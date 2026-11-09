@@ -7,6 +7,8 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+use crate::server::ToolError;
+
 #[derive(Parser)]
 #[command(version, about = "Stdio SSH MCP server")]
 pub(crate) struct Cli {
@@ -32,8 +34,8 @@ fn invalid(field: &'static str, reason: &'static str) -> ConfigError {
 }
 
 pub(crate) struct Config {
-    _ssh_config: Option<PathBuf>,
-    _limits: Limits,
+    ssh_config: Option<PathBuf>,
+    limits: Limits,
     targets: Option<BTreeMap<String, Target>>,
 }
 
@@ -53,12 +55,12 @@ struct Ssh {
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct Limits {
-    connect_timeout_secs: u64,
-    operation_timeout_secs: u64,
-    max_timeout_secs: u64,
-    max_output_bytes: u64,
-    max_file_bytes: u64,
+pub(crate) struct Limits {
+    pub(crate) connect_timeout_secs: u64,
+    pub(crate) operation_timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
+    pub(crate) max_output_bytes: u64,
+    pub(crate) max_file_bytes: u64,
 }
 
 impl Default for Limits {
@@ -122,12 +124,35 @@ enum TargetMode {
     Configured,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
-enum SudoMode {
+pub(crate) enum SudoMode {
     Disabled,
     SameAccount,
     SeparateIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum IdentityRole {
+    Ordinary,
+    Elevated,
+}
+
+pub(crate) struct ResolvedTarget<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) destination: &'a str,
+    pub(crate) role: IdentityRole,
+}
+
+impl Sudo {
+    fn mode(&self) -> SudoMode {
+        match self {
+            Self::Disabled => SudoMode::Disabled,
+            Self::SameAccount { .. } => SudoMode::SameAccount,
+            Self::SeparateIdentity { .. } => SudoMode::SeparateIdentity,
+        }
+    }
 }
 
 impl Config {
@@ -253,8 +278,8 @@ impl Config {
             validate_targets(targets)?;
         }
         Ok(Self {
-            _ssh_config: ssh_config,
-            _limits: document.limits,
+            ssh_config,
+            limits: document.limits,
             targets: document.targets,
         })
     }
@@ -272,14 +297,123 @@ impl Config {
                 .flat_map(|targets| targets.iter())
                 .map(|(name, target)| TargetSummary {
                     name,
-                    sudo_mode: match target.sudo {
-                        Sudo::Disabled => SudoMode::Disabled,
-                        Sudo::SameAccount { .. } => SudoMode::SameAccount,
-                        Sudo::SeparateIdentity { .. } => SudoMode::SeparateIdentity,
-                    },
+                    sudo_mode: target.sudo.mode(),
                 })
                 .collect(),
         }
+    }
+
+    pub(crate) fn ssh_config(&self) -> Option<&Path> {
+        self.ssh_config.as_deref()
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    pub(crate) fn has_sudo(&self) -> bool {
+        self.targets.as_ref().is_some_and(|targets| {
+            targets
+                .values()
+                .any(|target| !matches!(target.sudo, Sudo::Disabled))
+        })
+    }
+
+    pub(crate) fn sudo_mode(&self, host: &str) -> SudoMode {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .map_or(SudoMode::Disabled, |target| target.sudo.mode())
+    }
+
+    pub(crate) fn resolve<'a>(&'a self, host: &'a str) -> Result<ResolvedTarget<'a>, ToolError> {
+        let destination = match &self.targets {
+            Some(targets) => {
+                &targets
+                    .get(host)
+                    .ok_or_else(|| {
+                        ToolError::new(
+                            "policy_denied",
+                            "Host is not a configured logical target",
+                            false,
+                        )
+                    })?
+                    .ssh_host
+            }
+            None => {
+                destination(host, "host").map_err(|_| {
+                    ToolError::new(
+                        "invalid_argument",
+                        "Host must be a safe nonempty SSH destination",
+                        false,
+                    )
+                })?;
+                host
+            }
+        };
+        Ok(ResolvedTarget {
+            name: host,
+            destination,
+            role: IdentityRole::Ordinary,
+        })
+    }
+
+    pub(crate) fn resolve_sudo<'a>(
+        &'a self,
+        host: &'a str,
+        user: &str,
+        program: &str,
+    ) -> Result<ResolvedTarget<'a>, ToolError> {
+        let denied = || {
+            ToolError::new(
+                "policy_denied",
+                "Elevated target, user, or program is not authorized",
+                false,
+            )
+        };
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .ok_or_else(denied)?;
+        let (destination, role, users, programs) = match &target.sudo {
+            Sudo::Disabled => return Err(denied()),
+            Sudo::SameAccount { users, programs } => (
+                target.ssh_host.as_str(),
+                IdentityRole::Ordinary,
+                users,
+                programs,
+            ),
+            Sudo::SeparateIdentity {
+                ssh_host,
+                users,
+                programs,
+            } => (ssh_host.as_str(), IdentityRole::Elevated, users, programs),
+        };
+        if !users.iter().any(|allowed| allowed == user)
+            || programs
+                .as_ref()
+                .is_some_and(|allowed| !allowed.iter().any(|allowed| allowed == program))
+        {
+            return Err(denied());
+        }
+        Ok(ResolvedTarget {
+            name: host,
+            destination,
+            role,
+        })
+    }
+
+    pub(crate) fn timeout(&self, seconds: Option<u64>) -> Result<std::time::Duration, ToolError> {
+        let seconds = seconds.unwrap_or(self.limits.operation_timeout_secs);
+        if seconds == 0 || seconds > self.limits.max_timeout_secs {
+            return Err(ToolError::new(
+                "invalid_argument",
+                "timeout_secs must be positive and not exceed the configured maximum",
+                false,
+            ));
+        }
+        Ok(std::time::Duration::from_secs(seconds))
     }
 }
 
@@ -591,14 +725,14 @@ mode = "same-account"
             _ => None,
         };
         let from_toml = Config::load_with(cli(), cwd, env).unwrap();
-        assert_eq!(from_toml._ssh_config.unwrap(), cwd.join("nested/./$HOME"));
+        assert_eq!(from_toml.ssh_config.unwrap(), cwd.join("nested/./$HOME"));
         let env = |key: &str| match key {
             "SSH_MCP_CONFIG" => Some(OsString::from("nested/operator.toml")),
             "SSH_MCP_SSH_CONFIG" => Some(OsString::from("env-ssh")),
             _ => None,
         };
         let from_env = Config::load_with(cli(), cwd, env).unwrap();
-        assert_eq!(from_env._ssh_config.unwrap(), cwd.join("env-ssh"));
+        assert_eq!(from_env.ssh_config.unwrap(), cwd.join("env-ssh"));
         let from_cli = Config::load_with(
             Cli {
                 config: Some("nested/operator.toml".into()),
@@ -612,7 +746,7 @@ mode = "same-account"
             },
         )
         .unwrap();
-        assert_eq!(from_cli._ssh_config.unwrap(), cwd.join("cli-ssh"));
+        assert_eq!(from_cli.ssh_config.unwrap(), cwd.join("cli-ssh"));
     }
 
     #[test]
@@ -666,11 +800,11 @@ mode = "same-account"
         ]).unwrap();
         assert_eq!(
             (
-                config._limits.connect_timeout_secs,
-                config._limits.operation_timeout_secs,
-                config._limits.max_timeout_secs,
-                config._limits.max_output_bytes,
-                config._limits.max_file_bytes
+                config.limits.connect_timeout_secs,
+                config.limits.operation_timeout_secs,
+                config.limits.max_timeout_secs,
+                config.limits.max_output_bytes,
+                config.limits.max_file_bytes
             ),
             (7, 8, 9, 10, 11)
         );
@@ -822,5 +956,117 @@ mode = "same-account"
             error.to_string(),
             "limits.max_file_bytes: must be a positive decimal integer"
         );
+    }
+
+    #[test]
+    fn configured_dispatch_never_accepts_aliases_and_open_dispatch_is_validated() {
+        let config = load_text("[targets.logical]\nssh_host='ordinary-alias'", &[]).unwrap();
+        let resolved = config.resolve("logical").unwrap();
+        assert_eq!(
+            (resolved.name, resolved.destination, resolved.role),
+            ("logical", "ordinary-alias", IdentityRole::Ordinary)
+        );
+        for host in ["ordinary-alias", "unknown", ""] {
+            assert_eq!(config.resolve(host).err().unwrap().code, "policy_denied");
+        }
+        let empty = load_text("[targets]", &[]).unwrap();
+        assert_eq!(
+            empty.resolve("anything").err().unwrap().code,
+            "policy_denied"
+        );
+        let open = load_text("", &[]).unwrap();
+        let resolved = open.resolve("user@example").unwrap();
+        assert_eq!(
+            (resolved.name, resolved.destination),
+            ("user@example", "user@example")
+        );
+        for host in ["", "-option", "host name", "host\0name"] {
+            assert_eq!(open.resolve(host).err().unwrap().code, "invalid_argument");
+        }
+        assert!(!open.has_sudo());
+        assert_eq!(
+            open.resolve_sudo("user@example", "root", "/bin/id")
+                .err()
+                .unwrap()
+                .code,
+            "policy_denied"
+        );
+    }
+
+    #[test]
+    fn sudo_dispatch_uses_exact_policy_and_the_configured_role() {
+        let config = load_text(
+            r#"
+[targets.same]
+ssh_host = "ordinary"
+[targets.same.sudo]
+mode = "same-account"
+programs = ["/usr/bin/id"]
+[targets.split]
+ssh_host = "reader"
+[targets.split.sudo]
+mode = "separate-identity"
+ssh_host = "operator"
+users = ["service"]
+programs = ["/usr/bin/printf"]
+[targets.empty]
+ssh_host = "empty"
+[targets.empty.sudo]
+mode = "same-account"
+programs = []
+[targets.unrestricted]
+ssh_host = "unrestricted"
+[targets.unrestricted.sudo]
+mode = "same-account"
+"#,
+            &[],
+        )
+        .unwrap();
+        assert!(config.has_sudo());
+        let same = config.resolve_sudo("same", "root", "/usr/bin/id").unwrap();
+        assert_eq!(
+            (same.name, same.destination, same.role),
+            ("same", "ordinary", IdentityRole::Ordinary)
+        );
+        let split = config
+            .resolve_sudo("split", "service", "/usr/bin/printf")
+            .unwrap();
+        assert_eq!(
+            (split.name, split.destination, split.role),
+            ("split", "operator", IdentityRole::Elevated)
+        );
+        assert_eq!(config.resolve("split").unwrap().destination, "reader");
+        for (host, user, program) in [
+            ("same", "service", "/usr/bin/id"),
+            ("same", "root", "/bin/id"),
+            ("same", "root", "/usr/bin/id-extra"),
+            ("same", "root", "id"),
+            ("split", "root", "/usr/bin/printf"),
+            ("operator", "service", "/usr/bin/printf"),
+            ("empty", "root", "/usr/bin/id"),
+        ] {
+            assert_eq!(
+                config.resolve_sudo(host, user, program).err().unwrap().code,
+                "policy_denied",
+                "{host}/{user}/{program}"
+            );
+        }
+        assert_eq!(
+            config
+                .resolve_sudo("unrestricted", "root", "/opt/arbitrary")
+                .unwrap()
+                .role,
+            IdentityRole::Ordinary
+        );
+        assert_eq!(
+            config.timeout(Some(600)).unwrap(),
+            std::time::Duration::from_secs(600)
+        );
+        for seconds in [0, 601] {
+            assert_eq!(
+                config.timeout(Some(seconds)).err().unwrap().code,
+                "invalid_argument"
+            );
+        }
     }
 }
