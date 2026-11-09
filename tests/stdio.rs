@@ -13,6 +13,17 @@ use tokio::{
     time::timeout,
 };
 
+fn command(args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ssh-mcp"));
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("SSH_MCP_") {
+            command.env_remove(name);
+        }
+    }
+    command.args(args).kill_on_drop(true);
+    command
+}
+
 struct Server {
     child: Child,
     input: Option<ChildStdin>,
@@ -22,14 +33,7 @@ struct Server {
 
 impl Server {
     fn start(args: &[&str]) -> Result<Self> {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ssh-mcp"));
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("SSH_MCP_") {
-                command.env_remove(name);
-            }
-        }
-        let mut child = command
-            .args(args)
+        let mut child = command(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -169,5 +173,63 @@ async fn eof_before_initialize_exits_cleanly() -> Result<()> {
     let server = Server::start(&[])?;
     let (status, _) = server.finish().await?;
     ensure!(status.success(), "early EOF failed: {status}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
+    for (text, expected) in [
+        ("[targets]", json!({"mode":"configured","targets":[]})),
+        (
+            "[targets.zeta]\nssh_host='ordinary-secret'\n[targets.zeta.sudo]\nmode='separate-identity'\nssh_host='privileged-secret'\n[targets.alpha]\nssh_host='another-secret'",
+            json!({"mode":"configured","targets":[
+                {"name":"alpha","sudo_mode":"disabled"},
+                {"name":"zeta","sudo_mode":"separate-identity"}
+            ]}),
+        ),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("operator.toml");
+        std::fs::write(&path, text)?;
+        let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+        let scenario = async {
+            server.initialize().await?;
+            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            let response = server.response(2).await?;
+            ensure!(response["result"]["structuredContent"] == json!({"data":expected,"error":null}));
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let finished = server.finish().await;
+        scenario?;
+        ensure!(finished?.0.success());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_configuration_fails_before_mcp_without_echoing_secrets() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("operator.toml");
+    for text in [
+        "[ssh]\nsecret_marker='secret_marker'",
+        "[limits]\noperation_timeout_secs='secret_marker'",
+        "[targets.secret_marker]\nssh_host='ordinary'\n[targets.secret_marker.sudo]\nmode='secret_marker'",
+        "secret_marker = [broken",
+    ] {
+        std::fs::write(&path, text)?;
+        let output = timeout(
+            Duration::from_secs(5),
+            command(&["--config", path.to_str().context("config path")?]).output(),
+        )
+        .await??;
+        ensure!(!output.status.success());
+        ensure!(
+            output.stdout.is_empty(),
+            "invalid configuration started a protocol session"
+        );
+        ensure!(!String::from_utf8_lossy(&output.stderr).contains("secret_marker"));
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(diagnostic["code"] == "invalid_config", "{diagnostic}");
+    }
     Ok(())
 }

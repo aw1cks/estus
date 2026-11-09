@@ -1,3 +1,4 @@
+mod config;
 mod server;
 
 use std::process::ExitCode;
@@ -6,18 +7,27 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use tokio::signal::unix::{SignalKind, signal};
 
-#[derive(Parser)]
-#[command(version, about)]
-struct Cli {}
-
 fn main() -> ExitCode {
-    Cli::parse();
+    let config = match config::Config::load(config::Cli::parse()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "error",
+                    "code": "invalid_config",
+                    "message": error.to_string(),
+                })
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => {
-            let status = runtime.block_on(run());
+            let status = runtime.block_on(run(config));
             // Tokio's blocking stdin reader cannot be cancelled while stdin stays open.
             runtime.shutdown_timeout(std::time::Duration::from_secs(2));
             status
@@ -26,7 +36,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run() -> ExitCode {
+async fn run(config: config::Config) -> ExitCode {
     let (Ok(mut interrupt), Ok(mut terminate)) = (
         signal(SignalKind::interrupt()),
         signal(SignalKind::terminate()),
@@ -34,7 +44,7 @@ async fn run() -> ExitCode {
         return fail("signal_setup_failed");
     };
     let service = tokio::select! {
-        result = server::SshMcp::new().serve(rmcp::transport::stdio()) => match result {
+        result = server::SshMcp::new(config).serve(rmcp::transport::stdio()) => match result {
             Ok(service) => service,
             Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {
                 return ExitCode::SUCCESS;
