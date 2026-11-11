@@ -14,7 +14,12 @@ use tokio::{
 };
 
 fn command(args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ssh-mcp"));
+    let binary = std::env::var_os("SSH_MCP_TEST_BINARY").unwrap_or_else(|| {
+        option_env!("SSH_MCP_TEST_BINARY")
+            .unwrap_or(env!("CARGO_BIN_EXE_ssh-mcp"))
+            .into()
+    });
+    let mut command = Command::new(binary);
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("SSH_MCP_") {
             command.env_remove(name);

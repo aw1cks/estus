@@ -46,10 +46,14 @@
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
           '';
         });
+        acceptance = import ./nix/ssh-acceptance.nix {
+          inherit pkgs craneLib commonArgs cargoArtifacts package;
+        };
       in
       {
         packages = {
           default = package;
+          ssh-acceptance = acceptance;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
         };
@@ -57,7 +61,17 @@
           type = "app";
           program = "${package}/bin/ssh-mcp";
         };
+        apps.ssh-baseline = {
+          type = "app";
+          program = "${acceptance}/bin/ssh-baseline";
+        };
+        apps.ssh-stdio = {
+          type = "app";
+          program = "${acceptance}/bin/ssh-stdio";
+        };
         checks.package = package;
+        # Compilation only: daemon-dependent execution stays outside sandboxes.
+        checks.ssh-acceptance-build = acceptance;
         devShells.default = craneLib.devShell {
           checks = { inherit package; };
           # crane supplies cargo, rustc, rustfmt, and clippy from its toolchain.
