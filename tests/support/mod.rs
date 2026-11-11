@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use indoc::{formatdoc, indoc};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::{Pid, Uid, User},
@@ -281,6 +282,10 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn start() -> Result<Self> {
+        Self::start_with_sshd_config("").await
+    }
+
+    pub async fn start_with_sshd_config(extra_sshd_config: &str) -> Result<Self> {
         let uid = Uid::current();
         ensure!(
             !uid.is_root(),
@@ -337,7 +342,9 @@ impl Fixture {
             ports: Vec::new(),
             eventual_markers: Vec::new(),
         };
-        let setup = fixture.configure(&sshd, &keygen, &user.name).await;
+        let setup = fixture
+            .configure(&sshd, &keygen, &user.name, extra_sshd_config)
+            .await;
         if let Err(error) = setup {
             let cleanup = fixture.stop().await;
             cleanup.context("cleanup after native fixture startup failure")?;
@@ -346,7 +353,13 @@ impl Fixture {
         Ok(fixture)
     }
 
-    async fn configure(&mut self, sshd: &Path, keygen: &Path, user: &str) -> Result<()> {
+    async fn configure(
+        &mut self,
+        sshd: &Path,
+        keygen: &Path,
+        user: &str,
+        extra_sshd_config: &str,
+    ) -> Result<()> {
         for name in ["client", "host0", "host1", "wrong"] {
             let path = self.root.path().join(name);
             let output = run(Command::new(keygen)
@@ -383,9 +396,24 @@ impl Fixture {
                 } else {
                     ""
                 };
-                let contents = format!(
-                    "ListenAddress 127.0.0.1\nPort {port}\nHostKey {base}/host{index}\nAuthorizedKeysFile {base}/authorized_keys\nPidFile {base}/sshd{index}.pid\nAllowUsers {user}\nAuthenticationMethods publickey\nPubkeyAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nStrictModes yes\nPermitUserRC no\nLogLevel VERBOSE\nAllowTcpForwarding yes\n{subsystem}"
-                );
+                let contents = formatdoc! {"
+                    ListenAddress 127.0.0.1
+                    Port {port}
+                    HostKey {base}/host{index}
+                    AuthorizedKeysFile {base}/authorized_keys
+                    PidFile {base}/sshd{index}.pid
+                    AllowUsers {user}
+                    AuthenticationMethods publickey
+                    PubkeyAuthentication yes
+                    PasswordAuthentication no
+                    KbdInteractiveAuthentication no
+                    PermitRootLogin no
+                    StrictModes yes
+                    PermitUserRC no
+                    LogLevel VERBOSE
+                    AllowTcpForwarding yes
+                    {subsystem}{extra_sshd_config}
+                "};
                 fs::write(&config, &contents)?;
                 // Probe the selected build rather than assuming PAM exists on Darwin.
                 let pam = run(Command::new(sshd)
@@ -473,49 +501,100 @@ impl Fixture {
             } else {
                 "nosftp"
             };
-            hosts.push_str(&format!(
-                "Host {alias}\n HostName 127.0.0.1\n Port {port}\n User {user}\n"
-            ));
+            hosts.push_str(&formatdoc! {"
+                Host {alias}
+                    HostName 127.0.0.1
+                    Port {port}
+                    User {user}
+            "});
         }
         fs::write(self.root.path().join("known_hosts"), known)?;
-        hosts.push_str("Host viajump\n ProxyJump jump\n");
+        hosts.push_str(indoc! {"
+            Host viajump
+                ProxyJump jump
+        "});
         let port = self.ports.first().context("primary listener port")?;
+        // ssh_config directives cannot contain literal newlines, even when quoted.
         let proxy_script = format!(
-            "printf ready > {}; sleep 2; exec {} -F {} -W 127.0.0.1:{port} jump",
-            quote(&self.root.path().join("delayed-started").to_string_lossy()),
-            quote(&self.ssh.to_string_lossy()),
-            quote(&self.ssh_config.to_string_lossy()),
+            concat!(
+                "printf ready > {started}; ",
+                "sleep 2; ",
+                "exec {ssh} -F {config} -W 127.0.0.1:{port} jump",
+            ),
+            started = quote(&self.root.path().join("delayed-started").to_string_lossy()),
+            ssh = quote(&self.ssh.to_string_lossy()),
+            config = quote(&self.ssh_config.to_string_lossy()),
+            port = port,
         );
-        hosts.push_str(&format!(
-            "Host delayed\n HostName 127.0.0.1\n Port {port}\n User {user}\n ConnectTimeout 5\n ProxyCommand /bin/sh -c {}\n",
-            quote(&proxy_script),
-        ));
-        hosts.push_str(
-            "Match originalhost plain,nosftp,jump,viajump,delayed\n IdentitiesOnly yes\n",
-        );
+        hosts.push_str(&formatdoc! {"
+            Host delayed
+                HostName 127.0.0.1
+                Port {port}
+                User {user}
+                ConnectTimeout 5
+                ProxyCommand /bin/sh -c {proxy_script}
+            Match originalhost plain,nosftp,jump,viajump,delayed
+                IdentitiesOnly yes
+            ",
+            proxy_script = quote(&proxy_script),
+        });
         fs::write(self.root.path().join("included.conf"), hosts)?;
         fs::write(
             &self.ssh_config,
-            format!(
-                "Include {root}/included.conf\nHost *\n IdentityAgent none\n IdentityFile {root}/client\n UserKnownHostsFile {root}/known_hosts\n GlobalKnownHostsFile /dev/null\n StrictHostKeyChecking yes\n BatchMode yes\n ConnectTimeout 2\n ControlMaster no\n ControlPath none\n"
-            ),
+            formatdoc! {"
+                Include {root}/included.conf
+                Host *
+                    IdentityAgent none
+                    IdentityFile {root}/client
+                    UserKnownHostsFile {root}/known_hosts
+                    GlobalKnownHostsFile /dev/null
+                    StrictHostKeyChecking yes
+                    BatchMode yes
+                    ConnectTimeout 2
+                    ControlMaster no
+                    ControlPath none
+            "},
         )?;
         Ok(())
     }
 
     pub fn write_server_config(&self, path: &Path, ssh_config: &Path) -> Result<()> {
         let ssh_path = serde_json::to_string(&ssh_config.to_string_lossy())?;
-        fs::write(
-            path,
-            format!(
-                "[ssh]\nconfig_file = {ssh_path}\n[limits]\nconnect_timeout_secs = 3\noperation_timeout_secs = 10\nmax_timeout_secs = 15\nmax_output_bytes = 1024\n[targets.plain]\nssh_host = 'plain'\n[targets.nosftp]\nssh_host = 'nosftp'\n[targets.viajump]\nssh_host = 'viajump'\n[targets.resource]\nssh_host = 'plain'\n[targets.delayed]\nssh_host = 'delayed'\n[targets.restricted]\nssh_host = 'must-never-connect'\n[targets.restricted.sudo]\nmode = 'same-account'\nusers = ['root']\nprograms = ['/usr/bin/true']\n"
-            ),
-        )?;
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new().append(true).open(path)?;
+        let mut config = formatdoc! {"
+            [ssh]
+            config_file = {ssh_path}
+
+            [limits]
+            connect_timeout_secs = 3
+            operation_timeout_secs = 10
+            max_timeout_secs = 15
+            max_output_bytes = 1024
+
+            [targets.plain]
+            ssh_host = 'plain'
+            [targets.nosftp]
+            ssh_host = 'nosftp'
+            [targets.viajump]
+            ssh_host = 'viajump'
+            [targets.resource]
+            ssh_host = 'plain'
+            [targets.delayed]
+            ssh_host = 'delayed'
+
+            [targets.restricted]
+            ssh_host = 'must-never-connect'
+            [targets.restricted.sudo]
+            mode = 'same-account'
+            users = ['root']
+            programs = ['/usr/bin/true']
+        "};
         for index in 0..4 {
-            writeln!(file, "[targets.slots-{index}]\nssh_host = 'plain'")?;
+            config.push_str(&formatdoc! {"
+                [targets.slots-{index}]
+                ssh_host = 'plain'
+            "});
         }
+        fs::write(path, config)?;
         Ok(())
     }
 

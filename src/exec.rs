@@ -143,7 +143,6 @@ pub(crate) struct RunContext<'a> {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Termination {
     Exited,
-    RemoteSignal,
     Timeout,
     Cancelled,
     ConnectionLost,
@@ -248,8 +247,7 @@ async fn send_stdin(stream: Option<openssh::ChildStdin>, input: Option<&str>) ->
 }
 
 struct Completion {
-    exit_code: Option<i32>,
-    signalled: bool,
+    exit_code: i32,
     io_failed: bool,
 }
 
@@ -316,22 +314,19 @@ pub(crate) async fn run(
                 send_stdin(input, stdin),
             );
             let io_failed = out.is_err() || err.is_err() || input.is_err();
-            let (exit_code, signalled) = match child.wait().await {
-                Ok(status) => (status.code(), status.code().is_none()),
+            let exit_code = match child.wait().await {
+                // Native mux cannot distinguish a remote signal from a channel
+                // closed while remote work continues. Only an exit code proves completion.
+                Ok(status) => status
+                    .code()
+                    .ok_or(openssh::Error::RemoteProcessTerminated)?,
                 Err(openssh::Error::Remote(error)) if error.kind() == io::ErrorKind::NotFound => {
-                    (Some(127), false)
-                }
-                Err(openssh::Error::RemoteProcessTerminated) => {
-                    // Native mux uses the same notification for a signal and master loss.
-                    // This typed health check is bounded by the original operation deadline.
-                    session.check().await?;
-                    (None, true)
+                    127
                 }
                 Err(error) => return Err(error),
             };
             Ok::<_, openssh::Error>(Completion {
                 exit_code,
-                signalled,
                 io_failed,
             })
         };
@@ -357,7 +352,7 @@ pub(crate) async fn run(
                     "Command stream I/O failed",
                     false,
                 ))
-            } else if completion.signalled || completion.exit_code != Some(0) {
+            } else if completion.exit_code != 0 {
                 Some(ToolError::new(
                     "command_failed",
                     "Remote command failed",
@@ -367,12 +362,8 @@ pub(crate) async fn run(
                 None
             };
             (
-                completion.exit_code,
-                if completion.signalled {
-                    Termination::RemoteSignal
-                } else {
-                    Termination::Exited
-                },
+                Some(completion.exit_code),
+                Termination::Exited,
                 error,
                 false,
             )
@@ -439,7 +430,10 @@ fn connection_lost(error: &openssh::Error) -> bool {
     use std::error::Error;
     if matches!(
         error,
-        openssh::Error::Disconnected | openssh::Error::Master(_) | openssh::Error::Connect(_)
+        openssh::Error::Disconnected
+            | openssh::Error::Master(_)
+            | openssh::Error::Connect(_)
+            | openssh::Error::RemoteProcessTerminated
     ) {
         return true;
     }

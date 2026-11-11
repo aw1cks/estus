@@ -22,8 +22,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     audit::{Audit, Metadata},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
-    exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest},
-    ssh::Pool,
+    exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
+    ssh::{MasterHealth, Pool},
 };
 
 #[derive(Clone)]
@@ -398,10 +398,10 @@ impl State {
                     },
                 )
                 .await;
-                if reply
-                    .error
-                    .as_ref()
-                    .is_some_and(|error| error.code == "connection_lost")
+                if matches!(
+                    reply.data.as_ref().map(|data| &data.termination),
+                    Some(Termination::ConnectionLost)
+                ) && matches!(lease.check_health().await, MasterHealth::Lost)
                 {
                     lease.invalidate();
                 }

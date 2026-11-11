@@ -5,6 +5,7 @@ mod support;
 use std::{fs, time::Duration};
 
 use anyhow::{Context, Result, ensure};
+use indoc::{formatdoc, indoc};
 use rmcp::{
     model::{CallToolRequest, ClientRequest},
     service::PeerRequestOptions,
@@ -758,6 +759,140 @@ async fn ssh_local() -> Result<()> {
         strict_keys_and_diagnostics(&fixture).await?;
         shutdown_cases(&fixture).await?;
         Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking and a usable non-root local account"]
+async fn ssh_channel_timeout() -> Result<()> {
+    let mut fixture = Fixture::start_with_sshd_config(indoc! {"
+        ChannelTimeout session=1s
+    "})
+    .await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let commands = async {
+            ensure!(succeeded(&exec(&client, "printf PRIMED").await?)?["stdout"] == "PRIMED");
+            let owned = masters(&client.log)?;
+            ensure!(owned.len() == 1, "expected one ordinary master");
+            // Both fixture readiness connections and the application connection
+            // have authenticated. Wait for the asynchronously drained log.
+            timeout(Duration::from_secs(5), async {
+                while fixture.authentications() < 3 {
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .context("authentication log did not catch up")?;
+            let authentications = fixture.authentications();
+            let started = fixture.root.path().join("channel-started");
+            let done = fixture.root.path().join("channel-done");
+            let effects = fixture.root.path().join("channel-effects");
+            let sibling_started = fixture.root.path().join("sibling-started");
+            let sibling_done = fixture.root.path().join("sibling-done");
+            let release = fixture.root.path().join("sibling-release");
+            fixture
+                .eventual_markers
+                .extend([done.clone(), sibling_done.clone()]);
+            let quiet = formatdoc! {"
+                trap '' HUP
+                printf effect >> {effects}
+                printf started > {started}
+                printf PARTIAL
+                printf PARTIAL_ERR >&2
+                sleep 5
+                printf done > {done}
+                ",
+                effects = quote(&effects.to_string_lossy()),
+                started = quote(&started.to_string_lossy()),
+                done = quote(&done.to_string_lossy()),
+            };
+            // Periodic output prevents this sibling's own inactivity timeout.
+            // Its finite loop also bounds host work if an assertion fails.
+            let sibling = formatdoc! {r#"
+                printf started > {started}
+                i=0
+                while [ ! -f {release} ] && [ "$i" -lt 60 ]; do
+                    printf .
+                    sleep 0.1
+                    i=$((i + 1))
+                done
+                printf done > {done}
+                printf SIBLING_ALIVE
+                "#,
+                started = quote(&sibling_started.to_string_lossy()),
+                release = quote(&release.to_string_lossy()),
+                done = quote(&sibling_done.to_string_lossy()),
+            };
+            let loss = async {
+                Fixture::await_file(&sibling_started).await?;
+                let reply = exec(&client, &quiet).await?;
+                Fixture::await_file(&started).await?;
+                failed(&reply, "connection_lost")?;
+                ensure!(reply["data"]["termination"] == "connection_lost");
+                ensure!(reply["data"]["exit_code"].is_null());
+                ensure!(reply["data"]["stdout"] == "PARTIAL");
+                ensure!(reply["data"]["stderr"] == "PARTIAL_ERR");
+                ensure!(reply["error"]["remote_state_unknown"] == true);
+                ensure!(reply["data"]["remote_may_still_be_running"] == true);
+                ensure!(!done.exists(), "reply arrived only after remote completion");
+                let audit = await_audit(&client.log, "finish", "connection_lost").await?;
+                ensure!(audit["exit_code"].is_null());
+                ensure!(audit["remote_state_unknown"] == true);
+                fs::write(&release, b"release")?;
+                Ok::<_, anyhow::Error>(())
+            };
+            let (loss, sibling) = tokio::join!(loss, exec(&client, &sibling));
+            loss?;
+            let sibling = sibling?;
+            ensure!(
+                succeeded(&sibling)?["stdout"]
+                    .as_str()
+                    .context("sibling stdout")?
+                    .ends_with("SIBLING_ALIVE"),
+                "channel loss disrupted the active sibling"
+            );
+            Fixture::await_file(&done).await?;
+            ensure!(
+                fs::read(&effects)? == b"effect",
+                "uncertain command was replayed"
+            );
+            ensure!(succeeded(&exec(&client, "printf REUSED").await?)?["stdout"] == "REUSED");
+            let checked = support::run(
+                Command::new(&fixture.ssh)
+                    .arg("-F")
+                    .arg(&fixture.ssh_config)
+                    .arg("-S")
+                    .arg(&owned[0].1)
+                    .args(["-O", "check", "plain"]),
+            )
+            .await?;
+            ensure!(checked.status.success(), "original master is unavailable");
+            ensure!(
+                String::from_utf8_lossy(&checked.stderr).contains(&format!("pid={}", owned[0].0)),
+                "control socket no longer belongs to the original master"
+            );
+            ensure!(
+                masters(&client.log)? == owned,
+                "application replaced the healthy master"
+            );
+            ensure!(
+                fixture.authentications() == authentications,
+                "channel loss caused additional authentication"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = assert_masters_gone(&owned?).await;
+        commands?;
+        stopped?;
+        gone
     }
     .await;
     let cleanup = fixture.stop().await;

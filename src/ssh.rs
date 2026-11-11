@@ -98,6 +98,13 @@ impl Drop for Interest {
     }
 }
 
+/// Master availability is independent of whether a remote operation completed.
+pub(crate) enum MasterHealth {
+    Available,
+    Lost,
+    Unknown,
+}
+
 pub(crate) struct Lease {
     // Drop session before the interest tells cleanup that the last lease is gone.
     session: Arc<Session>,
@@ -108,6 +115,16 @@ pub(crate) struct Lease {
 impl Lease {
     pub(crate) fn session(&self) -> &Session {
         &self.session
+    }
+
+    pub(crate) async fn check_health(&self) -> MasterHealth {
+        match timeout_at(Instant::now() + CLEANUP, self.session.check()).await {
+            Ok(Ok(())) => MasterHealth::Available,
+            Ok(Err(_)) => MasterHealth::Lost,
+            // An unresponsive check does not establish loss. The supervisor
+            // still owns process-exit detection and idle/shutdown cleanup.
+            Err(_) => MasterHealth::Unknown,
+        }
     }
 
     pub(crate) fn invalidate(&self) {

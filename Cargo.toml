@@ -26,5 +26,6 @@ thiserror = "2"
 [dev-dependencies]
 testcontainers = "0.28.0"
 anyhow = "1"
+indoc = "2"
 nix = { version = "0.30.1", default-features = false, features = ["signal", "process", "user"] }
 rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process"] }
