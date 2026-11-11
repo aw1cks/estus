@@ -23,7 +23,7 @@ use rmcp::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
     time::{Instant, sleep, timeout},
@@ -654,7 +654,7 @@ impl Fixture {
 pub struct WireServer {
     child: Child,
     input: Option<ChildStdin>,
-    lines: Lines<BufReader<ChildStdout>>,
+    output: BufReader<ChildStdout>,
     pub log: Log,
     drain: JoinHandle<std::io::Result<()>>,
 }
@@ -667,29 +667,44 @@ impl WireServer {
             .stderr(Stdio::piped())
             .spawn()?;
         let input = Some(child.stdin.take().context("wire stdin")?);
-        let lines = BufReader::new(child.stdout.take().context("wire stdout")?).lines();
+        let output = BufReader::new(child.stdout.take().context("wire stdout")?);
         let log = Log::default();
         let drain = log.drain(child.stderr.take().context("wire stderr")?);
         Ok(Self {
             child,
             input,
-            lines,
+            output,
             log,
             drain,
         })
     }
 
     pub async fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value> {
+        Ok(self.request_with_size(json!(id), method, params).await?.0)
+    }
+
+    pub async fn request_with_size(
+        &mut self,
+        id: Value,
+        method: &str,
+        params: Value,
+    ) -> Result<(Value, usize)> {
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await?;
+        let mut frame = Vec::new();
         loop {
-            let line = timeout(Duration::from_secs(15), self.lines.next_line())
-                .await??
-                .context("wire server closed stdout")?;
-            let value: Value = serde_json::from_str(&line).context("non-JSON server stdout")?;
+            frame.clear();
+            let size = timeout(
+                Duration::from_secs(15),
+                self.output.read_until(b'\n', &mut frame),
+            )
+            .await??;
+            ensure!(size > 0, "wire server closed stdout");
+            ensure!(frame.last() == Some(&b'\n'), "unterminated wire response");
+            let value: Value = serde_json::from_slice(&frame).context("non-JSON server stdout")?;
             ensure!(value["jsonrpc"] == "2.0", "non-protocol stdout");
             if value["id"] == id {
-                return Ok(value);
+                return Ok((value, size));
             }
             ensure!(value.get("id").is_none(), "unexpected response: {value}");
         }
@@ -731,9 +746,14 @@ impl WireServer {
             }
         };
         drop(self.input.take());
-        while let Some(line) = timeout(CLEANUP, self.lines.next_line()).await?? {
+        let mut frame = Vec::new();
+        loop {
+            frame.clear();
+            if timeout(CLEANUP, self.output.read_until(b'\n', &mut frame)).await?? == 0 {
+                break;
+            }
             ensure!(
-                serde_json::from_str::<Value>(&line)?["jsonrpc"] == "2.0",
+                serde_json::from_slice::<Value>(&frame)?["jsonrpc"] == "2.0",
                 "non-protocol trailing stdout"
             );
         }

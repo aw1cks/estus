@@ -7,7 +7,7 @@ use nix::{
 };
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
     time::timeout,
@@ -27,7 +27,7 @@ fn command(args: &[&str]) -> Command {
 struct Server {
     child: Child,
     input: Option<ChildStdin>,
-    lines: Lines<BufReader<ChildStdout>>,
+    output: BufReader<ChildStdout>,
     stderr: JoinHandle<std::io::Result<Vec<u8>>>,
 }
 
@@ -50,7 +50,7 @@ impl Server {
         Ok(Self {
             child,
             input: Some(input),
-            lines: BufReader::new(output).lines(),
+            output: BufReader::new(output),
             stderr,
         })
     }
@@ -64,16 +64,28 @@ impl Server {
     }
 
     async fn response(&mut self, id: u64) -> Result<Value> {
+        Ok(self.response_with_id(&json!(id)).await?.0)
+    }
+
+    async fn response_with_id(&mut self, id: &Value) -> Result<(Value, usize)> {
         loop {
-            let line = timeout(Duration::from_secs(5), self.lines.next_line())
-                .await??
-                .context("server closed stdout before response")?;
-            let value: Value = serde_json::from_str(&line).context("non-JSON stdout")?;
+            let mut line = Vec::new();
+            let size = timeout(Duration::from_secs(5), async {
+                (&mut self.output)
+                    .take(16_777_217)
+                    .read_until(b'\n', &mut line)
+                    .await
+            })
+            .await??;
+            ensure!(size != 0, "server closed stdout before response");
+            ensure!(size <= 16_777_216, "response exceeds 16 MiB: {size} bytes");
+            ensure!(line.last() == Some(&b'\n'), "unterminated response");
+            let value: Value = serde_json::from_slice(&line).context("non-JSON stdout")?;
             ensure!(value["jsonrpc"] == "2.0", "non-JSON-RPC stdout");
-            if value["id"] == id {
-                return Ok(value);
+            if &value["id"] == id {
+                return Ok((value, size));
             }
-            ensure!(value.get("id").is_none(), "unexpected response ID: {value}");
+            ensure!(value.get("id").is_none(), "unexpected response ID");
         }
     }
 
@@ -109,9 +121,11 @@ impl Server {
                 bail!("server failed to exit after EOF");
             }
         };
-        while let Some(line) = self.lines.next_line().await? {
+        let mut line = String::new();
+        while self.output.read_line(&mut line).await? != 0 {
             let value: Value = serde_json::from_str(&line).context("non-JSON trailing stdout")?;
             ensure!(value["jsonrpc"] == "2.0");
+            line.clear();
         }
         Ok((status, self.stderr.await??))
     }
