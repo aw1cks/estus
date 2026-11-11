@@ -1851,8 +1851,59 @@ async fn ssh_closed_stderr() -> Result<()> {
     cleanup
 }
 
+// Independent local oracle for cases without a published SHA-256 vector.
+// find_program canonicalizes Nix multicall applets, so preserve sha256sum argv[0].
+async fn local_sha256(bytes: &[u8]) -> Result<String> {
+    use std::io::Write;
+
+    ensure!(
+        bytes.len() <= 300_000,
+        "local hash input exceeds test bound"
+    );
+    let program = support::find_program("sha256sum")?;
+    ensure!(
+        program.starts_with("/nix/store"),
+        "sha256sum must be Nix-provided"
+    );
+    let mut input = tempfile::NamedTempFile::new()?;
+    input.write_all(bytes)?;
+    let output = support::run(
+        Command::new(program)
+            .arg0("sha256sum")
+            .args(["--binary", "--zero", "--"])
+            .arg(input.path()),
+    )
+    .await?;
+    ensure!(
+        output.status.success() && output.stderr.is_empty(),
+        "local SHA-256 oracle failed"
+    );
+    ensure!(
+        output.stdout.len() == 67 + input.path().as_os_str().len()
+            && output.stdout[64..66] == *b" *"
+            && output.stdout.last() == Some(&0),
+        "unexpected bounded SHA-256 oracle output"
+    );
+    let digest = std::str::from_utf8(&output.stdout[..64])?;
+    ensure!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    Ok(digest.to_owned())
+}
+
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+const MISMATCH_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     let root = fixture.root.path();
+    {
+        let owned = observed_masters(&client.log, 1).await?;
+        live_transport(fixture, client, &owned[0], 1, 3).await?;
+    }
+    let before_reads = fixture.listeners[0].log.text();
     let text = root.join("read-text");
     fs::write(&text, b"abcdef")?;
     let empty = root.join("read-empty");
@@ -1872,12 +1923,24 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         if let Some(limit) = limit {
             args["max_bytes"] = json!(limit);
         }
+        // Published empty/abc vectors also exercise case-insensitive verification.
+        // The abc read has a fourth byte available: it must not enter the digest.
+        let digest = match content {
+            "" => EMPTY_SHA256.to_owned(),
+            "abc" => ABC_SHA256.to_owned(),
+            _ => local_sha256(content.as_bytes()).await?,
+        };
+        if content == "abc" {
+            args["expected_content_sha256"] = json!(ABC_SHA256.to_ascii_uppercase());
+        } else if content.is_empty() {
+            args["expected_content_sha256"] = json!(EMPTY_SHA256);
+        }
         let reply = client.call("ssh_read_file", args).await?;
         ensure!(
             succeeded(&reply)?
                 == &json!({
                     "content":content,"encoding":"utf8","bytes_read":content.len(),
-                    "next_offset":next,"eof":eof
+                    "next_offset":next,"eof":eof,"content_sha256":digest
                 }),
             "read range offset={offset}, limit={limit:?}: {reply}"
         );
@@ -1917,18 +1980,22 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     ensure!(
         data["bytes_read"] == 300_000 && data["next_offset"] == 300_000 && data["eof"] == false
     );
+    ensure!(data["content_sha256"] == local_sha256(&contents.as_bytes()[..300_000]).await?);
     let binary = root.join("read-binary");
     fs::write(&binary, [0, 255, 128, 65])?;
+    let binary_digest = local_sha256(&[0, 255, 128, 65]).await?;
     let reply = client
         .call(
             "ssh_read_file",
-            json!({"host":"plain","path":binary,"encoding":"base64"}),
+            json!({"host":"plain","path":binary,"encoding":"base64",
+                "expected_content_sha256":binary_digest}),
         )
         .await?;
     ensure!(
         succeeded(&reply)?
             == &json!({
-                "content":"AP+AQQ==","encoding":"base64","bytes_read":4,"next_offset":4,"eof":true
+                "content":"AP+AQQ==","encoding":"base64","bytes_read":4,"next_offset":4,"eof":true,
+                "content_sha256":binary_digest
             })
     );
     let unicode = root.join("read-unicode");
@@ -1951,6 +2018,66 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         .await?;
     ensure!(succeeded(&reply)?["content"] == "LITERAL_PATH");
 
+    let owned = observed_masters(&client.log, 1).await?;
+    let transport = live_transport(fixture, client, &owned[0], 1, 3).await?;
+    let before = fixture.listeners[0].log.text();
+    let sessions = |text: &str, kind: &str| {
+        text.lines()
+            .filter(|line| line.contains("Starting session:") && line.contains(kind))
+            .count()
+    };
+    let reply = client
+        .call(
+            "ssh_read_file",
+            json!({"host":"plain","path":unusual,"expected_content_sha256":MISMATCH_SHA256}),
+        )
+        .await?;
+    failed(&reply, "checksum_mismatch")?;
+    ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+    let serialized = serde_json::to_string(&reply)?;
+    let actual_digest = local_sha256(b"LITERAL_PATH").await?;
+    for secret in ["LITERAL_PATH", MISMATCH_SHA256, actual_digest.as_str()] {
+        ensure!(
+            !serialized.contains(secret),
+            "checksum failure disclosed read payload"
+        );
+    }
+    let audit = await_audit(&client.log, "finish", "checksum_mismatch").await?;
+    ensure!(audit["identity_role"] == "ordinary" && audit["remote_state_unknown"] == false);
+    ensure!(
+        live_transport(fixture, client, &owned[0], 1, 3).await? == transport,
+        "checksum mismatch replaced the healthy ordinary master"
+    );
+    // The transport probe drains listener logs. A mismatch opens exactly one
+    // SFTP session, and the only shell command is that explicit health probe.
+    let after = fixture.listeners[0].log.text();
+    ensure!(
+        sessions(&after, "subsystem 'sftp'") == sessions(&before, "subsystem 'sftp'") + 1,
+        "checksum mismatch retried its SFTP session"
+    );
+    ensure!(
+        sessions(&after, "command") == sessions(&before, "command") + 1,
+        "SFTP verification executed an unexpected remote shell helper"
+    );
+    for secret in [
+        "LITERAL_PATH",
+        MISMATCH_SHA256,
+        actual_digest.as_str(),
+        ABC_SHA256,
+        &ABC_SHA256.to_ascii_uppercase(),
+        EMPTY_SHA256,
+        binary_digest.as_str(),
+    ] {
+        ensure!(
+            !client.log.text().contains(secret),
+            "read audit disclosed content or digest"
+        );
+    }
+    ensure!(
+        sessions(&after, "command") == sessions(&before_reads, "command") + 2,
+        "range hashing or expected-digest verification ran a remote shell helper"
+    );
+
     let denied = root.join("read-denied");
     fs::write(&denied, b"PRIVATE")?;
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o000))?;
@@ -1967,6 +2094,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     }
     let default_range = root.join("read-default-range");
     fs::write(&default_range, vec![b'a'; 65_537])?;
+    let default_digest = local_sha256(&vec![b'a'; 65_536]).await?;
     let reply = client
         .call(
             "ssh_read_file",
@@ -1977,7 +2105,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         succeeded(&reply)?
             == &json!({
                 "content":"a".repeat(65_536),"encoding":"utf8","bytes_read":65_536,
-                "next_offset":65_536,"eof":false
+                "next_offset":65_536,"eof":false,"content_sha256":default_digest
             }),
         "default read must be bounded with one-byte lookahead"
     );
@@ -2169,6 +2297,22 @@ async fn ssh_read_file() -> Result<()> {
             !log.text().contains("LITERAL_PATH"),
             "requested file content reached audit"
         );
+        for record in log
+            .final_records()?
+            .iter()
+            .filter(|record| record["tool"] == "ssh_read_file")
+        {
+            ensure!(
+                record["identity_role"] == "ordinary",
+                "read used a nonordinary identity"
+            );
+            for field in ["content", "content_sha256", "expected_content_sha256"] {
+                ensure!(
+                    record.get(field).is_none(),
+                    "read audit includes payload field {field}"
+                );
+            }
+        }
         gone
     }
     .await;

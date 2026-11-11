@@ -3,6 +3,9 @@
 //! No remote commands or privilege changes are involved. Cancellation interrupts
 //! the local protocol streams as well as disconnecting this channel, so a remote
 //! FIFO cannot retain local library tasks or the caller's channel permit.
+//!
+//! SHA-256 covers only the returned raw byte range, not the lookahead or encoded
+//! content. Separate reads are not a snapshot of a concurrently changing file.
 use std::{
     future::Future,
     io::{self, SeekFrom},
@@ -18,6 +21,7 @@ use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
 use openssh_sftp_error::SftpErrorKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncSeekExt, AsyncWrite, ReadBuf},
     sync::oneshot,
@@ -50,6 +54,7 @@ pub(crate) struct ReadRequest {
     pub(crate) max_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) encoding: Encoding,
+    pub(crate) expected_content_sha256: Option<String>,
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -59,11 +64,13 @@ pub(crate) struct ReadSpec<'a> {
     pub(crate) offset: u64,
     pub(crate) max_bytes: usize,
     pub(crate) encoding: Encoding,
+    pub(crate) expected_content_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct ReadData {
     pub(crate) content: String,
+    pub(crate) content_sha256: String,
     pub(crate) encoding: Encoding,
     pub(crate) bytes_read: u64,
     pub(crate) next_offset: u64,
@@ -86,6 +93,19 @@ impl ReadRequest {
         if self.timeout_secs == Some(0) {
             return Err(invalid("timeout_secs must be positive"));
         }
+        let expected_content_sha256 = self
+            .expected_content_sha256
+            .as_ref()
+            .map(|value| {
+                let mut digest = [0; 32];
+                if value.len() != 64 || hex::decode_to_slice(value, &mut digest).is_err() {
+                    return Err(invalid(
+                        "expected_content_sha256 must contain exactly 64 hexadecimal ASCII characters",
+                    ));
+                }
+                Ok(digest)
+            })
+            .transpose()?;
         let max_bytes = self
             .max_bytes
             .unwrap_or(DEFAULT_READ_BYTES.min(max_file_bytes));
@@ -99,6 +119,7 @@ impl ReadRequest {
         let reservation = ToolReply {
             data: Some(ReadData {
                 content: String::new(),
+                content_sha256: String::new(),
                 encoding: self.encoding,
                 bytes_read: u64::MAX,
                 next_offset: u64::MAX,
@@ -106,9 +127,15 @@ impl ReadRequest {
             }),
             error: Some(ToolError::SSH_CONNECT_FAILED),
         };
-        let remaining = budget.remaining(&reservation).map_err(|_| {
-            invalid("Request leaves insufficient response budget for a lossless read")
-        })?;
+        // The empty string reserves the digest property and its quotes. Its 64
+        // ASCII hex characters appear twice and require no JSON escaping.
+        let remaining = budget
+            .remaining(&reservation)
+            .ok()
+            .and_then(|remaining| remaining.checked_sub(128))
+            .ok_or_else(|| {
+                invalid("Request leaves insufficient response budget for a lossless read")
+            })?;
         let max_bytes = usize::try_from(max_bytes)
             .map_err(|_| invalid("max_bytes cannot be represented on this platform"))?;
         if max_bytes.checked_add(1).is_none()
@@ -123,6 +150,7 @@ impl ReadRequest {
             offset: self.offset,
             max_bytes,
             encoding: self.encoding,
+            expected_content_sha256,
         })
     }
 }
@@ -406,6 +434,17 @@ fn combine_close<T>(result: Result<T, Failure>, close: Result<(), Failure>) -> R
 
 fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> {
     raw.bytes.truncate(spec.max_bytes);
+    let digest: [u8; 32] = Sha256::digest(&raw.bytes).into();
+    if spec
+        .expected_content_sha256
+        .is_some_and(|expected| expected != digest)
+    {
+        return Err(ToolError::new(
+            "checksum_mismatch",
+            "Returned bytes do not match expected_content_sha256",
+            false,
+        ));
+    }
     let bytes_read = raw.bytes.len() as u64;
     let next_offset = spec
         .offset
@@ -421,6 +460,7 @@ fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> 
     };
     Ok(ReadData {
         content,
+        content_sha256: hex::encode(digest),
         encoding: spec.encoding,
         bytes_read,
         next_offset,
@@ -570,6 +610,163 @@ mod tests {
         ReplyBudget::new(&RequestId::Number(1)).unwrap()
     }
 
+    // NIST SHAVS SHA256ShortMsg.rsp (empty and d3), published in
+    // https://core.tcl-lang.org/tcltls/artifact/58d145302d6ac9b7;
+    // FIPS 180-4's standard "abc" example.
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const BINARY_SHA256: &str = "28969cdfa74a12c82f3bad960b0b000aca2ac329deea5c2328ebc6f2ba9802c1";
+
+    #[test]
+    fn returned_digests_match_published_raw_byte_vectors_not_base64_text() {
+        for (bytes, digest, base64) in [
+            (&b""[..], EMPTY_SHA256, ""),
+            (&b"abc"[..], ABC_SHA256, "YWJj"),
+            (&b"\xd3"[..], BINARY_SHA256, "0w=="),
+        ] {
+            let data = encoded(bytes, 10, 0, Encoding::Base64, true).unwrap();
+            assert_eq!(data.content, base64);
+            assert_eq!(data.content_sha256, digest, "raw bytes: {bytes:?}");
+            assert_eq!(data.bytes_read, bytes.len() as u64);
+            assert!(data.eof);
+        }
+        let data = encoded(b"abc", 3, 0, Encoding::Utf8, true).unwrap();
+        assert_eq!(data.content, "abc");
+        assert_eq!(data.content_sha256, ABC_SHA256);
+    }
+
+    #[test]
+    fn uppercase_expected_digest_verifies_only_the_retained_offset_range() {
+        let mut request = request();
+        request.offset = 47;
+        request.max_bytes = Some(3);
+        request.expected_content_sha256 = Some(ABC_SHA256.to_ascii_uppercase());
+        let spec = request.validate(100, budget()).unwrap();
+        let data = encode(
+            RawRead {
+                bytes: BytesMut::from(&b"abc!"[..]),
+                eof: false,
+            },
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(data.content, "abc");
+        assert_eq!(data.content_sha256, ABC_SHA256);
+        assert_eq!(data.bytes_read, 3);
+        assert_eq!(data.next_offset, 50);
+        assert!(!data.eof);
+
+        request.offset = u64::MAX;
+        request.expected_content_sha256 = Some(EMPTY_SHA256.into());
+        let spec = request.validate(100, budget()).unwrap();
+        let data = encode(
+            RawRead {
+                bytes: BytesMut::new(),
+                eof: true,
+            },
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(data.content_sha256, EMPTY_SHA256);
+        assert_eq!(data.next_offset, u64::MAX);
+    }
+
+    #[test]
+    fn checksum_mismatch_returns_no_content_or_digest_and_known_remote_state() {
+        let mut request = request();
+        request.expected_content_sha256 = Some(EMPTY_SHA256.into());
+        let spec = request.validate(100, budget()).unwrap();
+        let error = encode(
+            RawRead {
+                bytes: BytesMut::from(&b"abc"[..]),
+                eof: true,
+            },
+            &spec,
+        )
+        .err()
+        .unwrap();
+        let reply: ToolReply<ReadData> = ToolReply::failure(error);
+        let reply = serde_json::to_value(reply).unwrap();
+        assert_eq!(reply["data"], serde_json::Value::Null);
+        assert_eq!(reply["error"]["code"], "checksum_mismatch");
+        assert_eq!(reply["error"]["remote_state_unknown"], false);
+    }
+
+    #[test]
+    fn malformed_expected_digests_fail_validation_before_io() {
+        for value in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+            format!("{} ", "a".repeat(63)),
+            "é".repeat(32),
+            format!("0x{}", "a".repeat(62)),
+        ] {
+            let mut request = request();
+            request.expected_content_sha256 = Some(value);
+            let error = request.validate(100, budget()).unwrap_err();
+            assert_eq!(error.code, "invalid_argument");
+            assert!(!error.remote_state_unknown);
+        }
+    }
+
+    #[test]
+    fn digest_budget_reservation_enforces_the_complete_duplicated_frame_boundary() {
+        let id = RequestId::String("consumer-id".repeat(50).into());
+        let budget = ReplyBudget::new(&id).unwrap();
+        for encoding in [Encoding::Utf8, Encoding::Base64] {
+            let mut reservation = ToolReply {
+                data: Some(ReadData {
+                    content: String::new(),
+                    content_sha256: ABC_SHA256.into(),
+                    encoding,
+                    bytes_read: u64::MAX,
+                    next_offset: u64::MAX,
+                    eof: false,
+                }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            };
+            let remaining = budget.remaining(&reservation).unwrap();
+            reservation.data.as_mut().unwrap().content_sha256.clear();
+            assert_eq!(budget.remaining(&reservation).unwrap(), remaining + 128);
+            reservation.data.as_mut().unwrap().content_sha256 = ABC_SHA256.into();
+            let (max_bytes, content) = match encoding {
+                Encoding::Utf8 => {
+                    let count = remaining / 13;
+                    (count, "\u{1}".repeat(count))
+                }
+                Encoding::Base64 => {
+                    let groups = remaining / 8;
+                    (groups * 3, "A".repeat(groups * 4))
+                }
+            };
+            let mut request = request();
+            request.encoding = encoding;
+            request.max_bytes = Some(max_bytes as u64);
+            assert!(request.validate(u64::MAX, budget).is_ok());
+            request.max_bytes = Some(max_bytes as u64 + 1);
+            assert_eq!(
+                request.validate(u64::MAX, budget).unwrap_err().code,
+                "invalid_argument"
+            );
+            reservation.data.as_mut().unwrap().content = content;
+            assert!(budget.remaining(&reservation).is_ok());
+            // One additional raw byte costs a full base64 group, or thirteen
+            // bytes for this UTF-8 control character, across both wire copies.
+            reservation
+                .data
+                .as_mut()
+                .unwrap()
+                .content
+                .push_str(match encoding {
+                    Encoding::Utf8 => "\u{1}",
+                    Encoding::Base64 => "AAAA",
+                });
+            assert!(budget.remaining(&reservation).is_err());
+        }
+    }
+
     #[test]
     fn defaults_cap_the_read_without_restricting_offsets_or_relative_paths() {
         let mut request = request();
@@ -659,6 +856,7 @@ mod tests {
                 offset,
                 max_bytes,
                 encoding,
+                expected_content_sha256: None,
             },
         )
     }
@@ -708,6 +906,7 @@ mod tests {
             serde_json::to_value(data).unwrap(),
             json!({
                 "content": "", "encoding": "utf8", "bytes_read": 0,
+                "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "next_offset": u64::MAX, "eof": true,
             })
         );
