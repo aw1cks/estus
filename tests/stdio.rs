@@ -655,7 +655,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_read_file", "ssh_stat"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_read_file", "ssh_stat", "ssh_list_directory"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -1028,6 +1028,91 @@ async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
             record["tool"] != "ssh_stat" || record["event"] == "reject",
             "invalid stat was accepted before validation"
         );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
+    let (mut server, directory) = local_only_server()?;
+    let scenario = async {
+        server.initialize().await?;
+        for (index, (arguments, code)) in [
+            (json!({"host":"denied","path":""}), "invalid_argument"),
+            (json!({"host":"denied","path":"a\0b"}), "invalid_argument"),
+            (
+                json!({"host":"denied","path":"dir","max_entries":0}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"dir","max_entries":1001}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"dir","max_entries":18446744073709551615u64}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"dir","timeout_secs":0}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"literal~$*' \n"}),
+                "policy_denied",
+            ),
+            (
+                json!({"host":"denied","path":"dir","max_entries":1}),
+                "policy_denied",
+            ),
+            (
+                json!({"host":"denied","path":"dir","max_entries":1000}),
+                "policy_denied",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 100 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_list_directory","arguments":arguments}}))
+                .await?;
+            let called = server.response(id).await?;
+            let result = &called["result"];
+            ensure!(result["isError"] == true);
+            ensure!(result["structuredContent"]["data"].is_null());
+            ensure!(result["structuredContent"]["error"]["code"] == code);
+            ensure!(result["structuredContent"]["error"]["remote_state_unknown"] == false);
+        }
+        for (index, arguments) in [
+            json!({"host":"denied","path":"dir","max_entries":-1}),
+            json!({"host":"denied","path":"dir","max_entries":"1"}),
+            json!({"host":"denied","path":"dir","recursive":true}),
+            json!({"host":"denied","path":"dir","sudo":true}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 200 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_list_directory","arguments":arguments}}))
+                .await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602);
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(record["tool"] != "ssh_list_directory" || record["event"] == "reject");
     }
     Ok(())
 }

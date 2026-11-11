@@ -80,6 +80,16 @@ impl io::Write for DuplicatedSize {
     }
 }
 
+/// Cost of a value appearing in both structuredContent and JSON text content.
+pub(crate) fn duplicated_size(value: &impl Serialize) -> Result<usize, ErrorData> {
+    let mut size = DuplicatedSize {
+        bytes: 0,
+        remaining: MAX_RESPONSE_BYTES,
+    };
+    serde_json::to_writer(&mut size, value).map_err(|_| exceeded())?;
+    Ok(size.bytes)
+}
+
 // Measure the SDK's actual result/frame shape once, rather than copying its
 // fields or constructing a placeholder result on every size calculation.
 fn tool_overhead(failed: bool) -> usize {

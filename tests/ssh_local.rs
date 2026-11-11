@@ -171,6 +171,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         "ssh_sudo",
         "ssh_read_file",
         "ssh_stat",
+        "ssh_list_directory",
     ] {
         let tool = listed
             .tools
@@ -179,12 +180,13 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
             .with_context(|| format!("missing {name}"))?;
         ensure!(tool.output_schema.is_some(), "{name} missing outputSchema");
     }
-    for name in ["ssh_write_file", "ssh_list_directory"] {
-        ensure!(
-            !listed.tools.iter().any(|tool| tool.name == name),
-            "file milestone must not advertise unfinished {name}"
-        );
-    }
+    ensure!(
+        !listed
+            .tools
+            .iter()
+            .any(|tool| tool.name == "ssh_write_file"),
+        "file milestone must not advertise unfinished ssh_write_file"
+    );
     let initial_auth = fixture.authentications();
     let targets = client.call("ssh_targets", json!({})).await?;
     ensure!(succeeded(&targets)?["mode"] == "configured");

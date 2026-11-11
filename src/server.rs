@@ -23,7 +23,9 @@ use crate::{
     audit::{Audit, Metadata},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
     exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
-    files::{self, FileContext, ReadData, ReadRequest, StatData, StatRequest},
+    files::{
+        self, FileContext, ListData, ListRequest, ReadData, ReadRequest, StatData, StatRequest,
+    },
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
 };
@@ -265,6 +267,36 @@ impl SshMcp {
         .await
     }
 
+    async fn list_directory(
+        &self,
+        request: ListRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(
+            &request.host,
+            "ssh_list_directory",
+            &self.state.config,
+            &context.id,
+        );
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<ListData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .list_directory(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -365,6 +397,20 @@ impl SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.stat_file(request, context).await
+    }
+
+    #[tool(
+        description = "List a literal UTF-8 directory path over an independent ordinary SFTP channel. max_entries defaults to 200 (1–1000); the complete 16 MiB reply budget can shorten it further. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 always preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. truncated means another entry was observed, not a continuation cursor or snapshot. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Timeout/cancellation closes only this channel; remote completion is not guaranteed.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        input_schema = schema_for_type::<ListRequest>(),
+        output_schema = schema_for_type::<ToolReply<ListData>>()
+    )]
+    async fn ssh_list_directory(
+        &self,
+        Arguments(request): Arguments<ListRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_directory(request, context).await
     }
 
     #[tool(
@@ -645,6 +691,66 @@ impl State {
         {
             Ok(lease) => {
                 let outcome = files::stat(
+                    lease.session(),
+                    spec,
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn list_directory(
+        &self,
+        request: ListRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<ListData> {
+        let metadata = file_metadata(
+            &request.host,
+            "ssh_list_directory",
+            &self.config,
+            &request_id,
+        );
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request.validate(budget).and_then(|spec| {
+            let target = self.config.resolve(&request.host)?;
+            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+            Ok((spec, target, deadline))
+        });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::list(
                     lease.session(),
                     spec,
                     FileContext {

@@ -9,6 +9,7 @@
 use std::{
     future::Future,
     io::{self, SeekFrom},
+    os::unix::ffi::OsStrExt,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -16,6 +17,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
+use futures_util::StreamExt;
 use openssh::{Session, Stdio};
 use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
 use openssh_sftp_error::SftpErrorKind;
@@ -30,7 +32,7 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
     server::{ToolError, ToolReply},
-    wire::ReplyBudget,
+    wire::{ReplyBudget, duplicated_size},
 };
 
 const DEFAULT_READ_BYTES: u64 = 65_536;
@@ -91,6 +93,91 @@ pub(crate) struct StatRequest {
 pub(crate) struct StatSpec<'a> {
     pub(crate) path: &'a str,
     pub(crate) follow_symlinks: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    pub(crate) max_entries: Option<u64>,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ListSpec<'a> {
+    path: &'a str,
+    max_entries: usize,
+    remaining_bytes: usize,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ListEntry {
+    name: Option<String>,
+    name_base64: String,
+    metadata: StatData,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ListData {
+    entries: Vec<ListEntry>,
+    truncated: bool,
+}
+
+impl ListData {
+    fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    // Reject only whole entries, retaining the server's prefix. The rejected
+    // entry is positive lookahead, so truncation never guesses from the limit.
+    fn push(&mut self, entry: ListEntry, spec: &mut ListSpec<'_>) -> bool {
+        let cost = duplicated_size(&entry)
+            .ok()
+            .and_then(|cost| cost.checked_add(if self.entries.is_empty() { 0 } else { 2 }));
+        let remaining = cost.and_then(|cost| spec.remaining_bytes.checked_sub(cost));
+        let Some(remaining) = remaining else {
+            self.truncated = true;
+            return false;
+        };
+        spec.remaining_bytes = remaining;
+        self.entries.push(entry);
+        true
+    }
+}
+
+impl ListRequest {
+    pub(crate) fn validate(&self, budget: ReplyBudget) -> Result<ListSpec<'_>, ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        let max_entries = self.max_entries.unwrap_or(200);
+        if !(1..=1000).contains(&max_entries) {
+            return Err(invalid("max_entries must be between 1 and 1000"));
+        }
+        let remaining_bytes = budget
+            .remaining(&ToolReply::success(ListData::empty()))
+            .and_then(|remaining| {
+                budget.remaining(&ToolReply::<ListData>::failure(
+                    ToolError::SSH_CONNECT_FAILED,
+                ))?;
+                Ok(remaining)
+            })
+            .map_err(|_| {
+                invalid("Request leaves insufficient response budget for a directory listing")
+            })?;
+        Ok(ListSpec {
+            path: &self.path,
+            max_entries: max_entries as usize,
+            remaining_bytes,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -526,6 +613,47 @@ async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> 
     combine_close(result, close)
 }
 
+async fn list_sftp(sftp: Sftp, mut spec: ListSpec<'_>) -> Result<ListData, Failure> {
+    let result = async {
+        let dir = {
+            let mut fs = sftp.fs();
+            fs.open_dir(spec.path).await.map_err(sftp_failure)?
+        };
+        let stream = dir.read_dir();
+        tokio::pin!(stream);
+        let mut data = ListData::empty();
+        while let Some(entry) = stream.next().await {
+            let entry = entry.map_err(sftp_failure)?;
+            let bytes = entry.filename().as_os_str().as_bytes();
+            if matches!(bytes, b"." | b"..") {
+                continue;
+            }
+            if data.entries.len() == spec.max_entries {
+                data.truncated = true;
+                break;
+            }
+            let entry = ListEntry {
+                name: std::str::from_utf8(bytes).ok().map(str::to_owned),
+                name_base64: STANDARD.encode(bytes),
+                metadata: metadata_data(entry.metadata()),
+            };
+            if !data.push(entry, &mut spec) {
+                break;
+            }
+        }
+        Ok(data)
+    }
+    .await;
+    // ReadDir has no explicit close API: its drop schedules the library-owned
+    // directory close. Drop the stream first, then await all protocol work via
+    // Sftp::close under the same bounded cleanup used by other file operations.
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 fn combine_close<T>(result: Result<T, Failure>, close: Result<(), Failure>) -> Result<T, Failure> {
     match (result, close) {
         (Ok(value), Ok(())) => Ok(value),
@@ -601,6 +729,14 @@ pub(crate) async fn stat(
     context: FileContext<'_>,
 ) -> FileOutcome<StatData> {
     run_sftp(session, context, |sftp| stat_sftp(sftp, spec)).await
+}
+
+pub(crate) async fn list(
+    session: &Session,
+    spec: ListSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<ListData> {
+    run_sftp(session, context, |sftp| list_sftp(sftp, spec)).await
 }
 
 async fn run_sftp<T, F, Fut>(
@@ -745,6 +881,66 @@ mod tests {
 
     fn budget() -> ReplyBudget {
         ReplyBudget::new(&RequestId::Number(1)).unwrap()
+    }
+
+    fn list_entry() -> ListEntry {
+        ListEntry {
+            name: Some("é\"\\\n\u{1}".repeat(20)),
+            name_base64: STANDARD.encode(b"raw filename"),
+            metadata: metadata_data(openssh_sftp_client::metadata::MetaDataBuilder::new().create()),
+        }
+    }
+
+    #[test]
+    fn listing_counts_both_escaped_representations_and_commas_at_exact_wire_boundary() {
+        let request: ListRequest =
+            serde_json::from_value(json!({"host":"target","path":"directory"})).unwrap();
+        let reply = ToolReply::success(ListData {
+            entries: vec![list_entry(), list_entry()],
+            truncated: false,
+        });
+        let remaining = ReplyBudget::new(&RequestId::String("".into()))
+            .unwrap()
+            .remaining(&reply)
+            .unwrap();
+        for extra in [0, 1] {
+            let id = RequestId::String("x".repeat(remaining + extra).into());
+            let budget = ReplyBudget::new(&id).unwrap();
+            let mut spec = request.validate(budget).unwrap();
+            let mut data = ListData::empty();
+            assert!(data.push(list_entry(), &mut spec));
+            assert_eq!(data.push(list_entry(), &mut spec), extra == 0);
+            if extra == 0 {
+                assert!(!data.truncated, "exact fit was falsely truncated");
+                assert_eq!(spec.remaining_bytes, 0);
+                let result = budget.result(ToolReply::success(data)).unwrap();
+                let frame = rmcp::model::JsonRpcResponse {
+                    jsonrpc: Default::default(),
+                    id,
+                    result,
+                };
+                assert_eq!(
+                    serde_json::to_vec(&frame).unwrap().len() + 1,
+                    crate::wire::MAX_RESPONSE_BYTES
+                );
+            } else {
+                assert!(data.truncated);
+                assert_eq!(data.entries.len(), 1);
+                assert!(budget.result(ToolReply::success(data)).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn listing_reports_truncation_when_no_whole_entry_fits() {
+        let mut spec = ListSpec {
+            path: "directory",
+            max_entries: 1,
+            remaining_bytes: 0,
+        };
+        let mut data = ListData::empty();
+        assert!(!data.push(list_entry(), &mut spec));
+        assert!(data.entries.is_empty() && data.truncated);
     }
 
     #[test]
