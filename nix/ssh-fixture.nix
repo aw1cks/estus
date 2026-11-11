@@ -1,0 +1,142 @@
+{ pkgs }:
+let
+  inherit (pkgs) lib;
+  commandPath = "/usr/bin:/bin:${pkgs.coreutils}/bin:${pkgs.dash}/bin";
+
+  # Pin runtime paths explicitly rather than inheriting a NixOS service setup.
+  # The locked OpenSSH common.nix supports etcDir and defaults to PAM on Linux;
+  # the fixture's supplied sshd_config disables PAM for public-key login.
+  openssh = (pkgs.openssh.override { etcDir = "/etc/ssh"; }).overrideAttrs (old: {
+    configureFlags = old.configureFlags ++ [
+      "--with-privsep-user=sshd"
+      "--with-privsep-path=/var/empty"
+      "--with-default-path=${commandPath}"
+    ];
+  });
+  # sudo's installation notes define these configure switches. Keep the plugins
+  # in its immutable closure, but read policy/PAM service files from the image.
+  sudo = pkgs.sudo.overrideAttrs (old: {
+    configureFlags = old.configureFlags ++ [
+      "--sysconfdir=/etc"
+      "--with-plugindir=\${out}/libexec/sudo"
+      "--with-pam"
+    ];
+  });
+  accounts = [
+    { name = "mcp"; id = 1000; }
+    { name = "mcp-sudo"; id = 1001; }
+    { name = "mcp-admin"; id = 1002; }
+    { name = "mcp-password"; id = 1003; }
+    { name = "mcp-tty"; id = 1004; }
+  ];
+  accountLines = f: lib.concatMapStringsSep "\n" f accounts;
+  sudoers = pkgs.writeText "ssh-fixture-sudoers" ''
+    Defaults env_reset
+    Defaults secure_path="${commandPath}"
+    Defaults timestamp_timeout=0
+    Defaults lecture=never
+    Defaults:mcp-tty requiretty
+    mcp-sudo ALL=(root) NOPASSWD: /usr/bin/id, /usr/bin/printf
+    mcp-admin ALL=(root) NOPASSWD: /usr/bin/id, /usr/bin/printf
+    mcp-password ALL=(root) PASSWD: /usr/bin/id
+    mcp-tty ALL=(root) NOPASSWD: /usr/bin/id
+  '';
+  rootfs = pkgs.runCommand "ssh-fixture-rootfs" { } ''
+    mkdir -p "$out"/{bin,usr/bin,etc/ssh,etc/pam.d,home,root,run/sshd,run/sudo,var/empty,var/db/sudo,var/log,fixture/authorized_keys,tmp}
+    ln -s ${pkgs.dash}/bin/dash "$out/bin/sh"
+    for program in ${pkgs.coreutils}/bin/*; do
+      ln -s "$program" "$out/bin/$(basename "$program")"
+    done
+    ln -s ${pkgs.coreutils}/bin/id "$out/usr/bin/id"
+    ln -s ${pkgs.coreutils}/bin/printf "$out/usr/bin/printf"
+    cp ${sudo}/bin/sudo "$out/usr/bin/sudo"
+    cat > "$out/etc/passwd" <<'EOF'
+    root:x:0:0:root:/root:/bin/sh
+    sshd:x:74:74:OpenSSH privilege separation:/var/empty:/bin/false
+    ${accountLines (a: "${a.name}:x:${toString a.id}:${toString a.id}:SSH fixture:/home/${a.name}:/bin/sh")}
+    EOF
+    cat > "$out/etc/group" <<'EOF'
+    root:x:0:
+    sshd:x:74:
+    ${accountLines (a: "${a.name}:x:${toString a.id}:")}
+    EOF
+    cat > "$out/etc/shadow" <<'EOF'
+    root:!:1:0:99999:7:::
+    sshd:!:1:0:99999:7:::
+    ${accountLines (a: "${a.name}:x:1:0:99999:7:::")}
+    EOF
+    cat > "$out/etc/nsswitch.conf" <<'EOF'
+    passwd: files
+    group: files
+    shadow: files
+    hosts: files dns
+    sudoers: files
+    EOF
+    cat > "$out/etc/hosts" <<'EOF'
+    127.0.0.1 localhost
+    ::1 localhost
+    EOF
+    printf '/bin/sh\n' > "$out/etc/shells"
+    cp ${sudoers} "$out/etc/sudoers"
+    cat > "$out/etc/sudo.conf" <<'EOF'
+    Plugin sudoers_policy ${sudo}/libexec/sudo/sudoers.so
+    Plugin sudoers_io ${sudo}/libexec/sudo/sudoers.so
+    EOF
+    # Deliberate sudo-only PAM policy: no host/NixOS PAM includes. Login hashes
+    # are unusable; NOPASSWD still passes account/session checks without a secret.
+    cat > "$out/etc/pam.d/sudo" <<'EOF'
+    auth required ${pkgs.pam}/lib/security/pam_unix.so
+    account required ${pkgs.pam}/lib/security/pam_permit.so
+    session required ${pkgs.pam}/lib/security/pam_permit.so
+    EOF
+    cp "$out/etc/pam.d/sudo" "$out/etc/pam.d/sudo-i"
+    ${lib.concatMapStringsSep "\n" (a: ''mkdir -p "$out/home/${a.name}"'') accounts}
+    ${sudo}/sbin/visudo -cf "$out/etc/sudoers"
+  '';
+  image = pkgs.dockerTools.buildLayeredImage {
+    name = "ssh-mcp-fixture";
+    # Omitting tag selects dockerTools' derivation-derived tag, never latest.
+    created = "1970-01-01T00:00:01Z";
+    mtime = "1970-01-01T00:00:01Z";
+    compressor = "gz";
+    # Copy real files, not symlinkJoin's links into rootfs: ownership and setuid
+    # bits below must affect only the private layer, never a host store inode.
+    extraCommands = ''
+      cp -a ${rootfs}/. .
+    '';
+    fakeRootCommands = ''
+      chown -R 0:0 .
+      find . -type d -exec chmod 0755 {} +
+      chmod 0700 root run/sudo var/db/sudo
+      chmod 1777 tmp
+      chmod 0600 etc/shadow
+      chmod 0440 etc/sudoers
+      chmod 4755 usr/bin/sudo
+      ${lib.concatMapStringsSep "\n" (a: ''
+        chown ${toString a.id}:${toString a.id} home/${a.name}
+        chmod 0700 home/${a.name}
+      '') accounts}
+    '';
+    config = {
+      User = "0:0";
+      Env = [ "PATH=${commandPath}" "LANG=C" ];
+      WorkingDir = "/";
+      Entrypoint = [ "${openssh}/bin/sshd" "-D" "-e" "-f" "/fixture/sshd_config" ];
+      ExposedPorts = { "2222/tcp" = { }; };
+    };
+  };
+in
+pkgs.runCommand "ssh-fixture-image" {
+  nativeBuildInputs = [ pkgs.gnutar pkgs.gzip pkgs.jq pkgs.coreutils ];
+} ''
+  mkdir -p "$out" archive
+  cp ${image} "$out/image.tar.gz"
+  tar -xzf "$out/image.tar.gz" -C archive
+  # Both identifiers come from this archive, including its generated tag and
+  # the actual configuration bytes (not a layer digest or an assumed filename).
+  jq -er 'if length == 1 and (.[0].RepoTags | length) == 1 then .[0].RepoTags[0] else error("unexpected image manifest") end' \
+    archive/manifest.json > "$out/image-ref"
+  config=$(jq -er '.[0].Config' archive/manifest.json)
+  test "$(cat "$out/image-ref")" = '${image.imageName}:${image.imageTag}'
+  printf 'sha256:%s\n' "$(sha256sum "archive/$config" | cut -d ' ' -f 1)" > "$out/image-id"
+''

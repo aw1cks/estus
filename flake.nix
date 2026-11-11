@@ -48,7 +48,11 @@
         });
       in
       {
-        packages.default = package;
+        packages = {
+          default = package;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
+        };
         apps.default = {
           type = "app";
           program = "${package}/bin/ssh-mcp";
@@ -60,7 +64,6 @@
           packages = [
             pkgs.openssh
             pkgs.coreutils
-          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.docker-client
           ];
         };
