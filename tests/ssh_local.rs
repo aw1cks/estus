@@ -3,7 +3,10 @@ mod support;
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt, symlink},
+        net::UnixListener,
+    },
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -1573,6 +1576,10 @@ async fn ssh_setenv_isolation() -> Result<()> {
                     .call("ssh_read_file", json!({"host":host,"path":path}))
                     .await?;
                 ensure!(succeeded(&reply)?["content"] == "SFTP_ENV_ISOLATED");
+                let reply = client
+                    .call("ssh_stat", json!({"host":host,"path":path}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &native_stat_data(&path, false)?);
             }
             let reply = exec(&client, probe).await?;
             ensure!(
@@ -2403,4 +2410,235 @@ async fn ssh_read_cleanup() -> Result<()> {
     cleanup?;
     removed?;
     Ok(())
+}
+
+// The independent shared-filesystem oracle also rejects extra result fields,
+// including paths, filenames, link targets, or authentication hints.
+fn native_stat_data(path: &Path, follow: bool) -> Result<Value> {
+    let metadata = if follow {
+        fs::metadata(path)?
+    } else {
+        fs::symlink_metadata(path)?
+    };
+    let kind = if metadata.is_file() {
+        "file"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.file_type().is_symlink() {
+        "symlink"
+    } else {
+        "other"
+    };
+    Ok(json!({
+        "kind":kind,
+        "size":metadata.len(),
+        "permissions":metadata.mode() & 0o7777,
+        "uid":metadata.uid(),
+        "gid":metadata.gid(),
+        "modified_unix_secs":u64::try_from(metadata.mtime())?,
+    }))
+}
+
+async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
+    let root = fixture.root.path();
+    let file = root.join("stat-file");
+    fs::write(&file, b"STAT_SHARED_MASTER")?;
+    // Nonexecutable owned data safely exercises setuid and sticky bits.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o5640))?;
+    ensure!(fs::metadata(&file)?.mode() & 0o7777 == 0o5640);
+    let directory = root.join("stat-directory");
+    fs::create_dir(&directory)?;
+    let link = root.join("stat-link");
+    symlink(&file, &link)?;
+    let dangling = root.join("stat-dangling");
+    let missing = root.join("stat-missing");
+    symlink(&missing, &dangling)?;
+    let unusual = root.join("stat-é quote' \" ; $(printf EVALUATED)\n*");
+    fs::write(&unusual, b"LITERAL_STAT_PATH")?;
+    let socket_tree = tempfile::Builder::new()
+        .prefix("sm-stat-")
+        .tempdir_in("/tmp")?;
+    let socket = socket_tree.path().join("s");
+    let _socket = UnixListener::bind(&socket)?;
+
+    ensure!(succeeded(&exec(client, "printf STAT_MASTER").await?)?["stdout"] == "STAT_MASTER");
+    let owned = observed_masters(&client.log, 1).await?;
+    let transport = live_transport(fixture, client, &owned[0], 1, 3).await?;
+    let before = fixture.listeners[0].log.text();
+    for (path, follow) in [
+        (&file, None),
+        (&directory, None),
+        (&link, None),
+        (&link, Some(true)),
+        (&dangling, None),
+        (&unusual, None),
+        (&socket, None),
+    ] {
+        let mut args = json!({"host":"plain","path":path});
+        if let Some(follow) = follow {
+            args["follow_symlinks"] = json!(follow);
+        }
+        let reply = client.call("ssh_stat", args).await?;
+        ensure!(
+            succeeded(&reply)? == &native_stat_data(path, follow.unwrap_or(false))?,
+            "native metadata mismatch for {path:?}, follow={follow:?}: {reply}"
+        );
+    }
+
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())?
+        .context("native prerequisite: current account")?;
+    let home = fs::canonicalize(user.dir).context("native prerequisite: usable account home")?;
+    let mut relative = PathBuf::new();
+    for component in home.components() {
+        if matches!(component, std::path::Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    relative.push(file.strip_prefix("/")?);
+    let reply = client
+        .call("ssh_stat", json!({"host":"plain","path":relative}))
+        .await?;
+    ensure!(
+        succeeded(&reply)? == &native_stat_data(&file, false)?,
+        "relative stat path used the wrong initial directory"
+    );
+
+    let denied = root.join("stat-denied");
+    fs::create_dir(&denied)?;
+    let child = denied.join("private");
+    fs::write(&child, b"PRIVATE_STAT")?;
+    let permissions = fs::metadata(&denied)?.permissions();
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000))?;
+    let failures = async {
+        // A file's mode alone does not deny stat: traversal must be denied.
+        ensure!(
+            fs::symlink_metadata(&child)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
+            "native prerequisite: owned parent must actually deny traversal"
+        );
+        for (path, follow, code) in [
+            (&missing, false, "not_found"),
+            (&dangling, true, "not_found"),
+            (&child, false, "permission_denied"),
+        ] {
+            let reply = client
+                .call(
+                    "ssh_stat",
+                    json!({"host":"plain","path":path,"follow_symlinks":follow}),
+                )
+                .await?;
+            failed(&reply, code)?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            let serialized = serde_json::to_string(&reply)?;
+            ensure!(
+                !serialized.contains(path.to_str().context("UTF8 fixture path")?),
+                "stat failure disclosed its path"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    // Restore before propagating any scenario failure or deleting the fixture.
+    let restored = fs::set_permissions(&denied, permissions);
+    failures?;
+    restored?;
+
+    let reply = client
+        .call("ssh_read_file", json!({"host":"plain","path":file}))
+        .await?;
+    ensure!(succeeded(&reply)?["content"] == "STAT_SHARED_MASTER");
+    ensure!(
+        live_transport(fixture, client, &owned[0], 1, 3).await? == transport,
+        "exec/read/stat did not reuse the same live ordinary master"
+    );
+    let sessions = |text: &str, kind: &str| {
+        text.lines()
+            .filter(|line| line.contains("Starting session:") && line.contains(kind))
+            .count()
+    };
+    let after = fixture.listeners[0].log.text();
+    ensure!(
+        sessions(&after, "command") == sessions(&before, "command") + 1,
+        "stat or read ran an unexpected remote shell helper"
+    );
+    let before = fixture.listeners[1].log.text();
+    let reply = client
+        .call("ssh_stat", json!({"host":"nosftp","path":file}))
+        .await?;
+    let code = reply["error"]["code"]
+        .as_str()
+        .context("subsystem denial must fail stat")?;
+    ensure!(
+        matches!(code, "unsupported" | "io_error" | "connection_lost"),
+        "unexpected subsystem failure: {reply}"
+    );
+    ensure!(
+        reply["data"].is_null(),
+        "stat used a missing-subsystem fallback"
+    );
+    let owned = observed_masters(&client.log, 2).await?;
+    let reply = client
+        .call(
+            "ssh_exec",
+            json!({"host":"nosftp","command":"printf STAT_NO_FALLBACK_MASTER_ALIVE"}),
+        )
+        .await?;
+    ensure!(succeeded(&reply)?["stdout"] == "STAT_NO_FALLBACK_MASTER_ALIVE");
+    ensure!(
+        masters(&client.log)? == owned,
+        "stat denial replaced a healthy master"
+    );
+    fixture.await_authentications(4).await?;
+    timeout(Duration::from_secs(5), async {
+        while sessions(&fixture.listeners[1].log.text(), "command")
+            < sessions(&before, "command") + 1
+        {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("missing subsystem health-probe log")?;
+    ensure!(
+        sessions(&fixture.listeners[1].log.text(), "command") == sessions(&before, "command") + 1,
+        "missing subsystem ran a stat shell fallback"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_stat() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = stat_cases(&fixture, &client).await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        let records = log.final_records()?;
+        let stats: Vec<_> = records
+            .iter()
+            .filter(|record| record["tool"] == "ssh_stat")
+            .collect();
+        ensure!(!stats.is_empty(), "stat emitted no audit records");
+        for record in stats {
+            ensure!(
+                record["identity_role"] == "ordinary",
+                "stat used a nonordinary identity"
+            );
+            for field in ["path", "filename", "target", "content", "uid", "gid"] {
+                ensure!(record.get(field).is_none(), "stat audit disclosed {field}");
+            }
+        }
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
 }
