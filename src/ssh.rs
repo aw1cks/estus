@@ -308,6 +308,8 @@ impl Master {
             "ClearAllForwardings=yes",
             "PermitLocalCommand=no",
             "RemoteCommand=none",
+            // SetEnv uses the first active list: replace operator-configured values.
+            "SetEnv=SSH_MCP=1",
         ] {
             command.arg("-o").arg(option);
         }
