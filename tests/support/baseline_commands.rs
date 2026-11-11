@@ -1,14 +1,19 @@
-//! Packaged included-config, strict-trust, environment and diagnostic acceptance.
-use crate::{command_succeeded, isolated, private_boundary, support};
+//! Packaged config, command fidelity and complete-response budget acceptance.
+use crate::{command_succeeded, isolated, observed_master_count, private_boundary, support};
 use anyhow::{Context, Result, ensure};
+use indoc::indoc;
 use serde_json::json;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
-use support::{Client, Log, assert_masters_gone, masters};
-use tokio::time::{sleep, timeout};
+use support::{Client, Log, WireServer, assert_masters_gone, masters, quote};
+use tokio::{
+    process::Command,
+    time::{sleep, timeout},
+};
 fn combined(results: impl IntoIterator<Item = (&'static str, Result<()>)>) -> Result<()> {
     let errors = results
         .into_iter()
@@ -79,6 +84,25 @@ async fn finish_client(client: Client, scenario: Result<()>, markers: &[String])
         ("diagnostic privacy", private_boundary(&log.text(), markers)),
         ("audit metadata", audit_metadata(&log)),
     ])
+}
+
+async fn check_master(fixture: &isolated::Fixture, owned: &(u32, PathBuf)) -> Result<()> {
+    let output = support::run(
+        Command::new(&fixture.ssh)
+            .arg("-F")
+            .arg(&fixture.ssh_config)
+            .arg("-S")
+            .arg(&owned.1)
+            .args(["-O", "check", "plain"]),
+    )
+    .await?;
+    ensure!(
+        owned.1.exists()
+            && output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains(&format!("(pid={})", owned.0)),
+        "original owned master PID/socket no longer live"
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -190,4 +214,297 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
         ("config/environment", scenario),
         ("fixture cleanup", cleanup),
     ])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
+async fn ssh_packaged_command_fidelity() -> Result<()> {
+    let fixture = isolated::Fixture::start().await?;
+    let scenario = async {
+        // This is an owned fixture TOML override, not a production default change.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.config)?
+            .write_all(
+                indoc! {"
+            [limits]
+            max_output_bytes = 1024
+            max_file_bytes = 8388608
+        "}
+                .as_bytes(),
+            )?;
+        let markers = fixture.credential_markers()?;
+        let client = Client::start(&fixture.config).await?;
+        let commands = async {
+            let rejected = client
+                .call(
+                    "ssh_exec",
+                    json!({
+                        "host":"plain", "command":"'".repeat(20_000)
+                    }),
+                )
+                .await?;
+            ensure!(
+                rejected["error"]["code"] == "invalid_argument"
+                    && rejected["error"]["remote_state_unknown"] == false
+                    && rejected["data"].is_null(),
+                "expanded SSH command was dispatched"
+            );
+            ensure!(
+                masters(&client.log)?.is_empty(),
+                "encoded-command rejection acquired a master"
+            );
+            for (command, out, err, exit) in [
+                ("printf out; printf err >&2; exit 7", "out", "err", 7),
+                ("exit 127", "", "", 127),
+                ("exit 255", "", "", 255),
+            ] {
+                let reply = client
+                    .call("ssh_exec", json!({"host":"plain","command":command}))
+                    .await?;
+                ensure!(
+                    reply["error"]["code"] == "command_failed"
+                        && reply["error"]["remote_state_unknown"] == false
+                );
+                let data = &reply["data"];
+                ensure!(
+                    data["stdout"] == out
+                        && data["stderr"] == err
+                        && data["exit_code"] == exit
+                        && data["termination"] == "exited"
+                        && data["remote_may_still_be_running"] == false
+                );
+                ensure!(data["duration_ms"].is_u64());
+                for field in [
+                    "stdout_lossy",
+                    "stderr_lossy",
+                    "stdout_truncated",
+                    "stderr_truncated",
+                ] {
+                    ensure!(data[field] == false);
+                }
+                private_boundary(&reply.to_string(), &markers)?;
+            }
+            let owned = observed_master_count(&client.log, 1).await?;
+            let local = tempfile::Builder::new()
+                .prefix("v03-injection-")
+                .tempdir_in("/tmp")?;
+            let local_marker = local.path().join("EXECUTED");
+            let injected = format!(
+                "$(touch {})",
+                quote(local_marker.to_str().context("local marker UTF-8")?)
+            );
+            let cwd = format!(
+                "/tmp/v03 space ' quote\nnewline ; {injected} ; $(touch /tmp/v03-remote-injected)"
+            );
+            fixture
+                .primary_exec(&format!(
+                    "mkdir -p -- {}; chmod 755 -- {}",
+                    quote(&cwd),
+                    quote(&cwd)
+                ))
+                .await?;
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({"host":"plain","cwd":cwd,"command":"printf '%s' \"$PWD\""}),
+                )
+                .await?;
+            command_succeeded(&reply, &cwd)?;
+            let literal =
+                format!("literal ; {injected} ' single\nnewline $(touch /tmp/v03-remote-injected)");
+            command_succeeded(
+                &client
+                    .call(
+                        "ssh_exec",
+                        json!({"host":"plain","command":format!("printf %s {}", quote(&literal))}),
+                    )
+                    .await?,
+                &literal,
+            )?;
+            ensure!(!local_marker.exists(), "local command injection executed");
+            ensure!(
+                fixture
+                    .primary_exec("if [ -e /tmp/v03-remote-injected ]; then printf BAD; fi")
+                    .await?
+                    .is_empty(),
+                "remote quoting executed literal text"
+            );
+            let stdin = "V03_STDIN_SECRET".repeat(32);
+            let command = "printf V03_COMMAND_SECRET; printf V03_STDERR_SECRET >&2; cat";
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({"host":"plain","command":command,"stdin":stdin}),
+                )
+                .await?;
+            ensure!(
+                reply["error"].is_null()
+                    && reply["data"]["exit_code"] == 0
+                    && reply["data"]["stdout"] == format!("V03_COMMAND_SECRET{stdin}")
+                    && reply["data"]["stderr"] == "V03_STDERR_SECRET"
+            );
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({"host":"plain","command":"printf '\\377'; printf '\\376' >&2"}),
+                )
+                .await?;
+            ensure!(
+                reply["error"].is_null()
+                    && reply["data"]["stdout"] == "\u{fffd}"
+                    && reply["data"]["stderr"] == "\u{fffd}"
+                    && reply["data"]["stdout_lossy"] == true
+                    && reply["data"]["stderr_lossy"] == true
+            );
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({
+                        "host":"plain","timeout_secs":15,
+                        "command":indoc! {"
+                    /bin/head -c 4194304 /dev/zero | /bin/tr '\\000' x
+                    /bin/head -c 4194304 /dev/zero | /bin/tr '\\000' y >&2
+                    cat
+                    exit 7
+                "},
+                        "stdin":"z".repeat(4_194_304)
+                    }),
+                )
+                .await?;
+            ensure!(
+                reply["error"]["code"] == "command_failed"
+                    && reply["data"]["exit_code"] == 7
+                    && reply["data"]["stdout"] == "x".repeat(1024)
+                    && reply["data"]["stderr"] == "y".repeat(1024)
+                    && reply["data"]["stdout_truncated"] == true
+                    && reply["data"]["stderr_truncated"] == true
+                    && reply["data"]["stdout_lossy"] == false
+                    && reply["data"]["stderr_lossy"] == false
+            );
+            ensure!(
+                masters(&client.log)? == owned,
+                "command cases replaced their shared master"
+            );
+            check_master(&fixture, &owned[0]).await?;
+            Ok(())
+        }
+        .await;
+        let mut audit_markers = markers;
+        audit_markers.extend(
+            [
+                "V03_STDIN_SECRET",
+                "V03_COMMAND_SECRET",
+                "V03_STDERR_SECRET",
+            ]
+            .map(str::to_owned),
+        );
+        finish_client(client, commands, &audit_markers).await
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    combined([("command fidelity", scenario), ("fixture cleanup", cleanup)])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires exact Nix fixture artifact and explicit Docker-compatible daemon"]
+async fn ssh_packaged_complete_wire_budget() -> Result<()> {
+    let fixture = isolated::Fixture::start().await?;
+    let scenario = async {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.config)?
+            .write_all(
+                indoc! {"
+            [limits]
+            max_output_bytes = 16777216
+        "}
+                .as_bytes(),
+            )?;
+        let mut markers = fixture.credential_markers()?;
+        markers.push("V03_BACKEND_DIAGNOSTIC_SECRET".to_owned());
+        let mut wire = WireServer::start(&fixture.config)?;
+        let log = wire.log.clone();
+        let response = async {
+            wire.initialize().await?;
+            let (mut frame, size) = wire
+                .request_with_size(
+                    json!("V03-wire-'\\\n".repeat(128)),
+                    "tools/call",
+                    json!({
+                        "name":"ssh_exec","arguments":{
+                            "host":"plain","timeout_secs":15,
+                            "command":indoc! {"
+                            /bin/printf V03_WIRE_PREFIX
+                            /bin/head -c 8388608 /dev/zero
+                            /bin/head -c 8388608 /dev/zero >&2
+                            exit 7
+                        "}
+                        }
+                    }),
+                )
+                .await?;
+            ensure!(
+                size <= 16_777_216,
+                "complete response exceeded the wire ceiling"
+            );
+            private_boundary(&frame.to_string(), &markers)?;
+            let result = frame
+                .get_mut("result")
+                .context("wire-budget result")?
+                .take();
+            let reply = support::envelope(serde_json::from_value(result)?)?;
+            ensure!(
+                reply["error"]["code"] == "command_failed"
+                    && reply["error"]["remote_state_unknown"] == false
+                    && reply["data"]["exit_code"] == 7
+                    && reply["data"]["termination"] == "exited"
+                    && reply["data"]["remote_may_still_be_running"] == false
+            );
+            let data = &reply["data"];
+            let out = data["stdout"].as_str().context("wire-budget stdout")?;
+            let err = data["stderr"].as_str().context("wire-budget stderr")?;
+            ensure!(
+                out.strip_prefix("V03_WIRE_PREFIX")
+                    .context("lost stdout prefix")?
+                    .bytes()
+                    .all(|byte| byte == 0)
+                    && err.bytes().all(|byte| byte == 0)
+            );
+            ensure!(
+                out.len() < 8_388_608
+                    && err.len() < 8_388_608
+                    && data["stdout_truncated"] == true
+                    && data["stderr_truncated"] == true
+                    && data["stdout_lossy"] == false
+                    && data["stderr_lossy"] == false,
+                "wire clipping lost its execution/truncation evidence"
+            );
+            let owned = observed_master_count(&log, 1).await?;
+            check_master(&fixture, &owned[0]).await?;
+            println!("V03_COMPLETE_RESPONSE_BYTES={size}");
+            Ok(())
+        }
+        .await;
+        let stopped = wire.stop(false).await.map(|_| ());
+        let gone = match masters(&log) {
+            Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        markers.push("V03_WIRE_PREFIX".to_owned());
+        combined([
+            ("complete wire response", response),
+            ("server cleanup", stopped),
+            ("master cleanup", gone),
+            (
+                "wire diagnostic privacy",
+                private_boundary(&log.text(), &markers),
+            ),
+            ("wire audit metadata", audit_metadata(&log)),
+        ])
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    combined([("wire budget", scenario), ("fixture cleanup", cleanup)])
 }
