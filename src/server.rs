@@ -24,6 +24,7 @@ use crate::{
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
     exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
     ssh::{MasterHealth, Pool},
+    wire::ReplyBudget,
 };
 
 #[derive(Clone)]
@@ -73,7 +74,13 @@ pub(crate) struct ToolError {
 }
 
 impl ToolError {
-    pub(crate) fn new(
+    pub(crate) const SSH_CONNECT_FAILED: Self = Self::new(
+        "ssh_connect_failed",
+        "SSH connection failed; verify the configured alias, authentication and known hosts with your SSH client outside MCP",
+        false,
+    );
+
+    pub(crate) const fn new(
         code: &'static str,
         message: &'static str,
         remote_state_unknown: bool,
@@ -122,17 +129,6 @@ impl<S, T: DeserializeOwned> FromContextPart<ToolCallContext<'_, S>> for Argumen
     }
 }
 
-fn result<T: Serialize>(reply: ToolReply<T>) -> Result<CallToolResult, ErrorData> {
-    let failed = reply.error.is_some();
-    let value = serde_json::to_value(reply)
-        .map_err(|_| ErrorData::internal_error("Could not serialize tool reply", None))?;
-    Ok(if failed {
-        CallToolResult::structured_error(value)
-    } else {
-        CallToolResult::structured(value)
-    })
-}
-
 impl SshMcp {
     pub(crate) fn new(config: Config) -> Self {
         let shutdown = CancellationToken::new();
@@ -175,12 +171,23 @@ impl SshMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let metadata = request.metadata(&self.state.config, &context.id);
+        let budget = ReplyBudget::new(&context.id)?;
+        let capture_limit = match budget.command_capture_limit() {
+            Ok(limit) => limit,
+            Err(error) => {
+                metadata.reject(
+                    started,
+                    &ToolError::new("invalid_argument", "Insufficient response budget", false),
+                );
+                return Err(error);
+            }
+        };
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
                 metadata.reject(started, &error);
-                return result(ToolReply::<CommandData>::failure(error));
+                return budget.result(ToolReply::<CommandData>::failure(error));
             }
         };
         let state = Arc::clone(&self.state);
@@ -188,13 +195,13 @@ impl SshMcp {
         // drops this handler's JoinHandle. Admission above bounds these tasks.
         let task = self.state.tasks.spawn(async move {
             let reply = state
-                .command(request, context.id, context.ct, started)
+                .command(request, context.id, context.ct, started, capture_limit)
                 .await;
             (permit, reply)
         });
         match task.await {
-            Ok((_permit, reply)) => result(reply),
-            Err(_) => result(ToolReply::<CommandData>::failure(ToolError::new(
+            Ok((_permit, reply)) => budget.command_result(reply),
+            Err(_) => budget.result(ToolReply::<CommandData>::failure(ToolError::new(
                 "io_error",
                 "Command task could not complete; remote state is unknown",
                 true,
@@ -217,6 +224,7 @@ impl SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
         let metadata = Metadata {
             request_id: &context.id,
             tool: "ssh_targets",
@@ -231,17 +239,17 @@ impl SshMcp {
             Err(_) => {
                 let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
                 metadata.reject(started, &error);
-                return result(ToolReply::<TargetDiscovery<'_>>::failure(error));
+                return budget.result(ToolReply::<TargetDiscovery<'_>>::failure(error));
             }
         };
         let audit = Audit::start(metadata, started);
         let reply = ToolReply::success(self.state.config.targets());
         audit.finish(None, None);
-        result(reply)
+        budget.result(reply)
     }
 
     #[tool(
-        description = "Execute a stateless noninteractive remote shell script (/bin/sh by default; Bash is opt-in). Potentially destructive; not idempotent. Timeout/cancellation closes only this channel: remote work may continue, and operations are never replayed. Ordinary shell authority can bypass same-account sudo approval separation.",
+        description = "Execute a stateless noninteractive remote shell script (/bin/sh by default; Bash is opt-in). Potentially destructive; not idempotent. Timeout/cancellation closes only this channel: remote work may continue, and operations are never replayed. Ordinary shell authority can bypass same-account sudo approval separation. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<ExecRequest>(),
         output_schema = schema_for_type::<ToolReply<CommandData>>()
@@ -255,7 +263,7 @@ impl SshMcp {
     }
 
     #[tool(
-        description = "Execute an authorized absolute executable via sudo -n -k with the target's configured identity/user/program policy. argv is not a shell script. Requires remote passwordless sudo; no passwords, PTY, environment preservation, or retries. Potentially destructive and not idempotent. Cancellation cannot guarantee remote termination. Permitted executables may themselves grant shell-like authority; sudoers remains authoritative.",
+        description = "Execute an authorized absolute executable via sudo -n -k with the target's configured identity/user/program policy. argv is not a shell script. Requires remote passwordless sudo; no passwords, PTY, environment preservation, or retries. Potentially destructive and not idempotent. Cancellation cannot guarantee remote termination. Permitted executables may themselves grant shell-like authority; sudoers remains authoritative. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<SudoRequest>(),
         output_schema = schema_for_type::<ToolReply<CommandData>>()
@@ -349,6 +357,7 @@ impl State {
         request_id: RequestId,
         ct: CancellationToken,
         started: Instant,
+        capture_limit: u64,
     ) -> ToolReply<CommandData> {
         let metadata = request.metadata(&self.config, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
@@ -390,7 +399,7 @@ impl State {
                     invocation,
                     input,
                     RunContext {
-                        max_output_bytes: self.config.limits().max_output_bytes,
+                        max_output_bytes: self.config.limits().max_output_bytes.min(capture_limit),
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,

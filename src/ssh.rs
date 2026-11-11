@@ -61,11 +61,7 @@ enum Failure {
 impl Failure {
     fn error(self) -> ToolError {
         match self {
-            Self::Connect => ToolError::new(
-                "ssh_connect_failed",
-                "SSH connection failed; verify the configured alias, authentication and known hosts with your SSH client outside MCP",
-                false,
-            ),
+            Self::Connect => ToolError::SSH_CONNECT_FAILED,
             Self::Timeout => ToolError::new("timeout", "SSH connection deadline expired", false),
             Self::Cancelled => ToolError::new("cancelled", "SSH connection cancelled", false),
             Self::Lost => ToolError::new("connection_lost", "SSH connection is unavailable", false),

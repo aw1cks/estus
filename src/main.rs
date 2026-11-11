@@ -3,6 +3,7 @@ mod config;
 mod exec;
 mod server;
 mod ssh;
+mod wire;
 
 use std::{
     pin::Pin,
@@ -69,8 +70,13 @@ async fn run_session(
         inner: input,
         shutdown: shutdown.clone(),
     };
+    let transport = wire::BoundedTransport(rmcp::transport::async_rw::AsyncRwTransport::<
+        rmcp::RoleServer,
+        _,
+        _,
+    >::new(input, output));
     let service = tokio::select! {
-        result = application.clone().serve((input, output)) => match result {
+        result = application.clone().serve(transport) => match result {
             Ok(service) => service,
             Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {
                 return ExitCode::SUCCESS;

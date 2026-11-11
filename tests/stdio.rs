@@ -308,3 +308,73 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable() -> Result<()> {
+    const MESSAGE_LIMIT: usize = 16_777_216;
+    let mut server = Server::start(&[])?;
+    let scenario = timeout(Duration::from_secs(20), async {
+        server.initialize().await?;
+        let id = Value::String("i".repeat(MESSAGE_LIMIT - 256));
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "ssh_exec",
+                "arguments": {"host": "127.0.0.1", "command": "printf budget"}
+            }
+        });
+        let request_bytes = serde_json::to_vec(&request)?.len() + 1;
+        ensure!(
+            request_bytes < MESSAGE_LIMIT,
+            "request must fit incoming limit: {request_bytes} bytes"
+        );
+        server.send(request).await?;
+        let (response, response_bytes) = server.response_with_id(&id).await?;
+        ensure!(response["id"] == id, "response did not preserve request ID");
+        ensure!(
+            response["error"]["code"] == -32602,
+            "insufficient reply budget must be a protocol invalid-params error"
+        );
+        ensure!(
+            response.get("result").is_none(),
+            "rejected request returned a tool result"
+        );
+        ensure!(
+            response_bytes <= MESSAGE_LIMIT,
+            "response exceeds limit including newline: {response_bytes} bytes"
+        );
+        drop(response);
+        drop(id);
+        server
+            .send(json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "ssh_targets", "arguments": {}}
+            }))
+            .await?;
+        let targets = server.response(2).await?;
+        ensure!(targets["result"]["isError"] != true);
+        ensure!(
+            targets["result"]["structuredContent"]
+                == json!({"data": {"mode": "open", "targets": []}, "error": null}),
+            "normal discovery failed after budget rejection"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("reply-budget scenario timed out")
+    .and_then(|result| result);
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success(), "server exit status: {status}");
+    for line in std::str::from_utf8(&stderr)?.lines() {
+        let record: Value = serde_json::from_str(line)?;
+        ensure!(
+            record["event"] != "master_start",
+            "budget-rejected request launched SSH"
+        );
+    }
+    Ok(())
+}
