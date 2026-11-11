@@ -63,29 +63,53 @@ impl Server {
         Ok(())
     }
 
+    async fn send_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        let input = self.input.as_mut().context("stdin already closed")?;
+        input.write_all(bytes).await?;
+        input.flush().await?;
+        Ok(())
+    }
+
+    async fn frame(&mut self) -> Result<Option<(Value, usize)>> {
+        let mut line = Vec::new();
+        let size = timeout(Duration::from_secs(5), async {
+            (&mut self.output)
+                .take(16_777_217)
+                .read_until(b'\n', &mut line)
+                .await
+        })
+        .await??;
+        if size == 0 {
+            return Ok(None);
+        }
+        ensure!(size <= 16_777_216, "response exceeds 16 MiB: {size} bytes");
+        ensure!(line.last() == Some(&b'\n'), "unterminated response");
+        let value: Value = serde_json::from_slice(&line).context("non-JSON stdout")?;
+        ensure!(value["jsonrpc"] == "2.0", "non-JSON-RPC stdout");
+        Ok(Some((value, size)))
+    }
+
     async fn response(&mut self, id: u64) -> Result<Value> {
         Ok(self.response_with_id(&json!(id)).await?.0)
     }
 
     async fn response_with_id(&mut self, id: &Value) -> Result<(Value, usize)> {
         loop {
-            let mut line = Vec::new();
-            let size = timeout(Duration::from_secs(5), async {
-                (&mut self.output)
-                    .take(16_777_217)
-                    .read_until(b'\n', &mut line)
-                    .await
-            })
-            .await??;
-            ensure!(size != 0, "server closed stdout before response");
-            ensure!(size <= 16_777_216, "response exceeds 16 MiB: {size} bytes");
-            ensure!(line.last() == Some(&b'\n'), "unterminated response");
-            let value: Value = serde_json::from_slice(&line).context("non-JSON stdout")?;
-            ensure!(value["jsonrpc"] == "2.0", "non-JSON-RPC stdout");
-            if &value["id"] == id {
+            let (value, size) = self
+                .frame()
+                .await?
+                .context("server closed stdout before response")?;
+            if value.get("id") == Some(id) {
+                ensure!(
+                    value.get("result").is_some() ^ value.get("error").is_some(),
+                    "correlated frame is not a JSON-RPC response"
+                );
                 return Ok((value, size));
             }
-            ensure!(value.get("id").is_none(), "unexpected response ID");
+            ensure!(
+                value.get("id").is_none() && value["method"].is_string(),
+                "unexpected response ID or non-notification frame"
+            );
         }
     }
 
@@ -126,6 +150,19 @@ impl Server {
         Ok(())
     }
 
+    async fn sigterm(&mut self) -> Result<()> {
+        kill(
+            Pid::from_raw(i32::try_from(self.child.id().context("live server PID")?)?),
+            Signal::SIGTERM,
+        )?;
+        // Keep stdin open: EOF must not mask the signal lifecycle.
+        let status = timeout(Duration::from_secs(5), self.child.wait())
+            .await
+            .context("SIGTERM did not stop the server")??;
+        ensure!(status.success(), "SIGTERM exit status: {status}");
+        Ok(())
+    }
+
     async fn finish(mut self) -> Result<(std::process::ExitStatus, Vec<u8>)> {
         drop(self.input.take());
         let status = match timeout(Duration::from_secs(5), self.child.wait()).await {
@@ -135,14 +172,21 @@ impl Server {
                 bail!("server failed to exit after EOF");
             }
         };
-        let mut line = String::new();
-        while self.output.read_line(&mut line).await? != 0 {
-            let value: Value = serde_json::from_str(&line).context("non-JSON trailing stdout")?;
-            ensure!(value["jsonrpc"] == "2.0");
-            line.clear();
+        while let Some((frame, _)) = self.frame().await? {
+            ensure!(
+                frame.get("id").is_none() && frame["method"].is_string(),
+                "uncorrelated response remained at EOF"
+            );
         }
         let stderr = match self.stderr {
-            Some(stderr) => stderr.await??,
+            Some(mut stderr) => match timeout(Duration::from_secs(5), &mut stderr).await {
+                Ok(result) => result??,
+                Err(_) => {
+                    stderr.abort();
+                    let _ = stderr.await;
+                    bail!("stderr did not reach EOF after server exit");
+                }
+            },
             None => Vec::new(),
         };
         Ok((status, stderr))
@@ -186,12 +230,7 @@ async fn sigterm_closes_initialized_server() -> Result<()> {
     let mut server = Server::start(&[])?;
     let scenario = async {
         server.initialize().await?;
-        let pid = server.child.id().context("owned child PID")?;
-        kill(Pid::from_raw(i32::try_from(pid)?), Signal::SIGTERM)?;
-        // Keep stdin open: this must be signal handling rather than EOF handling.
-        let status = timeout(Duration::from_secs(5), server.child.wait()).await??;
-        ensure!(status.success(), "SIGTERM was not handled: {status}");
-        Ok::<_, anyhow::Error>(())
+        server.sigterm().await
     }
     .await;
     let finished = server.finish().await;
@@ -543,4 +582,187 @@ async fn initialization_failure_with_closed_stderr_does_not_panic() -> Result<()
     let (status, _) = finished?;
     ensure!(status.code() == Some(1));
     Ok(())
+}
+
+const MODERN_VERSION: &str = "2026-07-28";
+
+fn modern_request(id: Value, method: &str, mut params: Value, version: &str) -> Value {
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": version,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name":"stdio-acceptance","version":"1"},
+    });
+    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+}
+
+fn local_only_server() -> Result<(Server, tempfile::TempDir)> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("operator.toml");
+    // A regression must fail without ever consulting the developer's SSH authority.
+    std::fs::write(&path, "[targets]\n")?;
+    let server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    Ok((server, directory))
+}
+
+fn no_remote_dispatch(stderr: &[u8]) -> Result<()> {
+    ensure!(
+        stderr.is_empty() || stderr.last() == Some(&b'\n'),
+        "incomplete final audit"
+    );
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["event"] != "master_start",
+            "protocol rejection launched SSH"
+        );
+        ensure!(
+            record["tool"] != "ssh_exec",
+            "protocol rejection reached remote handler"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Result<()> {
+    let (mut server, directory) = local_only_server()?;
+    let scenario = async {
+        server.send(modern_request(json!("discover"), "server/discover", json!({}), MODERN_VERSION)).await?;
+        let discovered = server.response_with_id(&json!("discover")).await?.0;
+        ensure!(discovered["error"].is_null());
+        let versions = discovered["result"]["supportedVersions"].as_array().context("supported versions")?;
+        ensure!(versions.contains(&json!(MODERN_VERSION)));
+        ensure!(versions.contains(&json!("2025-11-25")));
+        let capabilities = &discovered["result"]["capabilities"];
+        ensure!(capabilities["tools"].is_object());
+        for unsupported in ["prompts", "resources", "tasks", "logging"] {
+            ensure!(capabilities.get(unsupported).is_none());
+        }
+
+        // These hit distinct admission paths: bootstrap and an established inline session.
+        server.send(modern_request(json!("rejected-bootstrap"), "tools/call", json!({
+            "name":"ssh_exec","arguments":{"host":"must-not-connect.invalid","command":"printf NEVER"}
+        }), "2099-01-01")).await?;
+        let rejected = server.response_with_id(&json!("rejected-bootstrap")).await?.0;
+        ensure!(rejected["error"]["code"] == -32022);
+        ensure!(rejected.get("result").is_none());
+        ensure!(rejected["error"]["data"]["requested"] == "2099-01-01");
+
+        server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
+        let listed = server.response_with_id(&json!("tools")).await?.0;
+        let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
+        for name in ["ssh_targets", "ssh_exec"] {
+            ensure!(tools.iter().any(|tool| tool["name"] == name));
+        }
+        ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+
+        // Both are outstanding before either response is read; correlate by ID,
+        // never assume handler completion order.
+        server.send(modern_request(json!("targets"), "tools/call", json!({
+            "name":"ssh_targets","arguments":{}
+        }), MODERN_VERSION)).await?;
+        server.send(modern_request(json!(17), "tools/call", json!({
+            "name":"ssh_targets","arguments":{"extra":true}
+        }), MODERN_VERSION)).await?;
+        let mut replies = [None, None];
+        for _ in 0..2 {
+            let frame = server.frame().await?.context("inline session closed")?.0;
+            let index = if frame["id"] == "targets" { 0 } else if frame["id"] == 17 { 1 } else {
+                bail!("uncorrelated modern response ID");
+            };
+            ensure!(replies[index].replace(frame).is_none(), "duplicate response ID");
+        }
+        let [Some(called), Some(invalid)] = replies else { bail!("missing modern response") };
+        let result = &called["result"];
+        ensure!(result["resultType"] == "complete");
+        let expected = json!({"data":{"mode":"configured","targets":[]},"error":null});
+        ensure!(result["structuredContent"] == expected);
+        ensure!(result["isError"] != true);
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().context("text result")?)?;
+        ensure!(text == expected);
+        ensure!(invalid["error"]["code"] == -32602);
+
+        server.send(modern_request(json!("rejected-inline"), "tools/call", json!({
+            "name":"ssh_exec","arguments":{"host":"must-not-connect.invalid","command":"printf NEVER"}
+        }), "2099-01-01")).await?;
+        let rejected = server.response_with_id(&json!("rejected-inline")).await?.0;
+        ensure!(rejected["error"]["code"] == -32022 && rejected.get("result").is_none());
+        server.send(modern_request(json!("still-usable"), "server/discover", json!({}), MODERN_VERSION)).await?;
+        let healthy = server.response_with_id(&json!("still-usable")).await?.0;
+        ensure!(healthy["error"].is_null());
+        ensure!(healthy["result"]["capabilities"] == *capabilities);
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sigterm_closes_a_handshake_free_session_with_stdin_open() -> Result<()> {
+    let (mut server, directory) = local_only_server()?;
+    let scenario = async {
+        server
+            .send(modern_request(
+                json!(1),
+                "tools/call",
+                json!({
+                    "name":"ssh_targets","arguments":{}
+                }),
+                MODERN_VERSION,
+            ))
+            .await?;
+        let called = server.response(1).await?;
+        ensure!(called["result"]["structuredContent"]["data"]["mode"] == "configured");
+        server.sigterm().await
+    }
+    .await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fragmented_utf8_request_survives_multiple_pipe_writes() -> Result<()> {
+    let (mut server, directory) = local_only_server()?;
+    let scenario = async {
+        server.initialize().await?;
+        let frame = serde_json::to_vec(&json!({
+            "jsonrpc":"2.0","id":"fragmented","method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{},"_meta":{
+                "h07/a-padding":"x".repeat(131_072),"h07/z-unicode":"🙂"
+            }}
+        }))?;
+        let unicode = frame
+            .windows(4)
+            .position(|bytes| bytes == "🙂".as_bytes())
+            .context("raw UTF-8 test character")?;
+        // The large prefix requires the child to read partial input before
+        // completing the write; split inside a codepoint, with no delimiter.
+        server.send_raw(&frame[..unicode + 1]).await?;
+        server.send_raw(&frame[unicode + 1..]).await?;
+        server.send_raw(b"\n").await?;
+        let called = server.response_with_id(&json!("fragmented")).await?.0;
+        ensure!(
+            called["result"]["structuredContent"]
+                == json!({"data":{"mode":"configured","targets":[]},"error":null})
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)
 }
