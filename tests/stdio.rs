@@ -596,10 +596,14 @@ fn modern_request(id: Value, method: &str, mut params: Value, version: &str) -> 
 }
 
 fn local_only_server() -> Result<(Server, tempfile::TempDir)> {
+    server_with_config("[targets]\n")
+}
+
+fn server_with_config(text: &str) -> Result<(Server, tempfile::TempDir)> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("operator.toml");
     // A regression must fail without ever consulting the developer's SSH authority.
-    std::fs::write(&path, "[targets]\n")?;
+    std::fs::write(&path, text)?;
     let server = Server::start(&["--config", path.to_str().context("config path")?])?;
     Ok((server, directory))
 }
@@ -651,7 +655,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_read_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -836,6 +840,92 @@ async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Re
                 .any(|bytes| bytes == b"TRUNCATED_PAYLOAD_NO_ECHO")
         );
         no_remote_dispatch(&stderr)?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Result<()> {
+    let (mut server, directory) =
+        server_with_config("[limits]\nmax_file_bytes=33554432\n[targets]\n")?;
+    let scenario = async {
+        server.initialize().await?;
+        for (index, (arguments, code)) in [
+            (json!({"host":"denied","path":""}), "invalid_argument"),
+            (json!({"host":"denied","path":"a\0b"}), "invalid_argument"),
+            (
+                json!({"host":"denied","path":"file","max_bytes":0}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"file","max_bytes":33_554_433u64}),
+                "invalid_argument",
+            ),
+            // Both fit the configured file cap, but not a lossless worst-case
+            // UTF-8/base64 reply. No allocation/connection may precede refusal.
+            (
+                json!({"host":"denied","path":"file","max_bytes":3_000_000}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"file","max_bytes":8_000_000,"encoding":"base64"}),
+                "invalid_argument",
+            ),
+            // Offset width is not an arbitrary public limit; policy is reached.
+            (
+                json!({"host":"denied","path":"file","offset":u64::MAX,"max_bytes":1}),
+                "policy_denied",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 100 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_read_file","arguments":arguments}}))
+                .await?;
+            let called = server.response(id).await?;
+            let result = &called["result"];
+            ensure!(result["isError"] == true);
+            let reply = &result["structuredContent"];
+            ensure!(reply["data"].is_null() && reply["error"]["code"] == code);
+            ensure!(reply["error"]["remote_state_unknown"] == false);
+        }
+        for (id, arguments) in [
+            (200, json!({"host":"denied","path":"file","encoding":"hex"})),
+            (201, json!({"host":"denied","path":"file","sudo":true})),
+        ] {
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_read_file","arguments":arguments}}))
+                .await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602);
+        }
+        server
+            .send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        ensure!(
+            server.response(300).await?["result"]["structuredContent"]["data"]["mode"]
+                == "configured"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["tool"] != "ssh_read_file" || record["event"] == "reject",
+            "invalid read was accepted before validation"
+        );
     }
     Ok(())
 }

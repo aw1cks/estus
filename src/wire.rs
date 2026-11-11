@@ -128,6 +128,10 @@ impl ReplyBudget {
         Ok(size.bytes)
     }
 
+    pub(crate) fn remaining<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
+        Ok(MAX_RESPONSE_BYTES - self.tool_reply_size(reply)?)
+    }
+
     pub(crate) fn result<T: Serialize>(
         &self,
         reply: ToolReply<T>,
@@ -163,11 +167,10 @@ impl ReplyBudget {
             }),
             error: Some(ToolError::SSH_CONNECT_FAILED),
         };
-        let reserved = self.tool_reply_size(&reservation)?;
         // Even unescaped UTF-8 appears twice. No stream can contribute more raw
         // bytes than this, regardless of the operator's capture cap. Lossy
         // replacement and escaping are budgeted after decoding, before copying.
-        Ok(((MAX_RESPONSE_BYTES - reserved) / 2) as u64)
+        Ok((self.remaining(&reservation)? / 2) as u64)
     }
 
     pub(crate) fn command_result(

@@ -1,0 +1,723 @@
+//! Lossless, bounded reads over an independently owned ordinary SFTP channel.
+//!
+//! No remote commands or privilege changes are involved. Cancellation interrupts
+//! the local protocol streams as well as disconnecting this channel, so a remote
+//! FIFO cannot retain local library tasks or the caller's channel permit.
+use std::{
+    future::Future,
+    io::{self, SeekFrom},
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::BytesMut;
+use openssh::{Session, Stdio};
+use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
+use openssh_sftp_error::SftpErrorKind;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncRead, AsyncSeekExt, AsyncWrite, ReadBuf},
+    sync::oneshot,
+};
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+
+use crate::{
+    server::{ToolError, ToolReply},
+    wire::ReplyBudget,
+};
+
+const DEFAULT_READ_BYTES: u64 = 65_536;
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Encoding {
+    #[default]
+    Utf8,
+    Base64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) offset: u64,
+    pub(crate) max_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) encoding: Encoding,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReadSpec<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) offset: u64,
+    pub(crate) max_bytes: usize,
+    pub(crate) encoding: Encoding,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ReadData {
+    pub(crate) content: String,
+    pub(crate) encoding: Encoding,
+    pub(crate) bytes_read: u64,
+    pub(crate) next_offset: u64,
+    pub(crate) eof: bool,
+}
+
+fn invalid(message: &'static str) -> ToolError {
+    ToolError::new("invalid_argument", message, false)
+}
+
+impl ReadRequest {
+    pub(crate) fn validate(
+        &self,
+        max_file_bytes: u64,
+        budget: ReplyBudget,
+    ) -> Result<ReadSpec<'_>, ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        let max_bytes = self
+            .max_bytes
+            .unwrap_or(DEFAULT_READ_BYTES.min(max_file_bytes));
+        if max_bytes == 0 || max_bytes > max_file_bytes {
+            return Err(invalid(
+                "max_bytes must be positive and within the configured file limit",
+            ));
+        }
+        // Reserve the complete duplicated reply, actual request ID included, before
+        // opening SSH or allocating content. False and u64::MAX are widest.
+        let reservation = ToolReply {
+            data: Some(ReadData {
+                content: String::new(),
+                encoding: self.encoding,
+                bytes_read: u64::MAX,
+                next_offset: u64::MAX,
+                eof: false,
+            }),
+            error: Some(ToolError::SSH_CONNECT_FAILED),
+        };
+        let remaining = budget.remaining(&reservation).map_err(|_| {
+            invalid("Request leaves insufficient response budget for a lossless read")
+        })?;
+        let max_bytes = usize::try_from(max_bytes)
+            .map_err(|_| invalid("max_bytes cannot be represented on this platform"))?;
+        if max_bytes.checked_add(1).is_none()
+            || wire_content_cost(max_bytes, self.encoding).is_none_or(|cost| cost > remaining)
+        {
+            return Err(invalid(
+                "max_bytes exceeds the response budget for a lossless read",
+            ));
+        }
+        Ok(ReadSpec {
+            path: &self.path,
+            offset: self.offset,
+            max_bytes,
+            encoding: self.encoding,
+        })
+    }
+}
+
+fn wire_content_cost(bytes: usize, encoding: Encoding) -> Option<usize> {
+    match encoding {
+        // A control byte becomes six JSON bytes, then seven in the text
+        // representation: thirteen complete wire bytes per original byte.
+        Encoding::Utf8 => bytes.checked_mul(13),
+        Encoding::Base64 => bytes.checked_add(2)?.checked_div(3)?.checked_mul(8),
+    }
+}
+
+pub(crate) struct ReadContext<'a> {
+    pub(crate) deadline: tokio::time::Instant,
+    pub(crate) ct: &'a CancellationToken,
+    pub(crate) shutdown: &'a CancellationToken,
+}
+
+pub(crate) struct ReadOutcome {
+    pub(crate) reply: ToolReply<ReadData>,
+    pub(crate) check_master: bool,
+}
+
+struct Failure {
+    error: ToolError,
+    check_master: bool,
+}
+
+impl Failure {
+    fn io() -> Self {
+        Self {
+            error: ToolError::new("io_error", "SFTP file read failed", false),
+            check_master: false,
+        }
+    }
+
+    fn cleanup() -> Self {
+        Self {
+            error: ToolError::new(
+                "io_error",
+                "SFTP channel cleanup did not complete within its deadline",
+                true,
+            ),
+            check_master: false,
+        }
+    }
+}
+
+fn io_failure(error: &io::Error) -> Failure {
+    let (code, message, check_master) = match error.kind() {
+        io::ErrorKind::NotFound => ("not_found", "Remote file was not found", false),
+        io::ErrorKind::PermissionDenied => {
+            ("permission_denied", "Remote file access was denied", false)
+        }
+        io::ErrorKind::Unsupported => ("unsupported", "SFTP operation is not supported", false),
+        io::ErrorKind::BrokenPipe
+        | io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::NotConnected => {
+            ("connection_lost", "SFTP channel connection was lost", true)
+        }
+        _ => return Failure::io(),
+    };
+    Failure {
+        error: ToolError::new(code, message, false),
+        check_master,
+    }
+}
+
+fn sftp_failure(error: SftpError) -> Failure {
+    let (code, message) = match error {
+        SftpError::SftpError(SftpErrorKind::NoSuchFile, _) => {
+            ("not_found", "Remote file was not found")
+        }
+        SftpError::SftpError(SftpErrorKind::PermDenied, _) => {
+            ("permission_denied", "Remote file access was denied")
+        }
+        SftpError::SftpError(SftpErrorKind::OpUnsupported, _)
+        | SftpError::UnsupportedSftpProtocol { .. }
+        | SftpError::UnsupportedExtension(_) => ("unsupported", "SFTP operation is not supported"),
+        SftpError::IOError(error) => return io_failure(&error),
+        SftpError::RecursiveErrors(errors) => {
+            let mut original = sftp_failure(errors.original_error);
+            original.check_master |= sftp_failure(errors.occuring_error).check_master;
+            return original;
+        }
+        SftpError::RecursiveErrors3(errors) => {
+            let mut original = sftp_failure(errors.err1);
+            original.check_master |= sftp_failure(errors.err2).check_master;
+            original.check_master |= sftp_failure(errors.err3).check_master;
+            return original;
+        }
+        SftpError::AwaitableError(_) | SftpError::BackgroundTaskFailure(_) => {
+            return Failure {
+                error: ToolError::new("connection_lost", "SFTP channel connection was lost", false),
+                check_master: true,
+            };
+        }
+        _ => return Failure::io(),
+    };
+    Failure {
+        error: ToolError::new(code, message, false),
+        check_master: false,
+    }
+}
+
+fn ssh_failure(error: openssh::Error) -> Failure {
+    match error {
+        // openssh maps a subsystem process's exit 127 to Remote(NotFound).
+        // That is not an SFTP file-status response and must not blame the path.
+        openssh::Error::Remote(error) if error.kind() == io::ErrorKind::NotFound => Failure::io(),
+        openssh::Error::Remote(error) | openssh::Error::ChildIo(error) => io_failure(&error),
+        openssh::Error::Master(_)
+        | openssh::Error::Connect(_)
+        | openssh::Error::SshMux(_)
+        | openssh::Error::Disconnected
+        | openssh::Error::RemoteProcessTerminated => Failure {
+            error: ToolError::new(
+                "connection_lost",
+                "SFTP channel could not be opened or was lost",
+                false,
+            ),
+            check_master: true,
+        },
+        _ => Failure::io(),
+    }
+}
+
+// The native child alone is not sufficient cancellation: library tasks own the
+// transferred pipes. Each pipe also has an independent local cancellation wakeup.
+// Its completion signal lets bounded cleanup await release of those task-owned
+// streams, including cancellation during Sftp::new's initialization handshake.
+struct ChannelStream<T> {
+    inner: T,
+    cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
+    // Field drop order matters: signal only after the inner pipe is released.
+    _released: oneshot::Sender<()>,
+}
+
+impl<T> ChannelStream<T> {
+    fn new(inner: T, cancel: &CancellationToken) -> (Self, oneshot::Receiver<()>) {
+        let (released, receiver) = oneshot::channel();
+        (
+            Self {
+                inner,
+                cancelled: Box::pin(cancel.clone().cancelled_owned()),
+                _released: released,
+            },
+            receiver,
+        )
+    }
+
+    fn interrupted(&mut self, cx: &mut Context<'_>) -> bool {
+        self.cancelled.as_mut().poll(cx).is_ready()
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for ChannelStream<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.interrupted(cx) {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for ChannelStream<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.interrupted(cx) {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.interrupted(cx) {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.interrupted(cx) {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct RawRead {
+    bytes: BytesMut,
+    eof: bool,
+}
+
+async fn read_handle(
+    file: &mut openssh_sftp_client::file::File,
+    spec: &ReadSpec<'_>,
+) -> Result<RawRead, Failure> {
+    // OpenSSH's server uses signed OS offsets. Do not turn a regular file's
+    // unrepresentable, past-EOF offset into an error, or infer EOF from FIFO size.
+    if spec.offset > i64::MAX as u64 {
+        let metadata = file.metadata().await.map_err(sftp_failure)?;
+        if metadata.file_type().is_some_and(|kind| kind.is_file())
+            && metadata.len().is_some_and(|len| spec.offset >= len)
+        {
+            return Ok(RawRead {
+                bytes: BytesMut::new(),
+                eof: true,
+            });
+        }
+    }
+    let target = spec.max_bytes.checked_add(1).ok_or_else(Failure::io)?;
+    let mut bytes = BytesMut::with_capacity(target);
+    while bytes.len() < target {
+        let offset = spec
+            .offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(Failure::io)?;
+        // File::read advances its own cursor by requested n, even on a short
+        // response. Always reset from actual bytes received, never that cursor.
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|error| io_failure(&error))?;
+        let count = (target - bytes.len())
+            .min(u32::MAX as usize)
+            .min((u64::MAX - offset).min(usize::MAX as u64) as usize);
+        if count == 0 {
+            return Err(Failure::io());
+        }
+        // Split off spare capacity and join adjacent buffers without copying.
+        let spare = bytes.split_off(bytes.len());
+        match file.read(count as u32, spare).await.map_err(sftp_failure)? {
+            None => return Ok(RawRead { bytes, eof: true }),
+            Some(chunk) if chunk.is_empty() || chunk.len() > count => return Err(Failure::io()),
+            Some(chunk) => bytes.unsplit(chunk),
+        }
+    }
+    Ok(RawRead { bytes, eof: false })
+}
+
+async fn read_sftp(sftp: Sftp, spec: &ReadSpec<'_>) -> Result<RawRead, Failure> {
+    let (result, file) = match sftp.open(spec.path).await {
+        Ok(mut file) => (read_handle(&mut file, spec).await, Some(file)),
+        Err(error) => (Err(sftp_failure(error)), None),
+    };
+    let close = async {
+        let file_close = match file {
+            Some(file) => file.close().await.map_err(sftp_failure),
+            None => Ok(()),
+        };
+        combine_close(file_close, sftp.close().await.map_err(sftp_failure))
+    };
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, close)
+        .await
+        .unwrap_or_else(|_| Err(Failure::cleanup()));
+    combine_close(result, close)
+}
+
+fn combine_close<T>(result: Result<T, Failure>, close: Result<(), Failure>) -> Result<T, Failure> {
+    match (result, close) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(mut original), Err(cleanup)) => {
+            original.check_master |= cleanup.check_master;
+            original.error.remote_state_unknown |= cleanup.error.remote_state_unknown;
+            Err(original)
+        }
+    }
+}
+
+fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> {
+    raw.bytes.truncate(spec.max_bytes);
+    let bytes_read = raw.bytes.len() as u64;
+    let next_offset = spec
+        .offset
+        .checked_add(bytes_read)
+        .ok_or_else(|| invalid("Returned file offset cannot be represented"))?;
+    let content = match spec.encoding {
+        Encoding::Utf8 => String::from_utf8(raw.bytes.into()).map_err(|_| ToolError::new(
+            "invalid_encoding",
+            "Returned bytes are not complete UTF-8; use encoding base64 for lossless byte ranges",
+            false,
+        ))?,
+        Encoding::Base64 => STANDARD.encode(&raw.bytes),
+    };
+    Ok(ReadData {
+        content,
+        encoding: spec.encoding,
+        bytes_read,
+        next_offset,
+        eof: raw.eof,
+    })
+}
+
+pub(crate) async fn read(
+    session: &Session,
+    spec: ReadSpec<'_>,
+    context: ReadContext<'_>,
+) -> ReadOutcome {
+    let cancel = CancellationToken::new();
+    // Also wake library tasks if our caller drops the entire read future.
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let mut child = None;
+    let mut dispatched = false;
+    let mut released = [None, None];
+    let result = {
+        let operation = async {
+            // Once polled, a channel request may reach the server even if the
+            // spawn future is later cancelled before returning its handle.
+            dispatched = true;
+            child = Some(
+                session
+                    .subsystem("sftp")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .await
+                    .map_err(ssh_failure)?,
+            );
+            let channel = child.as_mut().ok_or_else(Failure::io)?;
+            let stdin = channel.stdin().take().ok_or_else(Failure::io)?;
+            let stdout = channel.stdout().take().ok_or_else(Failure::io)?;
+            let mut stderr = channel.stderr().take().ok_or_else(Failure::io)?;
+            let (stdin, input_released) = ChannelStream::new(stdin, &cancel);
+            let (stdout, output_released) = ChannelStream::new(stdout, &cancel);
+            released = [Some(input_released), Some(output_released)];
+            let protocol = async {
+                let sftp = Sftp::new(stdin, stdout, SftpOptions::default())
+                    .await
+                    .map_err(sftp_failure)?;
+                read_sftp(sftp, &spec).await
+            };
+            let drain = async { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await };
+            tokio::pin!(protocol, drain);
+            let result = tokio::select! {
+                result = &mut protocol => {
+                    let raw = result?;
+                    tokio::time::timeout(CLEANUP_TIMEOUT, &mut drain)
+                        .await.map_err(|_| Failure::cleanup())?
+                        .map_err(|error| io_failure(&error))?;
+                    Ok(raw)
+                }
+                drained = &mut drain => {
+                    drained.map_err(|error| io_failure(&error))?;
+                    protocol.await
+                }
+            };
+            let status = tokio::time::timeout(
+                CLEANUP_TIMEOUT,
+                child.take().ok_or_else(Failure::io)?.wait(),
+            )
+            .await
+            .map_err(|_| Failure::cleanup())?
+            .map_err(ssh_failure);
+            let closed = match status {
+                Ok(status) if status.success() => Ok(()),
+                Ok(_) => Err(Failure::io()),
+                Err(error) => Err(error),
+            };
+            combine_close(result, closed)
+        };
+        tokio::select! {
+            biased;
+            () = context.ct.cancelled() => Err(Failure {
+                error: ToolError::new("cancelled", "SFTP file read cancelled", false),
+                check_master: false,
+            }),
+            () = context.shutdown.cancelled() => Err(Failure {
+                error: ToolError::new("cancelled", "SFTP file read cancelled", false),
+                check_master: false,
+            }),
+            () = tokio::time::sleep_until(context.deadline) => Err(Failure {
+                error: ToolError::new("timeout", "SFTP file read deadline exceeded", false),
+                check_master: false,
+            }),
+            result = operation => result,
+        }
+    };
+    // Operation futures and every File/Sftp handle have now been dropped. Wake
+    // blocked protocol reads before disconnecting ONLY this child, not its master.
+    cancel.cancel();
+    let cleanup = async {
+        if let Some(child) = child.take() {
+            let _ = child.disconnect().await;
+        }
+        for receiver in released.into_iter().flatten() {
+            let _ = receiver.await;
+        }
+    };
+    let cleanup_timed_out = tokio::time::timeout(CLEANUP_TIMEOUT, cleanup)
+        .await
+        .is_err();
+    match result {
+        Ok(raw) if !cleanup_timed_out => ReadOutcome {
+            reply: match encode(raw, &spec) {
+                Ok(data) => ToolReply::success(data),
+                Err(error) => ToolReply::failure(error),
+            },
+            check_master: false,
+        },
+        Ok(_) => ReadOutcome {
+            reply: ToolReply::failure(Failure::io().error),
+            check_master: false,
+        },
+        Err(mut failure) => {
+            if dispatched
+                && matches!(
+                    failure.error.code,
+                    "timeout" | "cancelled" | "connection_lost"
+                )
+            {
+                failure.error.remote_state_unknown = true;
+            }
+            ReadOutcome {
+                reply: ToolReply::failure(failure.error),
+                check_master: failure.check_master,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::RequestId;
+    use serde_json::json;
+
+    fn request() -> ReadRequest {
+        serde_json::from_value(json!({ "host": "target", "path": "relative/file" })).unwrap()
+    }
+
+    fn budget() -> ReplyBudget {
+        ReplyBudget::new(&RequestId::Number(1)).unwrap()
+    }
+
+    #[test]
+    fn defaults_cap_the_read_without_restricting_offsets_or_relative_paths() {
+        let mut request = request();
+        request.offset = u64::MAX;
+        let spec = request.validate(100_000, budget()).unwrap();
+        assert_eq!(spec.max_bytes, 65_536);
+        assert_eq!(spec.offset, u64::MAX);
+        assert_eq!(spec.path, "relative/file");
+        assert_eq!(request.validate(10, budget()).unwrap().max_bytes, 10);
+    }
+
+    #[test]
+    fn invalid_inputs_are_rejected_before_any_channel_or_content_allocation() {
+        for path in ["", "a\0b"] {
+            let mut request = request();
+            request.path = path.into();
+            assert_eq!(
+                request.validate(100, budget()).unwrap_err().code,
+                "invalid_argument"
+            );
+        }
+        for count in [0, 101, u64::MAX] {
+            let mut request = request();
+            request.max_bytes = Some(count);
+            assert_eq!(
+                request.validate(100, budget()).unwrap_err().code,
+                "invalid_argument"
+            );
+        }
+        let mut request = request();
+        request.timeout_secs = Some(0);
+        assert!(
+            !request
+                .validate(100, budget())
+                .unwrap_err()
+                .remote_state_unknown
+        );
+        request.timeout_secs = None;
+        assert!(request.validate(0, budget()).is_err());
+    }
+
+    #[test]
+    fn unknown_fields_and_encodings_are_not_silently_accepted() {
+        for value in [
+            json!({"host":"target", "path":"file", "encoding":"UTF8"}),
+            json!({"host":"target", "path":"file", "encoding":"lossy"}),
+            json!({"host":"target", "path":"file", "sudo":true}),
+        ] {
+            assert!(serde_json::from_value::<ReadRequest>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn budget_rejects_huge_requests_and_accounts_for_actual_id_and_encoding() {
+        let mut request = request();
+        request.max_bytes = Some(u64::MAX);
+        assert!(request.validate(u64::MAX, budget()).is_err());
+        request.max_bytes = Some(1_000_000);
+        assert!(request.validate(u64::MAX, budget()).is_ok());
+        let large_id = RequestId::String("x".repeat(4_000_000).into());
+        let large_budget = ReplyBudget::new(&large_id).unwrap();
+        assert!(request.validate(u64::MAX, large_budget).is_err());
+        request.encoding = Encoding::Base64;
+        assert!(request.validate(u64::MAX, large_budget).is_ok());
+        assert_eq!(wire_content_cost(1, Encoding::Utf8), Some(13));
+        assert_eq!(wire_content_cost(1, Encoding::Base64), Some(8));
+        assert_eq!(wire_content_cost(3, Encoding::Base64), Some(8));
+        assert_eq!(wire_content_cost(4, Encoding::Base64), Some(16));
+        assert!(wire_content_cost(usize::MAX, Encoding::Utf8).is_none());
+        assert!(wire_content_cost(usize::MAX, Encoding::Base64).is_none());
+    }
+
+    fn encoded(
+        bytes: &[u8],
+        max_bytes: usize,
+        offset: u64,
+        encoding: Encoding,
+        eof: bool,
+    ) -> Result<ReadData, ToolError> {
+        encode(
+            RawRead {
+                bytes: BytesMut::from(bytes),
+                eof,
+            },
+            &ReadSpec {
+                path: "file",
+                offset,
+                max_bytes,
+                encoding,
+            },
+        )
+    }
+
+    #[test]
+    fn strict_utf8_rejects_invalid_and_split_codepoints_without_lossy_replacement() {
+        for bytes in [&b"\xff"[..], &b"\xe2\x82"[..], &b"\x82\xac"[..]] {
+            let error = encoded(bytes, bytes.len(), 0, Encoding::Utf8, true)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "invalid_encoding");
+            assert!(!error.remote_state_unknown);
+        }
+        // Even when lookahead completes a codepoint, the requested range must
+        // stand on its own rather than silently dropping or returning bytes.
+        assert!(encoded("€".as_bytes(), 2, 0, Encoding::Utf8, false).is_err());
+        let data = encoded("€!".as_bytes(), 3, 7, Encoding::Utf8, false).unwrap();
+        assert_eq!(data.content, "€");
+        assert_eq!(data.bytes_read, 3);
+        assert_eq!(data.next_offset, 10);
+        assert!(!data.eof);
+    }
+
+    #[test]
+    fn base64_is_padded_and_lookahead_never_counts_as_returned_bytes() {
+        for (bytes, expected) in [
+            (&b"f"[..], "Zg=="),
+            (&b"fo"[..], "Zm8="),
+            (&b"foo"[..], "Zm9v"),
+        ] {
+            let data = encoded(bytes, bytes.len(), 9, Encoding::Base64, true).unwrap();
+            assert_eq!(data.content, expected);
+            assert_eq!(data.next_offset, 9 + bytes.len() as u64);
+            assert!(data.eof);
+        }
+        let data = encoded(b"\xff\0x", 2, 5, Encoding::Base64, false).unwrap();
+        assert_eq!(data.content, "/wA=");
+        assert_eq!(data.bytes_read, 2);
+        assert_eq!(data.next_offset, 7);
+        assert!(!data.eof);
+    }
+
+    #[test]
+    fn empty_eof_preserves_even_the_maximum_offset_and_data_shape() {
+        let data = encoded(b"", 10, u64::MAX, Encoding::Utf8, true).unwrap();
+        assert_eq!(
+            serde_json::to_value(data).unwrap(),
+            json!({
+                "content": "", "encoding": "utf8", "bytes_read": 0,
+                "next_offset": u64::MAX, "eof": true,
+            })
+        );
+        assert!(encoded(b"a", 1, u64::MAX, Encoding::Base64, true).is_err());
+    }
+
+    #[test]
+    fn missing_subsystem_executable_is_not_a_missing_remote_file() {
+        let failure = ssh_failure(openssh::Error::Remote(io::ErrorKind::NotFound.into()));
+        assert_eq!(failure.error.code, "io_error");
+        assert!(!failure.check_master);
+    }
+}

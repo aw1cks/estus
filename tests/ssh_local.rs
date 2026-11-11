@@ -1,5 +1,4 @@
-//! Real native command milestone only. SFTP/file acceptance and isolated sudo authority
-//! deliberately belong to the later file/container milestones, not this suite.
+//! Real native command and read-only SFTP acceptance; isolated sudo remains separate.
 mod support;
 
 use std::{
@@ -162,7 +161,7 @@ fn capacity_script(
 
 async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let listed = timeout(Duration::from_secs(5), client.service.list_tools(None)).await??;
-    for name in ["ssh_targets", "ssh_exec", "ssh_sudo"] {
+    for name in ["ssh_targets", "ssh_exec", "ssh_sudo", "ssh_read_file"] {
         let tool = listed
             .tools
             .iter()
@@ -170,12 +169,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
             .with_context(|| format!("missing {name}"))?;
         ensure!(tool.output_schema.is_some(), "{name} missing outputSchema");
     }
-    for name in [
-        "ssh_read_file",
-        "ssh_write_file",
-        "ssh_stat",
-        "ssh_list_directory",
-    ] {
+    for name in ["ssh_write_file", "ssh_stat", "ssh_list_directory"] {
         ensure!(
             !listed.tools.iter().any(|tool| tool.name == name),
             "file milestone must not advertise unfinished {name}"

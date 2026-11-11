@@ -23,6 +23,7 @@ use crate::{
     audit::{Audit, Metadata},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
     exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
+    files::{self, ReadContext, ReadData, ReadRequest},
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
 };
@@ -208,6 +209,41 @@ impl SshMcp {
             ))),
         }
     }
+
+    async fn read_file(
+        &self,
+        request: ReadRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = read_metadata(&request, &self.state.config, &context.id);
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<ReadData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        // The request may be dropped by RMCP after cancellation. This bounded,
+        // tracked owner still closes SFTP and its channel and completes audit.
+        let task = self.state.tasks.spawn(async move {
+            let reply = state
+                .read_file(request, context.id, context.ct, started, budget)
+                .await;
+            (permit, reply)
+        });
+        match task.await {
+            Ok((_permit, reply)) => budget.result(reply),
+            Err(_) => budget.result(ToolReply::<ReadData>::failure(ToolError::new(
+                "io_error",
+                "File read task could not complete; remote state is unknown",
+                true,
+            ))),
+        }
+    }
 }
 
 #[tool_router]
@@ -260,6 +296,20 @@ impl SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.command(Operation::Exec(request), context).await
+    }
+
+    #[tool(
+        description = "Read a bounded range through an independent ordinary-identity SFTP channel. Paths are literal: no shell, tilde, environment or wildcard expansion, and no path sandbox. UTF-8 is strict, including split codepoints; use base64 for arbitrary bytes. Reads follow server symlink semantics. No sudo, shell/SCP fallback, installation or automatic replay. Timeout/cancellation disconnects only this channel; remote completion is not guaranteed. The requested lossless range must fit both the configured file cap and fixed 16 MiB reply limit.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        input_schema = schema_for_type::<ReadRequest>(),
+        output_schema = schema_for_type::<ToolReply<ReadData>>()
+    )]
+    async fn ssh_read_file(
+        &self,
+        Arguments(request): Arguments<ReadRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.read_file(request, context).await
     }
 
     #[tool(
@@ -350,6 +400,37 @@ impl Operation {
     }
 }
 
+fn read_metadata<'a>(
+    request: &'a ReadRequest,
+    config: &Config,
+    request_id: &'a RequestId,
+) -> Metadata<'a> {
+    Metadata {
+        request_id,
+        tool: "ssh_read_file",
+        host: Some(&request.host),
+        identity_role: IdentityRole::Ordinary,
+        sudo_mode: Some(config.sudo_mode(&request.host)),
+        user: None,
+        program: None,
+    }
+}
+
+fn request_deadline(
+    started: Instant,
+    duration: Duration,
+) -> Result<tokio::time::Instant, ToolError> {
+    tokio::time::Instant::from_std(started)
+        .checked_add(duration)
+        .ok_or_else(|| {
+            ToolError::new(
+                "invalid_argument",
+                "timeout_secs exceeds the supported clock range",
+                false,
+            )
+        })
+}
+
 impl State {
     async fn command(
         &self,
@@ -368,16 +449,7 @@ impl State {
         let validated = request
             .validate(&self.config)
             .and_then(|(target, duration)| {
-                tokio::time::Instant::from_std(started)
-                    .checked_add(duration)
-                    .map(|deadline| (target, deadline))
-                    .ok_or_else(|| {
-                        ToolError::new(
-                            "invalid_argument",
-                            "timeout_secs exceeds the supported clock range",
-                            false,
-                        )
-                    })
+                request_deadline(started, duration).map(|deadline| (target, deadline))
             });
         let (target, deadline) = match validated {
             Ok(validated) => validated,
@@ -422,6 +494,64 @@ impl State {
             reply.data.as_ref().and_then(|data| data.exit_code),
             reply.error.as_ref(),
         );
+        reply
+    }
+
+    async fn read_file(
+        &self,
+        request: ReadRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<ReadData> {
+        let metadata = read_metadata(&request, &self.config, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request
+            .validate(self.config.limits().max_file_bytes, budget)
+            .and_then(|spec| {
+                let target = self.config.resolve(&request.host)?;
+                let deadline =
+                    request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+                Ok((spec, target, deadline))
+            });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::read(
+                    lease.session(),
+                    spec,
+                    ReadContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
         reply
     }
 }

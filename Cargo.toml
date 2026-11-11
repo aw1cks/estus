@@ -10,6 +10,7 @@ publish = false
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
 openssh = { version = "0.11.6", default-features = false, features = ["native-mux"] }
 openssh-sftp-client = { version = "0.15.12", default-features = false }
+openssh-sftp-error = { version = "0.5.1", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
