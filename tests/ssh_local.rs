@@ -3,6 +3,7 @@ mod support;
 
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -1457,9 +1458,26 @@ async fn ssh_encoded_command_budget() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking and a usable non-root local account"]
 async fn ssh_setenv_isolation() -> Result<()> {
-    let fixture = Fixture::start_with_sshd_config(indoc! {"
+    let server = Fixture::sftp_server()?;
+    // A trusted guard observes the subsystem's environment before real SFTP.
+    // sshd reassembles subsystem argv for the login shell; nested apostrophes
+    // would reach the inner exec literally. This validated Nix path needs none.
+    let guard = format!(
+        concat!(
+            "[ \"$SSH_MCP\" = 1 ] && ",
+            "[ \"${{SSH_MCP_H04_HOST+x}}\" != x ] && ",
+            "[ \"${{SSH_MCP_H04_MATCH+x}}\" != x ] && ",
+            "[ \"${{SSH_MCP_H04_INCLUDE+x}}\" != x ] || exit 93; exec {}"
+        ),
+        server.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&guard));
+    let fixture = Fixture::start_with_sftp_subsystem(
+        indoc! {"
         AcceptEnv SSH_MCP SSH_MCP_H04_HOST SSH_MCP_H04_MATCH SSH_MCP_H04_INCLUDE
-    "})
+    "},
+        &subsystem,
+    )
     .await?;
     let scenario = async {
         let controls = [
@@ -1499,11 +1517,14 @@ async fn ssh_setenv_isolation() -> Result<()> {
                 SetEnv SSH_MCP_H04_HOST=h04-host-secret SSH_MCP=operator-host
             Match originalhost viajump
                 SetEnv SSH_MCP_H04_MATCH=h04-match-secret SSH_MCP=operator-match
+            Host nosftp
+                Port {sftp_port}
             Host *
                 Include {inherited}
             {original}
             ",
                 inherited = inherited.display(),
+                sftp_port = fixture.ports[0],
             },
         )?;
 
@@ -1538,6 +1559,14 @@ async fn ssh_setenv_isolation() -> Result<()> {
                 let data = succeeded(&reply)?;
                 ensure!(data["stdout"] == "1:::", "configured SetEnv reached {host}");
                 ensure!(data["exit_code"] == 0);
+            }
+            let path = fixture.root.path().join("environment-read");
+            fs::write(&path, b"SFTP_ENV_ISOLATED")?;
+            for &(host, _, _, _) in &controls {
+                let reply = client
+                    .call("ssh_read_file", json!({"host":host,"path":path}))
+                    .await?;
+                ensure!(succeeded(&reply)?["content"] == "SFTP_ENV_ISOLATED");
             }
             let reply = exec(&client, probe).await?;
             ensure!(
@@ -1820,4 +1849,408 @@ async fn ssh_closed_stderr() -> Result<()> {
     let cleanup = fixture.stop().await;
     scenario?;
     cleanup
+}
+
+async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
+    let root = fixture.root.path();
+    let text = root.join("read-text");
+    fs::write(&text, b"abcdef")?;
+    let empty = root.join("read-empty");
+    fs::write(&empty, b"")?;
+    // Exact metadata also distinguishes lookahead from incorrectly consuming it.
+    for (path, offset, limit, content, next, eof) in [
+        (&text, 0, None, "abcdef", 6, true),
+        (&text, 0, Some(3), "abc", 3, false),
+        (&text, 3, Some(3), "def", 6, true),
+        (&text, 5, Some(8), "f", 6, true),
+        (&text, 6, Some(1), "", 6, true),
+        (&text, 99, Some(1), "", 99, true),
+        (&text, u64::MAX, Some(1), "", u64::MAX, true),
+        (&empty, 0, None, "", 0, true),
+    ] {
+        let mut args = json!({"host":"plain","path":path,"offset":offset});
+        if let Some(limit) = limit {
+            args["max_bytes"] = json!(limit);
+        }
+        let reply = client.call("ssh_read_file", args).await?;
+        ensure!(
+            succeeded(&reply)?
+                == &json!({
+                    "content":content,"encoding":"utf8","bytes_read":content.len(),
+                    "next_offset":next,"eof":eof
+                }),
+            "read range offset={offset}, limit={limit:?}: {reply}"
+        );
+    }
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())?
+        .context("native prerequisite: current account")?;
+    let home = fs::canonicalize(user.dir).context("native prerequisite: usable account home")?;
+    let depth = home
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .count();
+    let mut relative = PathBuf::with_capacity(depth * 3 + root.as_os_str().len() + 16);
+    for _ in 0..depth {
+        relative.push("..");
+    }
+    relative.push(root.strip_prefix("/")?);
+    relative.push("read-text");
+    let reply = client
+        .call("ssh_read_file", json!({"host":"plain","path":relative}))
+        .await?;
+    ensure!(
+        succeeded(&reply)?["content"] == "abcdef",
+        "relative SFTP path used the wrong initial directory"
+    );
+
+    let large = root.join("read-multiple-packets");
+    let contents = "0123456789".repeat(30_001);
+    fs::write(&large, contents.as_bytes())?;
+    let reply = client
+        .call(
+            "ssh_read_file",
+            json!({"host":"plain","path":large,"max_bytes":300_000}),
+        )
+        .await?;
+    let data = succeeded(&reply)?;
+    ensure!(data["content"].as_str() == Some(&contents[..300_000]));
+    ensure!(
+        data["bytes_read"] == 300_000 && data["next_offset"] == 300_000 && data["eof"] == false
+    );
+    let binary = root.join("read-binary");
+    fs::write(&binary, [0, 255, 128, 65])?;
+    let reply = client
+        .call(
+            "ssh_read_file",
+            json!({"host":"plain","path":binary,"encoding":"base64"}),
+        )
+        .await?;
+    ensure!(
+        succeeded(&reply)?
+            == &json!({
+                "content":"AP+AQQ==","encoding":"base64","bytes_read":4,"next_offset":4,"eof":true
+            })
+    );
+    let unicode = root.join("read-unicode");
+    fs::write(&unicode, "é!")?;
+    for args in [
+        json!({"host":"plain","path":unicode,"max_bytes":1}),
+        json!({"host":"plain","path":unicode,"offset":1}),
+        json!({"host":"plain","path":binary}),
+    ] {
+        let reply = client.call("ssh_read_file", args).await?;
+        failed(&reply, "invalid_encoding")?;
+        ensure!(reply["data"].is_null(), "lossy or partial UTF8 success");
+        ensure!(reply["error"]["remote_state_unknown"] == false);
+    }
+    // Expansion would select a different path; the substitution is side-effect free.
+    let unusual = root.join("quote' \" ; $(printf EVALUATED)\n*");
+    fs::write(&unusual, b"LITERAL_PATH")?;
+    let reply = client
+        .call("ssh_read_file", json!({"host":"plain","path":unusual}))
+        .await?;
+    ensure!(succeeded(&reply)?["content"] == "LITERAL_PATH");
+
+    let denied = root.join("read-denied");
+    fs::write(&denied, b"PRIVATE")?;
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000))?;
+    for (path, code) in [
+        (root.join("read-missing"), "not_found"),
+        (denied, "permission_denied"),
+    ] {
+        let reply = client
+            .call("ssh_read_file", json!({"host":"plain","path":path}))
+            .await?;
+        failed(&reply, code)?;
+        ensure!(reply["data"].is_null());
+        ensure!(reply["error"]["remote_state_unknown"] == false);
+    }
+    let default_range = root.join("read-default-range");
+    fs::write(&default_range, vec![b'a'; 65_537])?;
+    let reply = client
+        .call(
+            "ssh_read_file",
+            json!({"host":"plain","path":default_range}),
+        )
+        .await?;
+    ensure!(
+        succeeded(&reply)?
+            == &json!({
+                "content":"a".repeat(65_536),"encoding":"utf8","bytes_read":65_536,
+                "next_offset":65_536,"eof":false
+            }),
+        "default read must be bounded with one-byte lookahead"
+    );
+    Ok(())
+}
+
+async fn blocked_reads() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let started = work.path().join("sftp-started");
+    let done = work.path().join("sftp-ready");
+    let server = Fixture::sftp_server()?;
+    for path in [&started, &done, &server] {
+        ensure!(
+            path.to_str().is_some_and(|path| path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_./+".contains(&byte))),
+            "native prerequisite: shell-safe subsystem fixture path"
+        );
+    }
+    // This finite fault delays the real protocol, not readiness observation.
+    // Both markers are observed; no test passes merely by sleeping long enough.
+    let script = format!(
+        concat!(
+            "trap \"\" HUP; printf started > {started}; ",
+            "sleep 5; printf done > {done}; exec {server}",
+        ),
+        started = started.display(),
+        done = done.display(),
+        server = server.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            ensure!(
+                succeeded(&exec(&client, "printf BLOCKED_READ_MASTER").await?)?["stdout"]
+                    == "BLOCKED_READ_MASTER"
+            );
+            let owned = observed_masters(&client.log, 1).await?;
+            fixture.await_authentications(3).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let path = fixture.root.path().join("delayed-read");
+            fs::write(&path, b"X")?;
+            for cancel in [false, true] {
+                for marker in [&started, &done] {
+                    if marker.exists() {
+                        fs::remove_file(marker)?;
+                    }
+                }
+                let args = json!({"host":"plain","path":path,"max_bytes":1,
+                    "timeout_secs":if cancel { 10 } else { 1 }});
+                let result = async {
+                    if cancel {
+                        let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
+                            "ssh_read_file",
+                            args,
+                        )));
+                        let handle = timeout(
+                            Duration::from_secs(5),
+                            client
+                                .service
+                                .send_cancellable_request(request, PeerRequestOptions::default()),
+                        )
+                        .await??;
+                        Fixture::await_file(&started).await?;
+                        ensure!(
+                            !done.exists(),
+                            "subsystem fault finished before cancellation"
+                        );
+                        ensure!(
+                            succeeded(&exec(&client, "printf SFTP_SIBLING").await?)?["stdout"]
+                                == "SFTP_SIBLING"
+                        );
+                        timeout(
+                            Duration::from_secs(5),
+                            handle.cancel(Some("native SFTP cancellation".into())),
+                        )
+                        .await??;
+                        let audit = await_audit(&client.log, "finish", "cancelled").await?;
+                        ensure!(audit["remote_state_unknown"] == true);
+                    } else {
+                        let blocked = client.call("ssh_read_file", args);
+                        let sibling = async {
+                            Fixture::await_file(&started).await?;
+                            let reply = exec(&client, "printf SFTP_SIBLING").await?;
+                            ensure!(succeeded(&reply)?["stdout"] == "SFTP_SIBLING");
+                            Ok::<_, anyhow::Error>(())
+                        };
+                        let (reply, sibling) = tokio::join!(blocked, sibling);
+                        sibling?;
+                        let reply = reply?;
+                        failed(&reply, "timeout")?;
+                        ensure!(reply["data"].is_null());
+                        ensure!(reply["error"]["remote_state_unknown"] == true);
+                        await_audit(&client.log, "finish", "timeout").await?;
+                    }
+                    ensure!(
+                        !done.exists(),
+                        "cancellation waited for remote startup to finish"
+                    );
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                // The channel close is not proof that the remote prefix ended.
+                let completed = Fixture::await_file(&done).await;
+                result?;
+                completed?;
+                ensure!(
+                    live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                    "cancelled file read replaced the ordinary master"
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        stopped?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH/coreutils and a non-root local account"]
+async fn ssh_read_file() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            ensure!(
+                succeeded(&exec(&client, "printf READ_MASTER").await?)?["stdout"] == "READ_MASTER"
+            );
+            read_cases(&fixture, &client).await?;
+            blocked_reads().await?;
+            let reply = client
+                .call(
+                    "ssh_read_file",
+                    json!({
+                        "host":"nosftp","path":fixture.root.path().join("read-text")
+                    }),
+                )
+                .await?;
+            let code = reply["error"]["code"]
+                .as_str()
+                .context("subsystem denial must fail")?;
+            ensure!(
+                matches!(code, "unsupported" | "io_error" | "connection_lost"),
+                "untyped subsystem denial must not masquerade as authentication failure: {reply}"
+            );
+            ensure!(reply["data"].is_null(), "missing subsystem used a fallback");
+            let before = observed_masters(&client.log, 2).await?;
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({"host":"nosftp","command":"printf NO_FALLBACK_MASTER_ALIVE"}),
+                )
+                .await?;
+            ensure!(succeeded(&reply)?["stdout"] == "NO_FALLBACK_MASTER_ALIVE");
+            ensure!(
+                masters(&client.log)? == before,
+                "subsystem denial discarded a healthy master"
+            );
+            fixture.await_authentications(4).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        ensure!(
+            !log.text().contains("LITERAL_PATH"),
+            "requested file content reached audit"
+        );
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_read_cleanup() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let done = work.path().join("channel-close-done");
+    let protocol_done = work.path().join("protocol-done");
+    let server = Fixture::sftp_server()?;
+    for path in [&done, &protocol_done, &server] {
+        ensure!(
+            path.to_str().is_some_and(|path| path
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_./+".contains(&byte))),
+            "native prerequisite: shell-safe subsystem fixture path"
+        );
+    }
+    // The real server exits successfully, then the configured session holds its
+    // channel open. Observe both protocol and session completion, not a delay.
+    let script = format!(
+        "trap \"\" HUP; {server} && printf closed > {protocol_done}; sleep 5; printf done > {done}",
+        done = done.display(),
+        protocol_done = protocol_done.display(),
+        server = server.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            ensure!(
+                succeeded(&exec(&client, "printf CLEANUP_MASTER").await?)?["stdout"]
+                    == "CLEANUP_MASTER"
+            );
+            let owned = observed_masters(&client.log, 1).await?;
+            fixture.await_authentications(3).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let path = fixture.root.path().join("cleanup-read");
+            fs::write(&path, b"X")?;
+            let reply = client
+                .call(
+                    "ssh_read_file",
+                    json!({"host":"plain","path":path,"max_bytes":1,"timeout_secs":10}),
+                )
+                .await?;
+            Fixture::await_file(&protocol_done).await?;
+            failed(&reply, "io_error")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(
+                !done.exists(),
+                "normal cleanup waited for the remote session to finish"
+            );
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "cleanup failure replaced the shared master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let completed = Fixture::await_file(&done).await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        stopped?;
+        completed?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
 }

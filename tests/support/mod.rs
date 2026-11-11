@@ -300,6 +300,24 @@ impl Fixture {
     }
 
     pub async fn start_with_sshd_config(extra_sshd_config: &str) -> Result<Self> {
+        Self::start_with_sftp_subsystem(extra_sshd_config, "internal-sftp").await
+    }
+
+    pub fn sftp_server() -> Result<PathBuf> {
+        let sshd = find_program("sshd")?;
+        ensure!(sshd.starts_with("/nix/store"), "sshd must be Nix-provided");
+        let package = sshd
+            .parent()
+            .and_then(Path::parent)
+            .context("sshd package root")?;
+        executable(&package.join("libexec/sftp-server"))
+            .context("native prerequisite: selected sshd package's real sftp-server")
+    }
+
+    pub async fn start_with_sftp_subsystem(
+        extra_sshd_config: &str,
+        subsystem: &str,
+    ) -> Result<Self> {
         let uid = Uid::current();
         ensure!(
             !uid.is_root(),
@@ -357,7 +375,7 @@ impl Fixture {
             eventual_markers: Vec::new(),
         };
         let setup = fixture
-            .configure(&sshd, &keygen, &user.name, extra_sshd_config)
+            .configure(&sshd, &keygen, &user.name, extra_sshd_config, subsystem)
             .await;
         if let Err(error) = setup {
             let cleanup = fixture.stop().await;
@@ -373,6 +391,7 @@ impl Fixture {
         keygen: &Path,
         user: &str,
         extra_sshd_config: &str,
+        sftp_subsystem: &str,
     ) -> Result<()> {
         for name in ["client", "host0", "host1", "wrong"] {
             let path = self.root.path().join(name);
@@ -406,9 +425,9 @@ impl Fixture {
                 let config = self.root.path().join(format!("sshd{index}.conf"));
                 let base = self.root.path().display();
                 let subsystem = if index == 0 {
-                    "Subsystem sftp internal-sftp\n"
+                    format!("Subsystem sftp {sftp_subsystem}\n")
                 } else {
-                    ""
+                    String::new()
                 };
                 let contents = formatdoc! {"
                     ListenAddress 127.0.0.1
