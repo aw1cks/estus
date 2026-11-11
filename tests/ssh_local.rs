@@ -1,4 +1,4 @@
-//! Real native command and read-only SFTP acceptance; isolated sudo remains separate.
+//! Real native command and SFTP acceptance; isolated sudo remains separate.
 mod support;
 
 use std::{
@@ -1592,6 +1592,18 @@ async fn ssh_setenv_isolation() -> Result<()> {
                     .find(|entry| entry["name"] == "environment-read")
                     .context("guarded SFTP omitted the created file")?;
                 ensure!(entry["metadata"] == native_stat_data(&path, false)?);
+                let destination = fixture
+                    .root
+                    .path()
+                    .join(format!("environment-write-{host}"));
+                let reply = client
+                    .call(
+                        "ssh_write_file",
+                        json!({"host":host,"path":destination,"content":"WRITE_ENV_ISOLATED"}),
+                    )
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"bytes_written":18}));
+                ensure!(fs::read(&destination)? == b"WRITE_ENV_ISOLATED");
             }
             let reply = exec(&client, probe).await?;
             ensure!(
@@ -2865,4 +2877,230 @@ async fn ssh_list_directory() -> Result<()> {
     let cleanup = fixture.stop().await;
     scenario?;
     cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_write_file() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let preserved = fixture.root.path().join("write-invalid-preserved");
+            fs::write(&preserved, b"KEEP_INVALID_WRITE")?;
+            for (content, encoding, code) in [
+                ("x".repeat(1_048_577), "utf8", "invalid_argument"),
+                ("YR==".to_owned(), "base64", "invalid_encoding"),
+            ] {
+                let reply = client.call("ssh_write_file", json!({
+                    "host":"plain","path":preserved,"content":content,"encoding":encoding,"overwrite":true,
+                })).await?;
+                failed(&reply, code)?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(fs::read(&preserved)? == b"KEEP_INVALID_WRITE");
+                ensure!(masters(&client.log)?.is_empty(), "invalid write acquired SSH");
+            }
+            fixture.await_authentications(2).await?;
+            succeeded(&exec(&client, "printf WRITE_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let root = fixture.root.path();
+            let payload = "WRITE_PRIVATE_é雪\0END";
+            let cap = "x".repeat(1_048_576);
+            for (name, content, encoding, expected) in [
+                ("write-unicode", payload, "utf8", payload.as_bytes()),
+                ("write-empty", "", "utf8", b"".as_slice()),
+                ("write-exact-cap", cap.as_str(), "utf8", cap.as_bytes()),
+                ("write-binary", "AP+AQQ==", "base64", b"\0\xff\x80A".as_slice()),
+                ("write-'\";~$*\n$(printf EVALUATED)", "LITERAL_WRITE", "utf8", b"LITERAL_WRITE".as_slice()),
+            ] {
+                let path = root.join(name);
+                let reply = client.call("ssh_write_file", json!({
+                    "host":"plain","path":path,"content":content,"encoding":encoding
+                })).await?;
+                ensure!(succeeded(&reply)? == &json!({"bytes_written":expected.len()}), "{name}: {reply}");
+                ensure!(fs::read(&path)? == expected, "{name}: native bytes differ");
+            }
+            let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())?
+                .context("native prerequisite: current account")?;
+            let home = fs::canonicalize(user.dir)?;
+            let mut relative = PathBuf::new();
+            for component in home.components() {
+                if matches!(component, std::path::Component::Normal(_)) {
+                    relative.push("..");
+                }
+            }
+            relative.push(root.strip_prefix("/")?);
+            relative.push("write-relative");
+            let reply = client.call("ssh_write_file", json!({
+                "host":"plain","path":relative,"content":"RELATIVE_WRITE"
+            })).await?;
+            ensure!(succeeded(&reply)? == &json!({"bytes_written":14}));
+            ensure!(fs::read(root.join("write-relative"))? == b"RELATIVE_WRITE");
+
+            let existing = root.join("write-existing");
+            fs::write(&existing, b"KEEP_OLD_TAIL")?;
+            let link = root.join("write-existing-link");
+            symlink(&existing, &link)?;
+            let dangling = root.join("write-dangling-link");
+            let absent = root.join("write-dangling-target");
+            symlink(&absent, &dangling)?;
+            for path in [&existing, &link, &dangling] {
+                let reply = client.call("ssh_write_file", json!({
+                    "host":"plain","path":path,"content":"MUST_NOT_REPLACE"
+                })).await?;
+                failed(&reply, "already_exists")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(fs::read(&existing)? == b"KEEP_OLD_TAIL");
+                ensure!(fs::read_link(&link)? == existing);
+                ensure!(fs::read_link(&dangling)? == absent && !absent.exists());
+            }
+            let reply = client.call("ssh_write_file", json!({
+                "host":"plain","path":existing,"content":"short","overwrite":true
+            })).await?;
+            ensure!(succeeded(&reply)? == &json!({"bytes_written":5}));
+            ensure!(fs::read(&existing)? == b"short", "overwrite retained old tail");
+            let reply = client.call("ssh_write_file", json!({
+                "host":"plain","path":link,"content":"L","overwrite":true
+            })).await?;
+            ensure!(succeeded(&reply)? == &json!({"bytes_written":1}));
+            ensure!(fs::read(&existing)? == b"L" && fs::read_link(&link)? == existing);
+            let reply = client.call("ssh_write_file", json!({
+                "host":"plain","path":dangling,"content":"NEW","overwrite":true
+            })).await?;
+            ensure!(succeeded(&reply)? == &json!({"bytes_written":3}));
+            ensure!(fs::read(&absent)? == b"NEW" && fs::read_link(&dangling)? == absent);
+
+            let parent = root.join("write-missing-parent");
+            let reply = client.call("ssh_write_file", json!({
+                "host":"plain","path":parent.join("child"),"content":"NO_MKDIR"
+            })).await?;
+            failed(&reply, "not_found")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(!parent.exists(), "write created an implicit parent");
+            let denied = root.join("write-denied");
+            fs::write(&denied, b"DENIED_OLD_BYTES")?;
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o400))?;
+            let attempted = client.call("ssh_write_file", json!({
+                "host":"plain","path":denied,"content":"DENIED_NEW_BYTES","overwrite":true
+            })).await;
+            let restored = fs::set_permissions(&denied, fs::Permissions::from_mode(0o600));
+            let reply = attempted?;
+            restored?;
+            failed(&reply, "permission_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(fs::read(&denied)? == b"DENIED_OLD_BYTES");
+
+            let reply = client.call("ssh_read_file", json!({"host":"plain","path":existing})).await?;
+            ensure!(succeeded(&reply)?["content"] == "L");
+            let reply = client.call("ssh_stat", json!({"host":"plain","path":existing})).await?;
+            ensure!(succeeded(&reply)? == &native_stat_data(&existing, false)?);
+            ensure!(live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "exec/read/stat/write did not share the ordinary master");
+
+            let unsupported = root.join("write-no-subsystem");
+            let reply = client.call("ssh_write_file", json!({
+                "host":"nosftp","path":unsupported,"content":"NO_FALLBACK"
+            })).await?;
+            ensure!(matches!(reply["error"]["code"].as_str(), Some("unsupported" | "io_error" | "connection_lost")));
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(!unsupported.exists(), "missing subsystem ran a write fallback");
+            let before = observed_masters(&client.log, 2).await?;
+            let reply = client.call("ssh_exec", json!({
+                "host":"nosftp","command":"printf WRITE_MASTER_HEALTHY"
+            })).await?;
+            ensure!(succeeded(&reply)?["stdout"] == "WRITE_MASTER_HEALTHY");
+            ensure!(masters(&client.log)? == before);
+            fixture.await_authentications(4).await?;
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        for secret in ["WRITE_PRIVATE_", "LITERAL_WRITE", "DENIED_NEW_BYTES", "write-existing",
+            "write-dangling", "write-no-subsystem"] {
+            ensure!(!log.text().contains(secret), "write audit disclosed path or content");
+        }
+        let records = log.final_records()?;
+        let writes: Vec<_> = records.iter().filter(|record| record["tool"] == "ssh_write_file").collect();
+        ensure!(!writes.is_empty());
+        for record in writes {
+            ensure!(record["identity_role"] == "ordinary");
+            for field in ["path", "content", "payload"] {
+                ensure!(record.get(field).is_none(), "write audit disclosed {field}");
+            }
+        }
+        gone
+    }.await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_write_close_and_write_failures() -> Result<()> {
+    let server = Fixture::sftp_server()?;
+    for (request, expected, code) in [
+        ("close", b"NEW".as_slice(), "permission_denied"),
+        ("write", b"".as_slice(), "permission_denied"),
+    ] {
+        // The actual OpenSSH server denies this protocol request; no emulator
+        // can accidentally acknowledge a write or close that never happened.
+        let subsystem = format!("{} -P {request}", server.display());
+        let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+        let scenario = async {
+            let client = Client::start(&fixture.config).await?;
+            let cases = async {
+                succeeded(&exec(&client, "printf WRITE_FAULT_MASTER").await?)?;
+                let owned = observed_masters(&client.log, 1).await?;
+                let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+                let path = fixture.root.path().join(format!("write-fault-{request}"));
+                fs::write(&path, b"OLD_BYTES_LONGER_THAN_NEW")?;
+                let reply = client
+                    .call(
+                        "ssh_write_file",
+                        json!({
+                            "host":"plain","path":path,"content":"NEW","overwrite":true
+                        }),
+                    )
+                    .await?;
+                failed(&reply, code)?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+                ensure!(
+                    fs::read(&path)? == expected,
+                    "{request}: incorrect post-mutation filesystem state"
+                );
+                let audit = await_audit(&client.log, "finish", code).await?;
+                ensure!(
+                    audit["remote_state_unknown"] == true && audit["identity_role"] == "ordinary"
+                );
+                ensure!(
+                    live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                    "{request} failure discarded the healthy ordinary master"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            let owned = masters(&client.log);
+            let stopped = client.stop().await;
+            let gone = match owned {
+                Ok(owned) => assert_masters_gone(&owned).await,
+                Err(error) => Err(error),
+            };
+            cases?;
+            stopped?;
+            gone
+        }
+        .await;
+        let cleanup = fixture.stop().await;
+        scenario?;
+        cleanup?;
+    }
+    Ok(())
 }
