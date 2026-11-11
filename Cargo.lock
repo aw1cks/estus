@@ -2182,6 +2182,7 @@ dependencies = [
  "openssh",
  "openssh-sftp-client",
  "openssh-sftp-error",
+ "openssh-sftp-protocol",
  "rmcp",
  "schemars 1.2.3",
  "serde",

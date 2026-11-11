@@ -5,7 +5,14 @@ use super::{
     {constants, seq_iter::SeqIter, visitor::impl_visitor, HandleOwned},
 };
 
-use std::{borrow::Cow, iter::FusedIterator, path::Path, str::from_utf8};
+use std::{
+    borrow::Cow,
+    ffi::OsString,
+    iter::FusedIterator,
+    os::unix::ffi::OsStringExt,
+    path::{Path, PathBuf},
+    str::from_utf8,
+};
 
 use bitflags::bitflags;
 use openssh_sftp_protocol_error::{ErrMsg, ErrorCode};
@@ -216,7 +223,7 @@ impl_visitor!(
                 let mut entries = Vec::<NameEntry>::with_capacity(len);
 
                 for _ in 0..len {
-                    let filename: Box<Path> = iter.get_next()?;
+                    let filename = filename_from_bytes(iter.get_next()?);
                     let longname: &[u8] = iter.get_next()?;
                     let attrs: FileAttrs = iter.get_next()?;
 
@@ -289,9 +296,20 @@ impl<'de> Deserialize<'de> for StatusCode {
 /// Entry in [`ResponseInner::Name`]
 #[derive(Debug, Deserialize, Clone)]
 pub struct NameEntry {
+    #[serde(deserialize_with = "deserialize_filename")]
     pub filename: Box<Path>,
     pub longname: Box<[u8]>,
     pub attrs: FileAttrs,
+}
+
+// SFTP v3 names are byte strings. Serde's Path decoder requires UTF-8, which
+// would reject an entire READDIR response containing one valid Unix filename.
+fn filename_from_bytes(bytes: Box<[u8]>) -> Box<Path> {
+    PathBuf::from(OsString::from_vec(bytes.into_vec())).into_boxed_path()
+}
+
+fn deserialize_filename<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Box<Path>, D::Error> {
+    Box::<[u8]>::deserialize(deserializer).map(filename_from_bytes)
 }
 
 #[cfg(test)]
