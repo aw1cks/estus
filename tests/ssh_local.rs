@@ -1301,3 +1301,124 @@ async fn ssh_encoded_command_budget() -> Result<()> {
     scenario?;
     cleanup
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking and a usable non-root local account"]
+async fn ssh_setenv_isolation() -> Result<()> {
+    let fixture = Fixture::start_with_sshd_config(indoc! {"
+        AcceptEnv SSH_MCP SSH_MCP_H04_HOST SSH_MCP_H04_MATCH SSH_MCP_H04_INCLUDE
+    "})
+    .await?;
+    let scenario = async {
+        let controls = [
+            (
+                "plain",
+                "SSH_MCP_H04_HOST",
+                "h04-host-secret",
+                "operator-host",
+            ),
+            (
+                "viajump",
+                "SSH_MCP_H04_MATCH",
+                "h04-match-secret",
+                "operator-match",
+            ),
+            (
+                "nosftp",
+                "SSH_MCP_H04_INCLUDE",
+                "h04-include-secret",
+                "operator-include",
+            ),
+        ];
+        let inherited = fixture.root.path().join("inherited-env.conf");
+        fs::write(
+            &inherited,
+            indoc! {"
+            Host nosftp
+                SetEnv SSH_MCP_H04_INCLUDE=h04-include-secret SSH_MCP=operator-include
+            Host *
+        "},
+        )?;
+        let original = fs::read_to_string(&fixture.ssh_config)?;
+        fs::write(
+            &fixture.ssh_config,
+            formatdoc! {"
+            Host plain
+                SetEnv SSH_MCP_H04_HOST=h04-host-secret SSH_MCP=operator-host
+            Match originalhost viajump
+                SetEnv SSH_MCP_H04_MATCH=h04-match-secret SSH_MCP=operator-match
+            Host *
+                Include {inherited}
+            {original}
+            ",
+                inherited = inherited.display(),
+            },
+        )?;
+
+        // Positive controls prove each configured source reaches real sessions
+        // when used by ordinary OpenSSH, rather than relying on ssh -G.
+        for &(host, variable, secret, marker) in &controls {
+            let command = format!("printf '%s:%s' \"${variable}\" \"$SSH_MCP\"");
+            let output = fixture.direct(host, &command).await?;
+            let expected = format!("{secret}:{marker}");
+            ensure!(
+                output.status.success(),
+                "fixture SetEnv control failed for {host}"
+            );
+            ensure!(
+                output.stdout.as_slice() == expected.as_bytes(),
+                "fixture did not accept the configured environment for {host}"
+            );
+        }
+
+        let client = Client::start(&fixture.config).await?;
+        let probe = indoc! {r#"
+            printf '%s:%s:%s:%s' "$SSH_MCP" \
+                "${SSH_MCP_H04_HOST+x}" \
+                "${SSH_MCP_H04_MATCH+x}" \
+                "${SSH_MCP_H04_INCLUDE+x}"
+        "#};
+        let commands = async {
+            for &(host, _, _, _) in &controls {
+                let reply = client
+                    .call("ssh_exec", json!({"host":host,"command":probe}))
+                    .await?;
+                let data = succeeded(&reply)?;
+                ensure!(data["stdout"] == "1:::", "configured SetEnv reached {host}");
+                ensure!(data["exit_code"] == 0);
+            }
+            let reply = exec(&client, probe).await?;
+            ensure!(
+                succeeded(&reply)?["stdout"] == "1:::",
+                "reuse inherited SetEnv"
+            );
+            ensure!(
+                masters(&client.log)?.len() == 3,
+                "ordinary masters were not reused"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let log = client.log.clone();
+        let stopped = client.stop().await;
+        let gone = match masters(&log) {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        commands?;
+        let log = stopped?;
+        gone?;
+        let audit = log.text();
+        for &(_, _, secret, _) in &controls {
+            ensure!(
+                !audit.contains(secret),
+                "synthetic environment value reached audit"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
