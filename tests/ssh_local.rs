@@ -4,6 +4,7 @@ mod support;
 use std::{
     fs,
     os::unix::{
+        ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, PermissionsExt, symlink},
         net::UnixListener,
     },
@@ -12,6 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use indoc::{formatdoc, indoc};
 use rmcp::{
     model::{CallToolRequest, ClientRequest},
@@ -1582,6 +1584,20 @@ async fn ssh_setenv_isolation() -> Result<()> {
                     .call("ssh_stat", json!({"host":host,"path":path}))
                     .await?;
                 ensure!(succeeded(&reply)? == &native_stat_data(&path, false)?);
+                let reply = client
+                    .call(
+                        "ssh_list_directory",
+                        json!({"host":host,"path":fixture.root.path()}),
+                    )
+                    .await?;
+                let entries = succeeded(&reply)?["entries"]
+                    .as_array()
+                    .context("guarded listing")?;
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry["name"] == "environment-read")
+                    .context("guarded SFTP omitted the created file")?;
+                ensure!(entry["metadata"] == native_stat_data(&path, false)?);
             }
             let reply = exec(&client, probe).await?;
             ensure!(
@@ -2640,6 +2656,218 @@ async fn ssh_stat() -> Result<()> {
         gone
     }
     .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
+    let directory = fixture.root.path().join("list-'\";~$*\n");
+    fs::create_dir(&directory)?;
+    let mut names = vec![
+        b"z-last".to_vec(),
+        b"a-first".to_vec(),
+        "é-雪".as_bytes().to_vec(),
+        b"quote'\";~$*\n\t\\control\x01".to_vec(),
+    ];
+    // APFS rejects invalid UTF-8; the approved Linux smoke covers these bytes.
+    #[cfg(target_os = "linux")]
+    names.push(b"nonutf8-\xff\xfe".to_vec());
+    names.extend((0..201).map(|i| format!("entry-{i:03}").into_bytes()));
+    for name in &names {
+        fs::write(
+            directory.join(std::ffi::OsString::from_vec(name.clone())),
+            b"LIST_DATA",
+        )?;
+    }
+    fs::create_dir(directory.join("subdirectory"))?;
+    fs::write(
+        directory.join("subdirectory/hidden-child"),
+        b"NOT_RECURSIVE",
+    )?;
+    symlink("z-last", directory.join("symlink"))?;
+    // Independent local readdir is the static native server's enumeration oracle,
+    // not a sorted expectation or a copy of the tool's filename conversion.
+    let expected: Vec<_> = fs::read_dir(&directory)?
+        .map(|entry| {
+            let entry = entry?;
+            let name = entry.file_name();
+            Ok(json!({
+                "name": name.to_str(),
+                "name_base64": STANDARD.encode(name.as_bytes()),
+                "metadata": native_stat_data(&entry.path(), false)?,
+            }))
+        })
+        .collect::<Result<_>>()?;
+    let count = names.len() + 2;
+    ensure!(expected.len() == count);
+    ensure!(succeeded(&exec(client, "printf LIST_MASTER").await?)?["stdout"] == "LIST_MASTER");
+    let owned = observed_masters(&client.log, 1).await?;
+    let transport = live_transport(fixture, client, &owned[0], 1, 3).await?;
+    for (limit, count, truncated) in [
+        (None, 200, true),
+        (Some(1), 1, true),
+        (Some(count - 1), count - 1, true),
+        (Some(count), count, false),
+        (Some(1000), count, false),
+    ] {
+        let mut args = json!({"host":"plain","path":directory});
+        if let Some(limit) = limit {
+            args["max_entries"] = json!(limit);
+        }
+        let reply = client.call("ssh_list_directory", args).await?;
+        ensure!(
+            succeeded(&reply)? == &json!({"entries": &expected[..count], "truncated":truncated}),
+            "listing lost bytes, reordered entries, fabricated metadata or misreported lookahead"
+        );
+    }
+    let empty = fixture.root.path().join("list-empty");
+    fs::create_dir(&empty)?;
+    let reply = client
+        .call(
+            "ssh_list_directory",
+            json!({"host":"plain","path":empty,"max_entries":1}),
+        )
+        .await?;
+    ensure!(succeeded(&reply)? == &json!({"entries":[],"truncated":false}));
+    // Exercise a larger directory crossing multiple SFTP READDIR responses.
+    for i in 201..1001 {
+        fs::write(directory.join(format!("entry-{i:03}")), b"")?;
+    }
+    let reply = client
+        .call(
+            "ssh_list_directory",
+            json!({"host":"plain","path":directory,"max_entries":1000}),
+        )
+        .await?;
+    let data = succeeded(&reply)?;
+    ensure!(data["truncated"] == true);
+    let entries = data["entries"].as_array().context("directory entries")?;
+    ensure!(entries.len() == 1000);
+    let actual: Vec<_> = entries
+        .iter()
+        .map(|entry| entry["name_base64"].as_str())
+        .collect();
+    let expected: Vec<_> = fs::read_dir(&directory)?
+        .take(1000)
+        .map(|entry| Ok(STANDARD.encode(entry?.file_name().as_bytes())))
+        .collect::<Result<_>>()?;
+    ensure!(
+        actual
+            == expected
+                .iter()
+                .map(|name| Some(name.as_str()))
+                .collect::<Vec<_>>()
+    );
+
+    let denied = fixture.root.path().join("list-denied");
+    fs::create_dir(&denied)?;
+    let permissions = fs::metadata(&denied)?.permissions();
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000))?;
+    let failures = async {
+        for (path, code) in [
+            (fixture.root.path().join("list-missing"), "not_found"),
+            (denied.clone(), "permission_denied"),
+        ] {
+            let reply = client
+                .call("ssh_list_directory", json!({"host":"plain","path":path}))
+                .await?;
+            failed(&reply, code)?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let restored = fs::set_permissions(&denied, permissions);
+    failures?;
+    restored?;
+    ensure!(live_transport(fixture, client, &owned[0], 1, 3).await? == transport);
+    let reply = client
+        .call(
+            "ssh_list_directory",
+            json!({"host":"nosftp","path":directory}),
+        )
+        .await?;
+    let code = reply["error"]["code"]
+        .as_str()
+        .context("subsystem denial must fail listing")?;
+    ensure!(matches!(
+        code,
+        "unsupported" | "io_error" | "connection_lost"
+    ));
+    ensure!(reply["data"].is_null(), "listing used a subsystem fallback");
+    let owned = observed_masters(&client.log, 2).await?;
+    let reply = client
+        .call(
+            "ssh_exec",
+            json!({"host":"nosftp","command":"printf LIST_NO_FALLBACK"}),
+        )
+        .await?;
+    ensure!(succeeded(&reply)?["stdout"] == "LIST_NO_FALLBACK");
+    ensure!(masters(&client.log)? == owned);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_list_directory() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = list_cases(&fixture, &client).await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let records = stopped?.final_records()?;
+        for record in records.iter().filter(|record| record["tool"] == "ssh_list_directory") {
+            ensure!(record["identity_role"] == "ordinary");
+            for field in ["path", "name", "name_base64", "metadata", "entries"] {
+                ensure!(record.get(field).is_none(), "listing audit disclosed {field}");
+            }
+        }
+        gone?;
+
+        // An actual near-limit string ID leaves room for only a directory prefix.
+        // The raw frame reader measures both SDK representations plus framing.
+        let directory = fixture.root.path().join("list-'\";~$*\n");
+        let expected: Vec<_> = fs::read_dir(&directory)?
+            .map(|entry| Ok(STANDARD.encode(entry?.file_name().as_bytes())))
+            .collect::<Result<_>>()?;
+        let mut wire = WireServer::start(&fixture.config)?;
+        let wire_case = async {
+            wire.initialize().await?;
+            let (frame, size) = wire.request_with_size(
+                json!("x".repeat(16_774_000)),
+                "tools/call",
+                json!({"name":"ssh_list_directory","arguments":{"host":"plain","path":directory,"max_entries":1000}}),
+            ).await?;
+            ensure!(size <= 16_777_216);
+            let result = &frame["result"];
+            let reply = &result["structuredContent"];
+            ensure!(serde_json::from_str::<Value>(result["content"][0]["text"].as_str().context("text result")?)? == *reply);
+            let data = succeeded(reply)?;
+            ensure!(data["truncated"] == true);
+            let entries = data["entries"].as_array().context("wire entries")?;
+            ensure!(!entries.is_empty() && entries.len() < 200, "wire budget was not exercised");
+            for (entry, expected) in entries.iter().zip(&expected) {
+                ensure!(entry["name_base64"] == *expected);
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&wire.log);
+        let stopped = wire.stop(false).await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        wire_case?;
+        stopped?;
+        gone
+    }.await;
     let cleanup = fixture.stop().await;
     scenario?;
     cleanup
