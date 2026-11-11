@@ -244,6 +244,12 @@ async fn bounded(command: &mut Command, deadline: Duration) -> Result<Output> {
     })
 }
 
+#[derive(Clone, Copy)]
+pub enum HostKeyFault {
+    Unknown,
+    Mismatch,
+}
+
 pub struct Fixture {
     root: TempDir,
     docker: Docker,
@@ -257,6 +263,10 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn start() -> Result<Self> {
+        Self::start_with_sshd_config("").await
+    }
+
+    pub async fn start_with_sshd_config(extra: &str) -> Result<Self> {
         // All malformed/missing artifact boundaries precede CLI/SDK side effects.
         let directory = std::env::var_os("SSH_MCP_TEST_FIXTURE")
             .context("set SSH_MCP_TEST_FIXTURE to the Nix-built three-file artifact directory")?;
@@ -273,7 +283,7 @@ impl Fixture {
             containers: Vec::new(),
             names: Vec::new(),
         };
-        let result = fixture.initialize().await;
+        let result = fixture.initialize(extra).await;
         if let Err(error) = result {
             let cleanup = fixture.stop().await;
             return match cleanup {
@@ -286,7 +296,7 @@ impl Fixture {
         Ok(fixture)
     }
 
-    async fn initialize(&mut self) -> Result<()> {
+    async fn initialize(&mut self, extra: &str) -> Result<()> {
         let mut command = self.docker.command();
         command
             .args(["image", "load", "--input"])
@@ -350,14 +360,17 @@ impl Fixture {
                 PermitRootLogin no
                 StrictModes yes
                 PermitUserRC no
-                LogLevel VERBOSE
+                LogLevel DEBUG2
+                AcceptEnv SSH_MCP V03_HOST V03_MATCH V03_INCLUDE
                 UsePAM no
                 AllowTcpForwarding yes
             "}
             .to_owned();
+            config.push_str(extra);
             if index == 0 {
                 config.push_str("Subsystem sftp internal-sftp\n");
             }
+            config.push_str("Match User mcp\n    Banner /fixture/backend-banner\n");
             let mut request = GenericImage::new(image, tag)
                 .with_exposed_port(2222.tcp())
                 .with_wait_for(WaitFor::message_on_stderr("Server listening on"))
@@ -366,6 +379,10 @@ impl Fixture {
                 .with_copy_to(
                     CopyTargetOptions::new("/fixture/host_key").with_mode(0o600),
                     self.root.path().join(host_key),
+                )
+                .with_copy_to(
+                    CopyTargetOptions::new("/fixture/backend-banner").with_mode(0o644),
+                    b"V03_BACKEND_DIAGNOSTIC_SECRET\n".to_vec(),
                 )
                 .with_copy_to(
                     CopyTargetOptions::new("/fixture/sshd_config").with_mode(0o644),
@@ -475,6 +492,9 @@ impl Fixture {
                     User {account}
                     IdentityFile {identity}
             ", identity = ssh_path(&self.root.path().join(account))?});
+            if alias == "plain" {
+                hosts.push_str("    SetEnv V03_INCLUDE=V03_INCLUDE_SECRET\n");
+            }
         }
         // ProxyJump's child must use our replacement config, not ~/.ssh/config.
         hosts.push_str(&formatdoc! {"
@@ -494,6 +514,8 @@ impl Fixture {
             &self.ssh_config,
             formatdoc! {"
             Include {included}
+            Host same
+                SetEnv V03_HOST=V03_HOST_SECRET
             Host *
                 IdentityAgent none
                 IdentitiesOnly yes
@@ -507,6 +529,8 @@ impl Fixture {
                 ControlPath none
                 ConnectTimeout 5
                 ConnectionAttempts 1
+            Match originalhost split-admin
+                SetEnv V03_MATCH=V03_MATCH_SECRET
         ",
                 included = ssh_path(&self.root.path().join("included.conf"))?,
                 known = ssh_path(&self.root.path().join("known_hosts"))?,
@@ -652,8 +676,12 @@ impl Fixture {
 
     /// Root container exec is fixture setup/observation, never the production writer.
     pub async fn primary_exec(&self, script: &str) -> Result<Vec<u8>> {
+        self.exec_in(0, script).await
+    }
+
+    async fn exec_in(&self, index: usize, script: &str) -> Result<Vec<u8>> {
         timeout(CLEANUP, async {
-            let mut exec = self.containers[0]
+            let mut exec = self.containers[index]
                 .exec(ExecCommand::new(["/bin/sh", "-eu", "-c", script]))
                 .await?;
             let stdout = exec.stdout_to_vec().await?;
@@ -686,6 +714,47 @@ impl Fixture {
             .lines()
             .filter(|line| line.contains("Accepted publickey for mcp "))
             .count())
+    }
+
+    pub async fn primary_logs(&self) -> Result<Vec<u8>> {
+        Ok(timeout(CLEANUP, self.containers[0].stderr_to_vec()).await??)
+    }
+
+    pub async fn host_key_config(&self, fault: HostKeyFault) -> Result<PathBuf> {
+        let label = match fault {
+            HostKeyFault::Unknown => "unknown",
+            HostKeyFault::Mismatch => "mismatch",
+        };
+        let known = self.root.path().join(format!("{label}-known-hosts"));
+        let contents = match fault {
+            HostKeyFault::Unknown => String::new(),
+            HostKeyFault::Mismatch => {
+                let (host, port) = self.primary_endpoint().await?;
+                let wrong = fs::read_to_string(self.root.path().join("host-nosftp.pub"))?;
+                format!("[{host}]:{port} {wrong}")
+            }
+        };
+        fs::write(&known, contents)?;
+        let replacement = self.root.path().join(format!("{label}-ssh-config"));
+        fs::write(
+            &replacement,
+            formatdoc! {"
+            Host *
+                UserKnownHostsFile {known}
+            Include {original}
+        ", known = ssh_path(&known)?, original = ssh_path(&self.ssh_config)?},
+        )?;
+        let config = self.root.path().join(format!("{label}-server.toml"));
+        fs::write(
+            &config,
+            formatdoc! {"
+            [ssh]
+            config_file = {replacement}
+            [targets.plain]
+            ssh_host = 'plain'
+        ", replacement = serde_json::to_string(&replacement.to_string_lossy())?},
+        )?;
+        Ok(config)
     }
 
     pub async fn authentication_keys(&self) -> Result<Vec<(String, String)>> {

@@ -3,6 +3,8 @@
 //! They check artifact/running-image identity, but upstream testcontainers 0.28
 //! can still pull on create-404. Required CI must retain the image and deny
 //! registry egress; that external enforcement belongs to V03.
+#[path = "support/baseline_commands.rs"]
+mod baseline_commands;
 #[path = "support/isolated.rs"]
 mod isolated;
 #[allow(dead_code, unused_imports)]
