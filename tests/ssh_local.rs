@@ -2,7 +2,11 @@
 //! deliberately belong to the later file/container milestones, not this suite.
 mod support;
 
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use indoc::{formatdoc, indoc};
@@ -51,6 +55,109 @@ async fn await_audit(log: &Log, event: &str, code: &str) -> Result<Value> {
     })
     .await
     .context("expected audit event not emitted")?
+}
+
+async fn observed_masters(log: &Log, expected: usize) -> Result<Vec<(u32, PathBuf)>> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let owned = masters(log)?;
+            if owned.len() >= expected {
+                ensure!(owned.len() == expected, "unexpected additional SSH master");
+                return Ok(owned);
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("master lifecycle log did not catch up")?
+}
+
+async fn live_transport(
+    fixture: &Fixture,
+    client: &Client,
+    master: &(u32, PathBuf),
+    expected_masters: usize,
+    expected_auth: usize,
+) -> Result<String> {
+    observed_masters(&client.log, expected_masters).await?;
+    let before = fixture.listeners[0].log.text();
+    let mut reply = exec(client, "printf %s \"$SSH_CONNECTION\"").await?;
+    succeeded(&reply)?;
+    let Value::String(connection) = reply["data"]["stdout"].take() else {
+        anyhow::bail!("missing SSH_CONNECTION transport identity");
+    };
+    let mut fields = connection.split_ascii_whitespace();
+    let port = fields.nth(1).context("missing SSH client port")?;
+    ensure!(
+        fields.count() == 2,
+        "invalid SSH_CONNECTION transport identity"
+    );
+    let port = format!(" port {port} ");
+    let closed = |text: &str| {
+        text.lines()
+            .filter(|line| line.contains("Close session:") && line.contains(&port))
+            .count()
+    };
+    let before_closed = closed(&before);
+    // This persistent-connection close is a positive log-drain barrier, unlike
+    // merely sampling an append-only authentication counter after cancellation.
+    timeout(Duration::from_secs(5), async {
+        while closed(&fixture.listeners[0].log.text()) <= before_closed {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("transport probe close record did not arrive")?;
+    let check = support::run(
+        Command::new(&fixture.ssh)
+            .arg("-F")
+            .arg(&fixture.ssh_config)
+            .arg("-S")
+            .arg(&master.1)
+            .args(["-O", "check", "plain"]),
+    )
+    .await?;
+    ensure!(
+        check.status.success()
+            && String::from_utf8_lossy(&check.stderr).contains(&format!("(pid={})", master.0)),
+        "original master PID/control socket is no longer live"
+    );
+    observed_masters(&client.log, expected_masters).await?;
+    fixture.await_authentications(expected_auth).await?;
+    Ok(connection)
+}
+
+fn capacity_script(
+    start: &Path,
+    release: &Path,
+    expired: &Path,
+    done: &Path,
+    label: &str,
+) -> String {
+    // Polling is not a capacity duration: only the controller can release a
+    // successful worker. The finite deadline fails closed and still marks done.
+    formatdoc! {r#"
+        trap '' HUP
+        printf ready > {start}
+        i=0
+        while [ ! -f {release} ] && [ "$i" -lt 100 ]; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+        if [ ! -f {release} ]; then
+            printf expired > {expired}
+            printf done > {done}
+            exit 90
+        fi
+        printf done > {done}
+        printf %s {label}
+        "#,
+        start = quote(&start.to_string_lossy()),
+        release = quote(&release.to_string_lossy()),
+        expired = quote(&expired.to_string_lossy()),
+        done = quote(&done.to_string_lossy()),
+        label = quote(label),
+    }
 }
 
 async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
@@ -146,26 +253,20 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         ensure!(data["termination"] == "exited" && data["remote_may_still_be_running"] == false);
         ensure!(data["duration_ms"].is_u64());
     }
-    let first_masters = masters(&client.log)?;
+    let first_masters = observed_masters(&client.log, 1).await?;
     ensure!(
         first_masters.len() == 1,
         "sequential commands did not share one owned master"
     );
-    let auth_after_first = fixture.authentications();
-    ensure!(
-        auth_after_first == initial_auth + 1,
-        "expected one real authentication for sequential commands"
-    );
+    let auth_after_first = initial_auth + 1;
+    fixture.await_authentications(auth_after_first).await?;
     let (left, right) = tokio::join!(
         exec(client, "sleep 1; printf LEFT"),
         exec(client, "printf RIGHT")
     );
     ensure!(succeeded(&left?)?["stdout"] == "LEFT");
     ensure!(succeeded(&right?)?["stdout"] == "RIGHT");
-    ensure!(
-        fixture.authentications() == auth_after_first,
-        "concurrent channels authenticated another transport"
-    );
+    fixture.await_authentications(auth_after_first).await?;
     ensure!(
         masters(&client.log)? == first_masters,
         "concurrent channels replaced the master"
@@ -225,7 +326,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     );
     ensure!(data["stdout_lossy"] == false && data["stderr_lossy"] == false);
 
-    let before_jump = fixture.authentications();
+    let before_jump = auth_after_first;
     let reply = client
         .call(
             "ssh_exec",
@@ -233,10 +334,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         )
         .await?;
     ensure!(succeeded(&reply)?["stdout"] == "JUMP_OK");
-    ensure!(
-        fixture.authentications() == before_jump + 2,
-        "ProxyJump must authenticate both jump and destination"
-    );
+    fixture.await_authentications(before_jump + 2).await?;
     let reply = client
         .call(
             "ssh_exec",
@@ -244,6 +342,17 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         )
         .await?;
     ensure!(succeeded(&reply)?["stdout"] == "NO_SUBSYSTEM_NEEDED");
+    let expected_auth = before_jump + 3;
+    fixture.await_authentications(expected_auth).await?;
+    let expected_masters = first_masters.len() + 2;
+    let transport = live_transport(
+        fixture,
+        client,
+        &first_masters[0],
+        expected_masters,
+        expected_auth,
+    )
+    .await?;
 
     // Finite remote work intentionally survives channel teardown. Register its completion
     // marker before dispatch so cleanup also awaits it when an assertion fails.
@@ -274,7 +383,20 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
             && timed["data"]["remote_may_still_be_running"] == true
     );
     ensure!(timed["error"]["remote_state_unknown"] == true);
+    await_audit(&client.log, "finish", "timeout").await?;
     Fixture::await_file(&timeout_done).await?;
+    ensure!(
+        live_transport(
+            fixture,
+            client,
+            &first_masters[0],
+            expected_masters,
+            expected_auth
+        )
+        .await?
+            == transport,
+        "timeout changed the authenticated transport"
+    );
 
     let cancel_started = fixture.root.path().join("cancel-started");
     let cancel_done = fixture.root.path().join("cancel-done");
@@ -314,12 +436,16 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     );
     Fixture::await_file(&cancel_done).await?;
     ensure!(
-        masters(&client.log)?
-            .iter()
-            .filter(|entry| *entry == &first_masters[0])
-            .count()
-            == 1,
-        "timeout/cancel replaced the shared master"
+        live_transport(
+            fixture,
+            client,
+            &first_masters[0],
+            expected_masters,
+            expected_auth
+        )
+        .await?
+            == transport,
+        "cancellation changed the authenticated transport"
     );
     Ok(())
 }
@@ -338,7 +464,7 @@ fn audit_boundary(log: &Log) -> Result<()> {
             "audit leaked synthetic payload: {secret}"
         );
     }
-    let records = log.records()?;
+    let records = log.final_records()?;
     ensure!(
         records.iter().any(|record| record["event"] == "reject"),
         "missing policy rejection audit"
@@ -523,6 +649,8 @@ async fn shutdown_cases(fixture: &Fixture) -> Result<()> {
 
 async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let before_auth = fixture.authentications();
+    let release = fixture.root.path().join("channel-release");
+    let expired = fixture.root.path().join("channel-expired");
     let before_masters = masters(&client.log)?.len();
     let mut requests = Vec::new();
     let mut ready = Vec::new();
@@ -530,12 +658,14 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
         let start = fixture.root.path().join(format!("channel-{index}-started"));
         let done = fixture.root.path().join(format!("channel-{index}-done"));
         fixture.eventual_markers.push(done.clone());
-        let command = format!(
-            "printf ready > {}; sleep 2; printf done > {}; printf CHANNEL_{index}",
-            quote(&start.to_string_lossy()),
-            quote(&done.to_string_lossy()),
+        let command = capacity_script(
+            &start,
+            &release,
+            &expired,
+            &done,
+            &format!("CHANNEL_{index}"),
         );
-        requests.push(json!({"host":"resource","command":command}));
+        requests.push(json!({"host":"resource","command":command,"timeout_secs":15}));
         ready.push(start);
     }
     let forbidden = fixture.root.path().join("excess-channel-dispatched");
@@ -545,20 +675,30 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
             .map(|request| client.call("ssh_exec", request)),
     );
     let rejection = async {
-        for path in ready {
-            Fixture::await_file(&path).await?;
+        let outcome = async {
+            for path in ready {
+                Fixture::await_file(&path).await?;
+            }
+            ensure!(!expired.exists(), "channels expired before rejection");
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({
+                        "host":"resource",
+                        "command":format!("printf WRONG > {}", quote(&forbidden.to_string_lossy())),
+                    }),
+                )
+                .await?;
+            failed(&reply, "resource_limit")?;
+            ensure!(reply["data"].is_null());
+            await_audit(&client.log, "finish", "resource_limit").await?;
+            ensure!(!expired.exists(), "channels expired during rejection");
+            Ok::<_, anyhow::Error>(())
         }
-        let reply = client
-            .call(
-                "ssh_exec",
-                json!({
-                    "host":"resource",
-                    "command":format!("printf WRONG > {}", quote(&forbidden.to_string_lossy())),
-                }),
-            )
-            .await?;
-        failed(&reply, "resource_limit")?;
-        ensure!(reply["data"].is_null());
+        .await;
+        let released = fs::write(&release, b"release");
+        outcome?;
+        released?;
         Ok::<_, anyhow::Error>(())
     };
     let (outputs, rejected) = tokio::join!(calls, rejection);
@@ -571,10 +711,11 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
         "excess channel was queued or dispatched"
     );
     ensure!(
-        fixture.authentications() == before_auth + 1,
-        "concurrent initialization opened extra SSH transports"
+        !expired.exists(),
+        "capacity was released by deadline rather than controller"
     );
-    ensure!(masters(&client.log)?.len() == before_masters + 1);
+    fixture.await_authentications(before_auth + 1).await?;
+    observed_masters(&client.log, before_masters + 1).await?;
     let reply = client
         .call(
             "ssh_exec",
@@ -591,6 +732,7 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
         .last()
         .cloned()
         .context("resource master")?;
+    let before_auth = fixture.authentications();
     let started = fixture.root.path().join("lost-started");
     let done = fixture.root.path().join("lost-done");
     let effects = fixture.root.path().join("lost-effects");
@@ -634,6 +776,7 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
         )
         .await?;
     ensure!(succeeded(&recovered)?["stdout"] == "RECONNECTED_WITHOUT_REPLAY");
+    fixture.await_authentications(before_auth + 1).await?;
     ensure!(
         fs::read(&effects)? == b"effect",
         "lost command was replayed"
@@ -646,6 +789,7 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
 }
 
 async fn independent_connection_deadlines(fixture: &Fixture, client: &Client) -> Result<()> {
+    let before_auth = fixture.authentications();
     let proxy_started = fixture.root.path().join("delayed-started");
     let short = client.call(
         "ssh_exec",
@@ -667,22 +811,27 @@ async fn independent_connection_deadlines(fixture: &Fixture, client: &Client) ->
         succeeded(&follower?)?["stdout"] == "LONG_FOLLOWER_SUCCEEDED",
         "creator timeout poisoned a live follower's connection"
     );
+    fixture.await_authentications(before_auth + 2).await?;
     Ok(())
 }
 
 async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Result<()> {
+    let before_auth = fixture.authentications();
+    let before_masters = masters(&client.log)?.len();
     let mut requests = Vec::new();
     let mut ready = Vec::new();
     let release = fixture.root.path().join("global-release");
+    let expired = fixture.root.path().join("global-expired");
     for index in 0..16 {
         let start = fixture.root.path().join(format!("global-{index}-started"));
         let done = fixture.root.path().join(format!("global-{index}-done"));
         fixture.eventual_markers.push(done.clone());
-        let command = format!(
-            "printf ready > {}; i=0; while [ ! -f {} ] && [ \"$i\" -lt 10 ]; do sleep 1; i=$((i+1)); done; printf done > {}; printf GLOBAL_{index}",
-            quote(&start.to_string_lossy()),
-            quote(&release.to_string_lossy()),
-            quote(&done.to_string_lossy()),
+        let command = capacity_script(
+            &start,
+            &release,
+            &expired,
+            &done,
+            &format!("GLOBAL_{index}"),
         );
         requests.push(
             json!({"host":format!("slots-{}", index / 4),"command":command,"timeout_secs":15}),
@@ -699,12 +848,15 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
             for path in ready {
                 Fixture::await_file(&path).await?;
             }
+            ensure!(!expired.exists(), "operations expired before rejection");
             let reply = client.call("ssh_targets", json!({})).await?;
             failed(&reply, "resource_limit")?;
             ensure!(
                 reply["data"].is_null(),
                 "the seventeenth operation was admitted"
             );
+            await_audit(&client.log, "reject", "resource_limit").await?;
+            ensure!(!expired.exists(), "operations expired during rejection");
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -718,6 +870,12 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
     for (index, output) in outputs.into_iter().enumerate() {
         ensure!(succeeded(&output?)?["stdout"] == format!("GLOBAL_{index}"));
     }
+    ensure!(
+        !expired.exists(),
+        "operation capacity was released by deadline"
+    );
+    fixture.await_authentications(before_auth + 4).await?;
+    observed_masters(&client.log, before_masters + 4).await?;
     let targets = client.call("ssh_targets", json!({})).await?;
     ensure!(
         succeeded(&targets)?["mode"] == "configured",
@@ -726,7 +884,7 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking and a usable non-root local account"]
 async fn ssh_local() -> Result<()> {
     let mut fixture = Fixture::start().await?;
