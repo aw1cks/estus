@@ -1422,3 +1422,250 @@ async fn ssh_setenv_isolation() -> Result<()> {
     scenario?;
     cleanup
 }
+
+// H05 uses a closed pipe, not a sink: every later diagnostic write gets EPIPE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking and a usable non-root local account"]
+async fn ssh_closed_stderr() -> Result<()> {
+    fn connection_activity(fixture: &Fixture) -> (usize, usize) {
+        let text = fixture.listeners[0].log.text();
+        (
+            text.lines()
+                .filter(|line| line.contains("Accepted publickey"))
+                .count(),
+            text.lines()
+                .filter(|line| {
+                    line.contains("Disconnected from user ")
+                        || line.contains("Connection closed by ")
+                })
+                .count(),
+        )
+    }
+
+    async fn control(
+        fixture: &Fixture,
+        socket: &std::path::Path,
+        operation: &str,
+    ) -> Result<std::process::Output> {
+        support::run(
+            Command::new(&fixture.ssh)
+                .arg("-F")
+                .arg(&fixture.ssh_config)
+                .arg("-S")
+                .arg(socket)
+                .args(["-O", operation, "plain"]),
+        )
+        .await
+    }
+
+    async fn call(
+        server: &mut WireServer,
+        id: u64,
+        host: &str,
+        command: &str,
+        cwd: &std::path::Path,
+    ) -> Result<Value> {
+        let response = server.request(id, "tools/call",
+            json!({"name":"ssh_exec","arguments":{"host":host,"command":command,"cwd":cwd,"timeout_secs":10}}))
+            .await?;
+        ensure!(response["error"].is_null(), "wire call failed: {response}");
+        ensure!(
+            response["result"]["structuredContent"].is_object(),
+            "missing envelope: {response}"
+        );
+        Ok(response["result"]["structuredContent"].clone())
+    }
+
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        // Direct readiness clients close whole connections, not persistent channels.
+        timeout(support::CLEANUP, async {
+            while !fixture.listeners.iter().all(|listener| {
+                listener.log.text().contains("Disconnected from user ")
+            }) {
+                sleep(Duration::from_millis(20)).await;
+            }
+        }).await.context("readiness clients did not disconnect")?;
+        let initial = connection_activity(&fixture);
+
+        let sockets = tempfile::Builder::new().prefix("sm-h05-").tempdir_in("/tmp")?;
+        let socket = sockets.path().join("c");
+        let external = Process::start(Command::new(&fixture.ssh)
+            .arg("-F").arg(&fixture.ssh_config)
+            .args(["-M", "-N", "-T", "-S"]).arg(&socket)
+            .args(["-o", "ControlMaster=yes", "plain"]))?;
+        let external_pid = external.child.id().context("external master PID")?;
+        let cases = async {
+            timeout(support::CLEANUP, async {
+                loop {
+                    if control(&fixture, &socket, "check").await?.status.success() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            }).await.context("external master was not ready")??;
+            timeout(support::CLEANUP, async {
+                while connection_activity(&fixture).0 < initial.0 + 1 {
+                    sleep(Duration::from_millis(20)).await;
+                }
+            }).await.context("external master authentication log did not catch up")?;
+            ensure!(connection_activity(&fixture).0 == initial.0 + 1,
+                "external master opened extra authenticated connections");
+
+            for sigterm in [false, true] {
+                for phase in ["fresh", "ready", "delayed"] {
+                    let work = tempfile::Builder::new().prefix("h05-")
+                        .tempdir_in(fixture.root.path())?;
+                    let started = work.path().join("started");
+                    let done = work.path().join("done");
+                    let shutdown_started = work.path().join("shutdown-started");
+                    let shutdown_done = work.path().join("shutdown-done");
+                    let proxy_started = fixture.root.path().join("delayed-started");
+                    if proxy_started.exists() {
+                        fs::remove_file(&proxy_started)?;
+                    }
+                    let baseline = connection_activity(&fixture);
+                    let mut server = WireServer::start(&fixture.config)?;
+                    let mut owned = Vec::new();
+                    let commands = async {
+                        server.initialize().await?;
+                        if phase == "fresh" {
+                            server.close_stderr().await?;
+                        } else if phase == "ready" {
+                            let reply = call(&mut server, 2, "plain", "printf READY", work.path()).await?;
+                            ensure!(succeeded(&reply)?["stdout"] == "READY");
+                            timeout(support::CLEANUP, async {
+                                loop {
+                                    owned = masters(&server.log)?;
+                                    if !owned.is_empty() {
+                                        break;
+                                    }
+                                    sleep(Duration::from_millis(20)).await;
+                                }
+                                Ok::<_, anyhow::Error>(())
+                            }).await??;
+                            let command = format!(
+                                "trap '' HUP; cd {}; printf started > {}; sleep 1; printf done > {}; printf FINISHED",
+                                quote(&work.path().to_string_lossy()),
+                                quote(&started.to_string_lossy()), quote(&done.to_string_lossy()));
+                            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                                "params":{"name":"ssh_exec","arguments":{"host":"plain","command":command}}})).await?;
+                            Fixture::await_file(&started).await?;
+                            server.close_stderr().await?;
+                            let response = server.receive(json!(3)).await?.0;
+                            ensure!(succeeded(&response["result"]["structuredContent"])?["stdout"] == "FINISHED");
+                            Fixture::await_file(&done).await?;
+
+                            // Force master_finish after diagnostics close, not just master_start.
+                            ensure!(control(&fixture, &owned[0].1, "exit").await?.status.success());
+                            assert_masters_gone(&owned).await?;
+                            timeout(support::CLEANUP, async {
+                                for id in 10..110 {
+                                    let reply = call(&mut server, id, "plain", "printf RECOVERED", work.path()).await?;
+                                    if reply["error"].is_null() {
+                                        ensure!(succeeded(&reply)?["stdout"] == "RECOVERED");
+                                        return Ok::<_, anyhow::Error>(());
+                                    }
+                                    // Explicitly retry only a known-not-dispatched read-only probe.
+                                    failed(&reply, "connection_lost")?;
+                                    ensure!(reply["data"].is_null());
+                                    ensure!(reply["error"]["remote_state_unknown"] == false);
+                                    sleep(Duration::from_millis(20)).await;
+                                }
+                                anyhow::bail!("finished pool entry was not removed")
+                            }).await.context("pool recovery exceeded deadline")??;
+                        } else {
+                            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                                "params":{"name":"ssh_exec","arguments":{"host":"delayed",
+                                    "command":"printf DELAYED_READY","cwd":work.path(),"timeout_secs":10}}})).await?;
+                            Fixture::await_file(&proxy_started).await?;
+                            timeout(support::CLEANUP, async {
+                                loop {
+                                    owned = masters(&server.log)?;
+                                    if !owned.is_empty() {
+                                        break;
+                                    }
+                                    sleep(Duration::from_millis(20)).await;
+                                }
+                                Ok::<_, anyhow::Error>(())
+                            }).await??;
+                            server.close_stderr().await?;
+                            let response = server.receive(json!(4)).await?.0;
+                            ensure!(succeeded(&response["result"]["structuredContent"])?["stdout"] == "DELAYED_READY");
+                        }
+
+                        let host = if phase == "delayed" { "delayed" } else { "plain" };
+                        // More than both channel (4) and global (16) capacities:
+                        // leaked permits or an unusable pooled channel cannot hide.
+                        for id in 200..220 {
+                            let reply = call(&mut server, id, host, "printf REUSED", work.path()).await?;
+                            ensure!(succeeded(&reply)?["stdout"] == "REUSED");
+                        }
+                        let command = format!(
+                            "cd {}; trap '' HUP; printf started > {}; sleep 2; printf done > {}",
+                            quote(&work.path().to_string_lossy()),
+                            quote(&shutdown_started.to_string_lossy()),
+                            quote(&shutdown_done.to_string_lossy()));
+                        server.send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
+                            "params":{"name":"ssh_exec","arguments":{"host":host,"command":command}}})).await?;
+                        Fixture::await_file(&shutdown_started).await?;
+                        Ok::<_, anyhow::Error>(())
+                    }.await;
+                    // Result-based teardown runs even if any assertion above failed.
+                    let stopped = server.stop(sigterm).await;
+                    let completed = async {
+                        for (start, finish) in [
+                            (&started, &done), (&shutdown_started, &shutdown_done),
+                        ] {
+                            if start.exists() {
+                                Fixture::await_file(finish).await?;
+                            }
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }.await;
+                    let gone = if owned.is_empty() {
+                        Ok(())
+                    } else {
+                        assert_masters_gone(&owned).await
+                    };
+                    let disconnected = timeout(support::CLEANUP, async {
+                        loop {
+                            let current = connection_activity(&fixture);
+                            if current.0 > baseline.0
+                                && current.1 - baseline.1 >= current.0 - baseline.0 {
+                                break;
+                            }
+                            sleep(Duration::from_millis(20)).await;
+                        }
+                    }).await.context("MCP fixture connections did not disconnect");
+                    commands.with_context(|| format!("closed stderr {phase}, SIGTERM={sigterm}"))?;
+                    stopped?;
+                    completed?;
+                    gone?;
+                    disconnected?;
+                    let expected_connections = if phase == "fresh" { 1 } else { 2 };
+                    ensure!(connection_activity(&fixture).0 - baseline.0 == expected_connections,
+                        "closed diagnostics prevented master reuse");
+                    let check = control(&fixture, &socket, "check").await?;
+                    ensure!(check.status.success() && socket.exists(), "external master was removed");
+                    ensure!(String::from_utf8_lossy(&check.stderr)
+                        .contains(&format!("pid={external_pid}")), "external master PID changed");
+                    let command = format!("cd {}; printf EXTERNAL_ALIVE",
+                        quote(&work.path().to_string_lossy()));
+                    let usable = support::run(Command::new(&fixture.ssh)
+                        .arg("-F").arg(&fixture.ssh_config).arg("-S").arg(&socket)
+                        .args(["-T", "plain", &command])).await?;
+                    ensure!(usable.status.success() && usable.stdout == b"EXTERNAL_ALIVE");
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let cleaned = external.stop().await;
+        cases?;
+        cleaned
+    }.await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
