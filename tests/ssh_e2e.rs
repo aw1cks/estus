@@ -1,8 +1,6 @@
 //! Explicit packaged SSH, SFTP and sudo acceptance against the exact Nix-built image.
-//! Local runs require SSH_MCP_TEST_FIXTURE, explicit DOCKER_HOST and the Nix CLI.
-//! They check artifact/running-image identity, but upstream testcontainers 0.28
-//! can still pull on create-404. Required CI must retain the image and deny
-//! registry egress; that external enforcement belongs to V03.
+//! Runs require SSH_MCP_TEST_FIXTURE, explicit DOCKER_HOST and the Nix-provided Docker CLI.
+//! Containers select the artifact's exact config digest; execution is not network-isolated.
 #[path = "support/baseline_commands.rs"]
 mod baseline_commands;
 #[path = "support/baseline_files.rs"]

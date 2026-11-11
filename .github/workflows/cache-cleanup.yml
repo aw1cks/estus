@@ -1,0 +1,32 @@
+# Generated from nix/ci.nix. Run: nix run .#generate-workflows
+%YAML 1.1
+---
+jobs:
+  cleanup:
+    name: Cleanup PR caches
+    runs-on: ubuntu-26.04
+    steps:
+    - env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PR_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        REPO: ${{ github.repository }}
+      name: Delete PR-scoped caches
+      run: |
+        for prefix in nix- lix-installer-; do
+          gh cache list \
+            --repo "$REPO" --ref "$PR_REF" \
+            --key "$prefix" --limit 10000 \
+            --json key --jq '.[].key' |
+            while read -r key; do
+              [ -n "$key" ] || continue
+              gh cache delete "$key" --repo "$REPO" --ref "$PR_REF"
+            done
+        done
+    timeout-minutes: 5
+name: Cache Cleanup
+'on':
+  pull_request_target:
+    types:
+    - closed
+permissions:
+  actions: write

@@ -11,9 +11,10 @@
   };
 
   outputs = inputs: inputs.flake-parts.lib.mkFlake { inherit inputs; } {
+    imports = [ ./nix/ci.nix ];
+
     systems = [
       "aarch64-darwin"
-      "x86_64-darwin"
       "aarch64-linux"
       "x86_64-linux"
     ];
@@ -70,6 +71,9 @@
           program = "${acceptance}/bin/ssh-stdio";
         };
         checks.package = package;
+        checks.formatting = craneLib.cargoFmt {
+          src = commonArgs.src;
+        };
         # Compilation only: daemon-dependent execution stays outside sandboxes.
         checks.ssh-acceptance-build = acceptance;
         devShells.default = craneLib.devShell {

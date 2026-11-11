@@ -1,6 +1,5 @@
-//! Concrete Nix-image fixture with artifact and running-image digest checks.
-//! Local runs retain the documented SDK create-404 pull race. Required CI must
-//! additionally retain the image and deny registry egress (V03).
+//! Concrete Nix-image fixture selected by config digest, with artifact identity checks.
+//! The SDK may attempt a pull on create-404; these tests do not promise offline execution.
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -342,11 +341,11 @@ impl Fixture {
             );
             self.names.push(name.clone());
             self.docker.inspect_image(&self.artifact).await?;
-            let (image, tag) = self
+            let (algorithm, hash) = self
                 .artifact
-                .reference
+                .digest
                 .split_once(':')
-                .context("validated image reference")?;
+                .context("validated image config digest")?;
             let mut config = indoc! {"
                 Port 2222
                 ListenAddress 0.0.0.0
@@ -371,7 +370,9 @@ impl Fixture {
                 config.push_str("Subsystem sftp internal-sftp\n");
             }
             config.push_str("Match User mcp\n    Banner /fixture/backend-banner\n");
-            let mut request = GenericImage::new(image, tag)
+            // The SDK joins these with ':', selecting the local sha256 image ID,
+            // not the mutable tag recorded in the archive.
+            let mut request = GenericImage::new(algorithm, hash)
                 .with_exposed_port(2222.tcp())
                 .with_wait_for(WaitFor::message_on_stderr("Server listening on"))
                 .with_container_name(name)
