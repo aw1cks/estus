@@ -40,11 +40,24 @@ impl Log {
     }
 
     pub fn records(&self) -> Result<Vec<Value>> {
-        // A live pipe read can end halfway through a JSON record.
-        self.text()
-            .split_inclusive('\n')
-            .filter(|line| line.ends_with('\n'))
-            .map(|line| serde_json::from_str(line).context("non-JSON audit stderr"))
+        // A live pipe can end halfway through a record; retain only full frames.
+        Self::parse_records(&self.0.lock().expect("log lock poisoned"))
+    }
+
+    pub fn final_records(&self) -> Result<Vec<Value>> {
+        let bytes = self.0.lock().expect("log lock poisoned");
+        ensure!(
+            bytes.is_empty() || bytes.last() == Some(&b'\n'),
+            "incomplete final audit record"
+        );
+        Self::parse_records(&bytes)
+    }
+
+    fn parse_records(bytes: &[u8]) -> Result<Vec<Value>> {
+        bytes
+            .split_inclusive(|&byte| byte == b'\n')
+            .filter(|line| line.last() == Some(&b'\n'))
+            .map(|line| serde_json::from_slice(line).context("non-JSON audit stderr"))
             .collect()
     }
 
@@ -200,6 +213,7 @@ impl Client {
         }
         closed??;
         drained???;
+        self.log.final_records()?;
         Ok(self.log)
     }
 }
@@ -481,6 +495,7 @@ impl Fixture {
             ensure!(ready, "native listener did not authenticate");
         }
         self.write_server_config(&self.config, &self.ssh_config)?;
+        self.await_authentications(self.listeners.len()).await?;
         Ok(())
     }
 
@@ -618,6 +633,22 @@ impl Fixture {
                     .count()
             })
             .sum()
+    }
+
+    pub async fn await_authentications(&self, expected: usize) -> Result<()> {
+        timeout(Duration::from_secs(5), async {
+            while self.authentications() < expected {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .with_context(|| format!("authentication log did not reach {expected} connections"))?;
+        ensure!(
+            self.authentications() == expected,
+            "expected {expected} SSH authentications, observed {}",
+            self.authentications()
+        );
+        Ok(())
     }
 
     pub async fn await_file(path: &Path) -> Result<()> {
@@ -774,6 +805,7 @@ impl WireServer {
         }
         if let Some(drain) = self.drain.take() {
             timeout(CLEANUP, drain).await???;
+            self.log.final_records()?;
         }
         ensure!(status.success(), "server shutdown status: {status}");
         Ok(self.log)
@@ -812,4 +844,40 @@ pub async fn assert_masters_gone(owned: &[(u32, PathBuf)]) -> Result<()> {
     })
     .await
     .context("owned master PID/socket survived shutdown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn final_audit_requires_a_delimiter_even_after_valid_json() {
+        let log = Log::default();
+        assert_eq!(log.final_records().unwrap(), Vec::<Value>::new());
+        log.0
+            .lock()
+            .unwrap()
+            .extend_from_slice(b"{\"event\":\"start\"}\n{\"event\":\"finish\"}");
+        assert_eq!(log.records().unwrap(), vec![json!({"event":"start"})]);
+        assert!(log.final_records().is_err());
+        log.0.lock().unwrap().push(b'\n');
+        assert_eq!(
+            log.final_records().unwrap(),
+            vec![json!({"event":"start"}), json!({"event":"finish"})]
+        );
+    }
+
+    #[test]
+    fn final_audit_rejects_truncated_json_and_invalid_utf8() {
+        for bytes in [
+            b"{".as_slice(),
+            b"{\"event\":\"start\"}\n{\"event\":".as_slice(),
+            b"{\"event\":\"\xff\"}\n".as_slice(),
+            b"not-json\n".as_slice(),
+        ] {
+            let log = Log(Arc::new(Mutex::new(bytes.to_vec())));
+            assert!(log.final_records().is_err());
+        }
+    }
 }
