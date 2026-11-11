@@ -766,3 +766,76 @@ async fn fragmented_utf8_request_survives_multiple_pipe_writes() -> Result<()> {
     ensure!(status.success());
     no_remote_dispatch(&stderr)
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_input_is_isolated_and_following_requests_still_correlate() -> Result<()> {
+    let (mut server, directory) = local_only_server()?;
+    let scenario = async {
+        server.initialize().await?;
+        // Syntax errors have no correlatable request; a well-formed but invalid
+        // message gets Invalid Request with no ID, as the modern MCP schema permits.
+        server.send_raw(b"{\"MALFORMED_PAYLOAD_NO_ECHO\":\n").await?;
+        server.send_raw(
+            b"{\"jsonrpc\":\"2.0\",\"id\":\"invalid\",\"method\":false,\"params\":{\"marker\":\"MALFORMED_PAYLOAD_NO_ECHO\"}}\n",
+        ).await?;
+        let rejected = server.frame().await?.context("missing invalid-request reply")?.0;
+        ensure!(rejected.get("id").is_none());
+        ensure!(rejected["error"]["code"] == -32600 && rejected.get("result").is_none());
+        server.send(json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}})).await?;
+        let healthy = server.response(7).await?;
+        ensure!(healthy["result"]["structuredContent"]["data"]["mode"] == "configured");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    ensure!(
+        !stderr
+            .windows(b"MALFORMED_PAYLOAD_NO_ECHO".len())
+            .any(|bytes| bytes == b"MALFORMED_PAYLOAD_NO_ECHO")
+    );
+    no_remote_dispatch(&stderr)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Result<()> {
+    for incomplete_json in [false, true] {
+        let (mut server, directory) = local_only_server()?;
+        let scenario = async {
+            server.initialize().await?;
+            let mut frame = serde_json::to_vec(&json!({
+                "jsonrpc":"2.0","id":"truncated","method":"tools/call",
+                "params":{"name":"ssh_exec","arguments":{
+                    "host":"must-not-connect.invalid","command":"printf TRUNCATED_PAYLOAD_NO_ECHO"
+                }}
+            }))?;
+            if incomplete_json {
+                frame.pop();
+            }
+            // Even syntactically complete JSON is an incomplete stdio frame
+            // without its newline. No partial tool call may reach the handler.
+            server.send_raw(&frame).await
+        }
+        .await;
+        let finished = server.finish().await;
+        let removed = directory.close();
+        scenario?;
+        let (status, stderr) = finished?;
+        removed?;
+        ensure!(
+            status.success(),
+            "truncated-input shutdown failed: {status}"
+        );
+        ensure!(
+            !stderr
+                .windows(b"TRUNCATED_PAYLOAD_NO_ECHO".len())
+                .any(|bytes| bytes == b"TRUNCATED_PAYLOAD_NO_ECHO")
+        );
+        no_remote_dispatch(&stderr)?;
+    }
+    Ok(())
+}
