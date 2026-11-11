@@ -162,7 +162,13 @@ fn capacity_script(
 
 async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let listed = timeout(Duration::from_secs(5), client.service.list_tools(None)).await??;
-    for name in ["ssh_targets", "ssh_exec", "ssh_sudo", "ssh_read_file"] {
+    for name in [
+        "ssh_targets",
+        "ssh_exec",
+        "ssh_sudo",
+        "ssh_read_file",
+        "ssh_stat",
+    ] {
         let tool = listed
             .tools
             .iter()
@@ -170,7 +176,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
             .with_context(|| format!("missing {name}"))?;
         ensure!(tool.output_schema.is_some(), "{name} missing outputSchema");
     }
-    for name in ["ssh_write_file", "ssh_stat", "ssh_list_directory"] {
+    for name in ["ssh_write_file", "ssh_list_directory"] {
         ensure!(
             !listed.tools.iter().any(|tool| tool.name == name),
             "file milestone must not advertise unfinished {name}"

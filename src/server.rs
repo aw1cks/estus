@@ -23,7 +23,7 @@ use crate::{
     audit::{Audit, Metadata},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
     exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
-    files::{self, ReadContext, ReadData, ReadRequest},
+    files::{self, FileContext, ReadData, ReadRequest, StatData, StatRequest},
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
 };
@@ -217,7 +217,12 @@ impl SshMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = read_metadata(&request, &self.state.config, &context.id);
+        let metadata = file_metadata(
+            &request.host,
+            "ssh_read_file",
+            &self.state.config,
+            &context.id,
+        );
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -227,19 +232,55 @@ impl SshMcp {
             }
         };
         let state = Arc::clone(&self.state);
-        // The request may be dropped by RMCP after cancellation. This bounded,
-        // tracked owner still closes SFTP and its channel and completes audit.
-        let task = self.state.tasks.spawn(async move {
-            let reply = state
+        self.file_result(budget, permit, async move {
+            state
                 .read_file(request, context.id, context.ct, started, budget)
-                .await;
-            (permit, reply)
-        });
+                .await
+        })
+        .await
+    }
+
+    async fn stat_file(
+        &self,
+        request: StatRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(&request.host, "ssh_stat", &self.state.config, &context.id);
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<StatData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .stat_file(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
+    async fn file_result<T: Serialize + Send + 'static>(
+        &self,
+        budget: ReplyBudget,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        operation: impl Future<Output = ToolReply<T>> + Send + 'static,
+    ) -> Result<CallToolResult, ErrorData> {
+        // A dropped RMCP request never drops the bounded SFTP cleanup owner.
+        let task = self
+            .state
+            .tasks
+            .spawn(async move { (permit, operation.await) });
         match task.await {
             Ok((_permit, reply)) => budget.result(reply),
-            Err(_) => budget.result(ToolReply::<ReadData>::failure(ToolError::new(
+            Err(_) => budget.result(ToolReply::<T>::failure(ToolError::new(
                 "io_error",
-                "File read task could not complete; remote state is unknown",
+                "File operation task could not complete; remote state is unknown",
                 true,
             ))),
         }
@@ -310,6 +351,20 @@ impl SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.read_file(request, context).await
+    }
+
+    #[tool(
+        description = "Query ordinary-identity SFTP metadata for a literal UTF-8 path. Default lstat reports a final symlink itself; follow_symlinks=true queries its target. Intermediate symlinks follow server semantics. No path sandbox, race-free no-follow guarantee, shell/SCP fallback, sudo or automatic retry. Missing attributes remain null and missing type is unknown; permissions contain only mode bits. Each call owns an independent SFTP channel under the original timeout.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        input_schema = schema_for_type::<StatRequest>(),
+        output_schema = schema_for_type::<ToolReply<StatData>>()
+    )]
+    async fn ssh_stat(
+        &self,
+        Arguments(request): Arguments<StatRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.stat_file(request, context).await
     }
 
     #[tool(
@@ -400,17 +455,18 @@ impl Operation {
     }
 }
 
-fn read_metadata<'a>(
-    request: &'a ReadRequest,
+fn file_metadata<'a>(
+    host: &'a str,
+    tool: &'static str,
     config: &Config,
     request_id: &'a RequestId,
 ) -> Metadata<'a> {
     Metadata {
         request_id,
-        tool: "ssh_read_file",
-        host: Some(&request.host),
+        tool,
+        host: Some(host),
         identity_role: IdentityRole::Ordinary,
-        sudo_mode: Some(config.sudo_mode(&request.host)),
+        sudo_mode: Some(config.sudo_mode(host)),
         user: None,
         program: None,
     }
@@ -505,7 +561,7 @@ impl State {
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ReadData> {
-        let metadata = read_metadata(&request, &self.config, &request_id);
+        let metadata = file_metadata(&request.host, "ssh_read_file", &self.config, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
@@ -536,7 +592,62 @@ impl State {
                 let outcome = files::read(
                     lease.session(),
                     spec,
-                    ReadContext {
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn stat_file(
+        &self,
+        request: StatRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<StatData> {
+        let metadata = file_metadata(&request.host, "ssh_stat", &self.config, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request.validate(budget).and_then(|spec| {
+            let target = self.config.resolve(&request.host)?;
+            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+            Ok((spec, target, deadline))
+        });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::stat(
+                    lease.session(),
+                    spec,
+                    FileContext {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,

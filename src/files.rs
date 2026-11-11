@@ -1,4 +1,4 @@
-//! Lossless, bounded reads over an independently owned ordinary SFTP channel.
+//! Lossless, bounded file operations over independently owned ordinary SFTP channels.
 //!
 //! No remote commands or privilege changes are involved. Cancellation interrupts
 //! the local protocol streams as well as disconnecting this channel, so a remote
@@ -75,6 +75,94 @@ pub(crate) struct ReadData {
     pub(crate) bytes_read: u64,
     pub(crate) next_offset: u64,
     pub(crate) eof: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StatRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) follow_symlinks: bool,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatSpec<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) follow_symlinks: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FileKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub(crate) struct StatData {
+    pub(crate) kind: FileKind,
+    pub(crate) size: Option<u64>,
+    pub(crate) permissions: Option<u32>,
+    pub(crate) uid: Option<u32>,
+    pub(crate) gid: Option<u32>,
+    pub(crate) modified_unix_secs: Option<u64>,
+}
+
+pub(crate) fn metadata_data(metadata: openssh_sftp_client::metadata::MetaData) -> StatData {
+    let kind = match metadata.file_type() {
+        Some(kind) if kind.is_file() => FileKind::File,
+        Some(kind) if kind.is_dir() => FileKind::Directory,
+        Some(kind) if kind.is_symlink() => FileKind::Symlink,
+        Some(_) => FileKind::Other,
+        None => FileKind::Unknown,
+    };
+    StatData {
+        kind,
+        size: metadata.len(),
+        permissions: metadata
+            .permissions()
+            .map(|mode| mode.as_raw().bits() & 0o7777),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        modified_unix_secs: metadata.modified().map(|time| u64::from(time.into_raw())),
+    }
+}
+
+impl StatRequest {
+    pub(crate) fn validate(&self, budget: ReplyBudget) -> Result<StatSpec<'_>, ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        // Reserve both complete envelopes conservatively before opening SSH.
+        // The longest kind and widest nullable scalar values dominate all
+        // metadata replies; the fixed connection error dominates typed failures.
+        let reservation = ToolReply {
+            data: Some(StatData {
+                kind: FileKind::Directory,
+                size: Some(u64::MAX),
+                permissions: Some(u32::MAX),
+                uid: Some(u32::MAX),
+                gid: Some(u32::MAX),
+                modified_unix_secs: Some(u64::MAX),
+            }),
+            error: Some(ToolError::SSH_CONNECT_FAILED),
+        };
+        budget.remaining(&reservation).map_err(|_| {
+            invalid("Request leaves insufficient response budget for file metadata")
+        })?;
+        Ok(StatSpec {
+            path: &self.path,
+            follow_symlinks: self.follow_symlinks,
+        })
+    }
 }
 
 fn invalid(message: &'static str) -> ToolError {
@@ -164,14 +252,14 @@ fn wire_content_cost(bytes: usize, encoding: Encoding) -> Option<usize> {
     }
 }
 
-pub(crate) struct ReadContext<'a> {
+pub(crate) struct FileContext<'a> {
     pub(crate) deadline: tokio::time::Instant,
     pub(crate) ct: &'a CancellationToken,
     pub(crate) shutdown: &'a CancellationToken,
 }
 
-pub(crate) struct ReadOutcome {
-    pub(crate) reply: ToolReply<ReadData>,
+pub(crate) struct FileOutcome<T> {
+    pub(crate) reply: ToolReply<T>,
     pub(crate) check_master: bool,
 }
 
@@ -183,7 +271,7 @@ struct Failure {
 impl Failure {
     fn io() -> Self {
         Self {
-            error: ToolError::new("io_error", "SFTP file read failed", false),
+            error: ToolError::new("io_error", "SFTP file operation failed", false),
             check_master: false,
         }
     }
@@ -420,6 +508,24 @@ async fn read_sftp(sftp: Sftp, spec: &ReadSpec<'_>) -> Result<RawRead, Failure> 
     combine_close(result, close)
 }
 
+async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> {
+    let result = {
+        // Fs retains library resources: drop it before waiting for Sftp::close.
+        let mut fs = sftp.fs();
+        let metadata = if spec.follow_symlinks {
+            fs.metadata(spec.path).await
+        } else {
+            fs.symlink_metadata(spec.path).await
+        };
+        metadata.map(metadata_data).map_err(sftp_failure)
+    };
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 fn combine_close<T>(result: Result<T, Failure>, close: Result<(), Failure>) -> Result<T, Failure> {
     match (result, close) {
         (Ok(value), Ok(())) => Ok(value),
@@ -471,10 +577,43 @@ fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> 
 pub(crate) async fn read(
     session: &Session,
     spec: ReadSpec<'_>,
-    context: ReadContext<'_>,
-) -> ReadOutcome {
+    context: FileContext<'_>,
+) -> FileOutcome<ReadData> {
+    let outcome = run_sftp(session, context, |sftp| read_sftp(sftp, &spec)).await;
+    FileOutcome {
+        reply: match outcome.reply.data {
+            Some(raw) => match encode(raw, &spec) {
+                Ok(data) => ToolReply::success(data),
+                Err(error) => ToolReply::failure(error),
+            },
+            None => ToolReply {
+                data: None,
+                error: outcome.reply.error,
+            },
+        },
+        check_master: outcome.check_master,
+    }
+}
+
+pub(crate) async fn stat(
+    session: &Session,
+    spec: StatSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<StatData> {
+    run_sftp(session, context, |sftp| stat_sftp(sftp, spec)).await
+}
+
+async fn run_sftp<T, F, Fut>(
+    session: &Session,
+    context: FileContext<'_>,
+    operation: F,
+) -> FileOutcome<T>
+where
+    F: FnOnce(Sftp) -> Fut,
+    Fut: Future<Output = Result<T, Failure>>,
+{
     let cancel = CancellationToken::new();
-    // Also wake library tasks if our caller drops the entire read future.
+    // Also wake library tasks if our caller drops the entire operation future.
     let _cancel_on_drop = cancel.clone().drop_guard();
     let mut child = None;
     let mut dispatched = false;
@@ -505,7 +644,7 @@ pub(crate) async fn read(
                 let sftp = Sftp::new(stdin, stdout, SftpOptions::default())
                     .await
                     .map_err(sftp_failure)?;
-                read_sftp(sftp, &spec).await
+                operation(sftp).await
             };
             let drain = async { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await };
             tokio::pin!(protocol, drain);
@@ -539,15 +678,15 @@ pub(crate) async fn read(
         tokio::select! {
             biased;
             () = context.ct.cancelled() => Err(Failure {
-                error: ToolError::new("cancelled", "SFTP file read cancelled", false),
+                error: ToolError::new("cancelled", "SFTP file operation cancelled", false),
                 check_master: false,
             }),
             () = context.shutdown.cancelled() => Err(Failure {
-                error: ToolError::new("cancelled", "SFTP file read cancelled", false),
+                error: ToolError::new("cancelled", "SFTP file operation cancelled", false),
                 check_master: false,
             }),
             () = tokio::time::sleep_until(context.deadline) => Err(Failure {
-                error: ToolError::new("timeout", "SFTP file read deadline exceeded", false),
+                error: ToolError::new("timeout", "SFTP file operation deadline exceeded", false),
                 check_master: false,
             }),
             result = operation => result,
@@ -568,27 +707,25 @@ pub(crate) async fn read(
         .await
         .is_err();
     match result {
-        Ok(raw) if !cleanup_timed_out => ReadOutcome {
-            reply: match encode(raw, &spec) {
-                Ok(data) => ToolReply::success(data),
-                Err(error) => ToolReply::failure(error),
-            },
+        Ok(data) if !cleanup_timed_out => FileOutcome {
+            reply: ToolReply::success(data),
             check_master: false,
         },
-        Ok(_) => ReadOutcome {
-            reply: ToolReply::failure(Failure::io().error),
+        Ok(_) => FileOutcome {
+            reply: ToolReply::failure(Failure::cleanup().error),
             check_master: false,
         },
         Err(mut failure) => {
-            if dispatched
-                && matches!(
-                    failure.error.code,
-                    "timeout" | "cancelled" | "connection_lost"
-                )
+            if cleanup_timed_out
+                || (dispatched
+                    && matches!(
+                        failure.error.code,
+                        "timeout" | "cancelled" | "connection_lost"
+                    ))
             {
                 failure.error.remote_state_unknown = true;
             }
-            ReadOutcome {
+            FileOutcome {
                 reply: ToolReply::failure(failure.error),
                 check_master: failure.check_master,
             }
@@ -608,6 +745,138 @@ mod tests {
 
     fn budget() -> ReplyBudget {
         ReplyBudget::new(&RequestId::Number(1)).unwrap()
+    }
+
+    #[test]
+    fn absent_metadata_stays_null_and_does_not_imply_a_file_kind() {
+        let data = metadata_data(openssh_sftp_client::metadata::MetaDataBuilder::new().create());
+        assert_eq!(
+            serde_json::to_value(data).unwrap(),
+            json!({
+                "kind": "unknown",
+                "size": null,
+                "permissions": null,
+                "uid": null,
+                "gid": null,
+                "modified_unix_secs": null,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_zero_metadata_is_not_treated_as_missing() {
+        use openssh_sftp_client::{
+            UnixTimeStamp,
+            metadata::{MetaDataBuilder, Permissions},
+        };
+        let metadata = MetaDataBuilder::new()
+            .len(0)
+            .id((0, 0))
+            .permissions(Permissions::from(0u16))
+            .time(UnixTimeStamp::unix_epoch(), UnixTimeStamp::unix_epoch())
+            .create();
+        let data = metadata_data(metadata);
+        assert_eq!(data.size, Some(0));
+        assert_eq!(data.uid, Some(0));
+        assert_eq!(data.gid, Some(0));
+        assert_eq!(data.permissions, Some(0));
+        assert_eq!(data.modified_unix_secs, Some(0));
+    }
+
+    #[test]
+    fn metadata_preserves_special_mode_bits_and_unsigned_modification_seconds() {
+        use openssh_sftp_client::{
+            UnixTimeStamp,
+            metadata::{MetaDataBuilder, Permissions},
+        };
+        for (mode, seconds) in [(0o7777u16, u32::MAX), (0o4750, 2_147_483_648)] {
+            let metadata = MetaDataBuilder::new()
+                .len(u64::MAX)
+                .id((u32::MAX, 0))
+                .permissions(Permissions::from(mode))
+                .time(
+                    UnixTimeStamp::unix_epoch(),
+                    UnixTimeStamp::from_raw(seconds).unwrap(),
+                )
+                .create();
+            let data = metadata_data(metadata);
+            assert_eq!(data.permissions, Some(u32::from(mode)));
+            assert_eq!(data.modified_unix_secs, Some(u64::from(seconds)));
+            assert_eq!(data.size, Some(u64::MAX));
+            assert_eq!(data.uid, Some(u32::MAX));
+            assert_eq!(data.gid, Some(0));
+        }
+    }
+
+    #[test]
+    fn stat_paths_remain_literal_and_following_requires_an_explicit_boolean() {
+        let path = "-é/../~/$HOME; 'quoted'\n*";
+        let mut request: StatRequest =
+            serde_json::from_value(json!({"host": "target", "path": path})).unwrap();
+        let spec = request.validate(budget()).unwrap();
+        assert_eq!(spec.path, path);
+        assert!(!spec.follow_symlinks);
+        request.follow_symlinks = true;
+        assert!(request.validate(budget()).unwrap().follow_symlinks);
+        for path in ["", "a\0b"] {
+            request.path = path.into();
+            let error = request.validate(budget()).unwrap_err();
+            assert_eq!(error.code, "invalid_argument");
+            assert!(!error.remote_state_unknown);
+        }
+        request.path = "file".into();
+        request.timeout_secs = Some(0);
+        assert_eq!(
+            request.validate(budget()).unwrap_err().code,
+            "invalid_argument"
+        );
+        for value in [
+            json!({"host": "target", "path": "file", "follow_symlinks": "true"}),
+            json!({"host": "target", "path": "file", "follow_symlinks": null}),
+            json!({"host": "target", "path": "file", "sudo": true}),
+        ] {
+            assert!(serde_json::from_value::<StatRequest>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn stat_reserves_the_complete_reply_at_the_actual_request_id_boundary() {
+        let request: StatRequest =
+            serde_json::from_value(json!({"host": "target", "path": "file"})).unwrap();
+        let widest = StatData {
+            kind: FileKind::Directory,
+            size: Some(u64::MAX),
+            permissions: Some(u32::MAX),
+            uid: Some(u32::MAX),
+            gid: Some(u32::MAX),
+            modified_unix_secs: Some(u64::MAX),
+        };
+        let reservation = ToolReply {
+            data: Some(widest),
+            error: Some(ToolError::SSH_CONNECT_FAILED),
+        };
+        let empty_id = RequestId::String("".into());
+        let remaining = ReplyBudget::new(&empty_id)
+            .unwrap()
+            .remaining(&reservation)
+            .unwrap();
+        let id = RequestId::String("x".repeat(remaining).into());
+        let boundary = ReplyBudget::new(&id).unwrap();
+        assert!(request.validate(boundary).is_ok());
+        assert!(boundary.result(ToolReply::success(widest)).is_ok());
+        assert!(
+            boundary
+                .result(ToolReply::<StatData>::failure(
+                    ToolError::SSH_CONNECT_FAILED
+                ))
+                .is_ok()
+        );
+        let id = RequestId::String("x".repeat(remaining + 1).into());
+        let error = request
+            .validate(ReplyBudget::new(&id).unwrap())
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
+        assert!(!error.remote_state_unknown);
     }
 
     // NIST SHAVS SHA256ShortMsg.rsp (empty and d3), published in

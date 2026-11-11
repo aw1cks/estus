@@ -655,7 +655,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_read_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_read_file", "ssh_stat"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -950,6 +950,83 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
         ensure!(
             record["tool"] != "ssh_read_file" || record["event"] == "reject",
             "invalid read was accepted before validation"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
+    let (mut server, directory) = local_only_server()?;
+    let scenario = async {
+        server.initialize().await?;
+        for (index, (arguments, code)) in [
+            (json!({"host":"denied","path":""}), "invalid_argument"),
+            (json!({"host":"denied","path":"a\0b"}), "invalid_argument"),
+            (
+                json!({"host":"denied","path":"file","timeout_secs":0}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"literal~$*' \n"}),
+                "policy_denied",
+            ),
+            (
+                json!({"host":"denied","path":"file","follow_symlinks":true}),
+                "policy_denied",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 100 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_stat","arguments":arguments}}))
+                .await?;
+            let called = server.response(id).await?;
+            let result = &called["result"];
+            ensure!(result["isError"] == true);
+            ensure!(result["structuredContent"]["data"].is_null());
+            ensure!(result["structuredContent"]["error"]["code"] == code);
+            ensure!(result["structuredContent"]["error"]["remote_state_unknown"] == false);
+        }
+        for (id, arguments) in [
+            (
+                200,
+                json!({"host":"denied","path":"file","follow_symlinks":"true"}),
+            ),
+            (201, json!({"host":"denied","path":"file","sudo":true})),
+        ] {
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_stat","arguments":arguments}}))
+                .await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602);
+        }
+        server
+            .send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        ensure!(
+            server.response(300).await?["result"]["structuredContent"]["data"]["mode"]
+                == "configured"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["tool"] != "ssh_stat" || record["event"] == "reject",
+            "invalid stat was accepted before validation"
         );
     }
     Ok(())
