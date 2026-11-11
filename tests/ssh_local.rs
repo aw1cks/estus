@@ -1108,3 +1108,196 @@ async fn ssh_response_wire_budget() -> Result<()> {
     scenario?;
     cleanup
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking and a usable non-root local account"]
+async fn ssh_encoded_command_budget() -> Result<()> {
+    const LIMIT: usize = 65_536;
+
+    fn activity(fixture: &Fixture) -> (usize, usize, usize) {
+        let count = |needle: &str| {
+            fixture
+                .listeners
+                .iter()
+                .map(|listener| {
+                    listener
+                        .log
+                        .text()
+                        .lines()
+                        .filter(|line| line.contains(needle))
+                        .count()
+                })
+                .sum()
+        };
+        (
+            count("Accepted publickey"),
+            count("Starting session: command"),
+            count("Close session:"),
+        )
+    }
+
+    async fn await_rejections(client: &Client, count: usize) -> Result<()> {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let rejected = client
+                    .log
+                    .records()?
+                    .iter()
+                    .filter(|record| {
+                        record["event"] == "reject" && record["error_code"] == "invalid_argument"
+                    })
+                    .count();
+                if rejected >= count {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("encoded-size rejection audit did not catch up")?
+    }
+
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        // Readiness clients disconnect their entire connections rather than
+        // closing channels on a persistent master. Await those disconnect logs.
+        timeout(Duration::from_secs(5), async {
+            while !fixture.listeners.iter().all(|listener| {
+                let text = listener.log.text();
+                text.contains("Accepted publickey") && text.contains("Disconnected from user ")
+            }) {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("readiness disconnect logs did not catch up")?;
+        let baseline = activity(&fixture);
+        let client = Client::start(&fixture.config).await?;
+        let commands = async {
+            let mut argv = vec![""; 100_001];
+            argv[0] = "/usr/bin/true";
+            for (name, arguments) in [
+                (
+                    "ssh_exec",
+                    json!({"host":"plain","command":format!("#{}", "'".repeat(LIMIT - 1))}),
+                ),
+                (
+                    "ssh_exec",
+                    json!({"host":"plain","command":"true","cwd":format!("/{}", "'".repeat(8192))}),
+                ),
+                // This authorized target must never connect, much less run host sudo.
+                (
+                    "ssh_sudo",
+                    json!({"host":"restricted","user":"root","argv":argv}),
+                ),
+            ] {
+                let reply = client.call(name, arguments).await?;
+                failed(&reply, "invalid_argument")?;
+                ensure!(
+                    reply["data"].is_null(),
+                    "oversize request returned execution data"
+                );
+                ensure!(reply["error"]["remote_state_unknown"] == false);
+            }
+            await_rejections(&client, 3).await?;
+            ensure!(
+                masters(&client.log)?.is_empty(),
+                "rejection acquired a master"
+            );
+            ensure!(
+                activity(&fixture) == baseline,
+                "rejection reached SSH authentication/session"
+            );
+
+            // Use the pinned public encoder as an independent size oracle.
+            let encoded_len = |script: &str| {
+                ["/bin/sh", "-c", script]
+                    .into_iter()
+                    .map(|arg| shell_escape::unix::escape(arg.into()).len())
+                    .sum::<usize>()
+                    + 2
+            };
+            let literal = "quotes ' \" bang! Unicode λ\n$HOME; `false` \\ end";
+            let mut script = format!("printf %s {}\n#", quote(literal));
+            let padding = LIMIT
+                .checked_sub(encoded_len(&script))
+                .context("boundary prefix too large")?;
+            script.push_str(&"x".repeat(padding));
+            ensure!(
+                encoded_len(&script) == LIMIT,
+                "test did not reach exact encoded boundary"
+            );
+            let reply = exec(&client, &script).await?;
+            let data = succeeded(&reply)?;
+            ensure!(
+                data["stdout"] == literal && data["stderr"] == "" && data["exit_code"] == 0,
+                "exact encoded boundary lost literal fidelity: {reply}"
+            );
+            timeout(Duration::from_secs(5), async {
+                while activity(&fixture).2 < baseline.2 + 1 || masters(&client.log)?.is_empty() {
+                    sleep(Duration::from_millis(20)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .context("boundary session/master logs did not catch up")??;
+            let connected = activity(&fixture);
+            ensure!(connected == (baseline.0 + 1, baseline.1 + 1, baseline.2 + 1));
+            let owned = masters(&client.log)?;
+            ensure!(
+                owned.len() == 1,
+                "boundary command did not own exactly one master"
+            );
+
+            script.push('x');
+            ensure!(encoded_len(&script) == LIMIT + 1);
+            let reply = exec(&client, &script).await?;
+            failed(&reply, "invalid_argument")?;
+            ensure!(reply["data"].is_null());
+            ensure!(reply["error"]["remote_state_unknown"] == false);
+            await_rejections(&client, 4).await?;
+            ensure!(
+                masters(&client.log)? == owned,
+                "one-byte-over request acquired a master"
+            );
+            ensure!(
+                activity(&fixture) == connected,
+                "one-byte-over request opened a channel"
+            );
+            let reply = exec(&client, "printf AFTER_H03").await?;
+            ensure!(succeeded(&reply)?["stdout"] == "AFTER_H03");
+            // The later successful session is a log-drain barrier: neither an
+            // old readiness record nor a fixed sleep proves absence of dispatch.
+            timeout(Duration::from_secs(5), async {
+                while activity(&fixture).2 < connected.2 + 1 {
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .context("post-rejection session-close log did not catch up")?;
+            ensure!(
+                activity(&fixture) == (connected.0, connected.1 + 1, connected.2 + 1),
+                "oversize request dispatched or replaced the authenticated connection"
+            );
+            ensure!(
+                masters(&client.log)? == owned,
+                "existing master was not reusable"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let log = client.log.clone();
+        let stopped = client.stop().await;
+        let gone = match masters(&log) {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        commands?;
+        stopped?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
