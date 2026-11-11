@@ -25,6 +25,7 @@ use crate::{
     exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
     files::{
         self, FileContext, ListData, ListRequest, ReadData, ReadRequest, StatData, StatRequest,
+        WriteData, WriteRequest,
     },
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
@@ -297,6 +298,36 @@ impl SshMcp {
         .await
     }
 
+    async fn write_file(
+        &self,
+        request: WriteRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(
+            &request.host,
+            "ssh_write_file",
+            &self.state.config,
+            &context.id,
+        );
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<WriteData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .write_file(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -411,6 +442,20 @@ impl SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.list_directory(request, context).await
+    }
+
+    #[tool(
+        description = "Write bounded content through an independent ordinary SFTP channel. Default exclusive create refuses an existing destination, including symlinks. overwrite=true directly creates or truncates and follows server symlink semantics: a later failure can leave partial, empty or completed changes. Success requires write and close acknowledgements, not atomic replacement or durable fsync. Paths are literal UTF-8, without shell expansion or a path sandbox. Content is UTF-8 by default (NUL allowed), or canonical padded standard base64; decoded bytes must fit the configured file cap before connecting. No append, parent creation, sudo, fallback, retries, replay or rollback. Failures after a mutating OPEN is dispatched report remote_state_unknown=true and null data. Timeout/cancellation closes only this channel; remote work may continue. SFTP v3 can report concurrent exclusive-create conflicts as io_error.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<WriteRequest>(),
+        output_schema = schema_for_type::<ToolReply<WriteData>>()
+    )]
+    async fn ssh_write_file(
+        &self,
+        Arguments(request): Arguments<WriteRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.write_file(request, context).await
     }
 
     #[tool(
@@ -751,6 +796,64 @@ impl State {
         {
             Ok(lease) => {
                 let outcome = files::list(
+                    lease.session(),
+                    spec,
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn write_file(
+        &self,
+        request: WriteRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<WriteData> {
+        let metadata = file_metadata(&request.host, "ssh_write_file", &self.config, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request
+            .validate(self.config.limits().max_file_bytes, budget)
+            .and_then(|spec| {
+                let target = self.config.resolve(&request.host)?;
+                let deadline =
+                    request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+                Ok((spec, target, deadline))
+            });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::write(
                     lease.session(),
                     spec,
                     FileContext {

@@ -203,6 +203,10 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         let tools = listed["result"]["tools"].as_array().context("tools list")?;
         ensure!(tools.iter().any(|tool| tool["name"] == "ssh_targets"));
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+        let write = tools.iter().find(|tool| tool["name"] == "ssh_write_file")
+            .context("write absent from legacy discovery")?;
+        ensure!(write["annotations"]["readOnlyHint"] == false);
+        ensure!(write["annotations"]["destructiveHint"] == true);
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
@@ -655,10 +659,14 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_read_file", "ssh_stat", "ssh_list_directory"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+        let write = tools.iter().find(|tool| tool["name"] == "ssh_write_file")
+            .context("write absent from modern discovery")?;
+        ensure!(write["annotations"]["readOnlyHint"] == false);
+        ensure!(write["annotations"]["destructiveHint"] == true);
 
         // Both are outstanding before either response is read; correlate by ID,
         // never assume handler completion order.
@@ -1113,6 +1121,94 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
         ensure!(record["tool"] != "ssh_list_directory" || record["event"] == "reject");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
+    let (mut server, directory) = server_with_config(indoc::indoc! {"
+        [limits]
+        max_file_bytes = 4
+        [targets]
+    "})?;
+    let scenario = async {
+        server.initialize().await?;
+        for (index, (arguments, code)) in [
+            (json!({"host":"denied","path":"","content":""}), "invalid_argument"),
+            (json!({"host":"denied","path":"a\0b","content":""}), "invalid_argument"),
+            (json!({"host":"denied","path":"file","content":"","timeout_secs":0}), "invalid_argument"),
+            (json!({"host":"denied","path":"file","content":"12345"}), "invalid_argument"),
+            // Byte length, not scalar count, enforces the file cap.
+            (json!({"host":"denied","path":"file","content":"雪é"}), "invalid_argument"),
+            (json!({"host":"denied","path":"file","content":"AAECAwQ=","encoding":"base64"}), "invalid_argument"),
+            // Standard padded base64 only: no URL-safe alphabet, whitespace,
+            // missing/excess padding, or nonzero discarded trailing bits.
+            (json!({"host":"denied","path":"file","content":"_w==","encoding":"base64"}), "invalid_encoding"),
+            (json!({"host":"denied","path":"file","content":"YQ","encoding":"base64"}), "invalid_encoding"),
+            (json!({"host":"denied","path":"file","content":"YQ===","encoding":"base64"}), "invalid_encoding"),
+            (json!({"host":"denied","path":"file","content":"YQ==\n","encoding":"base64"}), "invalid_encoding"),
+            (json!({"host":"denied","path":"file","content":"YR==","encoding":"base64"}), "invalid_encoding"),
+            (json!({"host":"denied","path":"literal~$*' \n","content":""}), "policy_denied"),
+            (json!({"host":"denied","path":"file","content":"é\0x"}), "policy_denied"),
+            (json!({"host":"denied","path":"file","content":"AP+AQQ==","encoding":"base64","overwrite":true}), "policy_denied"),
+        ].into_iter().enumerate() {
+            let id = 100 + index as u64;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_write_file","arguments":arguments}})).await?;
+            let called = server.response(id).await?;
+            let result = &called["result"];
+            let reply = &result["structuredContent"];
+            ensure!(result["isError"] == true);
+            ensure!(reply["data"].is_null() && reply["error"]["code"] == code,
+                "write rejection {index}: {called}");
+            ensure!(reply["error"]["remote_state_unknown"] == false);
+            let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().context("text compatibility result")?)?;
+            ensure!(text == *reply);
+        }
+        for (index, arguments) in [
+            json!({"host":"denied","path":"file"}),
+            json!({"host":"denied","path":"file","content":null}),
+            json!({"host":"denied","path":42,"content":"x"}),
+            json!({"host":"denied","path":"file","content":["x"]}),
+            json!({"host":"denied","path":"file","content":"x","encoding":"hex"}),
+            json!({"host":"denied","path":"file","content":"x","overwrite":"true"}),
+            json!({"host":"denied","path":"file","content":"x","timeout_secs":-1}),
+            json!({"host":"denied","path":"file","content":"x","sudo":true}),
+            json!({"host":"denied","path":"file","content":"x","append":true}),
+            json!({"host":"denied","path":"file","content":"x","retry_on_connection_loss":true}),
+        ].into_iter().enumerate() {
+            let id = 200 + index as u64;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_write_file","arguments":arguments}})).await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602,
+                "wrong-shaped write {index} reached the handler");
+        }
+        server.send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}})).await?;
+        ensure!(server.response(300).await?["result"]["structuredContent"]["data"]
+            == json!({"mode":"configured","targets":[]}));
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["tool"] != "ssh_write_file" || record["event"] == "reject",
+            "invalid write was admitted before validation"
+        );
+        for field in ["path", "content", "payload"] {
+            ensure!(
+                record.get(field).is_none(),
+                "write rejection audit disclosed {field}"
+            );
+        }
     }
     Ok(())
 }

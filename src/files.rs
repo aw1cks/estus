@@ -7,6 +7,7 @@
 //! SHA-256 covers only the returned raw byte range, not the lookahead or encoded
 //! content. Separate reads are not a snapshot of a concurrently changing file.
 use std::{
+    borrow::Cow,
     future::Future,
     io::{self, SeekFrom},
     os::unix::ffi::OsStrExt,
@@ -77,6 +78,31 @@ pub(crate) struct ReadData {
     pub(crate) bytes_read: u64,
     pub(crate) next_offset: u64,
     pub(crate) eof: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WriteRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    pub(crate) content: String,
+    #[serde(default)]
+    pub(crate) encoding: Encoding,
+    #[serde(default)]
+    pub(crate) overwrite: bool,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct WriteSpec<'a> {
+    path: &'a str,
+    content: Cow<'a, [u8]>,
+    overwrite: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct WriteData {
+    bytes_written: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -218,6 +244,77 @@ pub(crate) fn metadata_data(metadata: openssh_sftp_client::metadata::MetaData) -
         gid: metadata.gid(),
         modified_unix_secs: metadata.modified().map(|time| u64::from(time.into_raw())),
     }
+}
+
+impl WriteRequest {
+    pub(crate) fn validate(
+        &self,
+        max_file_bytes: u64,
+        budget: ReplyBudget,
+    ) -> Result<WriteSpec<'_>, ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        budget
+            .remaining(&ToolReply {
+                data: Some(WriteData {
+                    bytes_written: u64::MAX,
+                }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            })
+            .map_err(|_| {
+                invalid("Request leaves insufficient response budget for a write result")
+            })?;
+        let content = match self.encoding {
+            Encoding::Utf8 => {
+                if self.content.len() as u64 > max_file_bytes {
+                    return Err(invalid("content exceeds the configured file limit"));
+                }
+                Cow::Borrowed(self.content.as_bytes())
+            }
+            Encoding::Base64 => {
+                let input = self.content.as_bytes();
+                if !input.len().is_multiple_of(4) {
+                    return Err(invalid_base64());
+                }
+                let padding = if input.ends_with(b"==") {
+                    2
+                } else {
+                    usize::from(input.ends_with(b"="))
+                };
+                let decoded_len = (input.len() / 4)
+                    .checked_mul(3)
+                    .and_then(|len| len.checked_sub(padding))
+                    .ok_or_else(invalid_base64)?;
+                // Inspect encoded length/padding before allocating a decoded
+                // buffer. Exact sizing also handles caps not divisible by three.
+                if decoded_len as u64 > max_file_bytes {
+                    return Err(invalid("content exceeds the configured file limit"));
+                }
+                let mut decoded = vec![0; decoded_len];
+                STANDARD
+                    .decode_slice(input, &mut decoded)
+                    .map_err(|_| invalid_base64())?;
+                Cow::Owned(decoded)
+            }
+        };
+        Ok(WriteSpec {
+            path: &self.path,
+            content,
+            overwrite: self.overwrite,
+        })
+    }
+}
+
+fn invalid_base64() -> ToolError {
+    ToolError::new(
+        "invalid_encoding",
+        "content must be canonical padded standard base64",
+        false,
+    )
 }
 
 impl StatRequest {
@@ -378,6 +475,9 @@ impl Failure {
 fn io_failure(error: &io::Error) -> Failure {
     let (code, message, check_master) = match error.kind() {
         io::ErrorKind::NotFound => ("not_found", "Remote file was not found", false),
+        io::ErrorKind::AlreadyExists => {
+            ("already_exists", "Remote destination already exists", false)
+        }
         io::ErrorKind::PermissionDenied => {
             ("permission_denied", "Remote file access was denied", false)
         }
@@ -595,6 +695,74 @@ async fn read_sftp(sftp: Sftp, spec: &ReadSpec<'_>) -> Result<RawRead, Failure> 
     combine_close(result, close)
 }
 
+async fn write_sftp(
+    sftp: Sftp,
+    spec: &WriteSpec<'_>,
+    mutation_started: &mut bool,
+) -> Result<WriteData, Failure> {
+    let opened = async {
+        if !spec.overwrite {
+            // SFTP v3 reports EEXIST as generic FAILURE. Observe existing paths
+            // without following symlinks for a truthful already_exists result.
+            // This is not the race guard: OPEN below still uses atomic EXCL.
+            let metadata = {
+                let mut fs = sftp.fs();
+                fs.symlink_metadata(spec.path).await
+            };
+            match metadata {
+                Ok(_) => {
+                    return Err(Failure {
+                        error: ToolError::new(
+                            "already_exists",
+                            "Remote destination already exists",
+                            false,
+                        ),
+                        check_master: false,
+                    });
+                }
+                Err(SftpError::SftpError(SftpErrorKind::NoSuchFile, _)) => {}
+                Err(error) => return Err(sftp_failure(error)),
+            }
+        }
+        let mut options = sftp.options();
+        options.write(true);
+        if spec.overwrite {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        // OPEN itself can create or truncate, before any WRITE acknowledgement.
+        // Set before polling; cancellation can lose the OPEN response.
+        *mutation_started = true;
+        options.open(spec.path).await.map_err(sftp_failure)
+    }
+    .await;
+    let (result, file) = match opened {
+        Ok(mut file) => {
+            let result = file
+                .write_all(&spec.content)
+                .await
+                .map_err(sftp_failure)
+                .map(|()| WriteData {
+                    bytes_written: spec.content.len() as u64,
+                });
+            (result, Some(file))
+        }
+        Err(error) => (Err(error), None),
+    };
+    let close = async {
+        let file_close = match file {
+            Some(file) => file.close().await.map_err(sftp_failure),
+            None => Ok(()),
+        };
+        combine_close(file_close, sftp.close().await.map_err(sftp_failure))
+    };
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, close)
+        .await
+        .unwrap_or_else(|_| Err(Failure::cleanup()));
+    combine_close(result, close)
+}
+
 async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> {
     let result = {
         // Fs retains library resources: drop it before waiting for Sftp::close.
@@ -721,6 +889,24 @@ pub(crate) async fn read(
         },
         check_master: outcome.check_master,
     }
+}
+
+pub(crate) async fn write(
+    session: &Session,
+    spec: WriteSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<WriteData> {
+    let mut mutation_started = false;
+    let mut outcome = run_sftp(session, context, |sftp| {
+        write_sftp(sftp, &spec, &mut mutation_started)
+    })
+    .await;
+    if let Some(error) = &mut outcome.reply.error {
+        // Unlike reads, write uncertainty is specifically about file effects.
+        // Handshake/preflight failures cannot have dispatched a mutating OPEN.
+        error.remote_state_unknown = mutation_started;
+    }
+    outcome
 }
 
 pub(crate) async fn stat(
@@ -881,6 +1067,108 @@ mod tests {
 
     fn budget() -> ReplyBudget {
         ReplyBudget::new(&RequestId::Number(1)).unwrap()
+    }
+
+    fn write_request(content: &str, encoding: &str) -> WriteRequest {
+        serde_json::from_value(json!({
+            "host": "target", "path": "literal/file", "content": content, "encoding": encoding,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn write_decoding_obeys_exact_byte_caps_including_padding_and_utf8() {
+        for (encoded, raw) in [
+            ("", &b""[..]),
+            ("Zg==", &b"f"[..]),
+            ("Zm8=", &b"fo"[..]),
+            ("Zm9v", &b"foo"[..]),
+            ("AP8=", &b"\0\xff"[..]),
+        ] {
+            let request = write_request(encoded, "base64");
+            assert_eq!(
+                &*request
+                    .validate(raw.len() as u64, budget())
+                    .unwrap()
+                    .content,
+                raw
+            );
+            if !raw.is_empty() {
+                let error = request
+                    .validate(raw.len() as u64 - 1, budget())
+                    .unwrap_err();
+                assert_eq!(error.code, "invalid_argument", "encoded: {encoded}");
+                assert!(!error.remote_state_unknown);
+            }
+        }
+        let request = write_request("é\0雪", "utf8");
+        assert_eq!(
+            &*request.validate(6, budget()).unwrap().content,
+            "é\0雪".as_bytes()
+        );
+        assert_eq!(
+            request.validate(5, budget()).unwrap_err().code,
+            "invalid_argument"
+        );
+    }
+
+    #[test]
+    fn write_rejects_noncanonical_base64_without_accepting_lossy_or_urlsafe_input() {
+        for content in [
+            "Zg", "Zg=", "Zg===", "Zh==", "Zm9=", "====", "--__", "Zm9v\n", "雪",
+        ] {
+            let error = write_request(content, "base64")
+                .validate(100, budget())
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_encoding", "content: {content:?}");
+            assert!(!error.remote_state_unknown);
+        }
+        // Same encoded length as a one-byte payload, but without padding this
+        // contains three bytes. The encoded-length gate must account for that.
+        assert_eq!(
+            write_request("AAAA", "base64")
+                .validate(1, budget())
+                .unwrap_err()
+                .code,
+            "invalid_argument",
+        );
+    }
+
+    #[test]
+    fn write_reserves_success_and_uncertain_failure_before_decoding() {
+        let reservation = ToolReply {
+            data: Some(WriteData {
+                bytes_written: u64::MAX,
+            }),
+            error: Some(ToolError::SSH_CONNECT_FAILED),
+        };
+        let available = ReplyBudget::new(&RequestId::String("".into()))
+            .unwrap()
+            .remaining(&reservation)
+            .unwrap();
+        let id = RequestId::String("x".repeat(available).into());
+        let boundary = ReplyBudget::new(&id).unwrap();
+        assert!(write_request("", "utf8").validate(1, boundary).is_ok());
+        assert!(
+            boundary
+                .result(ToolReply::success(WriteData {
+                    bytes_written: u64::MAX
+                }))
+                .is_ok()
+        );
+        let mut error = ToolError::SSH_CONNECT_FAILED;
+        error.remote_state_unknown = true;
+        assert!(
+            boundary
+                .result(ToolReply::<WriteData>::failure(error))
+                .is_ok()
+        );
+        let id = RequestId::String("x".repeat(available + 1).into());
+        let error = write_request("Zg==", "base64")
+            .validate(1, ReplyBudget::new(&id).unwrap())
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
+        assert!(!error.remote_state_unknown);
     }
 
     fn list_entry() -> ListEntry {
