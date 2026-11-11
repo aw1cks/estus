@@ -1489,8 +1489,6 @@ dependencies = [
 [[package]]
 name = "openssh-sftp-protocol"
 version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaec0119cb70c511578fc2fa2e90ae9a1785348e2c95b9c6469c67169f0276f2"
 dependencies = [
  "bitflags",
  "num-derive",

@@ -1,0 +1,66 @@
+# Vendored from crates.io openssh-sftp-protocol 0.26.0 (MIT).
+# Archive SHA-256: aaec0119cb70c511578fc2fa2e90ae9a1785348e2c95b9c6469c67169f0276f2
+# Source: https://github.com/openssh-rust/openssh-sftp-protocol
+# Retained source is unchanged at import; local fixes follow as separate commits.
+
+[package]
+edition = "2018"
+name = "openssh-sftp-protocol"
+version = "0.26.0"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Data format used to communicate with openssh mux server."
+keywords = [
+    "ssh",
+    "multiplex",
+    "async",
+    "network",
+    "sftp",
+]
+categories = [
+    "asynchronous",
+    "network-programming",
+    "api-bindings",
+]
+license = "MIT"
+repository = "https://github.com/openssh-rust/openssh-sftp-client"
+
+[features]
+bytes = ["ssh_format/bytes"]
+
+[lib]
+name = "openssh_sftp_protocol"
+path = "src/lib.rs"
+
+[dependencies.bitflags]
+version = "2.0.0"
+
+[dependencies.num-derive]
+version = "0.5"
+
+[dependencies.num-traits]
+version = "0.2"
+
+[dependencies.openssh-sftp-protocol-error]
+version = "0.1.1"
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+
+[dependencies.ssh_format]
+version = "0.14.1"
+
+[dependencies.vec-strings]
+version = "0.4.5"
+features = ["serde"]
+
+[dev-dependencies.serde_json]
+version = "1.0"
+
+[dev-dependencies.serde_test]
+version = "1.0"

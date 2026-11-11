@@ -33,3 +33,6 @@ indoc = "2"
 shell-escape = "0.1.5"
 nix = { version = "0.30.1", default-features = false, features = ["signal", "process", "user"] }
 rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process"] }
+
+[patch.crates-io]
+openssh-sftp-protocol = { path = "vendor/openssh-sftp-protocol" }
