@@ -14,7 +14,7 @@ use indoc::{formatdoc, indoc};
 use tempfile::TempDir;
 use testcontainers::{
     ContainerAsync, CopyTargetOptions, GenericImage, ImageExt,
-    core::{IntoContainerPort, WaitFor},
+    core::{ExecCommand, IntoContainerPort, WaitFor},
     runners::AsyncRunner,
 };
 use tokio::{process::Command, time::timeout};
@@ -595,6 +595,79 @@ impl Fixture {
                     .contains("Permission denied (publickey)"),
             "unknown key was not refused specifically by public-key authentication: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    pub async fn primary_endpoint(&self) -> Result<(String, u16)> {
+        Ok((
+            self.containers[0].get_host().await?.to_string(),
+            self.containers[0].get_host_port_ipv4(2222.tcp()).await?,
+        ))
+    }
+
+    /// Add only the test-owned relay endpoint; the real primary host key is pinned.
+    pub fn configure_write_relay(&self, port: u16) -> Result<()> {
+        use std::io::Write;
+
+        let key = fs::read_to_string(self.root.path().join("host-primary.pub"))?;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(self.root.path().join("known_hosts"))?,
+            "[127.0.0.1]:{port} {key}"
+        )?;
+        write!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(self.root.path().join("included.conf"))?,
+            "{}",
+            formatdoc! {"
+                Host slowwrite
+                    HostName 127.0.0.1
+                    Port {port}
+                    User mcp
+                    IdentityFile {identity}
+                    Compression no
+            ", identity = ssh_path(&self.root.path().join("mcp"))?}
+        )?;
+        write!(
+            fs::OpenOptions::new().append(true).open(&self.config)?,
+            "{}",
+            indoc! {"
+                [targets.slowwrite]
+                ssh_host = 'slowwrite'
+            "}
+        )?;
+        Ok(())
+    }
+
+    /// Root container exec is fixture setup/observation, never the production writer.
+    pub async fn primary_exec(&self, script: &str) -> Result<Vec<u8>> {
+        timeout(CLEANUP, async {
+            let mut exec = self.containers[0]
+                .exec(ExecCommand::new(["/bin/sh", "-eu", "-c", script]))
+                .await?;
+            let stdout = exec.stdout_to_vec().await?;
+            let stderr = exec.stderr_to_vec().await?;
+            ensure!(
+                exec.exit_code().await? == Some(0),
+                "fixture exec failed: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            Ok::<_, anyhow::Error>(stdout)
+        })
+        .await
+        .context("fixture exec deadline")?
+    }
+
+    pub async fn kill_primary(&self) -> Result<()> {
+        timeout(CLEANUP, self.containers[0].stop_with_timeout(Some(0)))
+            .await
+            .context("primary container kill deadline")??;
+        ensure!(
+            !timeout(CLEANUP, self.containers[0].is_running()).await??,
+            "primary container survived kill"
         );
         Ok(())
     }
