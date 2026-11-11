@@ -656,7 +656,7 @@ pub struct WireServer {
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
     pub log: Log,
-    drain: JoinHandle<std::io::Result<()>>,
+    drain: Option<JoinHandle<std::io::Result<()>>>,
 }
 
 impl WireServer {
@@ -675,7 +675,7 @@ impl WireServer {
             input,
             output,
             log,
-            drain,
+            drain: Some(drain),
         })
     }
 
@@ -691,6 +691,10 @@ impl WireServer {
     ) -> Result<(Value, usize)> {
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await?;
+        self.receive(id).await
+    }
+
+    pub async fn receive(&mut self, id: Value) -> Result<(Value, usize)> {
         let mut frame = Vec::new();
         loop {
             frame.clear();
@@ -728,6 +732,17 @@ impl WireServer {
             .await
     }
 
+    pub async fn close_stderr(&mut self) -> Result<()> {
+        if let Some(drain) = self.drain.take() {
+            drain.abort();
+            match drain.await {
+                Err(error) if error.is_cancelled() => {}
+                result => result??,
+            }
+        }
+        Ok(())
+    }
+
     pub async fn stop(mut self, sigterm: bool) -> Result<Log> {
         if sigterm && self.child.try_wait()?.is_none() {
             kill(
@@ -741,7 +756,7 @@ impl WireServer {
             Ok(result) => result?,
             Err(_) => {
                 self.child.kill().await?;
-                self.drain.abort();
+                self.close_stderr().await?;
                 bail!("server shutdown exceeded ten seconds");
             }
         };
@@ -757,7 +772,9 @@ impl WireServer {
                 "non-protocol trailing stdout"
             );
         }
-        timeout(CLEANUP, self.drain).await???;
+        if let Some(drain) = self.drain.take() {
+            timeout(CLEANUP, drain).await???;
+        }
         ensure!(status.success(), "server shutdown status: {status}");
         Ok(self.log)
     }
