@@ -310,6 +310,125 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("operator.toml");
+    std::fs::write(
+        &path,
+        indoc::indoc! {"
+            [targets.allowed]
+            ssh_host = 'encoded-command.invalid'
+            [targets.allowed.sudo]
+            mode = 'same-account'
+            users = ['root']
+            programs = ['/usr/bin/true']
+        "},
+    )?;
+    let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    let scenario = timeout(Duration::from_secs(20), async {
+        server.initialize().await?;
+        let mut argv = vec![""; 100_001];
+        argv[0] = "/usr/bin/true";
+        let cases = [
+            (
+                "apostrophe expansion",
+                "ssh_exec",
+                json!({"host":"allowed","command":format!("#{}", "'".repeat(65_535))}),
+            ),
+            (
+                "bang expansion",
+                "ssh_exec",
+                json!({"host":"allowed","command":"!".repeat(65_000)}),
+            ),
+            (
+                "nested cwd escaping",
+                "ssh_exec",
+                // Both the raw cwd and inner script fit; outer shell escaping does not.
+                json!({"host":"allowed","command":"true","cwd":format!("/{}", "'".repeat(8_000))}),
+            ),
+            (
+                "empty sudo arguments",
+                "ssh_sudo",
+                json!({"host":"allowed","user":"root","argv":argv}),
+            ),
+        ];
+        for (index, (label, tool, arguments)) in cases.into_iter().enumerate() {
+            let id = 10 + index as u64;
+            server
+                .send(json!({
+                    "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                    "params":{"name":tool,"arguments":arguments}
+                }))
+                .await?;
+            let response = server.response(id).await?;
+            let result = &response["result"];
+            ensure!(result["isError"] == true, "{label}: expected tool error");
+            let content = &result["structuredContent"];
+            ensure!(
+                content.get("data") == Some(&Value::Null),
+                "{label}: expected null data"
+            );
+            ensure!(
+                content["error"]["code"] == "invalid_argument",
+                "{label}: expected invalid_argument"
+            );
+            ensure!(
+                content["error"]["remote_state_unknown"] == false,
+                "{label}: remote state must remain known"
+            );
+        }
+        server
+            .send(json!({
+                "jsonrpc":"2.0", "id":20, "method":"tools/call",
+                "params":{"name":"ssh_targets","arguments":{}}
+            }))
+            .await?;
+        let discovery = server.response(20).await?;
+        ensure!(discovery["result"]["isError"] != true);
+        ensure!(
+            discovery["result"]["structuredContent"]
+                == json!({
+                    "data":{"mode":"configured","targets":[
+                        {"name":"allowed","sudo_mode":"same-account"}
+                    ]},
+                    "error":null
+                }),
+            "discovery failed after encoded-command rejections"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("encoded-command scenario timed out")
+    .and_then(|result| result);
+    let finished = server.finish().await;
+    let removed = dir.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success(), "server exit status: {status}");
+    let mut rejected = [false; 4];
+    for line in std::str::from_utf8(&stderr)?.lines() {
+        let record: Value = serde_json::from_str(line).context("non-JSON audit record")?;
+        ensure!(
+            record["event"] != "master_start",
+            "encoded-command rejection launched SSH"
+        );
+        for (index, seen) in rejected.iter_mut().enumerate() {
+            if record["event"] == "reject" && record["request_id"] == 10 + index as u64 {
+                ensure!(record["error_code"] == "invalid_argument");
+                ensure!(record["remote_state_unknown"] == false);
+                *seen = true;
+            }
+        }
+    }
+    ensure!(
+        rejected.into_iter().all(|seen| seen),
+        "missing encoded-command rejection audit records"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable() -> Result<()> {
     const MESSAGE_LIMIT: usize = 16_777_216;
     let mut server = Server::start(&[])?;
