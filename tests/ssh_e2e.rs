@@ -1,4 +1,4 @@
-//! Explicit packaged ordinary-SSH acceptance against the exact Nix-built image.
+//! Explicit packaged SSH, SFTP and sudo acceptance against the exact Nix-built image.
 //! Local runs require SSH_MCP_TEST_FIXTURE, explicit DOCKER_HOST and the Nix CLI.
 //! They check artifact/running-image identity, but upstream testcontainers 0.28
 //! can still pull on create-404. Required CI must retain the image and deny
@@ -465,4 +465,393 @@ async fn ssh_write_timeout_after_truncate() -> Result<()> {
 #[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
 async fn ssh_write_cancel_after_truncate() -> Result<()> {
     isolated_write_fault(WriteFault::Cancel).await
+}
+
+fn command_succeeded(reply: &Value, stdout: &str) -> Result<()> {
+    ensure!(
+        reply["error"].is_null() && reply["data"]["exit_code"] == 0,
+        "command did not succeed"
+    );
+    let data = &reply["data"];
+    ensure!(
+        data["stdout"] == stdout && data["stderr"] == "",
+        "command output differs"
+    );
+    for field in [
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_lossy",
+        "stderr_lossy",
+    ] {
+        ensure!(
+            data[field] == false,
+            "command output was truncated or decoded lossily"
+        );
+    }
+    Ok(())
+}
+
+fn policy_rejected(reply: &Value) -> Result<()> {
+    ensure!(reply["data"].is_null() && reply["error"]["code"] == "policy_denied");
+    ensure!(reply["error"]["remote_state_unknown"] == false);
+    Ok(())
+}
+
+fn private_boundary(text: &str, markers: &[String]) -> Result<()> {
+    for marker in markers {
+        ensure!(
+            !text.contains(marker),
+            "credential material reached the MCP transcript/audit"
+        );
+    }
+    Ok(())
+}
+
+async fn fixture_fingerprints(
+    fixture: &isolated::Fixture,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut keys = std::collections::BTreeMap::new();
+    for account in ["mcp", "mcp-sudo", "mcp-admin", "mcp-password", "mcp-tty"] {
+        keys.insert(account.to_owned(), fixture.key_fingerprint(account).await?);
+    }
+    Ok(keys)
+}
+
+async fn observed_authentications(
+    fixture: &isolated::Fixture,
+    keys: &std::collections::BTreeMap<String, String>,
+    expected: &[(&str, usize)],
+) -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let accepted = fixture.authentication_keys().await?;
+            for (account, fingerprint) in &accepted {
+                ensure!(
+                    keys.get(account) == Some(fingerprint),
+                    "SSH authenticated with a different account/key"
+                );
+            }
+            let mut complete = true;
+            for (account, limit) in expected {
+                let count = accepted.iter().filter(|(name, _)| name == account).count();
+                ensure!(
+                    count <= *limit,
+                    "unexpected extra SSH authentication for {account}"
+                );
+                complete &= count == *limit;
+            }
+            if complete {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("expected account/key authentication was not observed")?
+}
+
+async fn observed_master_count(
+    log: &support::Log,
+    count: usize,
+) -> Result<Vec<(u32, std::path::PathBuf)>> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let owned = masters(log)?;
+            ensure!(owned.len() <= count, "unexpected extra owned SSH master");
+            if owned.len() == count {
+                return Ok::<_, anyhow::Error>(owned);
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("owned SSH master records did not arrive")?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires exact Nix fixture artifact and explicit Docker-compatible daemon"]
+async fn ssh_sudo_authority() -> Result<()> {
+    use std::io::Write as _;
+
+    let fixture = isolated::Fixture::start().await?;
+    // A second logical target for the same sudo-capable UID is deliberately NOT
+    // isolation: disabling its structured tool cannot constrain arbitrary exec.
+    let setup = (|| -> Result<_> {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.config)?
+            .write_all(
+                indoc::indoc! {"
+                [targets.same-disabled]
+                ssh_host = 'same'
+            "}
+                .as_bytes(),
+            )?;
+        fixture.credential_markers()
+    })();
+    let markers = match setup {
+        Ok(markers) => markers,
+        Err(error) => {
+            let cleanup = fixture.stop().await;
+            cleanup?;
+            return Err(error);
+        }
+    };
+    let client = match Client::start(&fixture.config).await {
+        Ok(client) => client,
+        Err(error) => {
+            let cleanup = fixture.stop().await;
+            cleanup?;
+            return Err(error);
+        }
+    };
+    let scenario = async {
+        let keys = fixture_fingerprints(&fixture).await?;
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 3),
+                ("mcp-sudo", 1),
+                ("mcp-admin", 0),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+        let out = fixture
+            .primary_exec("/usr/bin/id -u mcp; /usr/bin/id -u mcp-sudo; /usr/bin/id -u mcp-admin")
+            .await?;
+        ensure!(
+            out == b"1000\n1001\n1002\n",
+            "fixture identities are not distinct UIDs"
+        );
+
+        for (tool, args) in [
+            (
+                "ssh_sudo",
+                json!({"host":"same-disabled","argv":["/usr/bin/id","-u"]}),
+            ),
+            (
+                "ssh_sudo",
+                json!({"host":"split-admin","argv":["/usr/bin/id","-u"]}),
+            ),
+            (
+                "ssh_exec",
+                json!({"host":"split-admin","command":"/usr/bin/id -u"}),
+            ),
+        ] {
+            policy_rejected(&client.call(tool, args).await?)?;
+        }
+        ensure!(
+            masters(&client.log)?.is_empty(),
+            "policy refusal dispatched SSH"
+        );
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 3),
+                ("mcp-sudo", 1),
+                ("mcp-admin", 0),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+
+        let ordinary = client
+            .call(
+                "ssh_exec",
+                json!({"host":"split","command":"/usr/bin/id -u"}),
+            )
+            .await?;
+        command_succeeded(&ordinary, "1000\n")?;
+        let denied = client
+            .call(
+                "ssh_exec",
+                json!({
+                    "host":"split","command":"/usr/bin/sudo -n -k -u root -- /usr/bin/id -u"
+                }),
+            )
+            .await?;
+        ensure!(
+            denied["error"]["code"] == "command_failed"
+                && denied["error"]["remote_state_unknown"] == false
+                && denied["data"]["exit_code"] == 1
+                && denied["data"]["stdout"] == ""
+        );
+        let first = observed_master_count(&client.log, 1).await?;
+        let root = client
+            .call(
+                "ssh_sudo",
+                json!({"host":"split","argv":["/usr/bin/id","-u"]}),
+            )
+            .await?;
+        command_succeeded(&root, "0\n")?;
+        let split = observed_master_count(&client.log, 2).await?;
+        ensure!(split[..1] == first);
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 4),
+                ("mcp-sudo", 1),
+                ("mcp-admin", 1),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+        // A primed elevated master must not bypass per-request user/program policy.
+        for args in [
+            json!({"host":"split","user":"mcp","argv":["/usr/bin/id","-u"]}),
+            json!({"host":"split","argv":["/bin/sh","-c","/usr/bin/id -u"]}),
+        ] {
+            policy_rejected(&client.call("ssh_sudo", args).await?)?;
+        }
+        command_succeeded(
+            &client
+                .call(
+                    "ssh_exec",
+                    json!({"host":"split","command":"/usr/bin/id -u"}),
+                )
+                .await?,
+            "1000\n",
+        )?;
+        command_succeeded(
+            &client
+                .call(
+                    "ssh_sudo",
+                    json!({"host":"split","argv":["/usr/bin/id","-u"]}),
+                )
+                .await?,
+            "0\n",
+        )?;
+        ensure!(
+            masters(&client.log)? == split,
+            "split roles did not reuse their two original masters"
+        );
+
+        command_succeeded(
+            &client
+                .call(
+                    "ssh_exec",
+                    json!({"host":"same","command":"/usr/bin/id -u"}),
+                )
+                .await?,
+            "1001\n",
+        )?;
+        let same = observed_master_count(&client.log, 3).await?;
+        command_succeeded(
+            &client
+                .call(
+                    "ssh_sudo",
+                    json!({"host":"same","argv":["/usr/bin/id","-u"]}),
+                )
+                .await?,
+            "0\n",
+        )?;
+        ensure!(
+            masters(&client.log)? == same,
+            "same-account sudo created another identity/master"
+        );
+        // This succeeds despite the earlier structured sudo policy refusal.
+        command_succeeded(&client.call("ssh_exec", json!({
+            "host":"same-disabled","command":"/usr/bin/sudo -n -k -u root -- /usr/bin/id -u"
+        })).await?, "0\n")?;
+        let owned = observed_master_count(&client.log, 4).await?;
+        for ((pid, socket), alias) in owned.iter().zip(["split", "split-admin", "same", "same"]) {
+            let check = support::run(
+                Command::new(&fixture.ssh)
+                    .arg("-F")
+                    .arg(&fixture.ssh_config)
+                    .arg("-S")
+                    .arg(socket)
+                    .args(["-O", "check", alias]),
+            )
+            .await?;
+            ensure!(
+                check.status.success()
+                    && String::from_utf8_lossy(&check.stderr).contains(&format!("(pid={pid})")),
+                "original authority master did not remain alive"
+            );
+        }
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 4),
+                ("mcp-sudo", 3),
+                ("mcp-admin", 1),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let log = client.log.clone();
+    let server = client.stop().await;
+    let master_cleanup = match masters(&log) {
+        Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    };
+    let container_cleanup = fixture.stop().await;
+    let errors: Vec<_> = [
+        ("authority", scenario),
+        ("server cleanup", server.map(|_| ())),
+        ("master cleanup", master_cleanup),
+        ("container cleanup", container_cleanup),
+    ]
+    .into_iter()
+    .filter_map(|(label, result)| result.err().map(|error| format!("{label}: {error:#}")))
+    .collect();
+    ensure!(errors.is_empty(), "{}", errors.join("\n"));
+    private_boundary(&log.text(), &markers)?;
+    let records = log.final_records()?;
+    let roles: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "master_start")
+        .map(|record| record["role"].as_str())
+        .collect();
+    ensure!(
+        roles
+            == [
+                Some("ordinary"),
+                Some("elevated"),
+                Some("ordinary"),
+                Some("ordinary")
+            ]
+    );
+    for (host, role, mode) in [
+        ("same", "ordinary", "same-account"),
+        ("split", "elevated", "separate-identity"),
+    ] {
+        let completed: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                record["event"] == "finish"
+                    && record["tool"] == "ssh_sudo"
+                    && record["host"] == host
+            })
+            .collect();
+        ensure!(
+            !completed.is_empty(),
+            "successful elevated audit is missing"
+        );
+        ensure!(
+            completed
+                .iter()
+                .all(|record| record["identity_role"] == role
+                    && record["sudo_mode"] == mode
+                    && record["user"] == "root"
+                    && record["program"] == "/usr/bin/id"
+                    && record["exit_code"] == 0
+                    && record["remote_state_unknown"] == false)
+        );
+    }
+    Ok(())
 }

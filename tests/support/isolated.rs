@@ -680,6 +680,67 @@ impl Fixture {
             .count())
     }
 
+    pub async fn authentication_keys(&self) -> Result<Vec<(String, String)>> {
+        let logs = timeout(CLEANUP, self.containers[0].stderr_to_vec()).await??;
+        String::from_utf8(logs)?
+            .lines()
+            .filter_map(|line| {
+                line.split_once("Accepted publickey for ")
+                    .map(|(_, accepted)| {
+                        let account = accepted
+                            .split_ascii_whitespace()
+                            .next()
+                            .context("accepted SSH account")?;
+                        let fingerprint = accepted
+                            .split_ascii_whitespace()
+                            .find(|field| field.starts_with("SHA256:"))
+                            .context("accepted SSH key fingerprint")?;
+                        Ok((account.to_owned(), fingerprint.to_owned()))
+                    })
+            })
+            .collect()
+    }
+
+    pub async fn key_fingerprint(&self, account: &str) -> Result<String> {
+        let output = run(Command::new(find_program("ssh-keygen")?)
+            .args(["-l", "-E", "sha256", "-f"])
+            .arg(self.root.path().join(format!("{account}.pub"))))
+        .await?;
+        ensure!(
+            output.status.success(),
+            "fixture public-key fingerprint failed"
+        );
+        Ok(std::str::from_utf8(&output.stdout)?
+            .split_ascii_whitespace()
+            .nth(1)
+            .context("fixture public-key fingerprint")?
+            .to_owned())
+    }
+
+    pub fn credential_markers(&self) -> Result<Vec<String>> {
+        let mut markers = vec![
+            "-----BEGIN OPENSSH PRIVATE KEY-----".to_owned(),
+            self.root
+                .path()
+                .to_str()
+                .context("fixture credential directory UTF-8")?
+                .to_owned(),
+        ];
+        for key in ACCOUNTS
+            .into_iter()
+            .chain(["host-primary", "host-nosftp", "unknown"])
+        {
+            let private = fs::read_to_string(self.root.path().join(key))?;
+            markers.extend(
+                private
+                    .lines()
+                    .filter(|line| line.len() >= 32 && !line.starts_with("-----"))
+                    .map(str::to_owned),
+            );
+        }
+        Ok(markers)
+    }
+
     pub async fn stop(mut self) -> Result<()> {
         let mut errors = Vec::new();
         for container in self.containers.drain(..) {
