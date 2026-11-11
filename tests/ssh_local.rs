@@ -899,3 +899,212 @@ async fn ssh_channel_timeout() -> Result<()> {
     scenario?;
     cleanup
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking and a usable non-root local account"]
+async fn ssh_response_wire_budget() -> Result<()> {
+    const MIB: usize = 1_048_576;
+    const FRAME_LIMIT: usize = 16 * MIB;
+
+    fn output_prefixes(reply: &Value, stdout: &[u8], stderr: &[u8]) -> Result<()> {
+        let data = &reply["data"];
+        for (stream, emitted) in [("stdout", stdout), ("stderr", stderr)] {
+            let expected = String::from_utf8_lossy(emitted);
+            let retained = data[stream].as_str().context("missing captured stream")?;
+            ensure!(
+                expected.starts_with(retained),
+                "{stream} is not a valid UTF-8 prefix of the lossily decoded emitted bytes"
+            );
+            ensure!(
+                data[format!("{stream}_truncated")] == (retained.len() < expected.len()),
+                "{stream} truncation flag disagrees with retained prefix"
+            );
+            ensure!(
+                data[format!("{stream}_lossy")] == std::str::from_utf8(emitted).is_err(),
+                "{stream} lossy flag lost execution evidence"
+            );
+        }
+        ensure!(
+            data["stdout_truncated"] == true || data["stderr_truncated"] == true,
+            "wire-budget scenario did not truncate either stream"
+        );
+        ensure!(
+            !data["stdout"].as_str().context("stdout")?.is_empty(),
+            "wire budget discarded every stdout byte"
+        );
+        ensure!(data["termination"] == "exited");
+        ensure!(data["remote_may_still_be_running"] == false);
+        ensure!(data["duration_ms"].is_u64());
+        Ok(())
+    }
+
+    let mut fixture = Fixture::start().await?;
+    let scenario = async {
+        let original_config = fs::read_to_string(&fixture.config)?;
+        // Omit the fixture's tiny override: both capture and the SDK's incoming
+        // frame limit must use their real defaults in this scenario.
+        fs::write(
+            &fixture.config,
+            original_config.replace("max_output_bytes = 1024\n", ""),
+        )?;
+        let client = Client::start(&fixture.config).await?;
+        let sdk = async {
+            let effects = fixture.root.path().join("wire-sdk-effects");
+            let done = fixture.root.path().join("wire-sdk-done");
+            fixture.eventual_markers.push(done.clone());
+            let command = formatdoc! {"
+                set -e
+                printf effect >> {effects}
+                dd if=/dev/zero bs=1048576 count=1 2>/dev/null
+                {{ dd if=/dev/zero bs=1048576 count=1 2>/dev/null; }} >&2
+                printf done > {done}
+                exit 0
+                ",
+                effects = quote(&effects.to_string_lossy()),
+                done = quote(&done.to_string_lossy()),
+            };
+            let reply = exec(&client, &command).await?;
+            ensure!(succeeded(&reply)?["exit_code"] == 0);
+            let emitted = vec![0; MIB];
+            output_prefixes(&reply, &emitted, &emitted)?;
+            Fixture::await_file(&done).await?;
+            ensure!(
+                fs::read(&done)? == b"done",
+                "SDK command did not drain to completion"
+            );
+            ensure!(
+                succeeded(&exec(&client, "printf SDK_AFTER_BUDGET").await?)?["stdout"]
+                    == "SDK_AFTER_BUDGET",
+                "default SDK stopped responding after oversized output"
+            );
+            ensure!(fs::read(&effects)? == b"effect", "SDK command was replayed");
+            ensure!(
+                masters(&client.log)?.len() == 1,
+                "SDK command replaced its master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let sdk_log = client.log.clone();
+        let stopped = client.stop().await;
+        let gone = match masters(&sdk_log) {
+            Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        sdk?;
+        stopped?;
+        gone?;
+
+        fs::write(
+            &fixture.config,
+            original_config.replace("max_output_bytes = 1024", "max_output_bytes = 33554432"),
+        )?;
+        let mut server = WireServer::start(&fixture.config)?;
+        let raw = async {
+            server.initialize().await?;
+            let effects = fixture.root.path().join("wire-raw-effects");
+            let done = fixture.root.path().join("wire-raw-done");
+            fixture.eventual_markers.push(done.clone());
+            // Invalid UTF-8, multibyte UTF-8, controls, quotes and backslashes
+            // precede output well above the default capture cap on each stream.
+            let command = formatdoc! {r#"
+                set -e
+                printf effect >> {effects}
+                printf '\377\342\202\254\000\001"\\\n'
+                dd if=/dev/zero bs=1048576 count=4 2>/dev/null
+                printf '\377\342\202\254\000\001"\\\n' >&2
+                dd if=/dev/zero bs=1048576 count=4 2>/dev/null | tr '\000' '\001' >&2
+                printf done > {done}
+                exit 7
+                "#,
+                effects = quote(&effects.to_string_lossy()),
+                done = quote(&done.to_string_lossy()),
+            };
+            let id = json!(format!("H02-{}", "\"\\\n\t\u{0000}é".repeat(257)));
+            let (response, frame_bytes) = server
+                .request_with_size(
+                    id.clone(),
+                    "tools/call",
+                    json!({
+                        "name":"ssh_exec",
+                        "arguments":{"host":"plain","command":command},
+                    }),
+                )
+                .await?;
+            ensure!(response["id"] == id, "escaped string request ID changed");
+            ensure!(
+                frame_bytes <= FRAME_LIMIT,
+                "complete JSON-RPC frame including newline exceeded 16 MiB: {frame_bytes}"
+            );
+            ensure!(response.get("error").is_none(), "unexpected JSON-RPC error");
+            let result = &response["result"];
+            let reply = &result["structuredContent"];
+            let content = result["content"].as_array().context("raw content array")?;
+            ensure!(content.len() == 1 && content[0]["type"] == "text");
+            let text: Value = serde_json::from_str(
+                content[0]["text"]
+                    .as_str()
+                    .context("raw compatibility text")?,
+            )?;
+            ensure!(&text == reply, "raw text and structuredContent disagree");
+            ensure!(result["isError"] == true, "exit 7 lost tool error status");
+            failed(reply, "command_failed")?;
+            ensure!(reply["data"]["exit_code"] == 7, "exit 7 evidence was lost");
+            let prefix = b"\xff\xe2\x82\xac\x00\x01\"\\\n";
+            let mut stdout = prefix.to_vec();
+            stdout.resize(prefix.len() + 4 * MIB, 0);
+            let mut stderr = prefix.to_vec();
+            stderr.resize(prefix.len() + 4 * MIB, 1);
+            output_prefixes(reply, &stdout, &stderr)?;
+            ensure!(
+                reply["data"]["stdout"]
+                    .as_str()
+                    .context("raw stdout")?
+                    .len()
+                    > MIB,
+                "elevated capture cap did not retain output beyond the default cap"
+            );
+            ensure!(reply["error"]["remote_state_unknown"] == false);
+            Fixture::await_file(&done).await?;
+            ensure!(
+                fs::read(&done)? == b"done",
+                "raw command did not drain to completion"
+            );
+            let after = server
+                .request(
+                    3,
+                    "tools/call",
+                    json!({"name":"ssh_exec","arguments":{
+                        "host":"plain","command":"printf RAW_AFTER_BUDGET",
+                    }}),
+                )
+                .await?;
+            ensure!(
+                after["result"]["structuredContent"]["data"]["stdout"] == "RAW_AFTER_BUDGET",
+                "raw server stopped responding after clipped output"
+            );
+            ensure!(fs::read(&effects)? == b"effect", "raw command was replayed");
+            ensure!(
+                masters(&server.log)?.len() == 1,
+                "raw command replaced its master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let raw_log = server.log.clone();
+        let stopped = server.stop(false).await;
+        let gone = match masters(&raw_log) {
+            Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        raw?;
+        stopped?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
