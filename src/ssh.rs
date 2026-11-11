@@ -1,9 +1,11 @@
 //! Owned foreground OpenSSH masters; native mux channels never fall back to ssh.
-use crate::{config::IdentityRole, server::ToolError};
+use crate::{audit, config::IdentityRole, server::ToolError};
+use futures_util::FutureExt;
 use openssh::Session;
 use std::{
     collections::HashMap,
     os::unix::ffi::OsStrExt,
+    panic::AssertUnwindSafe,
     path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex, MutexGuard, Weak},
@@ -280,6 +282,7 @@ struct Master {
     child: Option<Child>,
     directory: Option<TempDir>,
     drain: Option<JoinHandle<()>>,
+    finalizer: Option<EntryFinalizer>,
 }
 
 impl Master {
@@ -341,6 +344,7 @@ impl Master {
                 child: Some(child),
                 directory: Some(directory),
                 drain,
+                finalizer: None,
             },
             session,
         ))
@@ -358,8 +362,13 @@ impl Master {
                     }
                     sleep(READINESS_POLL).await;
                 }
-                if let Ok(session) = Arc::try_unwrap(session) {
-                    let _ = session.close().await;
+                match Arc::try_unwrap(session) {
+                    Ok(session) => {
+                        if session.close().await.is_err() {
+                            diagnostic("master_close_failed");
+                        }
+                    }
+                    Err(_) => diagnostic("master_session_ownership_mismatch"),
                 }
             })
             .await;
@@ -369,16 +378,28 @@ impl Master {
             status = match timeout_at(until, child.wait()).await {
                 Ok(Ok(status)) => status.code(),
                 _ => {
-                    let _ = child.start_kill();
-                    child.wait().await.ok().and_then(|status| status.code())
+                    if child.start_kill().is_err() {
+                        diagnostic("master_kill_failed");
+                    }
+                    match child.wait().await {
+                        Ok(status) => status.code(),
+                        Err(_) => {
+                            diagnostic("master_reap_failed");
+                            None
+                        }
+                    }
                 }
             };
+        } else {
+            diagnostic("master_child_ownership_mismatch");
         }
         self.child.take();
         self.finish_drain().await;
         // The owned process has been reaped before unlinking its socket.
-        if let Some(directory) = self.directory.take() {
-            let _ = directory.close();
+        if let Some(directory) = self.directory.take()
+            && directory.close().is_err()
+        {
+            diagnostic("master_socket_cleanup_failed");
         }
         status
     }
@@ -386,12 +407,15 @@ impl Master {
     async fn finish_drain(&mut self) {
         if let Some(mut drain) = self.drain.take() {
             // A configured proxy descendant may inherit stderr after ssh exits.
-            if timeout_at(Instant::now() + Duration::from_millis(100), &mut drain)
-                .await
-                .is_err()
-            {
-                drain.abort();
-                let _ = drain.await;
+            match timeout_at(Instant::now() + Duration::from_millis(100), &mut drain).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => diagnostic("master_drain_failed"),
+                Err(_) => {
+                    drain.abort();
+                    if drain.await.is_err_and(|error| !error.is_cancelled()) {
+                        diagnostic("master_drain_failed");
+                    }
+                }
             }
         }
     }
@@ -399,23 +423,37 @@ impl Master {
 
 impl Drop for Master {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
+        let child = self.child.take();
         let directory = self.directory.take();
         let drain = self.drain.take();
-        // Launch/cleanup cancellation guard. The process and directory move
-        // together to an owned reaper; kill_on_drop remains the last backstop.
-        let _ = child.start_kill();
+        if child.is_none() && directory.is_none() && drain.is_none() {
+            return;
+        }
+        let finalizer = self.finalizer.take();
+        if let Some(finalizer) = &finalizer {
+            unavailable(&finalizer.entry);
+        }
+        // On an unexpected unwind, keep finalization with the owned reaper:
+        // shutdown must not observe done before process/socket cleanup.
         tokio::spawn(async move {
-            let _ = child.wait().await;
+            if let Some(mut child) = child {
+                if child.start_kill().is_err() {
+                    diagnostic("master_kill_failed");
+                }
+                if child.wait().await.is_err() {
+                    diagnostic("master_reap_failed");
+                }
+            }
             if let Some(drain) = drain {
                 drain.abort();
                 let _ = drain.await;
             }
-            if let Some(directory) = directory {
-                let _ = directory.close();
+            if let Some(directory) = directory
+                && directory.close().is_err()
+            {
+                diagnostic("master_socket_cleanup_failed");
             }
+            drop(finalizer);
         });
     }
 }
@@ -464,6 +502,7 @@ async fn ready(
 
 async fn supervise(master: &mut Master, entry: &Entry, control: &EntryControl) {
     let Some(child) = master.child.as_mut() else {
+        diagnostic("master_child_ownership_mismatch");
         return;
     };
     loop {
@@ -493,6 +532,53 @@ async fn supervise(master: &mut Master, entry: &Entry, control: &EntryControl) {
     }
 }
 
+/// Finalization follows the master into its fallback reaper on unwind.
+struct EntryFinalizer {
+    owner: Weak<Pool>,
+    key: Key,
+    entry: Arc<Entry>,
+    completed: bool,
+}
+
+fn unavailable(entry: &Entry) {
+    entry.stop.cancel();
+    {
+        let mut state = lock(&entry.state);
+        state.session.take();
+        if state.failure.is_none() {
+            state.failure = Some(Failure::Lost);
+        }
+    }
+    entry.ready.cancel();
+}
+
+impl Drop for EntryFinalizer {
+    fn drop(&mut self) {
+        unavailable(&self.entry);
+        let misplaced = if let Some(owner) = self.owner.upgrade() {
+            let mut entries = lock(&owner.entries);
+            let matches = entries
+                .get(&self.key)
+                .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
+            if matches {
+                entries.remove(&self.key);
+            }
+            !matches
+        } else {
+            false
+        };
+        // Signal before reporting: even an unexpected diagnostic failure must
+        // not strand shutdown. Normal completion follows awaited cleanup.
+        self.entry.done.cancel();
+        if misplaced {
+            diagnostic("master_entry_ownership_mismatch");
+        }
+        if !self.completed {
+            diagnostic("master_finalization_interrupted");
+        }
+    }
+}
+
 async fn run_entry(
     owner: Weak<Pool>,
     key: Key,
@@ -501,61 +587,85 @@ async fn run_entry(
     destination: String,
     control: EntryControl,
 ) {
-    let cancelled = entry.stop.is_cancelled()
-        || control.shutdown.is_cancelled()
-        || control.stopping.is_cancelled();
-    if cancelled
-        || control
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-    {
-        lock(&entry.state).failure = Some(if cancelled {
-            Failure::Cancelled
-        } else {
-            Failure::Timeout
-        });
-        entry.stop.cancel();
-        entry.ready.cancel();
-    } else if let Ok((mut master, session)) = Master::launch(config.as_ref(), &destination) {
+    let role = key.1;
+    let mut finalizer = Some(EntryFinalizer {
+        owner,
+        key,
+        entry: Arc::clone(&entry),
+        completed: false,
+    });
+    // Keep process ownership outside the unwind boundary. Dropping the inner
+    // future must not drop the only handle before awaited cleanup can run.
+    let mut resources = None;
+    let result = AssertUnwindSafe(async {
+        let cancelled = entry.stop.is_cancelled()
+            || control.shutdown.is_cancelled()
+            || control.stopping.is_cancelled();
+        if cancelled
+            || control
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            lock(&entry.state).failure = Some(if cancelled {
+                Failure::Cancelled
+            } else {
+                Failure::Timeout
+            });
+            return;
+        }
+        let (mut master, session) = match Master::launch(config.as_ref(), &destination) {
+            Ok(resources) => resources,
+            Err(failure) => {
+                lock(&entry.state).failure = Some(failure);
+                return;
+            }
+        };
+        master.finalizer = finalizer.take();
+        let (master, session) = resources.insert((master, Arc::new(session)));
         let pid = master.child.as_ref().and_then(Child::id);
         let socket = master
             .directory
             .as_ref()
             .map(|directory| directory.path().join("c"));
-        lifecycle("master_start", pid, socket.as_ref(), key.1, None);
-        let result = ready(&mut master, &session, &entry, &control).await;
-        let session = Arc::new(session);
+        lifecycle("master_start", pid, socket.as_ref(), role, None);
+        let result = ready(master, session, &entry, &control).await;
         {
             let mut state = lock(&entry.state);
             if let Err(failure) = result {
                 state.failure = Some(failure);
             } else {
-                state.session = Some(Arc::clone(&session));
+                state.session = Some(Arc::clone(session));
             }
         }
         entry.ready.cancel();
         if result.is_ok() {
-            supervise(&mut master, &entry, &control).await;
+            supervise(master, &entry, &control).await;
         }
-        entry.stop.cancel();
-        {
-            let mut state = lock(&entry.state);
-            state.session.take();
-            if state.failure.is_none() {
-                state.failure = Some(Failure::Lost);
-            }
-        }
+    })
+    .catch_unwind()
+    .await;
+    if result.is_err() {
+        // Never include panic payloads, backend errors, or destinations.
+        diagnostic("master_supervisor_panicked");
+    }
+    unavailable(&entry);
+    if let Some((mut master, session)) = resources {
+        let pid = master.child.as_ref().and_then(Child::id);
+        let socket = master
+            .directory
+            .as_ref()
+            .map(|directory| directory.path().join("c"));
         let status = master.cleanup(Some(session), &entry).await;
-        lifecycle("master_finish", pid, socket.as_ref(), key.1, status);
-    } else {
-        lock(&entry.state).failure = Some(Failure::Connect);
-        entry.stop.cancel();
-        entry.ready.cancel();
+        lifecycle("master_finish", pid, socket.as_ref(), role, status);
+        if let Some(finalizer) = master.finalizer.as_mut() {
+            finalizer.completed = true;
+        } else {
+            diagnostic("master_finalizer_ownership_mismatch");
+        }
     }
-    if let Some(owner) = owner.upgrade() {
-        lock(&owner.entries).remove(&key);
+    if let Some(finalizer) = finalizer.as_mut() {
+        finalizer.completed = true;
     }
-    entry.done.cancel();
 }
 
 fn lifecycle(
@@ -566,10 +676,79 @@ fn lifecycle(
     status: Option<i32>,
 ) {
     // No destination, backend error, or stderr payload may enter this record.
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "event": event, "pid": pid, "socket": socket, "role": role, "status": status,
-        })
-    );
+    audit::emit(&serde_json::json!({
+        "event": event, "pid": pid, "socket": socket, "role": role, "status": status,
+    }));
+}
+
+fn diagnostic(code: &'static str) {
+    audit::emit(&serde_json::json!({
+        "event": "master_error",
+        "error_code": code,
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unwound_master_reaps_before_pool_completion() {
+        let pool = Pool::new(None, Duration::from_secs(1), CancellationToken::new());
+        let key = ("unwind-owned".to_owned(), IdentityRole::Ordinary);
+        let entry = Arc::new(Entry {
+            state: Mutex::new(State {
+                session: None,
+                interests: 0,
+                idle_since: Instant::now(),
+                failure: None,
+            }),
+            channels: Arc::new(Semaphore::new(CHANNELS)),
+            ready: CancellationToken::new(),
+            stop: CancellationToken::new(),
+            done: CancellationToken::new(),
+        });
+        lock(&pool.entries).insert(key.clone(), Arc::clone(&entry));
+        let directory = tempfile::tempdir().unwrap();
+        let owned_path = directory.path().to_owned();
+        // This tests OS-process ownership, not SSH behavior. No SSH/network
+        // prerequisites enter the default suite; native tests use real masters.
+        let child = Command::new("sleep")
+            .arg("10")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap());
+        let master = Master {
+            child: Some(child),
+            directory: Some(directory),
+            drain: None,
+            finalizer: Some(EntryFinalizer {
+                owner: Arc::downgrade(&pool),
+                key: key.clone(),
+                entry: Arc::clone(&entry),
+                completed: false,
+            }),
+        };
+        let task = tokio::spawn(async move {
+            let _owned = master;
+            panic!("test supervisor unwind");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        timeout_at(
+            Instant::now() + Duration::from_secs(5),
+            entry.done.cancelled(),
+        )
+        .await
+        .unwrap();
+        // Completion is not merely a notification: the process must already
+        // be reaped, the private tree gone, and the capacity slot removed.
+        assert!(matches!(kill(pid, None), Err(Errno::ESRCH)));
+        assert!(!owned_path.exists());
+        assert!(!lock(&pool.entries).contains_key(&key));
+    }
 }

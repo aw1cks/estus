@@ -21,14 +21,11 @@ fn main() -> ExitCode {
     let config = match config::Config::load(config::Cli::parse()) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "event": "error",
-                    "code": "invalid_config",
-                    "message": error.to_string(),
-                })
-            );
+            audit::emit(&serde_json::json!({
+                "event": "error",
+                "code": "invalid_config",
+                "message": error.to_string(),
+            }));
             return ExitCode::FAILURE;
         }
     };
@@ -134,6 +131,6 @@ impl AsyncRead for EofStdin {
 }
 
 fn fail(code: &str) -> ExitCode {
-    eprintln!("{}", serde_json::json!({ "event": "error", "code": code }));
+    audit::emit(&serde_json::json!({ "event": "error", "code": code }));
     ExitCode::FAILURE
 }

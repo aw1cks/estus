@@ -28,7 +28,7 @@ struct Server {
     child: Child,
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
-    stderr: JoinHandle<std::io::Result<Vec<u8>>>,
+    stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
 }
 
 impl Server {
@@ -51,7 +51,7 @@ impl Server {
             child,
             input: Some(input),
             output: BufReader::new(output),
-            stderr,
+            stderr: Some(stderr),
         })
     }
 
@@ -112,6 +112,20 @@ impl Server {
             .await
     }
 
+    async fn close_stderr(&mut self) -> Result<()> {
+        if let Some(stderr) = self.stderr.take() {
+            stderr.abort();
+            match stderr.await {
+                Err(error) if error.is_cancelled() => {}
+                Ok(result) => {
+                    result?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     async fn finish(mut self) -> Result<(std::process::ExitStatus, Vec<u8>)> {
         drop(self.input.take());
         let status = match timeout(Duration::from_secs(5), self.child.wait()).await {
@@ -127,7 +141,11 @@ impl Server {
             ensure!(value["jsonrpc"] == "2.0");
             line.clear();
         }
-        Ok((status, self.stderr.await??))
+        let stderr = match self.stderr {
+            Some(stderr) => stderr.await??,
+            None => Vec::new(),
+        };
+        Ok((status, stderr))
     }
 }
 
@@ -495,5 +513,34 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
             "budget-rejected request launched SSH"
         );
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialization_failure_with_closed_stderr_does_not_panic() -> Result<()> {
+    let mut server = Server::start(&[])?;
+    let scenario = async {
+        // No request has been sent, so the server cannot report a handshake
+        // failure until after the pipe's read end has actually been dropped.
+        server.close_stderr().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await?;
+        // Keep stdin open until the invalid handshake exits; EOF would instead
+        // be a successful lifecycle and would not exercise failure reporting.
+        let status = timeout(Duration::from_secs(5), server.child.wait())
+            .await
+            .context("closed stderr stranded initialization failure")??;
+        ensure!(
+            status.code() == Some(1),
+            "expected failure, not panic: {status}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, _) = finished?;
+    ensure!(status.code() == Some(1));
     Ok(())
 }

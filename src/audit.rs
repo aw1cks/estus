@@ -8,6 +8,19 @@ use crate::{
     server::ToolError,
 };
 
+/// Best-effort JSON diagnostics; stderr failure must never interrupt cleanup.
+pub(crate) fn emit(record: &impl Serialize) {
+    use std::io::Write;
+
+    // Serialize before locking stderr, so a failed serialization cannot leave a
+    // partial record or hold the output lock while invoking Serialize code.
+    let line = serde_json::to_string(record);
+    let line = line
+        .as_deref()
+        .unwrap_or(r#"{"event":"diagnostic_error","error_code":"serialization_failed"}"#);
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Metadata<'a> {
     pub(crate) request_id: &'a RequestId,
@@ -72,12 +85,7 @@ impl Metadata<'_> {
             remote_state_unknown: duration_ms
                 .map(|_| error.is_some_and(|error| error.remote_state_unknown)),
         };
-        // The record has no payload-bearing fields and serialization cannot fail
-        // for these scalar/enum fields. Ignore stderr write failure during teardown.
-        if let Ok(line) = serde_json::to_string(&record) {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "{line}");
-        }
+        emit(&record);
     }
 
     pub(crate) fn reject(self, started: Instant, error: &ToolError) {
