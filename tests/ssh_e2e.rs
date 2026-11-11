@@ -855,3 +855,239 @@ async fn ssh_sudo_authority() -> Result<()> {
     }
     Ok(())
 }
+
+async fn wire_tool(
+    wire: &mut support::WireServer,
+    id: u64,
+    name: &str,
+    arguments: Value,
+    markers: &[String],
+) -> Result<Value> {
+    let mut frame = wire
+        .request(id, "tools/call", json!({"name":name,"arguments":arguments}))
+        .await?;
+    private_boundary(&serde_json::to_string(&frame)?, markers)?;
+    let result = frame
+        .get_mut("result")
+        .context("raw tool result missing")?
+        .take();
+    support::envelope(serde_json::from_value::<rmcp::model::CallToolResult>(
+        result,
+    )?)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires exact Nix fixture artifact and explicit Docker-compatible daemon"]
+async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
+    const STDIN_SECRET: &str = "V02_STDIN_SECRET_NOT_FOR_REPLY";
+    const REJECTED_SECRET: &str = "V02_REJECTED_ARG_NOT_FOR_REPLY";
+    const ARGV_SECRET: &str = "V02_ARG_AUDIT_SECRET";
+
+    let fixture = isolated::Fixture::start().await?;
+    let setup = fixture.credential_markers();
+    let mut markers = match setup {
+        Ok(markers) => markers,
+        Err(error) => {
+            let cleanup = fixture.stop().await;
+            cleanup?;
+            return Err(error);
+        }
+    };
+    markers.extend([STDIN_SECRET.to_owned(), REJECTED_SECRET.to_owned()]);
+    let mut wire = match support::WireServer::start(&fixture.config) {
+        Ok(wire) => wire,
+        Err(error) => {
+            let cleanup = fixture.stop().await;
+            cleanup?;
+            return Err(error);
+        }
+    };
+    let scenario = async {
+        wire.initialize().await?;
+        let keys = fixture_fingerprints(&fixture).await?;
+        let invalid = wire_tool(
+            &mut wire,
+            2,
+            "ssh_sudo",
+            json!({
+                "host":"split","argv":["/usr/bin/printf",format!("{REJECTED_SECRET}\0")]
+            }),
+            &markers,
+        )
+        .await?;
+        ensure!(
+            invalid["data"].is_null()
+                && invalid["error"]["code"] == "invalid_argument"
+                && invalid["error"]["remote_state_unknown"] == false
+        );
+        ensure!(
+            masters(&wire.log)?.is_empty(),
+            "invalid elevated argv authenticated"
+        );
+
+        // Independent policy/TTY oracles distinguish real sudo constraints from
+        // a missing executable, unauthorized command or broken fixture runtime.
+        fixture
+            .primary_exec("/usr/bin/sudo -n -l -U mcp-password -- /usr/bin/id -u")
+            .await
+            .context("password fixture policy does not permit the tested command")?;
+        let tty = fixture
+            .direct_tty(
+                "requiretty",
+                "/usr/bin/sudo -n -k -u root -- /usr/bin/id -u",
+            )
+            .await?;
+        ensure!(
+            tty.status.success() && std::str::from_utf8(&tty.stdout)?.trim() == "0",
+            "requiretty command did not succeed with an independently allocated TTY"
+        );
+
+        let arguments = [
+            "",
+            " leading and trailing  ",
+            "-n",
+            "'\"\\$HOME `id` ! * ? [x] {a,b}; & | < >\n\t\r",
+            "é雪",
+            "$(/bin/touch /tmp/v02-argv-injected)",
+            ARGV_SECRET,
+        ];
+        let mut argv = vec!["/usr/bin/printf", "%s\\0"];
+        argv.extend(arguments);
+        let mut expected = String::new();
+        for argument in arguments {
+            expected.push_str(argument);
+            expected.push('\0');
+        }
+        for (id, host) in [(3, "same"), (4, "split")] {
+            let reply = wire_tool(
+                &mut wire,
+                id,
+                "ssh_sudo",
+                json!({
+                    "host":host,"user":"root","argv":argv,
+                }),
+                &markers,
+            )
+            .await?;
+            command_succeeded(&reply, &expected)?;
+        }
+        fixture
+            .primary_exec("test ! -e /tmp/v02-argv-injected")
+            .await
+            .context("literal elevated argv executed shell substitution")?;
+
+        for (id, host) in [(5, "password"), (6, "requiretty")] {
+            let reply = wire_tool(
+                &mut wire,
+                id,
+                "ssh_sudo",
+                json!({
+                    "host":host,"argv":["/usr/bin/id","-u"],"timeout_secs":3,
+                }),
+                &markers,
+            )
+            .await?;
+            ensure!(
+                reply["error"]["code"] == "command_failed"
+                    && reply["error"]["remote_state_unknown"] == false
+                    && reply["data"]["exit_code"] == 1
+                    && reply["data"]["stdout"] == "",
+                "sudo failure did not preserve its known noninteractive command exit"
+            );
+            let direct = fixture
+                .direct(host, "/usr/bin/sudo -n -k -u root -- /usr/bin/id -u")
+                .await?;
+            ensure!(direct.status.code() == Some(1) && direct.stdout.is_empty());
+            ensure!(
+                reply["data"]["stderr"] == std::str::from_utf8(&direct.stderr)?,
+                "sudo command diagnostics differ from independent direct SSH"
+            );
+        }
+        let consumed = wire_tool(
+            &mut wire,
+            7,
+            "ssh_exec",
+            json!({
+                "host":"plain",
+                "command":indoc::indoc! {"
+                IFS= read -r hidden
+                /usr/bin/printf 'STDIN_CONSUMED\\n'
+            "},
+                "stdin":format!("{STDIN_SECRET}\n"),
+            }),
+            &markers,
+        )
+        .await?;
+        command_succeeded(&consumed, "STDIN_CONSUMED\n")?;
+        observed_master_count(&wire.log, 5).await?;
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 4),
+                ("mcp-sudo", 2),
+                ("mcp-admin", 1),
+                ("mcp-password", 2),
+                ("mcp-tty", 3),
+            ],
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let log = wire.log.clone();
+    let server = wire.stop(false).await;
+    let master_cleanup = match masters(&log) {
+        Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    };
+    let container_cleanup = fixture.stop().await;
+    let errors: Vec<_> = [
+        ("fidelity", scenario),
+        ("server cleanup", server.map(|_| ())),
+        ("master cleanup", master_cleanup),
+        ("container cleanup", container_cleanup),
+    ]
+    .into_iter()
+    .filter_map(|(label, result)| result.err().map(|error| format!("{label}: {error:#}")))
+    .collect();
+    ensure!(errors.is_empty(), "{}", errors.join("\n"));
+    // Literal printf output is intentionally public in the reply, never audit.
+    markers.push(ARGV_SECRET.to_owned());
+    private_boundary(&log.text(), &markers)?;
+    let records = log.final_records()?;
+    for record in records
+        .iter()
+        .filter(|record| record["tool"] == "ssh_sudo" || record["tool"] == "ssh_exec")
+    {
+        for field in [
+            "argv",
+            "stdin",
+            "command",
+            "stdout",
+            "stderr",
+            "password",
+            "private_key",
+        ] {
+            ensure!(
+                record.get(field).is_none(),
+                "audit retained a payload/credential field"
+            );
+        }
+    }
+    for host in ["password", "requiretty"] {
+        let failed = records
+            .iter()
+            .find(|record| record["event"] == "finish" && record["host"] == host)
+            .context("sudo failure audit")?;
+        ensure!(
+            failed["identity_role"] == "ordinary"
+                && failed["sudo_mode"] == "same-account"
+                && failed["error_code"] == "command_failed"
+                && failed["exit_code"] == 1
+                && failed["remote_state_unknown"] == false
+        );
+    }
+    Ok(())
+}

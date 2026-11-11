@@ -550,6 +550,14 @@ impl Fixture {
         .await
     }
 
+    pub async fn direct_tty(&self, alias: &str, command: &str) -> Result<Output> {
+        run(Command::new(&self.ssh)
+            .arg("-F")
+            .arg(&self.ssh_config)
+            .args(["-tt", alias, command]))
+        .await
+    }
+
     pub async fn reject_unknown_key(&self) -> Result<()> {
         let (host, port) = (
             self.containers[0].get_host().await?.to_string(),
