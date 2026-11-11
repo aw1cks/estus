@@ -876,6 +876,23 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
                 json!({"host":"denied","path":"file","offset":u64::MAX,"max_bytes":1}),
                 "policy_denied",
             ),
+            (
+                json!({"host":"denied","path":"file","expected_content_sha256":"sha256:abc"}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"file","expected_content_sha256":"g".repeat(64)}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"file","expected_content_sha256":"0".repeat(63)}),
+                "invalid_argument",
+            ),
+            (
+                json!({"host":"denied","path":"file","expected_content_sha256":
+                    "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"}),
+                "policy_denied",
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -895,6 +912,14 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
         for (id, arguments) in [
             (200, json!({"host":"denied","path":"file","encoding":"hex"})),
             (201, json!({"host":"denied","path":"file","sudo":true})),
+            (
+                202,
+                json!({"host":"denied","path":"file","expected_content_sha256":true}),
+            ),
+            (
+                203,
+                json!({"host":"denied","path":"file","retry_on_connection_loss":true}),
+            ),
         ] {
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
