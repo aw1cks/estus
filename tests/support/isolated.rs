@@ -679,6 +679,10 @@ impl Fixture {
         self.exec_in(0, script).await
     }
 
+    pub async fn nosftp_exec(&self, script: &str) -> Result<Vec<u8>> {
+        self.exec_in(1, script).await
+    }
+
     async fn exec_in(&self, index: usize, script: &str) -> Result<Vec<u8>> {
         timeout(CLEANUP, async {
             let mut exec = self.containers[index]
@@ -718,6 +722,10 @@ impl Fixture {
 
     pub async fn primary_logs(&self) -> Result<Vec<u8>> {
         Ok(timeout(CLEANUP, self.containers[0].stderr_to_vec()).await??)
+    }
+
+    pub async fn nosftp_logs(&self) -> Result<Vec<u8>> {
+        Ok(timeout(CLEANUP, self.containers[1].stderr_to_vec()).await??)
     }
 
     pub async fn host_key_config(&self, fault: HostKeyFault) -> Result<PathBuf> {

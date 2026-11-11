@@ -5,6 +5,8 @@
 //! registry egress; that external enforcement belongs to V03.
 #[path = "support/baseline_commands.rs"]
 mod baseline_commands;
+#[path = "support/baseline_files.rs"]
+mod baseline_files;
 #[path = "support/isolated.rs"]
 mod isolated;
 #[allow(dead_code, unused_imports)]
@@ -529,7 +531,8 @@ async fn observed_authentications(
             let accepted = fixture.authentication_keys().await?;
             for (account, fingerprint) in &accepted {
                 ensure!(
-                    keys.get(account) == Some(fingerprint),
+                    keys.get(account) == Some(fingerprint)
+                        && expected.iter().any(|(name, _)| *name == account.as_str()),
                     "SSH authenticated with a different account/key"
                 );
             }
