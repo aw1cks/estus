@@ -38,7 +38,11 @@ struct Server {
 
 impl Server {
     fn start(args: &[&str]) -> Result<Self> {
-        let mut child = command(args)
+        Self::from_command(command(args))
+    }
+
+    fn from_command(mut command: Command) -> Result<Self> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -198,6 +202,45 @@ impl Server {
     }
 }
 
+// Assert the public discovery envelope, not incidental default policy values.
+fn discovery_data<'a>(result: &'a Value, mode: &str) -> Result<&'a Value> {
+    ensure!(result["isError"] != true, "discovery returned a tool error");
+    let structured = &result["structuredContent"];
+    ensure!(structured.get("error") == Some(&Value::Null));
+    let data = &structured["data"];
+    ensure!(data["mode"] == mode);
+    ensure!(data["targets"].is_array());
+    let limits = &data["limits"];
+    for field in [
+        "connect_timeout_secs",
+        "operation_timeout_secs",
+        "max_timeout_secs",
+        "max_output_bytes",
+        "max_file_bytes",
+        "max_stdin_bytes",
+        "max_command_bytes",
+        "max_encoded_command_bytes",
+        "max_response_bytes",
+    ] {
+        ensure!(
+            limits[field].as_u64().is_some(),
+            "missing numeric limit {field}"
+        );
+    }
+    ensure!(limits["max_stdin_bytes"] == limits["max_file_bytes"]);
+    ensure!(limits["max_command_bytes"] == 65_536);
+    ensure!(limits["max_encoded_command_bytes"] == 65_536);
+    ensure!(limits["max_response_bytes"] == 16_777_216);
+    let content = result["content"]
+        .as_array()
+        .context("discovery text content")?;
+    ensure!(content.len() == 1);
+    ensure!(content[0]["type"] == "text");
+    let text: Value = serde_json::from_str(content[0]["text"].as_str().context("discovery text")?)?;
+    ensure!(text == *structured, "discovery text/structured mismatch");
+    Ok(data)
+}
+
 #[tokio::test]
 async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
     let mut server = Server::start(&[])?;
@@ -220,7 +263,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
-        ensure!(result["structuredContent"] == json!({"data":{"mode":"open","targets":[]},"error":null}));
+        ensure!(discovery_data(result, "open")?["targets"] == json!([]));
         ensure!(result["isError"] != true);
         let content = result["content"].as_array().context("text compatibility content")?;
         ensure!(content.len() == 1);
@@ -263,30 +306,380 @@ async fn eof_before_initialize_exits_cleanly() -> Result<()> {
 
 #[tokio::test]
 async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
-    for (text, expected) in [
-        ("[targets]", json!({"mode":"configured","targets":[]})),
-        (
-            "[targets.zeta]\nssh_host='ordinary-secret'\n[targets.zeta.sudo]\nmode='separate-identity'\nssh_host='privileged-secret'\n[targets.alpha]\nssh_host='another-secret'",
-            json!({"mode":"configured","targets":[
-                {"name":"alpha","sudo_mode":"disabled"},
-                {"name":"zeta","sudo_mode":"separate-identity"}
-            ]}),
-        ),
-    ] {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("operator.toml");
-        std::fs::write(&path, text)?;
-        let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    for override_limits in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("operator-private-marker.toml");
+        let replacement = directory.path().join("ssh-private-marker.conf");
+        let probe = directory.path().join("discovery-must-not-probe");
+        let credential = directory.path().join("credential-private-marker");
+        std::fs::write(
+            &replacement,
+            format!(
+                "Host *\n  IdentityFile '{}'\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+                credential.display(),
+                probe.display()
+            ),
+        )?;
+        std::fs::write(
+            &path,
+            indoc::indoc! {"
+            [ssh]
+            config_file = 'ssh-private-marker.conf'
+            [limits]
+            connect_timeout_secs = 7
+            operation_timeout_secs = 9
+            max_timeout_secs = 20
+            max_output_bytes = 1234
+            max_file_bytes = 2345
+            [targets.zeta]
+            ssh_host = 'ordinary-zeta-private.invalid'
+            [targets.zeta.sudo]
+            mode = 'separate-identity'
+            ssh_host = 'privileged-zeta-private.invalid'
+            [targets.gamma]
+            ssh_host = 'ordinary-gamma-private.invalid'
+            [targets.gamma.sudo]
+            mode = 'separate-identity'
+            ssh_host = 'privileged-gamma-private.invalid'
+            programs = ['/private/program-marker']
+            [targets.epsilon]
+            ssh_host = 'ordinary-epsilon-private.invalid'
+            [targets.epsilon.sudo]
+            mode = 'same-account'
+            [targets.delta]
+            ssh_host = 'ordinary-delta-private.invalid'
+            [targets.delta.sudo]
+            mode = 'separate-identity'
+            ssh_host = 'privileged-delta-private.invalid'
+            programs = []
+            [targets.beta]
+            ssh_host = 'ordinary-beta-private.invalid'
+            description = ''
+            [targets.beta.sudo]
+            mode = 'same-account'
+            programs = []
+            [targets.alpha]
+            ssh_host = 'ordinary-alpha-private.invalid'
+            description = 'Operator-authored café: advisory, not observed'
+            [targets.alpha.labels]
+            environment = 'synthetic-production'
+            ssh_sudo = 'allowed'
+        "},
+        )?;
+        let mut child = command(&["--config", path.to_str().context("config path")?]);
+        if override_limits {
+            child.envs([
+                ("SSH_MCP_CONNECT_TIMEOUT_SECS", "11"),
+                ("SSH_MCP_OPERATION_TIMEOUT_SECS", "13"),
+                ("SSH_MCP_MAX_TIMEOUT_SECS", "17"),
+                ("SSH_MCP_MAX_OUTPUT_BYTES", "33554432"),
+                ("SSH_MCP_MAX_FILE_BYTES", "33554433"),
+            ]);
+        }
+        let mut server = Server::from_command(child)?;
         let scenario = async {
-            server.initialize().await?;
-            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
-            let response = server.response(2).await?;
-            ensure!(response["result"]["structuredContent"] == json!({"data":expected,"error":null}));
+            if !override_limits {
+                server.initialize().await?;
+            }
+            let id = 2;
+            let modern = override_limits;
+            let params = json!({"name":"ssh_targets","arguments":{}});
+            let request = if modern {
+                modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+            };
+            server.send(request).await?;
+            let response = server.response(id).await?;
+            let data = discovery_data(&response["result"], "configured")?;
+            let rows = data["targets"].as_array().context("configured targets")?;
+            ensure!(rows.len() == 6);
+            for (index, (name, sudo_mode, permits_sudo)) in [
+                ("alpha", "disabled", false),
+                ("beta", "same-account", false),
+                ("delta", "separate-identity", false),
+                ("epsilon", "same-account", true),
+                ("gamma", "separate-identity", true),
+                ("zeta", "separate-identity", true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let row = &rows[index];
+                ensure!(row["name"] == name && row["sudo_mode"] == sudo_mode);
+                ensure!(row["observed_capabilities"] == "unknown");
+                let expected = if permits_sudo {
+                    json!([
+                        "ssh_exec",
+                        "ssh_list_directory",
+                        "ssh_read_file",
+                        "ssh_run",
+                        "ssh_stat",
+                        "ssh_sudo",
+                        "ssh_write_file"
+                    ])
+                } else {
+                    json!([
+                        "ssh_exec",
+                        "ssh_list_directory",
+                        "ssh_read_file",
+                        "ssh_run",
+                        "ssh_stat",
+                        "ssh_write_file"
+                    ])
+                };
+                ensure!(row["permitted_operations"] == expected, "policy for {name}");
+                if index > 1 {
+                    ensure!(row.get("description") == Some(&Value::Null));
+                }
+                if index > 0 {
+                    ensure!(row["labels"] == json!({}));
+                }
+            }
+            ensure!(rows[0]["description"] == "Operator-authored café: advisory, not observed");
+            ensure!(
+                rows[0]["labels"]
+                    == json!({
+                        "environment":"synthetic-production", "ssh_sudo":"allowed"
+                    })
+            );
+            ensure!(rows[1]["description"] == "");
+            let limits = &data["limits"];
+            let expected = if override_limits {
+                [11, 13, 17, 33_554_432, 33_554_433]
+            } else {
+                [7, 9, 20, 1234, 2345]
+            };
+            for (field, expected) in [
+                "connect_timeout_secs",
+                "operation_timeout_secs",
+                "max_timeout_secs",
+                "max_output_bytes",
+                "max_file_bytes",
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                ensure!(limits[field] == expected, "effective {field}");
+            }
+            let encoded = serde_json::to_string(&response)?;
+            for secret in [
+                "ordinary-",
+                "privileged-",
+                "private-marker",
+                "/private/program-marker",
+                path.to_str().context("operator path")?,
+                replacement.to_str().context("replacement path")?,
+                credential.to_str().context("credential path")?,
+            ] {
+                ensure!(
+                    !encoded.contains(secret),
+                    "discovery exposed private configuration"
+                );
+            }
             Ok::<_, anyhow::Error>(())
-        }.await;
+        }
+        .await;
         let finished = server.finish().await;
         scenario?;
-        ensure!(finished?.0.success());
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        ensure!(
+            !probe.exists(),
+            "discovery executed replacement-config Match exec"
+        );
+        let audit = std::str::from_utf8(&stderr)?;
+        for secret in [
+            "ordinary-",
+            "privileged-",
+            "private-marker",
+            "/private/program-marker",
+        ] {
+            ensure!(
+                !audit.contains(secret),
+                "audit exposed private configuration"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_metadata_schema_and_bounds_fail_before_mcp_without_secrets() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("secret_marker.toml");
+    let mut cases = vec![
+        (
+            "description type",
+            "description = ['secret_marker']".to_owned(),
+        ),
+        ("labels table", "labels = ['secret_marker']".to_owned()),
+        (
+            "label value type",
+            "labels = { secret_marker = 42 }".to_owned(),
+        ),
+        (
+            "empty label key",
+            "labels = { '' = 'secret_marker' }".to_owned(),
+        ),
+        (
+            "description bytes",
+            format!("description = '{}x'", "é".repeat(512)),
+        ),
+        (
+            "label key bytes",
+            format!("labels = {{ '{}x' = 'secret_marker' }}", "é".repeat(32)),
+        ),
+        (
+            "label value bytes",
+            format!("labels = {{ secret_marker = '{}x' }}", "é".repeat(128)),
+        ),
+    ];
+    let labels = (0..17)
+        .map(|index| format!("secret_marker_{index} = 'private-value'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    cases.push(("label count", format!("labels = {{ {labels} }}")));
+    for (case, metadata) in cases {
+        std::fs::write(
+            &path,
+            format!("[targets.secret_marker]\nssh_host = 'secret_marker.invalid'\n{metadata}\n"),
+        )?;
+        let output = timeout(
+            Duration::from_secs(5),
+            command(&["--config", path.to_str().context("config path")?]).output(),
+        )
+        .await??;
+        ensure!(
+            !output.status.success(),
+            "{case}: accepted invalid metadata"
+        );
+        ensure!(
+            output.stdout.is_empty(),
+            "{case}: started MCP before rejecting metadata"
+        );
+        let stderr = std::str::from_utf8(&output.stderr)?;
+        for secret in [
+            "secret_marker",
+            "private-value",
+            "é",
+            path.to_str().context("config path")?,
+        ] {
+            ensure!(!stderr.contains(secret), "{case}: reflected operator input");
+        }
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(
+            diagnostic["code"] == "invalid_config",
+            "{case}: wrong startup diagnostic"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_metadata_exact_caps_respect_aggregate_and_response_wire_bounds() -> Result<()> {
+    // Ten full 6144-byte targets, plus one 4096-byte target, total 65536.
+    // All lengths are UTF-8 bytes, not character counts.
+    let description = "é".repeat(512);
+    let value = "é".repeat(128);
+    let tail_value = "v".repeat(128);
+    let mut text = String::new();
+    for target in 0..11 {
+        text.push_str(&format!(
+            "[targets.target{target:02}]\nssh_host = 'private-boundary-{target}.invalid'\ndescription = '{description}'\n[targets.target{target:02}.labels]\n"
+        ));
+        for label in 0..if target == 10 { 10 } else { 16 } {
+            let key = format!("{label:02}{}", "é".repeat(31));
+            let label_value = if target == 10 && label == 9 {
+                &tail_value
+            } else {
+                &value
+            };
+            text.push_str(&format!("'{key}' = '{label_value}'\n"));
+        }
+    }
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("operator.toml");
+    std::fs::write(&path, &text)?;
+    let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let response = server.response(2).await?;
+        let data = discovery_data(&response["result"], "configured")?;
+        let rows = data["targets"].as_array().context("boundary targets")?;
+        ensure!(rows.len() == 11);
+        ensure!(rows[0]["description"] == description);
+        let labels = rows[0]["labels"].as_object().context("boundary labels")?;
+        ensure!(labels.len() == 16);
+        ensure!(labels.keys().all(|key| key.len() == 64));
+        ensure!(
+            labels
+                .values()
+                .all(|entry| entry.as_str() == Some(value.as_str()))
+        );
+        ensure!(!serde_json::to_string(&response)?.contains("private-boundary-"));
+        // The same real metadata fits a normal response but not one carrying
+        // this ID. The SDK must return a complete bounded error, then recover.
+        const MESSAGE_LIMIT: usize = 16_777_216;
+        let id = json!("i".repeat(MESSAGE_LIMIT - 65_536));
+        let request = json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}});
+        ensure!(serde_json::to_vec(&request)?.len() + 1 < MESSAGE_LIMIT);
+        server.send(request).await?;
+        let (rejected, bytes) = server.response_with_id(&id).await?;
+        ensure!(rejected["error"]["code"] == -32602);
+        ensure!(rejected.get("result").is_none());
+        ensure!(bytes <= MESSAGE_LIMIT);
+        drop(rejected);
+        drop(id);
+        server
+            .send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let healthy = server.response(4).await?;
+        ensure!(
+            discovery_data(&healthy["result"], "configured")? == data,
+            "request-ID wire pressure changed resolved discovery policy"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    // One additional byte, still below every per-target/per-label cap.
+    text.push_str("'x' = ''\n");
+    std::fs::write(&path, text)?;
+    let output = timeout(
+        Duration::from_secs(5),
+        command(&["--config", path.to_str().context("config path")?]).output(),
+    )
+    .await??;
+    ensure!(
+        !output.status.success(),
+        "accepted aggregate metadata overflow"
+    );
+    ensure!(output.stdout.is_empty());
+    let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+    ensure!(diagnostic["code"] == "invalid_config");
+    let stderr = std::str::from_utf8(&output.stderr)?;
+    for secret in [
+        "target00",
+        "private-boundary-",
+        "é",
+        path.to_str().context("config path")?,
+    ] {
+        ensure!(
+            !stderr.contains(secret),
+            "aggregate error reflected operator input"
+        );
     }
     Ok(())
 }
@@ -494,15 +887,28 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
             .await?;
         let discovery = server.response(20).await?;
         ensure!(discovery["result"]["isError"] != true);
+        let data = discovery_data(&discovery["result"], "configured")?;
+        let rows = data["targets"].as_array().context("recovery targets")?;
         ensure!(
-            discovery["result"]["structuredContent"]
-                == json!({
-                    "data":{"mode":"configured","targets":[
-                        {"name":"allowed","sudo_mode":"same-account"}
-                    ]},
-                    "error":null
-                }),
+            rows.len() == 1,
             "discovery failed after encoded-command rejections"
+        );
+        ensure!(rows[0]["name"] == "allowed");
+        ensure!(rows[0]["sudo_mode"] == "same-account");
+        ensure!(rows[0].get("description") == Some(&Value::Null));
+        ensure!(rows[0]["labels"] == json!({}));
+        ensure!(rows[0]["observed_capabilities"] == "unknown");
+        ensure!(
+            rows[0]["permitted_operations"]
+                == json!([
+                    "ssh_exec",
+                    "ssh_list_directory",
+                    "ssh_read_file",
+                    "ssh_run",
+                    "ssh_stat",
+                    "ssh_sudo",
+                    "ssh_write_file"
+                ])
         );
         Ok::<_, anyhow::Error>(())
     })
@@ -584,8 +990,7 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
         let targets = server.response(2).await?;
         ensure!(targets["result"]["isError"] != true);
         ensure!(
-            targets["result"]["structuredContent"]
-                == json!({"data": {"mode": "open", "targets": []}, "error": null}),
+            discovery_data(&targets["result"], "open")?["targets"] == json!([]),
             "normal discovery failed after budget rejection"
         );
         Ok::<_, anyhow::Error>(())
@@ -740,11 +1145,10 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         let [Some(called), Some(invalid)] = replies else { bail!("missing modern response") };
         let result = &called["result"];
         ensure!(result["resultType"] == "complete");
-        let expected = json!({"data":{"mode":"configured","targets":[]},"error":null});
-        ensure!(result["structuredContent"] == expected);
+        ensure!(discovery_data(result, "configured")?["targets"] == json!([]));
         ensure!(result["isError"] != true);
         let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().context("text result")?)?;
-        ensure!(text == expected);
+        ensure!(text == result["structuredContent"]);
         ensure!(invalid["error"]["code"] == -32602);
 
         server.send(modern_request(json!("rejected-inline"), "tools/call", json!({
@@ -816,10 +1220,7 @@ async fn fragmented_utf8_request_survives_multiple_pipe_writes() -> Result<()> {
         server.send_raw(&frame[unicode + 1..]).await?;
         server.send_raw(b"\n").await?;
         let called = server.response_with_id(&json!("fragmented")).await?.0;
-        ensure!(
-            called["result"]["structuredContent"]
-                == json!({"data":{"mode":"configured","targets":[]},"error":null})
-        );
+        ensure!(discovery_data(&called["result"], "configured")?["targets"] == json!([]));
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -1239,8 +1640,8 @@ async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
         }
         server.send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}})).await?;
-        ensure!(server.response(300).await?["result"]["structuredContent"]["data"]
-            == json!({"mode":"configured","targets":[]}));
+        let healthy = server.response(300).await?;
+        ensure!(discovery_data(&healthy["result"], "configured")?["targets"] == json!([]));
         Ok::<_, anyhow::Error>(())
     }.await;
     let finished = server.finish().await;
