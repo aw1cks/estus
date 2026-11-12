@@ -77,6 +77,10 @@
           type = "app";
           program = "${acceptance}/bin/ssh-stdio";
         };
+        apps.ssh-native = {
+          type = "app";
+          program = "${acceptance}/bin/ssh-native";
+        };
         checks.package = package;
         # Compile every test target and run the network-free suite on the MSRV.
         # Never reuse artifacts produced by the default (newer) compiler.
@@ -89,7 +93,7 @@
         checks.formatting = craneLib.cargoFmt {
           src = commonArgs.src;
         };
-        # Compilation only: daemon-dependent execution stays outside sandboxes.
+        # Compilation only: SSH listeners and containers stay outside sandboxes.
         checks.ssh-acceptance-build = acceptance;
         devShells.default = craneLib.devShell {
           checks = { inherit package; };
