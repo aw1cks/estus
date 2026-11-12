@@ -28,6 +28,33 @@ pub(crate) enum ToolId {
     Sudo,
 }
 
+#[derive(Clone, Copy, Default, Deserialize)]
+enum Profile {
+    #[default]
+    #[serde(rename = "baseline")]
+    Baseline,
+    #[serde(rename = "read-only-files")]
+    ReadOnlyFiles,
+    #[serde(rename = "files-only")]
+    FilesOnly,
+    #[serde(rename = "actions-only")]
+    ActionsOnly,
+}
+
+impl Profile {
+    fn permits(self, tool: ToolId) -> bool {
+        // Keep every ID classified explicitly so a new binding requires a policy decision.
+        match tool {
+            ToolId::Targets => true,
+            ToolId::ReadFile | ToolId::Stat | ToolId::ListDirectory => {
+                matches!(self, Self::Baseline | Self::ReadOnlyFiles | Self::FilesOnly)
+            }
+            ToolId::WriteFile => matches!(self, Self::Baseline | Self::FilesOnly),
+            ToolId::Exec | ToolId::Run | ToolId::Sudo => matches!(self, Self::Baseline),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ToolEntry {
     pub(crate) id: ToolId,
@@ -98,6 +125,7 @@ fn invalid(field: &'static str, reason: &'static str) -> ConfigError {
 }
 
 pub(crate) struct Config {
+    profile: Profile,
     ssh_config: Option<PathBuf>,
     limits: Limits,
     targets: Option<BTreeMap<String, Target>>,
@@ -106,6 +134,7 @@ pub(crate) struct Config {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Document {
+    profile: Profile,
     ssh: Ssh,
     limits: Limits,
     targets: Option<BTreeMap<String, Target>>,
@@ -143,6 +172,8 @@ impl Default for Limits {
 #[serde(deny_unknown_fields)]
 struct Target {
     ssh_host: String,
+    #[serde(default)]
+    profile: Profile,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -197,6 +228,7 @@ struct TargetSummary<'a> {
 struct TargetSummaries<'a> {
     targets: Option<&'a BTreeMap<String, Target>>,
     tools: &'a ToolCatalog,
+    profile: Profile,
 }
 
 impl Serialize for TargetSummaries<'_> {
@@ -210,6 +242,8 @@ impl Serialize for TargetSummaries<'_> {
                 permitted_operations: PermittedOperations {
                     tools: self.tools,
                     sudo: &target.sudo,
+                    global_profile: self.profile,
+                    target_profile: target.profile,
                 },
                 observed_capabilities: ObservedCapabilities::Unknown,
             },
@@ -220,6 +254,8 @@ impl Serialize for TargetSummaries<'_> {
 struct PermittedOperations<'a> {
     tools: &'a ToolCatalog,
     sudo: &'a Sudo,
+    global_profile: Profile,
+    target_profile: Profile,
 }
 
 impl Serialize for PermittedOperations<'_> {
@@ -228,15 +264,19 @@ impl Serialize for PermittedOperations<'_> {
             self.tools
                 .entries
                 .iter()
-                .filter(|entry| match entry.id {
-                    ToolId::Targets => false,
-                    ToolId::Exec
-                    | ToolId::Run
-                    | ToolId::ReadFile
-                    | ToolId::WriteFile
-                    | ToolId::Stat
-                    | ToolId::ListDirectory => true,
-                    ToolId::Sudo => self.sudo.permits_programs(),
+                .filter(|entry| {
+                    self.global_profile.permits(entry.id)
+                        && self.target_profile.permits(entry.id)
+                        && match entry.id {
+                            ToolId::Targets => false,
+                            ToolId::Exec
+                            | ToolId::Run
+                            | ToolId::ReadFile
+                            | ToolId::WriteFile
+                            | ToolId::Stat
+                            | ToolId::ListDirectory => true,
+                            ToolId::Sudo => self.sudo.permits_programs(),
+                        }
                 })
                 .map(|entry| entry.name.as_ref()),
         )
@@ -435,6 +475,7 @@ impl Config {
             validate_targets(targets)?;
         }
         Ok(Self {
+            profile: document.profile,
             ssh_config,
             limits: document.limits,
             targets: document.targets,
@@ -451,6 +492,7 @@ impl Config {
             targets: TargetSummaries {
                 targets: self.targets.as_ref(),
                 tools,
+                profile: self.profile,
             },
             limits: DiscoveryLimits {
                 connect_timeout_secs: self.limits.connect_timeout_secs,
@@ -474,6 +516,10 @@ impl Config {
         &self.limits
     }
 
+    pub(crate) fn tool_enabled(&self, tool: ToolId) -> bool {
+        self.profile.permits(tool) && (tool != ToolId::Sudo || self.has_sudo())
+    }
+
     pub(crate) fn has_sudo(&self) -> bool {
         self.targets.as_ref().is_some_and(|targets| {
             targets
@@ -489,19 +535,37 @@ impl Config {
             .map_or(SudoMode::Disabled, |target| target.sudo.mode())
     }
 
-    pub(crate) fn resolve<'a>(&'a self, host: &'a str) -> Result<ResolvedTarget<'a>, ToolError> {
+    pub(crate) fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        tool: ToolId,
+    ) -> Result<ResolvedTarget<'a>, ToolError> {
+        let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        match tool {
+            ToolId::Targets | ToolId::Sudo => return Err(denied()),
+            ToolId::Exec
+            | ToolId::Run
+            | ToolId::ReadFile
+            | ToolId::WriteFile
+            | ToolId::Stat
+            | ToolId::ListDirectory => {}
+        }
+        if !self.profile.permits(tool) {
+            return Err(denied());
+        }
         let destination = match &self.targets {
             Some(targets) => {
-                &targets
-                    .get(host)
-                    .ok_or_else(|| {
-                        ToolError::new(
-                            "policy_denied",
-                            "Host is not a configured logical target",
-                            false,
-                        )
-                    })?
-                    .ssh_host
+                let target = targets.get(host).ok_or_else(|| {
+                    ToolError::new(
+                        "policy_denied",
+                        "Host is not a configured logical target",
+                        false,
+                    )
+                })?;
+                if !target.profile.permits(tool) {
+                    return Err(denied());
+                }
+                &target.ssh_host
             }
             None => {
                 destination(host, "host").map_err(|_| {
@@ -534,11 +598,17 @@ impl Config {
                 false,
             )
         };
+        if !self.profile.permits(ToolId::Sudo) {
+            return Err(denied());
+        }
         let target = self
             .targets
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
+        if !target.profile.permits(ToolId::Sudo) {
+            return Err(denied());
+        }
         let (destination, role, users, programs) = match &target.sudo {
             Sudo::Disabled => return Err(denied()),
             Sudo::SameAccount { users, programs } => (
@@ -729,8 +799,21 @@ fn string(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn validate_profile(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
+    let value = value
+        .as_str()
+        .ok_or_else(|| invalid(field, "must be a string"))?;
+    let value = serde::de::value::BorrowedStrDeserializer::<serde::de::value::Error>::new(value);
+    Profile::deserialize(value)
+        .map(|_| ())
+        .map_err(|_| invalid(field, "unknown startup profile"))
+}
+
 fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
-    let root = table(value, "config", &["ssh", "limits", "targets"])?;
+    let root = table(value, "config", &["profile", "ssh", "limits", "targets"])?;
+    if let Some(value) = root.get("profile") {
+        validate_profile(value, "profile")?;
+    }
     if let Some(value) = root.get("ssh") {
         let ssh = table(value, "ssh", &["config_file"])?;
         if let Some(value) = ssh.get("config_file") {
@@ -768,7 +851,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             let target = table(
                 value,
                 "targets.*",
-                &["ssh_host", "sudo", "description", "labels"],
+                &["ssh_host", "profile", "sudo", "description", "labels"],
             )?;
             string(
                 target
@@ -776,6 +859,9 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                     .ok_or_else(|| invalid("targets.*.ssh_host", "required field is missing"))?,
                 "targets.*.ssh_host",
             )?;
+            if let Some(value) = target.get("profile") {
+                validate_profile(value, "targets.*.profile")?;
+            }
             if let Some(value) = target.get("description") {
                 string(value, "targets.*.description")?;
             }
@@ -940,6 +1026,290 @@ mod tests {
             discovery["targets"][0]["permitted_operations"],
             serde_json::json!(["a-run", "b-list", "c-write", "n-read", "q-stat", "z-exec"])
         );
+    }
+
+    #[test]
+    fn omitted_and_explicit_baseline_preserve_publication_and_identity_policy() {
+        for root in ["", "profile='baseline'\n"] {
+            let config = load_text(
+                &format!(
+                    "{root}[targets.one]\nssh_host='ordinary'\n\
+                     [targets.one.sudo]\nmode='separate-identity'\nssh_host='elevated'\n\
+                     users=['service']\nprograms=['/usr/bin/id']"
+                ),
+                &[],
+            )
+            .unwrap();
+            let mut tools = catalog();
+            tools.retain(|id| config.tool_enabled(id));
+            assert_eq!(tools.entries.len(), 8);
+            for entry in &tools.entries {
+                if !matches!(entry.id, ToolId::Targets | ToolId::Sudo) {
+                    let resolved = config.resolve("one", entry.id).unwrap();
+                    assert_eq!(resolved.destination, "ordinary");
+                    assert_eq!(resolved.role, IdentityRole::Ordinary);
+                }
+            }
+            let elevated = config
+                .resolve_sudo("one", "service", "/usr/bin/id")
+                .unwrap();
+            assert_eq!(elevated.destination, "elevated");
+            assert_eq!(elevated.role, IdentityRole::Elevated);
+            assert!(config.resolve_sudo("one", "root", "/usr/bin/id").is_err());
+            assert!(config.resolve_sudo("one", "service", "/bin/sh").is_err());
+            assert_eq!(
+                serde_json::to_value(config.targets(&tools)).unwrap()["targets"][0]["permitted_operations"],
+                serde_json::json!([
+                    "a-run",
+                    "b-list",
+                    "c-write",
+                    "m-elevate",
+                    "n-read",
+                    "q-stat",
+                    "z-exec"
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn restrictive_profiles_publish_authorize_and_discover_only_their_file_sets() {
+        for (profile, published, permitted) in [
+            (
+                "read-only-files",
+                vec!["0-global-discovery", "b-list", "n-read", "q-stat"],
+                vec!["b-list", "n-read", "q-stat"],
+            ),
+            (
+                "files-only",
+                vec![
+                    "0-global-discovery",
+                    "b-list",
+                    "c-write",
+                    "n-read",
+                    "q-stat",
+                ],
+                vec!["b-list", "c-write", "n-read", "q-stat"],
+            ),
+            ("actions-only", vec!["0-global-discovery"], vec![]),
+        ] {
+            let config = load_text(
+                &format!(
+                    "profile='{profile}'\n[targets.one]\nssh_host='private-alias'\n\
+                     description='execution allowed'\nlabels={{exec='enabled'}}\n\
+                     [targets.one.sudo]\nmode='same-account'"
+                ),
+                &[],
+            )
+            .unwrap();
+            let all = catalog();
+            let mut active = catalog();
+            active.retain(|id| config.tool_enabled(id));
+            assert_eq!(
+                active
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name.as_ref())
+                    .collect::<Vec<_>>(),
+                published,
+                "{profile}"
+            );
+            for entry in &all.entries {
+                if matches!(entry.id, ToolId::Targets | ToolId::Sudo) {
+                    continue;
+                }
+                let result = config.resolve("one", entry.id);
+                if permitted.contains(&entry.name.as_ref()) {
+                    assert_eq!(result.unwrap().destination, "private-alias", "{profile}");
+                } else {
+                    let error = result.err().unwrap();
+                    assert_eq!(error.code, "policy_denied", "{profile}/{:?}", entry.id);
+                    assert!(!error.remote_state_unknown);
+                    assert!(!format!("{error:?}").contains("private"));
+                    assert!(!format!("{error:?}").contains(profile));
+                }
+            }
+            assert_eq!(
+                config
+                    .resolve_sudo("one", "root", "/bin/sh")
+                    .err()
+                    .unwrap()
+                    .code,
+                "policy_denied"
+            );
+            // Even an unfiltered catalogue cannot advertise a profile-disabled operation.
+            let discovery = serde_json::to_value(config.targets(&all)).unwrap();
+            assert_eq!(
+                discovery["targets"][0]["permitted_operations"],
+                serde_json::json!(permitted),
+                "{profile}"
+            );
+            assert_eq!(discovery["targets"][0]["sudo_mode"], "same-account");
+            assert_eq!(discovery["targets"][0]["observed_capabilities"], "unknown");
+        }
+    }
+
+    #[test]
+    fn target_profiles_intersect_global_policy_without_changing_publication() {
+        let config = load_text(
+            "profile='files-only'\n\
+             [targets.base]\nssh_host='base-alias'\nprofile='baseline'\n\
+             [targets.reader]\nssh_host='reader-alias'\nprofile='read-only-files'\n\
+             [targets.actions]\nssh_host='actions-alias'\nprofile='actions-only'\n\
+             [targets.implicit]\nssh_host='implicit-alias'",
+            &[],
+        )
+        .unwrap();
+        let mut tools = catalog();
+        tools.retain(|id| config.tool_enabled(id));
+        assert!(tools.contains(ToolId::WriteFile));
+        assert!(!tools.contains(ToolId::Exec));
+        assert!(!tools.contains(ToolId::Run));
+        for name in ["base", "implicit"] {
+            assert!(config.resolve(name, ToolId::WriteFile).is_ok());
+            assert!(config.resolve(name, ToolId::Exec).is_err());
+        }
+        assert!(config.resolve("reader", ToolId::ReadFile).is_ok());
+        assert!(config.resolve("reader", ToolId::WriteFile).is_err());
+        assert!(config.resolve("actions", ToolId::ReadFile).is_err());
+        tools.retain(|id| id != ToolId::Stat);
+        let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+        let rows = discovery["targets"].as_array().unwrap();
+        let operations = |name: &str| &rows.iter().find(|row| row["name"] == name).unwrap()["permitted_operations"];
+        assert_eq!(
+            operations("base"),
+            &serde_json::json!(["b-list", "c-write", "n-read"])
+        );
+        assert_eq!(operations("implicit"), operations("base"));
+        assert_eq!(
+            operations("reader"),
+            &serde_json::json!(["b-list", "n-read"])
+        );
+        assert_eq!(operations("actions"), &serde_json::json!([]));
+    }
+
+    #[test]
+    fn restrictive_targets_do_not_hide_baseline_routes_or_authorize_sudo() {
+        let config = load_text(
+            "[targets.reader]\nssh_host='private-reader'\nprofile='read-only-files'\n\
+             [targets.reader.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n\
+             [targets.files]\nssh_host='private-files'\nprofile='files-only'\n\
+             [targets.files.sudo]\nmode='same-account'\n\
+             [targets.actions]\nssh_host='private-actions'\nprofile='actions-only'\n\
+             [targets.actions.sudo]\nmode='same-account'\n\
+             [targets.disabled]\nssh_host='private-disabled'\nprofile='baseline'\n\
+             [targets.empty]\nssh_host='private-empty'\nprofile='baseline'\n\
+             [targets.empty.sudo]\nmode='same-account'\nprograms=[]",
+            &[],
+        )
+        .unwrap();
+        assert!(config.tool_enabled(ToolId::Exec));
+        assert!(config.tool_enabled(ToolId::Run));
+        assert!(config.tool_enabled(ToolId::Sudo));
+        for name in ["reader", "files", "actions", "disabled", "empty"] {
+            let error = config.resolve_sudo(name, "root", "/bin/sh").err().unwrap();
+            assert_eq!(error.code, "policy_denied");
+            assert!(!error.remote_state_unknown);
+        }
+        for name in ["reader", "files", "actions"] {
+            assert!(config.resolve(name, ToolId::Exec).is_err());
+            assert!(config.resolve(name, ToolId::Run).is_err());
+        }
+        let discovery = serde_json::to_value(config.targets(&catalog())).unwrap();
+        for row in discovery["targets"].as_array().unwrap() {
+            assert!(
+                !row["permitted_operations"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("m-elevate"))
+            );
+        }
+    }
+
+    #[test]
+    fn profile_policy_preserves_open_validation_closed_targets_and_resolver_boundaries() {
+        let open = load_text("profile='read-only-files'", &[]).unwrap();
+        let resolved = open.resolve("user@example", ToolId::ReadFile).unwrap();
+        assert_eq!(resolved.destination, "user@example");
+        assert_eq!(resolved.role, IdentityRole::Ordinary);
+        assert_eq!(
+            open.resolve("-option", ToolId::ReadFile)
+                .err()
+                .unwrap()
+                .code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            open.resolve("user@example", ToolId::WriteFile)
+                .err()
+                .unwrap()
+                .code,
+            "policy_denied"
+        );
+        let closed = load_text(
+            "profile='read-only-files'\n[targets.logical]\nssh_host='private-alias'",
+            &[],
+        )
+        .unwrap();
+        assert!(closed.resolve("logical", ToolId::ReadFile).is_ok());
+        assert!(closed.resolve("private-alias", ToolId::ReadFile).is_err());
+        let empty = load_text("profile='files-only'\n[targets]", &[]).unwrap();
+        assert!(empty.tool_enabled(ToolId::WriteFile));
+        assert!(empty.tool_enabled(ToolId::Targets));
+        assert!(empty.resolve("anything", ToolId::ReadFile).is_err());
+        let baseline_empty = load_text("[targets]", &[]).unwrap();
+        assert!(baseline_empty.tool_enabled(ToolId::Exec));
+        assert!(baseline_empty.tool_enabled(ToolId::WriteFile));
+        assert!(!baseline_empty.tool_enabled(ToolId::Sudo));
+        for tool in [ToolId::Targets, ToolId::Sudo] {
+            assert_eq!(
+                closed.resolve("logical", tool).err().unwrap().code,
+                "policy_denied"
+            );
+            assert_eq!(
+                load_text("", &[])
+                    .unwrap()
+                    .resolve("host", tool)
+                    .err()
+                    .unwrap()
+                    .code,
+                "policy_denied"
+            );
+        }
+        let discovery = serde_json::to_value(open.targets(&catalog())).unwrap();
+        assert_eq!(discovery["mode"], "open");
+        assert_eq!(discovery["targets"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn unknown_and_wrong_type_profiles_use_only_fixed_secret_free_schema_paths() {
+        for value in [
+            "'secret_payload'",
+            "'Baseline'",
+            "'read_only_files'",
+            "''",
+            "42",
+            "true",
+            "1.5",
+            "['secret_payload']",
+            "{secret_payload='secret_payload'}",
+        ] {
+            for (text, field) in [
+                (format!("profile={value}"), "profile"),
+                (
+                    format!("[targets.secret_target]\nssh_host='secret_alias'\nprofile={value}"),
+                    "targets.*.profile",
+                ),
+            ] {
+                let error = load_text(&text, &[]).err().unwrap();
+                assert_eq!(error.field, field);
+                for secret in ["secret_payload", "secret_target", "secret_alias"] {
+                    assert!(!error.to_string().contains(secret));
+                    assert!(!format!("{error:?}").contains(secret));
+                }
+                assert!(std::error::Error::source(&error).is_none());
+            }
+        }
     }
 
     fn load_text(text: &str, vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
@@ -1527,27 +1897,33 @@ programs=['/private/program']
     #[test]
     fn configured_dispatch_never_accepts_aliases_and_open_dispatch_is_validated() {
         let config = load_text("[targets.logical]\nssh_host='ordinary-alias'", &[]).unwrap();
-        let resolved = config.resolve("logical").unwrap();
+        let resolved = config.resolve("logical", ToolId::Exec).unwrap();
         assert_eq!(
             (resolved.name, resolved.destination, resolved.role),
             ("logical", "ordinary-alias", IdentityRole::Ordinary)
         );
         for host in ["ordinary-alias", "unknown", ""] {
-            assert_eq!(config.resolve(host).err().unwrap().code, "policy_denied");
+            assert_eq!(
+                config.resolve(host, ToolId::Exec).err().unwrap().code,
+                "policy_denied"
+            );
         }
         let empty = load_text("[targets]", &[]).unwrap();
         assert_eq!(
-            empty.resolve("anything").err().unwrap().code,
+            empty.resolve("anything", ToolId::Exec).err().unwrap().code,
             "policy_denied"
         );
         let open = load_text("", &[]).unwrap();
-        let resolved = open.resolve("user@example").unwrap();
+        let resolved = open.resolve("user@example", ToolId::Exec).unwrap();
         assert_eq!(
             (resolved.name, resolved.destination),
             ("user@example", "user@example")
         );
         for host in ["", "-option", "host name", "host\0name"] {
-            assert_eq!(open.resolve(host).err().unwrap().code, "invalid_argument");
+            assert_eq!(
+                open.resolve(host, ToolId::Exec).err().unwrap().code,
+                "invalid_argument"
+            );
         }
         assert!(!open.has_sudo());
         assert_eq!(
@@ -1601,7 +1977,13 @@ mode = "same-account"
             (split.name, split.destination, split.role),
             ("split", "operator", IdentityRole::Elevated)
         );
-        assert_eq!(config.resolve("split").unwrap().destination, "reader");
+        assert_eq!(
+            config
+                .resolve("split", ToolId::ReadFile)
+                .unwrap()
+                .destination,
+            "reader"
+        );
         for (host, user, program) in [
             ("same", "service", "/usr/bin/id"),
             ("same", "root", "/bin/id"),

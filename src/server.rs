@@ -161,7 +161,7 @@ impl SshMcp {
             .attr
             .name
             .clone();
-        tools.retain(|id| id != ToolId::Sudo || config.has_sudo());
+        tools.retain(|id| config.tool_enabled(id));
         let mut tool_router = ToolRouter::new();
         for (id, route) in routes {
             if tools.contains(id) {
@@ -551,11 +551,17 @@ impl Operation {
         let (target, seconds) = match self {
             Self::Exec(request) => {
                 request.validate(config.limits().max_file_bytes)?;
-                (config.resolve(&request.host)?, request.timeout_secs)
+                (
+                    config.resolve(&request.host, ToolId::Exec)?,
+                    request.timeout_secs,
+                )
             }
             Self::Run(request) => {
                 request.validate(config.limits().max_file_bytes)?;
-                (config.resolve(&request.host)?, request.timeout_secs)
+                (
+                    config.resolve(&request.host, ToolId::Run)?,
+                    request.timeout_secs,
+                )
             }
             Self::Sudo(request) => {
                 request.validate(config.limits().max_file_bytes)?;
@@ -715,7 +721,7 @@ impl State {
         let validated = request
             .validate(self.config.limits().max_file_bytes, budget)
             .and_then(|spec| {
-                let target = self.config.resolve(&request.host)?;
+                let target = self.config.resolve(&request.host, ToolId::ReadFile)?;
                 let deadline =
                     request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
                 Ok((spec, target, deadline))
@@ -771,7 +777,7 @@ impl State {
             return ToolReply::failure(error);
         }
         let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host)?;
+            let target = self.config.resolve(&request.host, ToolId::Stat)?;
             let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
             Ok((spec, target, deadline))
         });
@@ -826,7 +832,7 @@ impl State {
             return ToolReply::failure(error);
         }
         let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host)?;
+            let target = self.config.resolve(&request.host, ToolId::ListDirectory)?;
             let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
             Ok((spec, target, deadline))
         });
@@ -883,7 +889,7 @@ impl State {
         let validated = request
             .validate(self.config.limits().max_file_bytes, budget)
             .and_then(|spec| {
-                let target = self.config.resolve(&request.host)?;
+                let target = self.config.resolve(&request.host, ToolId::WriteFile)?;
                 let deadline =
                     request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
                 Ok((spec, target, deadline))
