@@ -2328,10 +2328,13 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
             ("change_account", "change-2", json!(["persistent_write"]), false, true),
         ] {
             let tool = tools.iter().find(|tool| tool["name"] == name).context("binding metadata")?;
-            ensure!(tool["_meta"]["revision"] == revision);
-            ensure!(tool["_meta"]["effects"] == effects);
-            ensure!(tool["_meta"]["result"] == "command");
-            ensure!(tool["_meta"]["executor"] == "native_argv");
+            ensure!(tool["_meta"] == json!({
+                "revision": revision,
+                "authority": "ordinary",
+                "effects": effects,
+                "result": "command",
+                "executor": "native_argv",
+            }));
             ensure!(tool["annotations"]["readOnlyHint"] == read_only);
             ensure!(tool["annotations"]["destructiveHint"] == destructive);
             ensure!(tool["annotations"]["idempotentHint"] == false);
@@ -2534,6 +2537,7 @@ async fn file_profiles_do_not_publish_enabled_native_bindings() -> Result<()> {
 async fn invalid_named_tool_definitions_fail_before_mcp_without_private_values() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("private-binding-config.toml");
+    std::fs::write(directory.path().join("replacement.conf"), "")?;
     let mut invalid = Vec::new();
     for (from, to) in [
         (
@@ -2632,35 +2636,175 @@ async fn invalid_named_tool_definitions_fail_before_mcp_without_private_values()
 
 #[tokio::test]
 async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<()> {
-    let config = NAMED_TOOL_CONFIG.replace("profile = \"actions-only\"", "profile = \"baseline\"");
-    let (mut server, directory) = named_tools_server(&config)?;
+    for (fixture, names) in [
+        (NAMED_TOOL_CONFIG, ["observe_account", "change_account"]),
+        (FIXED_SUDO_TOOL_CONFIG, ["fixed_id", "fixed_printf"]),
+    ] {
+        let config = fixture.replace("profile = \"actions-only\"", "profile = \"baseline\"");
+        let (mut server, directory) = named_tools_server(&config)?;
+        let scenario = async {
+            server.initialize().await?;
+            server
+                .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+                .await?;
+            let listed = server.response(2).await?;
+            let tools = listed["result"]["tools"]
+                .as_array()
+                .context("baseline tools")?;
+            let command_schema = &tools
+                .iter()
+                .find(|tool| tool["name"] == "ssh_run")
+                .context("actual command route")?["outputSchema"];
+            ensure!(command_schema.is_object());
+            for name in names {
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool["name"] == name)
+                    .context("named command route")?;
+                ensure!(
+                    tool["outputSchema"] == *command_schema,
+                    "wrong command result schema for {name}"
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        binding_public_only(&stderr)?;
+        ensure!(!directory.path().join("binding-must-not-probe").exists());
+    }
+    Ok(())
+}
+
+const FIXED_SUDO_TOOL_CONFIG: &str = indoc::indoc! {r#"
+    profile = "actions-only"
+    enabled_tools = ["fixed_id", "fixed_printf"]
+    [ssh]
+    config_file = "replacement.conf"
+    [limits]
+    connect_timeout_secs = 1
+    operation_timeout_secs = 3
+    max_timeout_secs = 5
+    max_output_bytes = 4096
+    [targets.base]
+    ssh_host = "private-binding-backend.invalid"
+    [targets.base.sudo]
+    mode = "separate-identity"
+    ssh_host = "private-binding-elevated.invalid"
+    users = ["root"]
+    programs = ["/usr/bin/id", "/usr/bin/printf"]
+    [targets.same]
+    ssh_host = "private-binding-same.invalid"
+    profile = "actions-only"
+    [targets.same.sudo]
+    mode = "same-account"
+    users = ["root"]
+    programs = ["/usr/bin/id", "/usr/bin/printf"]
+    [targets.read]
+    ssh_host = "private-binding-read.invalid"
+    profile = "read-only-files"
+    [targets.read.sudo]
+    mode = "same-account"
+    [targets.files]
+    ssh_host = "private-binding-files.invalid"
+    profile = "files-only"
+    [targets.files.sudo]
+    mode = "same-account"
+    [targets.other]
+    ssh_host = "private-binding-other.invalid"
+    [tools.fixed_id]
+    description = "Observe the fixed privileged account."
+    revision = "id-1"
+    targets = ["base", "same", "read", "files"]
+    authority = { sudo = "root" }
+    effects = ["read"]
+    execution = { kind = "native_argv", program = "/usr/bin/id", argv = ["-u"] }
+    input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+    result = { kind = "command" }
+    [tools.fixed_printf]
+    description = "Perform the reviewed privileged operation."
+    revision = "printf-1"
+    targets = ["base", "same", "read", "files"]
+    authority = { sudo = "root" }
+    effects = ["persistent_write"]
+    execution = { kind = "native_argv", program = "/usr/bin/printf", argv = ["--", "%s", { input = "value" }] }
+    input_schema = { type = "object", additionalProperties = false, required = ["value"], properties = { value = { type = "string", maxLength = 64 } } }
+    result = { kind = "command" }
+"#};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Result<()> {
+    let (mut server, directory) = named_tools_server(FIXED_SUDO_TOOL_CONFIG)?;
     let scenario = async {
         server.initialize().await?;
-        server
-            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
-            .await?;
+        server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
         let listed = server.response(2).await?;
-        let tools = listed["result"]["tools"]
-            .as_array()
-            .context("baseline tools")?;
-        let command_schema = &tools
-            .iter()
-            .find(|tool| tool["name"] == "ssh_run")
-            .context("actual command route")?["outputSchema"];
-        ensure!(command_schema.is_object());
-        for name in ["observe_account", "change_account"] {
-            let tool = tools
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .context("named command route")?;
-            ensure!(
-                tool["outputSchema"] == *command_schema,
-                "wrong command result schema for {name}"
-            );
+        binding_public_only(&serde_json::to_vec(&listed)?)?;
+        let tools = listed["result"]["tools"].as_array().context("fixed sudo tools")?;
+        let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
+        names.sort_unstable();
+        ensure!(names == ["fixed_id", "fixed_printf", "ssh_targets"]);
+        for (name, revision, effects, read_only, destructive) in [
+            ("fixed_id", "id-1", json!(["read"]), true, false),
+            ("fixed_printf", "printf-1", json!(["persistent_write"]), false, true),
+        ] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).context("fixed sudo metadata")?;
+            ensure!(tool["_meta"] == json!({
+                "revision": revision,
+                "authority": {"sudo": "root"},
+                "effects": effects,
+                "executor": "native_argv",
+                "result": "command",
+            }));
+            ensure!(tool["annotations"]["readOnlyHint"] == read_only);
+            ensure!(tool["annotations"]["destructiveHint"] == destructive);
+            ensure!(tool["annotations"]["idempotentHint"] == false);
+            let schema = &tool["inputSchema"];
+            ensure!(schema["type"] == "object" && schema["additionalProperties"] == false);
+            let properties = schema["properties"].as_object().context("fixed sudo properties")?;
+            let expected_fields = if name == "fixed_id" { 2 } else { 3 };
+            ensure!(properties.len() == expected_fields);
+            ensure!(properties.contains_key("host") && properties.contains_key("timeout_secs"));
+            ensure!(schema["properties"]["timeout_secs"]["maximum"] == 5);
+            let hosts = schema["properties"]["host"]["enum"].as_array().context("fixed sudo hosts")?;
+            ensure!(hosts.len() == 4);
+            for host in ["base", "same", "read", "files"] {
+                ensure!(hosts.contains(&json!(host)));
+            }
+            let required = schema["required"].as_array().context("fixed sudo required fields")?;
+            ensure!(required.contains(&json!("host")));
+            if name == "fixed_id" {
+                ensure!(required.len() == 1);
+            } else {
+                ensure!(required.len() == 2 && required.contains(&json!("value")));
+            }
+            for fixed in ["user", "program", "authority", "argv", "cwd", "role", "sudo"] {
+                ensure!(!properties.contains_key(fixed));
+                ensure!(tool["_meta"].get(fixed).is_none() || fixed == "authority");
+            }
+            let public = serde_json::to_string(tool)?;
+            ensure!(!public.contains("/usr/bin/id") && !public.contains("/usr/bin/printf"));
+        }
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        let discovered = server.response(3).await?;
+        binding_public_only(&serde_json::to_vec(&discovered)?)?;
+        let rows = discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("fixed sudo target rows")?;
+        for (host, operations) in [
+            ("base", json!(["fixed_id", "fixed_printf"])),
+            ("same", json!(["fixed_id", "fixed_printf"])),
+            ("read", json!([])),
+            ("files", json!([])),
+            ("other", json!([])),
+        ] {
+            let row = rows.iter().find(|row| row["name"] == host).context("fixed sudo target")?;
+            ensure!(row["permitted_operations"] == operations, "{row}");
         }
         Ok::<_, anyhow::Error>(())
-    }
-    .await;
+    }.await;
     let finished = server.finish().await;
     scenario?;
     let (status, stderr) = finished?;
@@ -2668,5 +2812,234 @@ async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<(
     no_remote_dispatch(&stderr)?;
     binding_public_only(&stderr)?;
     ensure!(!directory.path().join("binding-must-not-probe").exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_sudo_controls_and_target_policy_reject_before_ssh() -> Result<()> {
+    let (mut server, directory) = named_tools_server(FIXED_SUDO_TOOL_CONFIG)?;
+    let scenario = async {
+        server.initialize().await?;
+        let mut id = 2;
+        for tool in ["ssh_exec", "ssh_run", "ssh_sudo"] {
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":profile_call_arguments(tool, "base")}})).await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602);
+            id += 1;
+        }
+        for host in ["base", "same", "read", "private-binding-elevated.invalid"] {
+            for (field, value) in [
+                ("user", json!("BINDING_INPUT_SECRET")),
+                ("authority", json!({"sudo":"BINDING_INPUT_SECRET"})),
+                ("program", json!("/private/binding-override")),
+                ("argv", json!(["BINDING_INPUT_SECRET"])),
+                ("cwd", json!("/private/binding-cwd")),
+                ("role", json!("elevated")),
+            ] {
+                let mut arguments = json!({"host":host});
+                arguments[field] = value;
+                server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"fixed_id","arguments":arguments}})).await?;
+                let response = server.response(id).await?;
+                ensure!(response["error"]["code"] == -32602, "{host}/{field}: {response}");
+                binding_public_only(&serde_json::to_vec(&response)?)?;
+                id += 1;
+            }
+        }
+        for host in ["read", "files", "other", "private-binding-elevated.invalid", "unconfigured.invalid"] {
+            for (tool, arguments) in [
+                ("fixed_id", json!({"host":host})),
+                ("fixed_printf", json!({"host":host,"value":"BINDING_INPUT_SECRET"})),
+            ] {
+                server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).await?;
+                let response = server.response(id).await?;
+                profile_policy_denied(&response)?;
+                binding_public_only(&serde_json::to_vec(&response)?)?;
+                id += 1;
+            }
+        }
+        server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        discovery_data(&server.response(id).await?["result"], "configured")?;
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    binding_public_only(&stderr)?;
+    ensure!(!directory.path().join("binding-must-not-probe").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn fixed_sudo_file_profiles_hide_routes_and_reject_direct_calls() -> Result<()> {
+    for profile in ["read-only-files", "files-only"] {
+        let config = FIXED_SUDO_TOOL_CONFIG.replacen(
+            "profile = \"actions-only\"",
+            &format!("profile = \"{profile}\""),
+            1,
+        );
+        let (mut server, directory) = named_tools_server(&config)?;
+        let scenario = async {
+            server.initialize().await?;
+            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
+            let listed = server.response(2).await?;
+            let tools = listed["result"]["tools"].as_array().context("file profile tools")?;
+            for (index, name) in ["fixed_id", "fixed_printf", "ssh_sudo"].into_iter().enumerate() {
+                ensure!(!tools.iter().any(|tool| tool["name"] == name));
+                let id = 3 + index as u64;
+                let arguments = match name {
+                    "fixed_printf" => json!({"host":"base","value":"BINDING_INPUT_SECRET"}),
+                    "ssh_sudo" => profile_call_arguments(name, "base"),
+                    _ => json!({"host":"base"}),
+                };
+                server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await?;
+                let response = server.response(id).await?;
+                ensure!(response["error"]["code"] == -32602);
+                binding_public_only(&serde_json::to_vec(&response)?)?;
+            }
+            server.send(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            let discovered = server.response(6).await?;
+            for row in discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("file profile target rows")? {
+                let operations = row["permitted_operations"].as_array().context("file profile operations")?;
+                ensure!(!operations.contains(&json!("fixed_id")));
+                ensure!(!operations.contains(&json!("fixed_printf")));
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        binding_public_only(&stderr)?;
+        ensure!(!directory.path().join("binding-must-not-probe").exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fixed_sudo_invalid_or_unauthorized_definitions_fail_sanitized_startup() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("private-binding-config.toml");
+    std::fs::write(directory.path().join("replacement.conf"), "")?;
+    let mut cases = Vec::new();
+    for (label, authority) in [
+        ("string sudo", "\"sudo\""),
+        ("empty authority", "{}"),
+        (
+            "extra authority key",
+            "{ sudo = \"root\", extra = \"BINDING_CONFIG_SECRET\" }",
+        ),
+        ("numeric account", "{ sudo = \"0\" }"),
+        ("option account", "{ sudo = \"--BINDING_CONFIG_SECRET\" }"),
+        (
+            "NUL account",
+            "{ sudo = \"root\\u0000BINDING_CONFIG_SECRET\" }",
+        ),
+        (
+            "wrong account type",
+            "{ sudo = [\"BINDING_CONFIG_SECRET\"] }",
+        ),
+    ] {
+        cases.push((
+            label,
+            FIXED_SUDO_TOOL_CONFIG.replace(
+                "authority = { sudo = \"root\" }",
+                &format!("authority = {authority}"),
+            ),
+        ));
+    }
+    cases.push((
+        "long account",
+        FIXED_SUDO_TOOL_CONFIG.replace(
+            "authority = { sudo = \"root\" }",
+            &format!("authority = {{ sudo = \"{}\" }}", "a".repeat(65)),
+        ),
+    ));
+    for (label, from, to) in [
+        (
+            "elevated cwd",
+            "program = \"/usr/bin/id\", argv",
+            "program = \"/usr/bin/id\", cwd = \"/private/binding-cwd\", argv",
+        ),
+        (
+            "disabled sudo",
+            "[targets.read.sudo]\nmode = \"same-account\"",
+            "[targets.read.sudo]\nmode = \"disabled\"",
+        ),
+        (
+            "missing permitted user",
+            "users = [\"root\"]",
+            "users = [\"operator\"]",
+        ),
+        (
+            "empty program policy",
+            "programs = [\"/usr/bin/id\", \"/usr/bin/printf\"]",
+            "programs = []",
+        ),
+        (
+            "same basename wrong path",
+            "program = \"/usr/bin/id\"",
+            "program = \"/private/binding/id\"",
+        ),
+        (
+            "one unauthorized target",
+            "[targets.read.sudo]\nmode = \"same-account\"",
+            "[targets.read.sudo]\nmode = \"same-account\"\nprograms = []",
+        ),
+    ] {
+        cases.push((label, FIXED_SUDO_TOOL_CONFIG.replace(from, to)));
+    }
+    let unauthorized =
+        FIXED_SUDO_TOOL_CONFIG.replace("users = [\"root\"]", "users = [\"operator\"]");
+    cases.push((
+        "disabled unauthorized definition",
+        unauthorized.replace(
+            "enabled_tools = [\"fixed_id\", \"fixed_printf\"]",
+            "enabled_tools = []",
+        ),
+    ));
+    cases.push((
+        "profile-hidden unauthorized definition",
+        unauthorized.replacen("profile = \"actions-only\"", "profile = \"files-only\"", 1),
+    ));
+    cases.push((
+        "disabled malformed definition",
+        FIXED_SUDO_TOOL_CONFIG
+            .replace(
+                "enabled_tools = [\"fixed_id\", \"fixed_printf\"]",
+                "enabled_tools = []",
+            )
+            .replace(
+                "authority = { sudo = \"root\" }",
+                "authority = { sudo = \"BINDING_CONFIG_SECRET value\" }",
+            ),
+    ));
+    for (label, config) in cases {
+        std::fs::write(&path, config)?;
+        let output = timeout(
+            Duration::from_secs(5),
+            command(&["--config", path.to_str().context("config path")?]).output(),
+        )
+        .await??;
+        ensure!(!output.status.success(), "accepted {label}");
+        ensure!(output.stdout.is_empty(), "started MCP for {label}");
+        binding_public_only(&output.stderr)?;
+        let stderr = std::str::from_utf8(&output.stderr)?;
+        ensure!(!stderr.contains("BINDING_CONFIG_SECRET"), "{label}");
+        ensure!(
+            !stderr.contains(path.to_str().context("config path")?),
+            "{label}"
+        );
+        ensure!(
+            !stderr.contains("/usr/bin/id") && !stderr.contains("/usr/bin/printf"),
+            "{label}"
+        );
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(
+            diagnostic["code"] == "invalid_config",
+            "{label}: {diagnostic}"
+        );
+    }
     Ok(())
 }
