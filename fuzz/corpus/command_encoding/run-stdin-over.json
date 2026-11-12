@@ -1,0 +1,1 @@
+{"kind":"run","argv":["cat"],"stdin":"é\u0000","max_stdin_bytes":2}

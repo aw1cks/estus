@@ -170,6 +170,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     for name in [
         "ssh_targets",
         "ssh_exec",
+        "ssh_run",
         "ssh_sudo",
         "ssh_read_file",
         "ssh_stat",
@@ -226,6 +227,26 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         (
             "ssh_exec",
             json!({"host":"plain","command":"true","timeout_secs":16}),
+            "invalid_argument",
+        ),
+        (
+            "ssh_run",
+            json!({"host":"plain","argv":[]}),
+            "invalid_argument",
+        ),
+        (
+            "ssh_run",
+            json!({"host":"plain","argv":[""]}),
+            "invalid_argument",
+        ),
+        (
+            "ssh_run",
+            json!({"host":"plain","argv":["bad\u{0000}program"]}),
+            "invalid_argument",
+        ),
+        (
+            "ssh_run",
+            json!({"host":"plain","argv":["/bin/sh","bad\u{0000}argument"]}),
             "invalid_argument",
         ),
     ] {
@@ -299,6 +320,95 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         !injected.exists(),
         "argument text was evaluated as shell syntax"
     );
+    let baseline = exec(client, "printf %s \"$PWD\"").await?;
+    let baseline_cwd = succeeded(&baseline)?["stdout"]
+        .as_str()
+        .context("initial channel cwd")?;
+    let arguments = [
+        "",
+        "two words",
+        "single' and double\" quotes",
+        "line one\nline two",
+        "; & | < > * ? [ ] { } \\ $HOME",
+        "日本語 🦀",
+        &injection,
+    ];
+    let mut argv = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        indoc! {r#"
+            printf '%s\000' "$PWD" "$@"
+            cat
+            printf RUN_STDERR >&2
+            exit 23
+        "#}
+        .to_owned(),
+        "argv-probe".to_owned(),
+    ];
+    argv.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+    let stdin = "stdin before\0after\n日本語";
+    let reply = client
+        .call(
+            "ssh_run",
+            json!({"host":"plain","argv":argv,"cwd":unusual,"stdin":stdin}),
+        )
+        .await?;
+    failed(&reply, "command_failed")?;
+    let data = &reply["data"];
+    let expected = format!(
+        "{}\0{}\0{stdin}",
+        unusual.to_string_lossy(),
+        arguments.join("\0"),
+    );
+    ensure!(
+        data["stdout"] == expected && data["stderr"] == "RUN_STDERR" && data["exit_code"] == 23,
+        "literal argv, cwd, stdin, or stream fidelity: {reply}"
+    );
+    ensure!(
+        data["termination"] == "exited"
+            && data["remote_may_still_be_running"] == false
+            && data["stdout_lossy"] == false
+            && data["stderr_lossy"] == false
+    );
+    ensure!(reply["error"]["remote_state_unknown"] == false);
+    ensure!(
+        !injected.exists(),
+        "ssh_run evaluated caller text as shell syntax"
+    );
+    let reply = client
+        .call(
+            "ssh_run",
+            json!({"host":"plain","argv":["/bin/sh","-c","printf %s \"$PWD\""]}),
+        )
+        .await?;
+    ensure!(
+        succeeded(&reply)?["stdout"] == baseline_cwd,
+        "ssh_run cwd carried over to a later channel"
+    );
+    let reply = client
+        .call("ssh_run", json!({"host":"plain","argv":["true"]}))
+        .await?;
+    ensure!(
+        succeeded(&reply)?["exit_code"] == 0,
+        "bare PATH executable failed"
+    );
+    for program in [
+        "SSH_MCP_MISSING_EXECUTABLE_8f19=value",
+        "if",
+        "-SSH_MCP_MISSING_EXECUTABLE_8f19",
+    ] {
+        let reply = client
+            .call("ssh_run", json!({"host":"plain","argv":[program]}))
+            .await?;
+        failed(&reply, "command_failed")?;
+        ensure!(
+            reply["data"]["exit_code"] == 127
+                && reply["data"]["termination"] == "exited"
+                && reply["data"]["remote_may_still_be_running"] == false,
+            "executable was not treated literally ({program:?}): {reply}"
+        );
+        ensure!(reply["error"]["remote_state_unknown"] == false);
+    }
     let secret = "SYNTHETIC_STDIN_PAYLOAD_77c940";
     let reply = client.call("ssh_exec", json!({"host":"plain","command":"printf SYNTHETIC_COMMAND_MARKER_07b9; printf SYNTHETIC_STDERR_MARKER_319a >&2; cat","stdin":secret})).await?;
     let data = succeeded(&reply)?;
@@ -307,14 +417,19 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
             && data["stderr"] == "SYNTHETIC_STDERR_MARKER_319a"
     );
     // POSIX printf octal escapes generate invalid UTF-8 on both streams.
-    let reply = exec(client, "printf '\\377'; printf '\\376' >&2").await?;
+    let reply = client
+        .call(
+            "ssh_run",
+            json!({"host":"plain","argv":["/bin/sh","-c","printf '\\377'; printf '\\376' >&2"]}),
+        )
+        .await?;
     let data = succeeded(&reply)?;
     ensure!(
         data["stdout_lossy"] == true && data["stderr_lossy"] == true,
         "binary output must disclose lossy decoding"
     );
     ensure!(data["stdout"] == "\u{fffd}" && data["stderr"] == "\u{fffd}");
-    let reply = client.call("ssh_exec", json!({"host":"plain","command":"i=0; while [ \"$i\" -lt 4096 ]; do printf x; printf y >&2; i=$((i+1)); done; cat; exit 7","stdin":"z".repeat(8192)})).await?;
+    let reply = client.call("ssh_run", json!({"host":"plain","argv":["/bin/sh","-c","i=0; while [ \"$i\" -lt 4096 ]; do printf x; printf y >&2; i=$((i+1)); done; cat; exit 7"],"stdin":"z".repeat(8192)})).await?;
     failed(&reply, "command_failed")?;
     let data = &reply["data"];
     ensure!(
@@ -368,8 +483,8 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     );
     let (timed, unaffected) = tokio::join!(
         client.call(
-            "ssh_exec",
-            json!({"host":"plain","command":command,"timeout_secs":1})
+            "ssh_run",
+            json!({"host":"plain","argv":["/bin/sh","-c",command],"timeout_secs":1})
         ),
         async {
             Fixture::await_file(&timeout_started).await?;
@@ -382,6 +497,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     ensure!(timed["data"]["stdout"] == "partial" && timed["data"]["stderr"] == "error");
     ensure!(
         timed["data"]["termination"] == "timeout"
+            && timed["data"]["exit_code"].is_null()
             && timed["data"]["remote_may_still_be_running"] == true
     );
     ensure!(timed["error"]["remote_state_unknown"] == true);
@@ -409,8 +525,8 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         quote(&cancel_done.to_string_lossy())
     );
     let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
-        "ssh_exec",
-        json!({"host":"plain","command":command,"timeout_secs":10}),
+        "ssh_run",
+        json!({"host":"plain","argv":["/bin/sh","-c",command],"timeout_secs":10}),
     )));
     let handle = timeout(
         Duration::from_secs(5),
@@ -428,6 +544,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     )
     .await??;
     let audit = await_audit(&client.log, "finish", "cancelled").await?;
+    ensure!(audit["exit_code"].is_null());
     ensure!(
         audit["remote_state_unknown"] == true,
         "cancel audit must acknowledge remote uncertainty"
@@ -487,6 +604,13 @@ fn audit_boundary(log: &Log) -> Result<()> {
             ensure!(
                 record.get("host").is_some(),
                 "remote request audit missing logical host"
+            );
+        }
+        if record["tool"] == "ssh_run" {
+            ensure!(record["identity_role"] == "ordinary");
+            ensure!(
+                record.get("program").is_none() && record.get("user").is_none(),
+                "ordinary argv payload leaked into audit metadata"
             );
         }
         for forbidden in [
@@ -745,7 +869,10 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
         quote(&started.to_string_lossy()),
         quote(&done.to_string_lossy()),
     );
-    let request = client.call("ssh_exec", json!({"host":"resource","command":command}));
+    let request = client.call(
+        "ssh_run",
+        json!({"host":"resource","argv":["/bin/sh","-c",command]}),
+    );
     let disconnect = async {
         Fixture::await_file(&started).await?;
         let closed = support::run(
@@ -768,6 +895,8 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
     let reply = reply?;
     failed(&reply, "connection_lost")?;
     ensure!(reply["error"]["remote_state_unknown"] == true);
+    ensure!(reply["data"]["termination"] == "connection_lost");
+    ensure!(reply["data"]["exit_code"].is_null());
     ensure!(reply["data"]["remote_may_still_be_running"] == true);
     Fixture::await_file(&done).await?;
     assert_masters_gone(std::slice::from_ref(&owned)).await?;
@@ -990,7 +1119,12 @@ async fn ssh_channel_timeout() -> Result<()> {
             };
             let loss = async {
                 Fixture::await_file(&sibling_started).await?;
-                let reply = exec(&client, &quiet).await?;
+                let reply = client
+                    .call(
+                        "ssh_run",
+                        json!({"host":"plain","argv":["/bin/sh","-c",quiet]}),
+                    )
+                    .await?;
                 Fixture::await_file(&started).await?;
                 failed(&reply, "connection_lost")?;
                 ensure!(reply["data"]["termination"] == "connection_lost");

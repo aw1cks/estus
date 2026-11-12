@@ -11,13 +11,13 @@ mod command;
 #[path = "../../src/reply.rs"]
 mod reply;
 
-use command::{ExecRequest, Invocation, MAX_COMMAND_BYTES, Shell, SudoRequest};
+use command::{ExecRequest, Invocation, MAX_COMMAND_BYTES, RunRequest, Shell, SudoRequest};
 
 // Bound raw JSON before deserialization and every expansion before allocation.
 const MAX_INPUT_BYTES: usize = 16_384;
 const MAX_FIELD_BYTES: usize = 131_072;
 const MAX_EXPANDED_BYTES: usize = 262_144;
-const MAX_ARGUMENTS: usize = 21_840;
+const MAX_ARGUMENTS: usize = 21_844;
 const MAX_EXPLICIT_ARGUMENTS: usize = 64;
 
 fn one() -> usize {
@@ -70,6 +70,16 @@ enum Fixture {
         #[serde(default)]
         max_stdin_bytes: u64,
     },
+    Run {
+        argv: Vec<Text>,
+        #[serde(default)]
+        empty_args: usize,
+        cwd: Option<Text>,
+        stdin: Option<Text>,
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        max_stdin_bytes: u64,
+    },
     Sudo {
         argv: Vec<Text>,
         #[serde(default)]
@@ -92,6 +102,21 @@ fn expand_optional(text: Option<Text>, remaining: &mut usize) -> Option<Option<S
         Some(text) => Some(Some(text.expand(remaining)?)),
         None => Some(None),
     }
+}
+
+fn expand_argv(argv: Vec<Text>, empty_args: usize, remaining: &mut usize) -> Option<Vec<String>> {
+    if argv.len() > MAX_EXPLICIT_ARGUMENTS
+        || empty_args > MAX_ARGUMENTS
+        || argv.len().checked_add(empty_args)? > MAX_ARGUMENTS
+    {
+        return None;
+    }
+    let mut arguments = Vec::with_capacity(argv.len() + empty_args);
+    for argument in argv {
+        arguments.push(argument.expand(remaining)?);
+    }
+    arguments.resize_with(arguments.len() + empty_args, String::new);
+    Some(arguments)
 }
 
 fn encoded<'a>(arguments: impl IntoIterator<Item = &'a str>) -> String {
@@ -185,6 +210,54 @@ fn exercise(fixture: Fixture) -> Option<()> {
                 && expected_bytes <= MAX_COMMAND_BYTES;
             check_validation(request.validate(max_stdin_bytes), valid, expected_bytes);
         }
+        Fixture::Run {
+            argv,
+            empty_args,
+            cwd,
+            stdin,
+            timeout_secs,
+            max_stdin_bytes,
+        } => {
+            let request = RunRequest {
+                host: "unused".into(),
+                argv: expand_argv(argv, empty_args, &mut remaining)?,
+                cwd: expand_optional(cwd, &mut remaining)?,
+                stdin: expand_optional(stdin, &mut remaining)?,
+                timeout_secs,
+            };
+            // The raw join is fixed syntax, not an escaped argument. All caller
+            // values use the real encoder, independently of production counting.
+            let mut expected = match request.cwd.as_deref() {
+                Some(cwd) => format!("{} && exec --", encoded(["cd", "--", cwd])),
+                None => encoded(["exec", "--"]),
+            };
+            if !request.argv.is_empty() {
+                expected.push(' ');
+                expected.push_str(&encoded(request.argv.iter().map(String::as_str)));
+            }
+            let expected_bytes = expected.len();
+            check_accounting(
+                Invocation::Argv {
+                    argv: &request.argv,
+                    cwd: request.cwd.as_deref(),
+                },
+                expected_bytes,
+            );
+            let valid = request
+                .argv
+                .first()
+                .is_some_and(|program| !program.is_empty())
+                && request
+                    .argv
+                    .iter()
+                    .all(|argument| !argument.as_bytes().contains(&0))
+                && request.cwd.as_deref().is_none_or(|cwd| {
+                    cwd.as_bytes().first() == Some(&b'/') && !cwd.as_bytes().contains(&0)
+                })
+                && common_valid(request.stdin.as_deref(), timeout_secs, max_stdin_bytes)
+                && expected_bytes <= MAX_COMMAND_BYTES;
+            check_validation(request.validate(max_stdin_bytes), valid, expected_bytes);
+        }
         Fixture::Sudo {
             argv,
             empty_args,
@@ -193,17 +266,7 @@ fn exercise(fixture: Fixture) -> Option<()> {
             timeout_secs,
             max_stdin_bytes,
         } => {
-            if argv.len() > MAX_EXPLICIT_ARGUMENTS
-                || empty_args > MAX_ARGUMENTS
-                || argv.len().checked_add(empty_args)? > MAX_ARGUMENTS
-            {
-                return None;
-            }
-            let mut arguments = Vec::with_capacity(argv.len() + empty_args);
-            for argument in argv {
-                arguments.push(argument.expand(&mut remaining)?);
-            }
-            arguments.resize_with(arguments.len() + empty_args, String::new);
+            let arguments = expand_argv(argv, empty_args, &mut remaining)?;
             let request = SudoRequest {
                 host: "unused".into(),
                 argv: arguments,
