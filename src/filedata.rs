@@ -406,12 +406,78 @@ pub(crate) fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, 
     })
 }
 
+pub(crate) fn verify_script(
+    bytes: Vec<u8>,
+    eof: bool,
+    expected_content_sha256: &[u8; 32],
+    max_bytes: usize,
+) -> Result<String, ToolError> {
+    if !eof || bytes.len() > max_bytes {
+        return Err(ToolError::new(
+            "resource_limit",
+            "Script source exceeds its complete byte bound",
+            false,
+        ));
+    }
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    if digest != *expected_content_sha256 {
+        return Err(ToolError::new(
+            "checksum_mismatch",
+            "Script source does not match its reviewed content_sha256",
+            false,
+        ));
+    }
+    if bytes.contains(&0) {
+        return Err(ToolError::new(
+            "invalid_encoding",
+            "Script source must be NUL-free UTF-8",
+            false,
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        ToolError::new(
+            "invalid_encoding",
+            "Script source must be NUL-free UTF-8",
+            false,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::filemeta::metadata_data;
     use rmcp::model::RequestId;
     use serde_json::json;
+
+    #[test]
+    fn script_verification_requires_complete_exact_bytes_before_decoding() {
+        let mut digest = [0; 32];
+        hex::decode_to_slice(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            &mut digest,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_script(b"abc".to_vec(), true, &digest, 3).unwrap(),
+            "abc"
+        );
+        for (bytes, eof, limit, code) in [
+            (b"abc".as_slice(), false, 3, "resource_limit"),
+            (b"abcd".as_slice(), true, 3, "resource_limit"),
+            (b"ab".as_slice(), true, 3, "checksum_mismatch"),
+            (b"abd".as_slice(), true, 3, "checksum_mismatch"),
+        ] {
+            let error = verify_script(bytes.to_vec(), eof, &digest, limit).unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(!error.remote_state_unknown);
+        }
+        for bytes in [b"\xff".as_slice(), b"abc\0"] {
+            let digest = Sha256::digest(bytes).into();
+            let error = verify_script(bytes.to_vec(), true, &digest, bytes.len()).unwrap_err();
+            assert_eq!(error.code, "invalid_encoding");
+        }
+    }
 
     fn request() -> ReadRequest {
         serde_json::from_value(json!({ "host": "target", "path": "relative/file" })).unwrap()
