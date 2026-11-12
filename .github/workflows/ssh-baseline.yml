@@ -5,14 +5,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
   group: ${{ github.workflow }}-${{ github.ref }}
 jobs:
-  ssh-baseline-linux:
-    env:
-      DOCKER_HOST: unix:///var/run/docker.sock
-    name: ssh-baseline-linux
+  verify:
+    name: ${{ matrix.name }}
     permissions:
       actions: write
       contents: read
-    runs-on: ubuntu-26.04
+    runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -26,17 +24,36 @@ jobs:
       with:
         gc-max-store-size-linux: 2G
         gc-max-store-size-macos: 2G
-        primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock', '**/*.rs') }}
+        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock', '**/*.rs') }}
         purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         purge-created: 0
-        purge-prefixes: nix-${{ runner.os }}-
+        purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-
         purge-primary-key: never
-        restore-prefixes-first-match: nix-${{ runner.os }}-
+        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
         save: true
     - name: Run flake checks
       run: nix flake check -L --no-update-lock-file --keep-going
-    - name: Run packaged Linux acceptance
+    - if: runner.os == 'macOS'
+      name: Run packaged native SSH acceptance
+      run: |
+        runtime=$(mktemp -d "$HOME/.ssh-mcp-native.XXXXXXXX")
+        trap 'rm -rf -- "$runtime"' EXIT
+        XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native
+    - env:
+        DOCKER_HOST: unix:///var/run/docker.sock
+      if: runner.os == 'Linux'
+      name: Run packaged Linux acceptance
       run: nix run -L --no-update-lock-file .#ci
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - name: ssh-baseline-linux
+          runner: ubuntu-26.04
+        - name: ssh-baseline-linux-arm64
+          runner: ubuntu-26.04-arm
+        - name: ssh-native-macos-arm64
+          runner: macos-26
     timeout-minutes: 45
 name: SSH baseline
 'on':

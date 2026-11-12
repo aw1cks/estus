@@ -6,7 +6,7 @@
       checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"; # v7.0.1
       lixInstaller = "samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d"; # v2026-06-15
       nixCache = "nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569"; # v7.0.2
-      cachePrefix = "nix-\${{ runner.os }}-";
+      cachePrefix = "nix-\${{ runner.os }}-\${{ runner.arch }}-";
       workflows = {
         "ssh-baseline.yml" = {
           name = "SSH baseline";
@@ -21,16 +21,33 @@
             # Let main finish seeding its cache; superseded PRs can stop.
             cancel-in-progress = "\${{ github.event_name != 'push' }}";
           };
-          jobs.ssh-baseline-linux = {
-            name = "ssh-baseline-linux";
-            runs-on = "ubuntu-26.04";
+          jobs.verify = {
+            name = "\${{ matrix.name }}";
+            runs-on = "\${{ matrix.runner }}";
+            strategy = {
+              fail-fast = false;
+              matrix.include = [
+                {
+                  # Preserve the existing required-check name.
+                  name = "ssh-baseline-linux";
+                  runner = "ubuntu-26.04";
+                }
+                {
+                  name = "ssh-baseline-linux-arm64";
+                  runner = "ubuntu-26.04-arm";
+                }
+                {
+                  name = "ssh-native-macos-arm64";
+                  runner = "macos-26";
+                }
+              ];
+            };
             timeout-minutes = 45;
             permissions = {
               contents = "read";
               # cache-nix-action needs this for same-ref cache purging.
               actions = "write";
             };
-            env.DOCKER_HOST = "unix:///var/run/docker.sock";
             steps = [
               {
                 uses = checkout;
@@ -65,7 +82,18 @@
                 run = "nix flake check -L --no-update-lock-file --keep-going";
               }
               {
+                name = "Run packaged native SSH acceptance";
+                "if" = "runner.os == 'macOS'";
+                run = ''
+                  runtime=$(mktemp -d "$HOME/.ssh-mcp-native.XXXXXXXX")
+                  trap 'rm -rf -- "$runtime"' EXIT
+                  XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native
+                '';
+              }
+              {
                 name = "Run packaged Linux acceptance";
+                "if" = "runner.os == 'Linux'";
+                env.DOCKER_HOST = "unix:///var/run/docker.sock";
                 run = "nix run -L --no-update-lock-file .#ci";
               }
             ];
