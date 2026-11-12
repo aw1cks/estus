@@ -140,12 +140,32 @@ struct RawBinding {
     limits: Option<RawLimits>,
 }
 #[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawExecution {
+    NativeArgv {
+        program: String,
+        argv: Vec<RawSlot>,
+        cwd: Option<String>,
+    },
+    RemoteScript {
+        source: RawScriptSource,
+        interpreter: RawInterpreter,
+        argv: Vec<RawSlot>,
+        cwd: Option<String>,
+    },
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawExecution {
-    kind: String,
+struct RawScriptSource {
+    path: String,
+    content_sha256: String,
+    max_bytes: Option<u64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInterpreter {
     program: String,
-    argv: Vec<RawSlot>,
-    cwd: Option<String>,
+    argv: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -268,6 +288,28 @@ enum Authority {
 }
 
 #[derive(Debug)]
+pub(crate) struct ScriptSource {
+    pub(crate) path: String,
+    pub(crate) content_sha256: [u8; 32],
+    pub(crate) max_bytes: usize,
+}
+
+#[derive(Debug)]
+enum Execution {
+    NativeArgv {
+        program: String,
+        cwd: Option<String>,
+        authority: Authority,
+    },
+    RemoteScript {
+        source: ScriptSource,
+        program: String,
+        prefix: Vec<String>,
+        cwd: Option<String>,
+    },
+}
+
+#[derive(Debug)]
 pub(crate) struct CompiledBinding {
     pub(crate) name: String,
     pub(crate) description: String,
@@ -277,10 +319,8 @@ pub(crate) struct CompiledBinding {
     enabled: bool,
     effects: Vec<Effect>,
     inputs: Vec<Input>,
-    authority: Authority,
-    program: String,
+    execution: Execution,
     argv: Vec<Slot>,
-    cwd: Option<String>,
     timeout_secs: Option<u64>,
     max_output_bytes: Option<u64>,
 }
@@ -291,6 +331,7 @@ pub(crate) struct BindingRequest {
 }
 pub(crate) struct PreparedBinding<'a> {
     pub(crate) invocation: Invocation<'a>,
+    pub(crate) script: Option<&'a ScriptSource>,
     pub(crate) duration: Duration,
     pub(crate) max_output_bytes: u64,
 }
@@ -359,11 +400,8 @@ impl CompiledBinding {
             },
             _ => return Err(invalid("Invalid fixed tool authority")),
         };
-        if raw.execution.kind != EXECUTOR_KIND || raw.result.kind != RESULT_KIND {
-            return Err(invalid("Only native argv command tools are supported"));
-        }
-        if matches!(authority, Authority::Sudo(_)) && raw.execution.cwd.is_some() {
-            return Err(invalid("Elevated bindings do not support cwd"));
+        if raw.result.kind != RESULT_KIND {
+            return Err(invalid("Only command tool results are supported"));
         }
         if raw.targets.is_empty()
             || raw.targets.len() > 32
@@ -377,14 +415,83 @@ impl CompiledBinding {
         {
             return Err(invalid("Effects must be nonempty and unique"));
         }
-        let execution = raw.execution;
-        if !absolute(&execution.program)
-            || execution.program.ends_with('/')
-            || execution.cwd.as_deref().is_some_and(|v| !absolute(v))
-            || execution.argv.len() > 64
-        {
-            return Err(invalid("Invalid fixed executable layout"));
-        }
+        let (execution, raw_argv, mut separator) = match raw.execution {
+            RawExecution::NativeArgv { program, argv, cwd } => {
+                if !absolute(&program)
+                    || program.ends_with('/')
+                    || cwd.as_deref().is_some_and(|v| !absolute(v))
+                    || argv.len() > 64
+                {
+                    return Err(invalid("Invalid fixed executable layout"));
+                }
+                if matches!(authority, Authority::Sudo(_)) && cwd.is_some() {
+                    return Err(invalid("Elevated bindings do not support cwd"));
+                }
+                (
+                    Execution::NativeArgv {
+                        program,
+                        cwd,
+                        authority,
+                    },
+                    argv,
+                    false,
+                )
+            }
+            RawExecution::RemoteScript {
+                source,
+                interpreter,
+                argv,
+                cwd,
+            } => {
+                if !matches!(authority, Authority::Ordinary) {
+                    return Err(invalid("Remote scripts require ordinary authority"));
+                }
+                if !absolute(&source.path)
+                    || source.path.ends_with('/')
+                    || !absolute(&interpreter.program)
+                    || interpreter.program.ends_with('/')
+                    || cwd.as_deref().is_some_and(|v| !absolute(v))
+                    || interpreter.argv.len() > 64
+                    || argv.len() > 64 - interpreter.argv.len()
+                    || interpreter
+                        .argv
+                        .iter()
+                        .any(|v| v.len() > 4096 || v.contains('\0'))
+                {
+                    return Err(invalid("Invalid fixed remote script layout"));
+                }
+                let mut content_sha256 = [0; 32];
+                if source.content_sha256.len() != 64
+                    || hex::decode_to_slice(&source.content_sha256, &mut content_sha256).is_err()
+                {
+                    return Err(invalid(
+                        "Script content_sha256 requires exactly 64 hexadecimal ASCII characters",
+                    ));
+                }
+                let ceiling = limits.max_file_bytes.min(1_048_576);
+                let max_bytes = source.max_bytes.unwrap_or(ceiling);
+                if max_bytes == 0 || max_bytes > ceiling {
+                    return Err(invalid(
+                        "Script byte bound must be positive and within the server and 1 MiB ceilings",
+                    ));
+                }
+                let separator = interpreter.argv.iter().any(|v| v == "--");
+                (
+                    Execution::RemoteScript {
+                        source: ScriptSource {
+                            path: source.path,
+                            content_sha256,
+                            max_bytes: max_bytes as usize,
+                        },
+                        program: interpreter.program,
+                        prefix: interpreter.argv,
+                        cwd,
+                    },
+                    argv,
+                    separator,
+                )
+            }
+        };
         let timeout_secs = raw.limits.as_ref().and_then(|v| v.timeout_secs);
         let max_output_bytes = raw.limits.as_ref().and_then(|v| v.max_output_bytes);
         if timeout_secs.is_some_and(|v| v == 0 || v > limits.max_timeout_secs)
@@ -483,10 +590,9 @@ impl CompiledBinding {
             );
             inputs.push(input);
         }
-        let mut separator = false;
         let mut used = vec![false; inputs.len()];
-        let mut argv = Vec::with_capacity(execution.argv.len());
-        for slot in execution.argv {
+        let mut argv = Vec::with_capacity(raw_argv.len());
+        for slot in raw_argv {
             argv.push(match slot {
                 RawSlot::Fixed(value) => {
                     if value.len() > 4096 || value.contains('\0') {
@@ -540,46 +646,70 @@ impl CompiledBinding {
             enabled,
             effects: raw.effects,
             inputs,
-            authority,
-            program: execution.program,
+            execution,
             argv,
-            cwd: execution.cwd,
             timeout_secs,
             max_output_bytes,
         };
-        let fixed = binding.invocation(
-            binding
-                .argv
-                .iter()
-                .filter_map(|v| match v {
-                    Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
-                    Slot::Input(_) => None,
-                })
-                .collect(),
-        );
+        let mut arguments = binding.arguments();
+        arguments.extend(binding.argv.iter().filter_map(|v| match v {
+            Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
+            Slot::Input(_) => None,
+        }));
+        let fixed = binding.invocation(arguments);
         fixed
             .encoded_len()
             .map_err(|_| invalid("Fixed command exceeds encoded command bound"))?;
         Ok(binding)
     }
-    pub(crate) fn sudo(&self) -> Option<(&str, &str)> {
-        match &self.authority {
-            Authority::Ordinary => None,
-            Authority::Sudo(user) => Some((user, &self.program)),
+    pub(crate) fn executor_kind(&self) -> &'static str {
+        match self.execution {
+            Execution::NativeArgv { .. } => EXECUTOR_KIND,
+            Execution::RemoteScript { .. } => "remote_script",
         }
     }
 
+    pub(crate) fn sudo(&self) -> Option<(&str, &str)> {
+        match &self.execution {
+            Execution::NativeArgv {
+                program,
+                authority: Authority::Sudo(user),
+                ..
+            } => Some((user, program)),
+            _ => None,
+        }
+    }
+
+    fn arguments(&self) -> Vec<Cow<'_, str>> {
+        let prefix = match &self.execution {
+            Execution::NativeArgv { .. } => &[][..],
+            Execution::RemoteScript { prefix, .. } => prefix.as_slice(),
+        };
+        let mut arguments = Vec::with_capacity(prefix.len() + self.argv.len());
+        arguments.extend(prefix.iter().map(|v| Cow::Borrowed(v.as_str())));
+        arguments
+    }
+
     fn invocation<'a>(&'a self, arguments: Vec<Cow<'a, str>>) -> Invocation<'a> {
-        match &self.authority {
-            Authority::Ordinary => Invocation::BoundArgv {
-                program: &self.program,
-                arguments,
-                cwd: self.cwd.as_deref(),
-            },
-            Authority::Sudo(user) => Invocation::BoundSudo {
-                program: &self.program,
+        match &self.execution {
+            Execution::NativeArgv {
+                program,
+                authority: Authority::Sudo(user),
+                ..
+            } => Invocation::BoundSudo {
+                program,
                 arguments,
                 user,
+            },
+            Execution::NativeArgv {
+                program,
+                cwd,
+                authority: Authority::Ordinary,
+            }
+            | Execution::RemoteScript { program, cwd, .. } => Invocation::BoundArgv {
+                program,
+                arguments,
+                cwd: cwd.as_deref(),
             },
         }
     }
@@ -652,7 +782,7 @@ impl CompiledBinding {
         for (input, value) in self.inputs.iter().zip(&request.values) {
             input.validate(value)?;
         }
-        let mut arguments: Vec<Cow<'a, str>> = Vec::with_capacity(self.argv.len());
+        let mut arguments = self.arguments();
         // Reused integer slots copy their already formatted bounded representation, never reformat.
         let mut numeric_slots: [Option<usize>; 16] = [None; 16];
         for slot in &self.argv {
@@ -678,6 +808,10 @@ impl CompiledBinding {
         invocation.encoded_len()?;
         Ok(PreparedBinding {
             invocation,
+            script: match &self.execution {
+                Execution::RemoteScript { source, .. } => Some(source),
+                Execution::NativeArgv { .. } => None,
+            },
             duration: Duration::from_secs(timeout),
             max_output_bytes: self.max_output_bytes.unwrap_or(limits.max_output_bytes),
         })

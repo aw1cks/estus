@@ -1,0 +1,33 @@
+# Explicit opt-in. Deploy observe_system.sh independently at this reviewed remote path.
+# The server reads complete bytes with ordinary SFTP, checks SHA-256, closes the
+# source, and streams that exact snapshot to the fixed interpreter's stdin.
+# It does not upload/install scripts, reopen their path for execution, or retry.
+# The hash pins only this source, not the interpreter/dependency/environment closure.
+profile = "actions-only"
+enabled_tools = ["observe_system"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[tools.observe_system]
+description = "Observe the ordinary remote system and UID with a reviewed script and one literal label. Source changes require an operator-reviewed digest update. The script/interpreter remain trusted code, not a sandbox; interruption can leave effects uncertain."
+revision = "1"
+targets = ["server"]
+authority = "ordinary"
+effects = ["read"]
+input_schema = { type = "object", additionalProperties = false, required = ["label"], properties = { label = { type = "string", maxLength = 64 } } }
+result = { kind = "command" }
+limits = { timeout_secs = 10, max_output_bytes = 1024 }
+
+[tools.observe_system.execution]
+kind = "remote_script"
+argv = [{ input = "label" }]
+
+[tools.observe_system.execution.source]
+path = "/opt/ssh-mcp/observe_system.sh"
+content_sha256 = "588948b88691496356a9ada173f42f78e4f2b5268b372cafd98721cfd8629a29"
+max_bytes = 4096
+
+[tools.observe_system.execution.interpreter]
+program = "/bin/sh"
+argv = ["-s", "--"]

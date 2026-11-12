@@ -164,7 +164,7 @@ impl SshMcp {
                 ("revision".into(), serde_json::json!(binding.revision)),
                 ("result".into(), serde_json::json!(bindings::RESULT_KIND)),
                 ("effects".into(), serde_json::json!(binding.effects())),
-                ("executor".into(), serde_json::json!(bindings::EXECUTOR_KIND)),
+                ("executor".into(), serde_json::json!(binding.executor_kind())),
                 ("authority".into(), binding.sudo().map_or_else(
                     || serde_json::json!("ordinary"),
                     |(user, _)| serde_json::json!({"sudo": user}),
@@ -329,7 +329,7 @@ impl SshMcp {
                     user: binding.sudo().map(|(user, _)| user),
                     program: None,
                     binding_revision: Some(&binding.revision),
-                    executor: Some(bindings::EXECUTOR_KIND),
+                    executor: Some(binding.executor_kind()),
                 }
                 .reject(
                     Instant::now(),
@@ -631,6 +631,7 @@ struct PreparedCommand<'a> {
     target: ResolvedTarget<'a>,
     duration: Duration,
     invocation: Invocation<'a>,
+    script: Option<&'a bindings::ScriptSource>,
     stdin: Option<&'a str>,
     max_output_bytes: u64,
 }
@@ -678,7 +679,7 @@ impl Operation {
                     binding.sudo().map(|(user, _)| user),
                     None,
                     Some(binding.revision.as_str()),
-                    Some(bindings::EXECUTOR_KIND),
+                    Some(binding.executor_kind()),
                 )
             }
         };
@@ -753,6 +754,7 @@ impl Operation {
                     target,
                     duration: prepared.duration,
                     invocation: prepared.invocation,
+                    script: prepared.script,
                     stdin: None,
                     max_output_bytes: prepared.max_output_bytes,
                 });
@@ -762,6 +764,7 @@ impl Operation {
             target,
             duration: config.timeout(seconds)?,
             invocation,
+            script: None,
             stdin,
             max_output_bytes: config.limits().max_output_bytes,
         })
@@ -836,6 +839,7 @@ impl State {
             PreparedCommand {
                 target,
                 invocation,
+                script,
                 stdin,
                 max_output_bytes,
                 ..
@@ -855,18 +859,70 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let reply = exec::run(
-                    lease.session(),
-                    invocation,
-                    stdin,
-                    RunContext {
-                        max_output_bytes: max_output_bytes.min(capture_limit),
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        started,
-                    },
-                )
+                let reply = async {
+                    let source = if let Some(script) = script {
+                        let outcome = files::read_script(
+                            lease.session(),
+                            &script.path,
+                            &script.content_sha256,
+                            script.max_bytes,
+                            FileContext {
+                                deadline,
+                                ct: &ct,
+                                shutdown: &self.shutdown,
+                            },
+                        )
+                        .await;
+                        if outcome.check_master
+                            && matches!(lease.check_health().await, MasterHealth::Lost)
+                        {
+                            lease.invalidate();
+                        }
+                        match outcome.reply.data {
+                            Some(source) => Some(source),
+                            None => {
+                                return ToolReply::failure(
+                                    outcome
+                                        .reply
+                                        .error
+                                        .expect("failed script preparation carries an error"),
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if source.is_some() {
+                        if ct.is_cancelled() || self.shutdown.is_cancelled() {
+                            return ToolReply::failure(ToolError::new(
+                                "cancelled",
+                                "Request cancelled before script dispatch",
+                                false,
+                            ));
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            return ToolReply::failure(ToolError::new(
+                                "timeout",
+                                "Request deadline expired before script dispatch",
+                                false,
+                            ));
+                        }
+                    }
+                    // The checked snapshot owns stdin until the existing command owner finishes.
+                    exec::run(
+                        lease.session(),
+                        invocation,
+                        source.as_deref().or(stdin),
+                        RunContext {
+                            max_output_bytes: max_output_bytes.min(capture_limit),
+                            deadline,
+                            ct: &ct,
+                            shutdown: &self.shutdown,
+                            started,
+                        },
+                    )
+                    .await
+                }
                 .await;
                 if matches!(
                     reply.data.as_ref().map(|data| &data.termination),

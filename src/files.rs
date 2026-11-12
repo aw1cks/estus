@@ -272,9 +272,34 @@ async fn read_handle(
     Ok(RawRead { bytes, eof: false })
 }
 
-async fn read_sftp(sftp: Sftp, spec: &ReadSpec<'_>) -> Result<RawRead, Failure> {
+#[derive(Clone, Copy)]
+enum ReadKind {
+    Range,
+    Script,
+}
+
+async fn read_sftp(sftp: Sftp, spec: &ReadSpec<'_>, kind: ReadKind) -> Result<RawRead, Failure> {
     let (result, file) = match sftp.open(spec.path).await {
-        Ok(mut file) => (read_handle(&mut file, spec).await, Some(file)),
+        Ok(mut file) => {
+            let result = async {
+                if let ReadKind::Script = kind {
+                    let metadata = file.metadata().await.map_err(sftp_failure)?;
+                    if !metadata.file_type().is_some_and(|kind| kind.is_file()) {
+                        return Err(Failure {
+                            error: ToolError::new(
+                                "unsupported",
+                                "Script source must be a regular file",
+                                false,
+                            ),
+                            check_master: false,
+                        });
+                    }
+                }
+                read_handle(&mut file, spec).await
+            }
+            .await;
+            (result, Some(file))
+        }
         Err(error) => (Err(sftp_failure(error)), None),
     };
     let close = async {
@@ -430,7 +455,10 @@ pub(crate) async fn read(
     spec: ReadSpec<'_>,
     context: FileContext<'_>,
 ) -> FileOutcome<ReadData> {
-    let outcome = run_sftp(session, context, |sftp| read_sftp(sftp, &spec)).await;
+    let outcome = run_sftp(session, context, |sftp| {
+        read_sftp(sftp, &spec, ReadKind::Range)
+    })
+    .await;
     FileOutcome {
         reply: match outcome.reply.data {
             Some(raw) => match encode(raw, &spec) {
@@ -442,6 +470,81 @@ pub(crate) async fn read(
                 error: outcome.reply.error,
             },
         },
+        check_master: outcome.check_master,
+    }
+}
+
+fn verify_script(
+    raw: RawRead,
+    expected_content_sha256: &[u8; 32],
+    max_bytes: usize,
+) -> Result<String, ToolError> {
+    if !raw.eof || raw.bytes.len() > max_bytes {
+        return Err(ToolError::new(
+            "resource_limit",
+            "Script source exceeds its complete byte bound",
+            false,
+        ));
+    }
+    let digest: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&raw.bytes).into();
+    if digest != *expected_content_sha256 {
+        return Err(ToolError::new(
+            "checksum_mismatch",
+            "Script source does not match its reviewed content_sha256",
+            false,
+        ));
+    }
+    if raw.bytes.contains(&0) {
+        return Err(ToolError::new(
+            "invalid_encoding",
+            "Script source must be NUL-free UTF-8",
+            false,
+        ));
+    }
+    String::from_utf8(raw.bytes.into()).map_err(|_| {
+        ToolError::new(
+            "invalid_encoding",
+            "Script source must be NUL-free UTF-8",
+            false,
+        )
+    })
+}
+
+/// Read/close once and retain the exact checked bytes; execution never reopens the path.
+pub(crate) async fn read_script(
+    session: &Session,
+    path: &str,
+    expected_content_sha256: &[u8; 32],
+    max_bytes: usize,
+    context: FileContext<'_>,
+) -> FileOutcome<String> {
+    let spec = ReadSpec {
+        path,
+        offset: 0,
+        max_bytes,
+        encoding: crate::filedata::Encoding::Utf8,
+        expected_content_sha256: None,
+    };
+    let outcome = run_sftp(session, context, |sftp| {
+        read_sftp(sftp, &spec, ReadKind::Script)
+    })
+    .await;
+    let mut reply = match outcome.reply.data {
+        Some(raw) => match verify_script(raw, expected_content_sha256, max_bytes) {
+            Ok(source) => ToolReply::success(source),
+            Err(error) => ToolReply::failure(error),
+        },
+        None => ToolReply {
+            data: None,
+            error: outcome.reply.error,
+        },
+    };
+    if let Some(error) = &mut reply.error {
+        // SFTP preparation can be incomplete, but no script interpreter was started.
+        error.remote_state_unknown = false;
+    }
+    FileOutcome {
+        reply,
         check_master: outcome.check_master,
     }
 }
@@ -613,6 +716,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_verification_requires_complete_exact_bytes_before_decoding() {
+        let mut abc_sha256 = [0; 32];
+        hex::decode_to_slice(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            &mut abc_sha256,
+        )
+        .unwrap();
+        let raw = |bytes: &[u8], eof| RawRead {
+            bytes: BytesMut::from(bytes),
+            eof,
+        };
+        assert_eq!(
+            verify_script(raw(b"abc", true), &abc_sha256, 3).unwrap(),
+            "abc"
+        );
+        for (bytes, eof, limit, expected) in [
+            (b"abc".as_slice(), false, 3, "resource_limit"),
+            (b"abcd".as_slice(), true, 3, "resource_limit"),
+            (b"ab".as_slice(), true, 3, "checksum_mismatch"),
+            (b"abd".as_slice(), true, 3, "checksum_mismatch"),
+        ] {
+            let error = verify_script(raw(bytes, eof), &abc_sha256, limit).unwrap_err();
+            assert_eq!(error.code, expected);
+            assert!(!error.remote_state_unknown);
+        }
+        for bytes in [b"\xff".as_slice(), b"abc\0"] {
+            let digest = <sha2::Sha256 as sha2::Digest>::digest(bytes).into();
+            let error = verify_script(raw(bytes, true), &digest, bytes.len()).unwrap_err();
+            assert_eq!(error.code, "invalid_encoding");
+            assert!(!error.remote_state_unknown);
+        }
+    }
 
     #[test]
     fn missing_subsystem_executable_is_not_a_missing_remote_file() {
