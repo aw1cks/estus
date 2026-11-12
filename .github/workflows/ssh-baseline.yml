@@ -42,7 +42,9 @@ jobs:
         DOCKER_HOST: unix:///var/run/docker.sock
       if: runner.os == 'Linux'
       name: Run packaged Linux acceptance
-      run: nix run -L --no-update-lock-file .#ci
+      run: |
+        nix run -L --no-update-lock-file .#ci
+        nix run -L --no-update-lock-file .#ci-msrv
     strategy:
       fail-fast: false
       matrix:

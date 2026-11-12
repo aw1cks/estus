@@ -93,7 +93,10 @@
                 name = "Run packaged Linux acceptance";
                 "if" = "runner.os == 'Linux'";
                 env.DOCKER_HOST = "unix:///var/run/docker.sock";
-                run = "nix run -L --no-update-lock-file .#ci";
+                run = ''
+                  nix run -L --no-update-lock-file .#ci
+                  nix run -L --no-update-lock-file .#ci-msrv
+                '';
               }
             ];
           };
@@ -153,15 +156,17 @@
           install -m644 ${generated}/* "$root/.github/workflows/"
         '';
       };
-      ci = pkgs.writeShellApplication {
-        name = "ci";
+      mkCi = name: acceptance: pkgs.writeShellApplication {
+        inherit name;
         text = ''
           : "''${DOCKER_HOST:?set DOCKER_HOST to the Docker-compatible Unix socket}"
           export SSH_MCP_TEST_FIXTURE=${config.packages.ssh-fixture-image}
-          ${config.packages.ssh-acceptance}/bin/ssh-stdio
-          exec ${config.packages.ssh-acceptance}/bin/ssh-baseline
+          ${acceptance}/bin/ssh-stdio
+          exec ${acceptance}/bin/ssh-baseline
         '';
       };
+      ci = mkCi "ci" config.packages.ssh-acceptance;
+      ciMsrv = mkCi "ci-msrv" config.packages.ssh-acceptance-msrv;
     in
     {
       packages.github-workflows = generated;
@@ -180,6 +185,10 @@
         ci = {
           type = "app";
           program = lib.getExe ci;
+        };
+        ci-msrv = {
+          type = "app";
+          program = lib.getExe ciMsrv;
         };
       };
     };
