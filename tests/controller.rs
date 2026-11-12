@@ -714,3 +714,139 @@ printf 'PINNED SOURCE\n'
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_stream_capture_nonzero_and_signal_are_distinct() -> Result<()> {
+    for (name, script, limit) in [
+        (
+            "streams",
+            "out=o; err=e; i=0; while [ \"$i\" -lt 10 ]; do out=$out$out; err=$err$err; i=$((i + 1)); done; i=0; while [ \"$i\" -lt 2048 ]; do printf '%s' \"$out\"; printf '%s' \"$err\" >&2; i=$((i + 1)); done; printf '\\377'; printf '\\377' >&2\n",
+            128,
+        ),
+        ("lossy", "printf '\\377'; printf '\\376' >&2\n", 8192),
+        (
+            "nonzero",
+            "printf x >> @OBS@/attempts; printf 'before failure\\n'; printf 'private diagnostic\\n' >&2; exit 23\n",
+            8192,
+        ),
+        (
+            "signal",
+            "printf 'before signal\\n'; kill -TERM \"$$\"\n",
+            8192,
+        ),
+    ] {
+        let fixture = Fixture::new(script, limit, 15)?;
+        let mut server = Server::start(&fixture).await?;
+        let scenario = async {
+            server.call(2, arguments()).await?;
+            let frame = server.response(2).await?;
+            let result = envelope(&frame)?;
+            let data = &result["data"];
+            cleaned(data)?;
+            match name {
+                "streams" => {
+                    ensure!(result["error"].is_null(), "capture failed: {result}");
+                    let stdout = data["stdout"].as_str().context("captured stdout")?;
+                    let stderr = data["stderr"].as_str().context("captured stderr")?;
+                    ensure!(
+                        stdout == "o".repeat(limit as usize)
+                            && stderr == "e".repeat(limit as usize),
+                        "capture lost bounded stream prefixes"
+                    );
+                    ensure!(
+                        data["stdout_truncated"] == true && data["stderr_truncated"] == true,
+                        "streams were not drained/truncated: {data}"
+                    );
+                    ensure!(data["exit_code"] == 0 && data["termination"] == "exited");
+                }
+                "lossy" => {
+                    ensure!(result["error"].is_null(), "lossy capture failed: {result}");
+                    ensure!(data["stdout"] == "\u{fffd}" && data["stderr"] == "\u{fffd}");
+                    ensure!(data["stdout_lossy"] == true && data["stderr_lossy"] == true);
+                    ensure!(data["stdout_truncated"] == false && data["stderr_truncated"] == false);
+                }
+                "nonzero" => {
+                    ensure!(
+                        result["error"]["code"] == "command_failed",
+                        "nonzero error category: {result}"
+                    );
+                    ensure!(
+                        data["stdout"] == "before failure\n"
+                            && data["stderr"] == "private diagnostic\n"
+                    );
+                    ensure!(
+                        data["exit_code"] == 23
+                            && data["signal"].is_null()
+                            && data["termination"] == "exited"
+                    );
+                    ensure!(
+                        fs::read(fixture.observations.join("attempts"))? == b"x",
+                        "failed local command was replayed"
+                    );
+                }
+                "signal" => {
+                    ensure!(!result["error"].is_null(), "signal was reported as success");
+                    ensure!(data["stdout"] == "before signal\n" && data["exit_code"].is_null());
+                    ensure!(
+                        data["signal"] == 15 && data["termination"] == "signalled",
+                        "signal status was lost: {data}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+            fixture.clean().await
+        }
+        .await;
+        let stopped = server.stop(false).await;
+        scenario.with_context(|| name)?;
+        stopped?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interpreter_disappearing_after_activation_is_local_spawn_failure_without_fallback()
+-> Result<()> {
+    let fixture = Fixture::new("printf unexpected > @OBS@/executed\n", 8192, 15)?;
+    let interpreter = fixture.temp.path().join("declared-interpreter");
+    std::os::unix::fs::symlink(&fixture.sh, &interpreter)?;
+    let mut config: toml::Value = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+    config["tools"]["observe_controller"]["execution"]["interpreter"]["program"] =
+        toml::Value::String(
+            interpreter
+                .to_str()
+                .context("UTF-8 interpreter")?
+                .to_owned(),
+        );
+    fs::write(&fixture.config, toml::to_string(&config)?)?;
+    let mut server = Server::start(&fixture).await?;
+    let scenario = async {
+        fs::remove_file(&interpreter)?;
+        server.call(2, arguments()).await?;
+        let frame = server.response(2).await?;
+        let result = envelope(&frame)?;
+        ensure!(
+            result["error"]["code"] == "spawn_failed",
+            "local spawn failure lost its category: {result}"
+        );
+        ensure!(
+            result["data"]["termination"] == "io_error" && result["data"]["exit_code"].is_null()
+        );
+        ensure!(result["data"]["stdout"] == "" && result["data"]["stderr"] == "");
+        cleaned(&result["data"])?;
+        ensure!(
+            fixture.records()?.is_empty(),
+            "failed dispatch executed source"
+        );
+        ensure!(
+            !serde_json::to_string(result)?.contains(fixture.temp.path().to_str().unwrap()),
+            "spawn diagnostic leaked a private path"
+        );
+        fixture.clean().await
+    }
+    .await;
+    let stopped = server.stop(false).await;
+    scenario?;
+    stopped?;
+    Ok(())
+}
