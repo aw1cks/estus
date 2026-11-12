@@ -517,4 +517,84 @@ mod tests {
         assert!(!frame_fits(&frame));
     }
 
+    fn controller(stdout: String, stderr: String) -> ControllerReply {
+        ControllerReply {
+            data: Some(ControllerData {
+                stdout,
+                stderr,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_lossy: true,
+                stderr_lossy: false,
+                exit_code: None,
+                signal: Some(9),
+                termination: ControllerTermination::Timeout,
+                duration_ms: 42,
+                owned_group_cleanup: GroupCleanup::Incomplete,
+            }),
+            error: Some(ControllerError::new(
+                "controller_timeout",
+                "Controller execution timed out",
+            )),
+        }
+    }
+
+    #[test]
+    fn controller_boundary_precedes_copies_and_clipping_preserves_local_evidence() {
+        let mut id = RequestId::Number(1);
+        let mut budget = ReplyBudget::new(&id).unwrap();
+        let empty = controller(String::new(), String::new());
+        let mut base = budget.value_size(&empty, true).unwrap();
+        if !(MAX_RESPONSE_BYTES - base).is_multiple_of(2) {
+            id = RequestId::Number(10);
+            budget = ReplyBudget::new(&id).unwrap();
+            base = budget.value_size(&empty, true).unwrap();
+        }
+        let count = (MAX_RESPONSE_BYTES - base) / 2;
+        let exact = controller("x".repeat(count), String::new());
+        assert_eq!(budget.value_size(&exact, true).unwrap(), MAX_RESPONSE_BYTES);
+        let result = budget.controller_result(exact).unwrap();
+        assert_eq!(actual_frame_size(id.clone(), &result), MAX_RESPONSE_BYTES);
+        drop(result);
+
+        let excess = controller("x".repeat(count + 1), "é🙂\0\n\"\\".into());
+        assert!(budget.serialized_result(&excess, true).is_err());
+        let result = budget.controller_result(excess).unwrap();
+        assert!(actual_frame_size(id, &result) <= MAX_RESPONSE_BYTES);
+        assert_eq!(result.is_error, Some(true));
+        let value = result.structured_content.unwrap();
+        let data = &value["data"];
+        assert_eq!(data["stdout"].as_str().unwrap().len(), count);
+        assert_eq!(data["stderr"], "");
+        assert_eq!(data["stdout_truncated"], true);
+        assert_eq!(data["stderr_truncated"], true);
+        assert_eq!(data["stdout_lossy"], true);
+        assert_eq!(data["exit_code"], Value::Null);
+        assert_eq!(data["signal"], 9);
+        assert_eq!(data["termination"], "timeout");
+        assert_eq!(data["owned_group_cleanup"], "incomplete");
+        assert_eq!(value["error"]["code"], "controller_timeout");
+        assert!(value["error"].get("remote_state_unknown").is_none());
+        assert!(data.get("remote_may_still_be_running").is_none());
+    }
+
+    #[test]
+    fn controller_sizes_nested_escaping_and_rejects_impossible_capture_envelopes() {
+        let id = RequestId::String("controller-\"\\\0🙂".into());
+        let budget = ReplyBudget::new(&id).unwrap();
+        let reply = controller("é🙂\0\n\"\\".into(), "\u{fffd}\t\r".into());
+        let predicted = budget.value_size(&reply, true).unwrap();
+        let result = budget.controller_result(reply).unwrap();
+        assert_eq!(predicted, actual_frame_size(id, &result));
+        let text: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(Some(text), result.structured_content);
+        assert!(budget.controller_capture_limit().unwrap() < (MAX_RESPONSE_BYTES / 2) as u64);
+        assert!(
+            ReplyBudget {
+                id_bytes: MAX_RESPONSE_BYTES - 256,
+            }
+            .controller_capture_limit()
+            .is_err()
+        );
+    }
 }

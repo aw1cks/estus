@@ -1146,6 +1146,268 @@ impl CompiledBinding {
 mod tests {
     use super::*;
 
+    #[test]
+    fn active_controller_rejects_unavailable_and_unverified_prerequisites() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let source = dir.path().join("source");
+        fs::write(&source, b"abc").unwrap();
+        let good = controller_definition(&source);
+        for (field, value) in [
+            ("program", "/unavailable/private-runtime"),
+            ("program", "/"),
+            ("program", "/dev/null"),
+        ] {
+            let mut raw = good.clone();
+            raw["execution"]["interpreter"][field] = value.into();
+            assert!(controller_compile(raw, true, true, Some(dir.path())).is_err());
+        }
+        let mut raw = good.clone();
+        raw["execution"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cwd".into(), "/unavailable/private-cwd".into());
+        assert!(controller_compile(raw, true, true, Some(dir.path())).is_err());
+        let mut raw = good.clone();
+        raw["execution"]["source"]["path"] = dir.path().to_str().unwrap().into();
+        assert!(controller_compile(raw, true, true, Some(dir.path())).is_err());
+        for bytes in [b"abd".as_slice(), b"abcd", b"\xff", b"a\0c"] {
+            fs::write(&source, bytes).unwrap();
+            let error = controller_compile(good.clone(), true, true, Some(dir.path()))
+                .err()
+                .unwrap();
+            assert!(!error.to_string().contains(dir.path().to_str().unwrap()));
+        }
+        fs::remove_file(&source).unwrap();
+        assert!(controller_compile(good.clone(), true, true, Some(dir.path())).is_err());
+        assert!(controller_compile(good, false, true, Some(dir.path())).is_ok());
+    }
+
+    #[test]
+    fn configured_controller_environment_obeys_entry_value_and_aggregate_bounds() {
+        assert!(
+            controller_environment(BTreeMap::from([("MCP_VALUE".into(), "x".repeat(4096))]))
+                .is_ok()
+        );
+        assert!(
+            controller_environment(BTreeMap::from([("MCP_VALUE".into(), "x".repeat(4097))]))
+                .is_err()
+        );
+        assert!(
+            controller_environment(
+                (0..32)
+                    .map(|i| (format!("MCP_{i}"), String::new()))
+                    .collect()
+            )
+            .is_ok()
+        );
+        assert!(
+            controller_environment(
+                (0..33)
+                    .map(|i| (format!("MCP_{i}"), String::new()))
+                    .collect()
+            )
+            .is_err()
+        );
+        assert!(
+            controller_environment(BTreeMap::from([
+                ("MCP_A".into(), "x".repeat(4096)),
+                ("MCP_B".into(), "x".repeat(4086)),
+            ]))
+            .is_ok()
+        );
+        assert!(
+            controller_environment(BTreeMap::from([
+                ("MCP_A".into(), "x".repeat(4096)),
+                ("MCP_B".into(), "x".repeat(4087)),
+            ]))
+            .is_err()
+        );
+    }
+
+    fn controller_definition(source: &Path) -> toml::Value {
+        let shell = std::env::split_paths(&std::env::var_os("PATH").expect("test utility PATH"))
+            .map(|directory| directory.join("sh"))
+            .find(|path| path.is_file())
+            .expect("declared POSIX interpreter is available");
+        let mut raw = definition();
+        raw.as_table_mut().unwrap().remove("targets");
+        raw["authority"] = "controller".into();
+        raw["result"]["kind"] = "controller_command".into();
+        raw["execution"] = toml::from_str(&format!(
+            "kind='controller_script'\nsource={{path={:?},content_sha256='ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',max_bytes=3}}\ninterpreter={{program={:?},argv=[]}}",
+            source.to_str().unwrap(), shell.to_str().unwrap())).unwrap();
+        raw
+    }
+
+    fn controller_compile(
+        raw: toml::Value,
+        enabled: bool,
+        permitted: bool,
+        root: Option<&Path>,
+    ) -> Result<Bindings, ConfigError> {
+        let selected = enabled.then(|| "observe".to_owned());
+        Bindings::compile(
+            BTreeMap::from([("observe".into(), raw)]),
+            selected.as_slice(),
+            &Limits::default(),
+            |_| false,
+            root.map(|p| p.to_str().unwrap()),
+            permitted,
+        )
+    }
+
+    #[test]
+    fn inactive_controller_declarations_do_not_open_runtime_source_or_root() {
+        let raw = controller_definition(Path::new("/unavailable/source"));
+        for (enabled, permitted) in [(false, true), (true, false), (false, false)] {
+            let mut raw = raw.clone();
+            raw["execution"]["interpreter"]["program"] = "/unavailable/runtime".into();
+            assert!(
+                controller_compile(
+                    raw,
+                    enabled,
+                    permitted,
+                    Some(Path::new("/unavailable/root"))
+                )
+                .is_ok()
+            );
+        }
+        assert!(controller_compile(raw.clone(), true, true, None).is_err());
+        for targets in [vec![], vec!["server".into()]] {
+            let mut raw = raw.clone();
+            put(&mut raw, "targets", toml::Value::Array(targets));
+            assert!(controller_compile(raw, false, true, None).is_err());
+        }
+        for (name, value) in [
+            ("HOME", "private"),
+            ("MCP_", "x"),
+            ("MCP_lower", "x"),
+            ("PATH", "bad\0value"),
+        ] {
+            let mut raw = raw.clone();
+            raw["execution"].as_table_mut().unwrap().insert(
+                "environment".into(),
+                toml::Value::Table(toml::Table::from_iter([(name.into(), value.into())])),
+            );
+            assert!(
+                controller_compile(raw, false, true, None).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_pins_source_and_rejects_host_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let source = dir.path().join("source");
+        fs::write(&source, b"abc").unwrap();
+        let bindings =
+            controller_compile(controller_definition(&source), true, true, Some(dir.path()))
+                .unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        fs::write(&source, b"changed").unwrap();
+        for arguments in [
+            json!({"value":"ok","host":"server"}),
+            json!({"value":"ok","cwd":"/"}),
+        ] {
+            assert!(
+                binding
+                    .parse_request(arguments.as_object().unwrap().clone())
+                    .is_err()
+            );
+        }
+        let BindingCall::Controller(request) = binding
+            .parse_request(
+                json!({"value":"$(not shell) ☃\n","timeout_secs":1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+        else {
+            panic!("expected controller request")
+        };
+        let prepared = binding
+            .prepare_controller(&request, &Limits::default())
+            .unwrap();
+        assert_eq!(prepared.plan.source, "abc");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&prepared.input_json).unwrap(),
+            json!({"value":"$(not shell) ☃\n"})
+        );
+        for mode in [0o755, 0o770, 0o1700] {
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                controller_compile(controller_definition(&source), true, true, Some(dir.path()))
+                    .is_err()
+            );
+        }
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn controller_json_limit_counts_actual_escaped_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let source = dir.path().join("source");
+        fs::write(&source, b"abc").unwrap();
+        let mut raw = controller_definition(&source);
+        let names: Vec<_> = ('a'..='p').map(|c| c.to_string()).collect();
+        raw["input_schema"]["required"] =
+            toml::Value::Array(names.iter().cloned().map(Into::into).collect());
+        raw["input_schema"]["properties"] = toml::Value::Table(
+            names
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        toml::from_str("type='string'\nmaxLength=4096").unwrap(),
+                    )
+                })
+                .collect(),
+        );
+        let bindings = controller_compile(raw, true, true, Some(dir.path())).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        let mut arguments: JsonObject = names
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    Value::String("x".repeat(if name == "p" { 3983 } else { 4096 })),
+                )
+            })
+            .collect();
+        let BindingCall::Controller(request) = binding.parse_request(arguments.clone()).unwrap()
+        else {
+            panic!("expected controller request")
+        };
+        assert_eq!(
+            binding
+                .prepare_controller(&request, &Limits::default())
+                .unwrap()
+                .input_json
+                .len(),
+            65_536
+        );
+        arguments.insert(
+            "p".into(),
+            Value::String("\n".to_owned() + &"x".repeat(3982)),
+        );
+        let BindingCall::Controller(request) = binding.parse_request(arguments).unwrap() else {
+            panic!("expected controller request")
+        };
+        assert_eq!(
+            binding
+                .prepare_controller(&request, &Limits::default())
+                .err()
+                .unwrap()
+                .code,
+            "resource_limit"
+        );
+    }
+
     fn definition() -> toml::Value {
         toml::from_str(r#"
 description = "Literal observation"

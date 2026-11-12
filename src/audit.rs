@@ -201,3 +201,48 @@ fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_records_exclude_remote_and_private_identity_even_on_drop_path() {
+        let id = RequestId::Number(7);
+        let metadata = Metadata {
+            request_id: &id,
+            tool: "observe_controller",
+            host: Some("private-host"),
+            identity_role: IdentityRole::Controller,
+            sudo_mode: None,
+            user: Some("private-user"),
+            program: Some("/private/interpreter"),
+            binding_revision: Some("1"),
+            executor: Some("controller_script"),
+        };
+        for (event, remote, cleanup) in [
+            ("start", None, None),
+            ("reject", Some(false), None),
+            ("finish", Some(true), Some(GroupCleanup::Incomplete)),
+        ] {
+            // Drop/panic passes native uncertainty to this constructor too.
+            let record = metadata.record(event, Some(1), None, Some("cancelled"), remote, cleanup);
+            let value = serde_json::to_value(record).unwrap();
+            for forbidden in [
+                "host",
+                "sudo_mode",
+                "user",
+                "program",
+                "remote_state_unknown",
+            ] {
+                assert!(value.get(forbidden).is_none(), "{event}: {forbidden}");
+            }
+            assert_eq!(value["identity_role"], "controller");
+            assert_eq!(value["tool"], "observe_controller");
+            if cleanup.is_some() {
+                assert_eq!(value["owned_group_cleanup"], "incomplete");
+            } else {
+                assert!(value.get("owned_group_cleanup").is_none());
+            }
+        }
+    }
+}
