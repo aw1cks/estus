@@ -1,5 +1,7 @@
 { pkgs, craneLib, commonArgs, cargoTestExtraArgs ? "" }:
 let
+  controllerTestPrograms = [ pkgs.bash pkgs.coreutils ]
+    ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
   cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
     dummySrc = craneLib.mkDummySrc {
       src = commonArgs.src;
@@ -15,6 +17,7 @@ let
   package = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts cargoTestExtraArgs;
     nativeBuildInputs = [ pkgs.makeWrapper ];
+    nativeCheckInputs = controllerTestPrograms;
     postFixup = ''
       wrapProgram "$out/bin/ssh-mcp" \
         --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
@@ -22,6 +25,7 @@ let
   });
   acceptance = import ./ssh-acceptance.nix {
     inherit pkgs craneLib commonArgs cargoArtifacts package;
+    inherit controllerTestPrograms;
   };
 in
 {

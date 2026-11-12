@@ -82,6 +82,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/ssh-native";
         };
+        apps.controller-scripts = {
+          type = "app";
+          program = "${acceptance}/bin/controller-scripts";
+        };
+        apps.controller-scripts-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/controller-scripts";
+        };
         checks.package = package;
         # Compile every test target and run the network-free suite on the MSRV.
         # Never reuse artifacts produced by the default (newer) compiler.

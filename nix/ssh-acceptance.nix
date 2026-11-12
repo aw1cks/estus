@@ -1,4 +1,4 @@
-{ pkgs, craneLib, commonArgs, cargoArtifacts, package }:
+{ pkgs, craneLib, commonArgs, cargoArtifacts, package, controllerTestPrograms }:
 craneLib.mkCargoDerivation (commonArgs // {
   pnameSuffix = "-acceptance";
   inherit cargoArtifacts;
@@ -9,12 +9,12 @@ craneLib.mkCargoDerivation (commonArgs // {
   # not a build-directory Cargo executable that disappears after installation.
   SSH_MCP_TEST_BINARY = "${package}/bin/ssh-mcp";
   buildPhaseCargoCommand = ''
-    cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local \
+    cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local --test controller \
       --message-format=json-render-diagnostics > test-artifacts.json
   '';
   installPhaseCommand = ''
     mkdir -p "$out/bin" "$out/libexec"
-    for name in stdio ssh_e2e ssh_local; do
+    for name in stdio ssh_e2e ssh_local controller; do
       executable=$(jq -ers --arg name "$name" '
         [.[] | select(.reason == "compiler-artifact" and .profile.test
           and .target.name == $name and .executable != null)]
@@ -34,5 +34,9 @@ craneLib.mkCargoDerivation (commonArgs // {
       --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils ]} \
       --add-flags '--ignored --nocapture --test-threads=2'
+    makeWrapper "$out/libexec/controller" "$out/bin/controller-scripts" \
+      --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
+      --prefix PATH : ${pkgs.lib.makeBinPath controllerTestPrograms} \
+      --add-flags '--include-ignored --nocapture --test-threads=2'
   '';
 })
