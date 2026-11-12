@@ -1,0 +1,1 @@
+{"string_id":true,"id":"quote\"slash\\\n\u0000é🙂","id_repeat":3,"stdout":"\u0000\u0001\b\t\n\f\r\"\\é🙂�","stderr":"🙂é\r\n","stdout_repeat":8,"stderr_repeat":8,"exit_code":0,"stdout_truncated":true,"stderr_lossy":true}

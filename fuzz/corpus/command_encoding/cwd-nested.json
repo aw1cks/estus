@@ -1,0 +1,1 @@
+{"kind":"exec","command":"printf '%s\\n' \"é!\"","cwd":"/space ' !\nend"}
