@@ -652,3 +652,526 @@ impl CompiledBinding {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn definition() -> toml::Value {
+        toml::from_str(r#"
+description = "Literal observation"
+revision = "review-1"
+targets = ["server"]
+authority = "ordinary"
+effects = ["read"]
+execution = { kind = "native_argv", program = "/usr/bin/printf", argv = ["--", { input = "value" }] }
+input_schema = { type = "object", additionalProperties = false, required = ["value"], properties = { value = { type = "string", maxLength = 4096 } } }
+result = { kind = "command" }
+"#).unwrap()
+    }
+    fn compile(value: toml::Value) -> Result<Bindings, ConfigError> {
+        Bindings::compile(
+            BTreeMap::from([("observe".into(), value)]),
+            &["observe".into()],
+            &Limits::default(),
+            |v| v == "server",
+        )
+    }
+    fn request(binding: &CompiledBinding, value: Value) -> BindingRequest {
+        binding
+            .parse_request(
+                json!({"host":"server", "value":value})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+    }
+    fn property(raw: &mut toml::Value) -> &mut toml::Value {
+        &mut raw["input_schema"]["properties"]["value"]
+    }
+    fn put(table: &mut toml::Value, key: &str, value: toml::Value) {
+        table.as_table_mut().unwrap().insert(key.into(), value);
+    }
+
+    #[test]
+    fn literal_slots_borrow_and_preserve_adversarial_text() {
+        let mut raw = definition();
+        put(
+            &mut raw["execution"],
+            "cwd",
+            "/tmp/quotes ' and spaces".into(),
+        );
+        raw["execution"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .insert(1, "fixed '$()`;\n".into());
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        let text = "-a ' \"$()`;\\\n雪";
+        let request = request(binding, json!(text));
+        let prepared = binding.prepare(&request, &Limits::default()).unwrap();
+        match prepared.invocation {
+            Invocation::BoundArgv {
+                program,
+                arguments,
+                cwd,
+            } => {
+                assert_eq!(program, "/usr/bin/printf");
+                assert_eq!(cwd, Some("/tmp/quotes ' and spaces"));
+                assert_eq!(
+                    arguments.iter().map(Cow::as_ref).collect::<Vec<_>>(),
+                    ["--", "fixed '$()`;\n", text]
+                );
+            }
+            _ => panic!("Expected bound argv"),
+        }
+    }
+
+    #[test]
+    fn closed_shape_and_types_reject_before_preparation() {
+        let bindings = compile(definition()).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        for arguments in [
+            json!({"host":"server"}),
+            json!({"host":42, "value":"ok"}),
+            json!({"host":"server", "value":1}),
+            json!({"host":"server", "value":"ok", "program":"/bin/sh"}),
+            json!({"host":"server", "value":"ok", "timeout_secs":-1}),
+            json!({"host":"server", "value":"ok", "timeout_secs":null}),
+            json!({"host":"server", "value":"ok", "env":{}}),
+        ] {
+            let error = binding
+                .parse_request(arguments.as_object().unwrap().clone())
+                .err()
+                .unwrap();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        }
+    }
+
+    #[test]
+    fn string_bounds_count_characters_and_enum_is_enforced() {
+        let mut raw = definition();
+        *property(&mut raw) = toml::from_str("type='string'\nminLength=1\nmaxLength=2").unwrap();
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        for (text, accepted) in [
+            ("", false),
+            ("雪", true),
+            ("雪雪", true),
+            ("雪雪雪", false),
+            ("\0", false),
+        ] {
+            let request = request(binding, json!(text));
+            let result = binding.prepare(&request, &Limits::default());
+            assert_eq!(result.is_ok(), accepted, "{text:?}");
+            if let Err(error) = result {
+                assert_eq!(error.code, "invalid_argument");
+                assert!(!error.remote_state_unknown);
+            }
+        }
+        let mut raw = definition();
+        put(
+            property(&mut raw),
+            "enum",
+            toml::Value::Array(vec!["approved".into()]),
+        );
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        assert!(
+            binding
+                .prepare(&request(binding, json!("approved")), &Limits::default())
+                .is_ok()
+        );
+        assert!(
+            binding
+                .prepare(&request(binding, json!("other")), &Limits::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn integer_and_boolean_domains_render_exactly() {
+        for (schema, values) in [
+            (
+                "type='integer'\nminimum=-2\nmaximum=2",
+                vec![
+                    (json!(-2), Some("-2")),
+                    (json!(2), Some("2")),
+                    (json!(3), None),
+                ],
+            ),
+            (
+                "type='boolean'\nenum=[true]",
+                vec![(json!(true), Some("true")), (json!(false), None)],
+            ),
+            (
+                "type='integer'\nminimum=-9223372036854775808\nmaximum=9223372036854775807",
+                vec![
+                    (json!(i64::MIN), Some("-9223372036854775808")),
+                    (json!(i64::MAX), Some("9223372036854775807")),
+                ],
+            ),
+        ] {
+            let mut raw = definition();
+            *property(&mut raw) = toml::from_str(schema).unwrap();
+            let bindings = compile(raw).unwrap();
+            let binding = bindings.get(BindingId(0)).unwrap();
+            for (value, expected) in values {
+                let request = request(binding, value);
+                let result = binding.prepare(&request, &Limits::default());
+                if let Some(expected) = expected {
+                    match result.unwrap().invocation {
+                        Invocation::BoundArgv { arguments, .. } => {
+                            assert_eq!(arguments[1], expected)
+                        }
+                        _ => panic!("Expected bound argv"),
+                    }
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+            for wrong in [json!("1"), json!(1.5), json!([])] {
+                assert!(
+                    binding
+                        .parse_request(
+                            json!({"host":"server","value":wrong})
+                                .as_object()
+                                .unwrap()
+                                .clone()
+                        )
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn option_safety_depends_on_fixed_separator_or_closed_domain() {
+        for (schema, accepted) in [
+            ("type='string'\nmaxLength=32", false),
+            ("type='string'\nmaxLength=32\nenum=['--version']", true),
+            ("type='integer'\nminimum=-1\nmaximum=5", false),
+            ("type='integer'\nminimum=-1\nmaximum=5\nenum=[-1,2]", true),
+            ("type='integer'\nminimum=0\nmaximum=5", true),
+            ("type='boolean'", true),
+        ] {
+            let mut raw = definition();
+            raw["execution"]["argv"].as_array_mut().unwrap().remove(0);
+            *property(&mut raw) = toml::from_str(schema).unwrap();
+            assert_eq!(compile(raw).is_ok(), accepted, "{schema}");
+        }
+        let mut raw = definition();
+        raw["execution"]["argv"].as_array_mut().unwrap().swap(0, 1);
+        assert!(
+            compile(raw).is_err(),
+            "A later separator must not authorize an earlier free slot"
+        );
+    }
+
+    #[test]
+    fn unsupported_schemas_and_bad_mappings_fail_even_when_disabled() {
+        for schema in [
+            "type='string'",
+            "type='string'\nmaxLength=4097",
+            "type='string'\nmaxLength=2\nminLength=3",
+            "type='string'\nmaxLength=2\npattern='.*'",
+            "type='string'\nmaxLength=2\ndefault='x'",
+            "type='object'\nproperties={}",
+            "type='integer'\nminimum=0",
+            "type='integer'\nminimum=2\nmaximum=1",
+            "type='integer'\nminimum=0\nmaximum=2\nenum=['1']",
+            "type='boolean'\nenum=[]",
+            "type='boolean'\nenum=[true,true]",
+            "type='boolean'\nmaximum=2",
+        ] {
+            let mut raw = definition();
+            *property(&mut raw) = toml::from_str(schema).unwrap();
+            assert!(
+                Bindings::compile(
+                    BTreeMap::from([("observe".into(), raw)]),
+                    &[],
+                    &Limits::default(),
+                    |_| true
+                )
+                .is_err(),
+                "{schema}"
+            );
+        }
+        for name in RESERVED
+            .iter()
+            .copied()
+            .chain(["_hidden", "bad-name", "1value"])
+        {
+            let mut raw = definition();
+            let properties = raw["input_schema"]["properties"].as_table_mut().unwrap();
+            let value = properties.remove("value").unwrap();
+            properties.insert(name.into(), value);
+            raw["input_schema"]["required"] = toml::Value::Array(vec![name.into()]);
+            raw["execution"]["argv"][1]["input"] = name.into();
+            assert!(compile(raw).is_err(), "{name}");
+        }
+        for argv in [
+            vec![],
+            vec![toml::Value::String("--".into())],
+            vec![toml::from_str("input='unknown'").unwrap()],
+            vec![toml::from_str("input='value'\nfixed='override'").unwrap()],
+        ] {
+            let mut raw = definition();
+            raw["execution"]["argv"] = toml::Value::Array(argv);
+            assert!(compile(raw).is_err());
+        }
+        for required in [vec![], vec!["value", "value"], vec!["missing"]] {
+            let mut raw = definition();
+            raw["input_schema"]["required"] =
+                toml::Value::Array(required.into_iter().map(Into::into).collect());
+            assert!(compile(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn limits_targets_revision_and_enablement_are_enforced() {
+        let mut raw = definition();
+        put(
+            &mut raw,
+            "limits",
+            toml::from_str("timeout_secs=3\nmax_output_bytes=7").unwrap(),
+        );
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        let mut request = request(binding, json!("ok"));
+        let prepared = binding.prepare(&request, &Limits::default()).unwrap();
+        assert_eq!(prepared.duration, Duration::from_secs(3));
+        assert_eq!(prepared.max_output_bytes, 7);
+        for timeout in [0, 4] {
+            request.timeout_secs = Some(timeout);
+            assert!(binding.prepare(&request, &Limits::default()).is_err());
+        }
+        request.timeout_secs = Some(2);
+        assert_eq!(
+            binding
+                .prepare(&request, &Limits::default())
+                .unwrap()
+                .duration,
+            Duration::from_secs(2)
+        );
+        request.host = "arbitrary.example".into();
+        assert!(binding.prepare(&request, &Limits::default()).is_err());
+        for revision in ["", "not secret!", "☃"] {
+            let mut raw = definition();
+            raw["revision"] = revision.into();
+            assert!(compile(raw).is_err());
+        }
+        for targets in [vec![], vec!["server", "server"], vec!["unknown"]] {
+            let mut raw = definition();
+            raw["targets"] = toml::Value::Array(targets.into_iter().map(Into::into).collect());
+            assert!(compile(raw).is_err());
+        }
+        for limits in [
+            "timeout_secs=0",
+            "timeout_secs=601",
+            "max_output_bytes=0",
+            "max_output_bytes=1048577",
+        ] {
+            let mut raw = definition();
+            put(&mut raw, "limits", toml::from_str(limits).unwrap());
+            assert!(compile(raw).is_err());
+        }
+        for enabled in [
+            vec!["missing".into()],
+            vec!["observe".into(), "observe".into()],
+        ] {
+            assert!(
+                Bindings::compile(
+                    BTreeMap::from([("observe".into(), definition())]),
+                    &enabled,
+                    &Limits::default(),
+                    |_| true
+                )
+                .is_err()
+            );
+        }
+        let disabled = Bindings::compile(
+            BTreeMap::from([("observe".into(), definition())]),
+            &[],
+            &Limits::default(),
+            |_| true,
+        )
+        .unwrap();
+        assert!(!disabled.get(BindingId(0)).unwrap().enabled());
+    }
+
+    #[test]
+    fn actual_expansion_obeys_exact_encoded_command_boundary() {
+        // The fixed prefix "exec -- /x --" is 13 bytes; sixteen references
+        // contribute 65504 bytes at 4093 bytes each plus their leading spaces.
+        // An 18-byte literal plus its leading space reaches exactly 65536.
+        let mut raw = definition();
+        raw["execution"]["program"] = "/x".into();
+        let mut argv = vec![
+            toml::Value::String("--".into()),
+            toml::Value::String("x".repeat(18)),
+        ];
+        argv.extend((0..16).map(|_| toml::from_str("input='value'").unwrap()));
+        raw["execution"]["argv"] = toml::Value::Array(argv);
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        let exact = request(binding, json!("x".repeat(4093)));
+        let prepared = binding.prepare(&exact, &Limits::default()).unwrap();
+        assert_eq!(prepared.invocation.encoded_len().unwrap(), 65536);
+        let over = request(binding, json!("x".repeat(4094)));
+        let error = binding.prepare(&over, &Limits::default()).err().unwrap();
+        assert_eq!(error.code, "invalid_argument");
+        assert!(!error.remote_state_unknown);
+    }
+
+    #[test]
+    fn static_layout_and_metadata_bounds_reject_overflow() {
+        for (field, value) in [
+            ("program", Value::String("relative".into())),
+            ("program", Value::String("/bin/".into())),
+            ("program", Value::String("/".to_owned() + &"x".repeat(4096))),
+            ("cwd", Value::String("relative".into())),
+        ] {
+            let mut raw = definition();
+            put(&mut raw["execution"], field, value.as_str().unwrap().into());
+            assert!(compile(raw).is_err());
+        }
+        let mut raw = definition();
+        raw["execution"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .push("x".repeat(4097).into());
+        assert!(compile(raw).is_err());
+        let mut raw = definition();
+        raw["execution"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .extend((0..63).map(|_| "x".into()));
+        assert!(compile(raw).is_err(), "More than 64 slots");
+        let mut raw = definition();
+        raw["execution"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .extend((0..32).map(|_| "x".repeat(4096).into()));
+        assert!(
+            compile(raw).is_err(),
+            "Fixed-only command must fit before any request"
+        );
+        let mut raw = definition();
+        put(
+            property(&mut raw),
+            "enum",
+            toml::Value::Array(
+                (0..5)
+                    .map(|i| format!("{i}{}", "x".repeat(4000)).into())
+                    .collect(),
+            ),
+        );
+        assert!(compile(raw).is_err(), "Aggregate enum text is bounded");
+        let raw = (0..33)
+            .map(|i| (format!("tool_{i}"), definition()))
+            .collect();
+        assert!(Bindings::compile(raw, &[], &Limits::default(), |_| true).is_err());
+    }
+
+    #[test]
+    fn effect_annotations_are_conservative_and_unique() {
+        for (effects, read_only) in [
+            (vec!["read", "sensitive_read"], true),
+            (vec!["read", "probe"], false),
+            (vec!["runtime_write"], false),
+            (vec!["persistent_write"], false),
+            (vec!["availability"], false),
+            (vec!["unknown"], false),
+        ] {
+            let mut raw = definition();
+            raw["effects"] = toml::Value::Array(effects.into_iter().map(Into::into).collect());
+            let bindings = compile(raw).unwrap();
+            assert_eq!(bindings.get(BindingId(0)).unwrap().read_only(), read_only);
+        }
+        for effects in [vec![], vec!["read", "read"], vec!["invented"]] {
+            let mut raw = definition();
+            raw["effects"] = toml::Value::Array(effects.into_iter().map(Into::into).collect());
+            assert!(compile(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn integer_schema_normalizes_integral_numbers_without_truncating() {
+        let mut raw = definition();
+        *property(&mut raw) =
+            toml::from_str("type='integer'\nminimum=-2\nmaximum=2\nenum=[1,2]").unwrap();
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        for (token, expected) in [("1", "1"), ("1.0", "1"), ("1e0", "1"), ("2.0", "2")] {
+            let value: Value = serde_json::from_str(token).unwrap();
+            let request = binding
+                .parse_request(
+                    json!({
+                        "host":"server", "value":value, "timeout_secs":1.0
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                )
+                .unwrap();
+            let prepared = binding.prepare(&request, &Limits::default()).unwrap();
+            assert_eq!(prepared.duration, Duration::from_secs(1));
+            match prepared.invocation {
+                Invocation::BoundArgv { arguments, .. } => assert_eq!(arguments[1], expected),
+                _ => panic!("wrong native invocation"),
+            }
+        }
+        for token in ["1.5", "1e100", "3.0"] {
+            let value: Value = serde_json::from_str(token).unwrap();
+            if let Ok(request) = binding.parse_request(
+                json!({
+                    "host":"server", "value":value
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ) {
+                assert!(binding.prepare(&request, &Limits::default()).is_err());
+            }
+        }
+        let mut raw = definition();
+        *property(&mut raw) =
+            toml::from_str("type='integer'\nminimum=0\nmaximum=2\nenum=[1,1.0]").unwrap();
+        assert!(
+            compile(raw).is_err(),
+            "numeric enum aliases must not become distinct choices"
+        );
+    }
+
+    #[test]
+    fn generated_host_enums_share_the_complete_input_schema_budget() {
+        for (target, choices) in [
+            ("x".repeat(MAX_SCHEMA_BYTES + 1), None),
+            (
+                "x".repeat(MAX_SCHEMA_BYTES - 1024),
+                Some(vec!["a".repeat(1000), "b".repeat(1000)]),
+            ),
+        ] {
+            let mut raw = definition();
+            raw["targets"] = toml::Value::Array(vec![target.into()]);
+            if let Some(choices) = choices {
+                put(
+                    property(&mut raw),
+                    "enum",
+                    toml::Value::Array(choices.into_iter().map(toml::Value::String).collect()),
+                );
+            }
+            let result = Bindings::compile(
+                BTreeMap::from([("observe".into(), raw)]),
+                &["observe".into()],
+                &Limits::default(),
+                |_| true,
+            );
+            assert!(
+                result.is_err(),
+                "generated host choices escaped the schema cap"
+            );
+        }
+    }
+}
