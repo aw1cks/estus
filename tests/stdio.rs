@@ -1666,3 +1666,71 @@ async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("operator.toml");
+    std::fs::write(
+        &path,
+        indoc::indoc! {"
+        [targets.one]
+        ssh_host = 'private-empty-policy.invalid'
+        [targets.one.sudo]
+        mode = 'same-account'
+        programs = []
+    "},
+    )?;
+    let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(2).await?;
+        ensure!(
+            listed["result"]["tools"]
+                .as_array()
+                .context("tool list")?
+                .iter()
+                .any(|tool| tool["name"] == "ssh_sudo")
+        );
+        server
+            .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let response = server.response(3).await?;
+        let data = discovery_data(&response["result"], "configured")?;
+        let target = &data["targets"][0];
+        ensure!(target["sudo_mode"] == "same-account");
+        ensure!(
+            !target["permitted_operations"]
+                .as_array()
+                .context("target operations")?
+                .iter()
+                .any(|operation| operation == "ssh_sudo")
+        );
+        server
+            .send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"ssh_sudo","arguments":{"host":"one","argv":["/usr/bin/id"]}}}))
+            .await?;
+        let denied = server.response(4).await?;
+        ensure!(
+            denied.get("error").is_none(),
+            "registered route rejected before target policy"
+        );
+        ensure!(denied["result"]["isError"] == true);
+        let reply = &denied["result"]["structuredContent"];
+        ensure!(reply["data"].is_null());
+        ensure!(reply["error"]["code"] == "policy_denied");
+        ensure!(reply["error"]["remote_state_unknown"] == false);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    ensure!(!String::from_utf8_lossy(&stderr).contains("private-empty-policy"));
+    Ok(())
+}
