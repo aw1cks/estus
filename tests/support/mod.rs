@@ -121,8 +121,10 @@ impl Process {
 }
 
 pub fn executable(path: &Path) -> Result<PathBuf> {
-    let path =
-        fs::canonicalize(path).with_context(|| format!("missing executable {}", path.display()))?;
+    // Keep the invocation basename: canonicalizing a multicall utility symlink
+    // would turn e.g. mkdir into the undifferentiated coreutils executable.
+    let path = std::path::absolute(path)
+        .with_context(|| format!("missing executable {}", path.display()))?;
     let metadata = fs::metadata(&path)?;
     ensure!(
         metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
@@ -306,7 +308,7 @@ impl Fixture {
     }
 
     pub fn sftp_server() -> Result<PathBuf> {
-        let sshd = find_program("sshd")?;
+        let sshd = fs::canonicalize(find_program("sshd")?)?;
         ensure!(sshd.starts_with("/nix/store"), "sshd must be Nix-provided");
         let package = sshd
             .parent()
