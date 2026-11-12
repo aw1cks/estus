@@ -1,4 +1,4 @@
-{ pkgs, craneLib, commonArgs }:
+{ pkgs, craneLib, commonArgs, cargoTestExtraArgs ? "" }:
 let
   cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
     dummySrc = craneLib.mkDummySrc {
@@ -13,7 +13,7 @@ let
     };
   });
   package = craneLib.buildPackage (commonArgs // {
-    inherit cargoArtifacts;
+    inherit cargoArtifacts cargoTestExtraArgs;
     nativeBuildInputs = [ pkgs.makeWrapper ];
     postFixup = ''
       wrapProgram "$out/bin/ssh-mcp" \

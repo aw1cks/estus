@@ -33,12 +33,11 @@ jobs:
         save: true
     - name: Run flake checks
       run: nix flake check -L --no-update-lock-file --keep-going
-    - if: runner.os == 'macOS'
-      name: Run packaged native SSH acceptance
+    - name: Run packaged MSRV native SSH acceptance
       run: |
         runtime=$(mktemp -d "$HOME/.ssh-mcp-native.XXXXXXXX")
         trap 'rm -rf -- "$runtime"' EXIT
-        XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native
+        XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native-msrv
     - env:
         DOCKER_HOST: unix:///var/run/docker.sock
       if: runner.os == 'Linux'

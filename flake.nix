@@ -34,15 +34,23 @@
           strictDeps = true;
           doCheck = true;
         };
-        buildWith = craneLib: import ./nix/rust-build.nix {
+        defaultBuild = import ./nix/rust-build.nix {
           inherit pkgs craneLib commonArgs;
         };
-        inherit (buildWith craneLib) package acceptance;
+        msrvBuild = import ./nix/rust-build.nix {
+          inherit pkgs;
+          craneLib = msrvLib;
+          commonArgs = commonArgs // { preBuild = "rustc --version"; };
+          cargoTestExtraArgs = "--all-targets";
+        };
+        inherit (defaultBuild) package acceptance;
       in
       {
         packages = {
           default = package;
+          msrv = msrvBuild.package;
           ssh-acceptance = acceptance;
+          ssh-acceptance-msrv = msrvBuild.acceptance;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
         };
@@ -62,20 +70,20 @@
           type = "app";
           program = "${acceptance}/bin/ssh-native";
         };
+        apps.ssh-native-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/ssh-native";
+        };
         checks.package = package;
         # Compile every test target and run the network-free suite on the MSRV.
         # Never reuse artifacts produced by the default (newer) compiler.
-        checks.msrv = msrvLib.cargoTest (commonArgs // {
-          cargoArtifacts = null;
-          doInstallCargoArtifacts = false;
-          cargoTestExtraArgs = "--all-targets";
-          preBuild = "rustc --version";
-        });
+        checks.msrv = msrvBuild.package;
         checks.formatting = craneLib.cargoFmt {
           src = commonArgs.src;
         };
         # Compilation only: SSH listeners and containers stay outside sandboxes.
         checks.ssh-acceptance-build = acceptance;
+        checks.ssh-acceptance-msrv-build = msrvBuild.acceptance;
         devShells.default = craneLib.devShell {
           checks = { inherit package; };
           # crane supplies cargo, rustc, rustfmt, and clippy from its toolchain.
