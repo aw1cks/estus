@@ -1991,7 +1991,10 @@ async fn ssh_closed_stderr() -> Result<()> {
                             }
                             sleep(Duration::from_millis(20)).await;
                         }
-                    }).await.context("MCP fixture connections did not disconnect");
+                    }).await.with_context(|| format!(
+                        "MCP fixture connections did not disconnect: phase={phase}, SIGTERM={sigterm}, baseline={baseline:?}, current={:?}, sshd_log={}",
+                        connection_activity(&fixture), fixture.listeners[0].log.text(),
+                    ));
                     commands.with_context(|| format!("closed stderr {phase}, SIGTERM={sigterm}"))?;
                     stopped?;
                     completed?;
