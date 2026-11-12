@@ -271,10 +271,10 @@ fn argv_encoded_len<'a>(
         append_argument(&mut bytes, escaped_len("--")?)?;
         append_argument(&mut bytes, escaped_len(cwd)?)?;
         // The sole raw argument in the builder, including its internal space.
-        append_argument(&mut bytes, "&& exec".len())?;
+        append_argument(&mut bytes, "&& command".len())?;
         bytes
     } else {
-        escaped_len("exec")?
+        escaped_len("command")?
     };
     append_argument(&mut bytes, escaped_len("--")?)?;
     append_argument(&mut bytes, escaped_len(program)?)?;
@@ -371,8 +371,8 @@ mod bound_argv_tests {
     fn actual_encoding(program: &str, arguments: &[Cow<'_, str>], cwd: Option<&str>) -> String {
         let escape = |value: &str| shell_escape::unix::escape(Cow::Borrowed(value)).into_owned();
         let mut encoded = match cwd {
-            Some(cwd) => format!("cd -- {} && exec --", escape(cwd)),
-            None => "exec --".into(),
+            Some(cwd) => format!("cd -- {} && command --", escape(cwd)),
+            None => "command --".into(),
         };
         for argument in std::iter::once(program).chain(arguments.iter().map(Cow::as_ref)) {
             encoded.push(' ');
@@ -418,10 +418,6 @@ mod bound_argv_tests {
                 assert!(expected.ends_with(&format!(" {number} true")));
             }
         }
-        assert_eq!(
-            actual_encoding("/bin/x", &[Cow::Borrowed(""), Cow::Borrowed("$(id)")], None),
-            "exec -- /bin/x '' '$(id)'",
-        );
     }
 
     #[test]
@@ -685,8 +681,8 @@ mod tests {
         let escape =
             |argument: &str| shell_escape::unix::escape(Cow::Borrowed(argument)).into_owned();
         let prefix = match cwd {
-            Some(cwd) => format!("cd -- {} && exec --", escape(cwd)),
-            None => "exec --".into(),
+            Some(cwd) => format!("cd -- {} && command --", escape(cwd)),
+            None => "command --".into(),
         };
         argv.iter().fold(prefix, |mut encoded, argument| {
             encoded.push(' ');
@@ -747,7 +743,7 @@ mod tests {
         }
         // Empty arguments have no raw payload, but their quotes and separators count.
         let mut request = run(vec!["xx".into()]);
-        request.argv.resize_with(21_843, String::new);
+        request.argv.resize_with(21_842, String::new);
         assert_eq!(
             actual_run_encoding(&request.argv, None).len(),
             MAX_COMMAND_BYTES

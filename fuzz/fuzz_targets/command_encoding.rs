@@ -228,8 +228,8 @@ fn exercise(fixture: Fixture) -> Option<()> {
             // The raw join is fixed syntax, not an escaped argument. All caller
             // values use the real encoder, independently of production counting.
             let mut expected = match request.cwd.as_deref() {
-                Some(cwd) => format!("{} && exec --", encoded(["cd", "--", cwd])),
-                None => encoded(["exec", "--"]),
+                Some(cwd) => format!("{} && command --", encoded(["cd", "--", cwd])),
+                None => encoded(["command", "--"]),
             };
             if !request.argv.is_empty() {
                 expected.push(' ');

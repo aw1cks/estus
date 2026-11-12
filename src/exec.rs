@@ -102,10 +102,11 @@ fn argv_command<'s, 'a>(
     let mut command = if let Some(cwd) = cwd {
         let mut command = session.command("cd");
         // Only fixed syntax is raw; cwd, program and arguments remain escaped data.
-        command.arg("--").arg(cwd).raw_arg("&& exec");
+        command.arg("--").arg(cwd).raw_arg("&& command");
         command
     } else {
-        session.command("exec")
+        // POSIX command accepts -- in dash too; exec -- does not.
+        session.command("command")
     };
     command.arg("--").arg(program).args(arguments);
     command

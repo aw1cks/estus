@@ -1070,14 +1070,14 @@ result = { kind = "command" }
 
     #[test]
     fn actual_expansion_obeys_exact_encoded_command_boundary() {
-        // The fixed prefix "exec -- /x --" is 13 bytes; sixteen references
+        // The fixed prefix "command -- /x --" is 16 bytes; sixteen references
         // contribute 65504 bytes at 4093 bytes each plus their leading spaces.
-        // An 18-byte literal plus its leading space reaches exactly 65536.
+        // A 15-byte literal plus its leading space reaches exactly 65536.
         let mut raw = definition();
         raw["execution"]["program"] = "/x".into();
         let mut argv = vec![
             toml::Value::String("--".into()),
-            toml::Value::String("x".repeat(18)),
+            toml::Value::String("x".repeat(15)),
         ];
         argv.extend((0..16).map(|_| toml::from_str("input='value'").unwrap()));
         raw["execution"]["argv"] = toml::Value::Array(argv);
