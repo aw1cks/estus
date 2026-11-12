@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -7,12 +8,12 @@ use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{
         common::FromContextPart,
-        router::tool::ToolRouter,
+        router::tool::{IntoToolRoute, ToolRoute, ToolRouter},
         tool::{ToolCallContext, schema_for_type},
     },
     model::{CallToolResult, RequestId, ServerCapabilities, ServerConfig},
     service::RequestContext,
-    tool, tool_handler, tool_router,
+    tool, tool_handler,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -22,7 +23,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     audit::{Audit, Metadata},
     command::{ExecRequest, Invocation, RunRequest, SudoRequest},
-    config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
+    config::{
+        Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery, ToolCatalog, ToolEntry,
+        ToolId,
+    },
     exec::{self, RunContext},
     filedata::{
         ListData, ListRequest, ReadData, ReadRequest, StatRequest, WriteData, WriteRequest,
@@ -42,6 +46,8 @@ pub(crate) struct SshMcp {
 
 struct State {
     config: Config,
+    tools: ToolCatalog,
+    sudo_name: Cow<'static, str>,
     pool: Arc<Pool>,
     shutdown: CancellationToken,
     operations: Arc<Semaphore>,
@@ -57,8 +63,8 @@ struct Empty {}
 // reflects malformed input values or field names in diagnostics.
 struct Arguments<T>(T);
 
-impl<S, T: DeserializeOwned> FromContextPart<ToolCallContext<'_, S>> for Arguments<T> {
-    fn from_context_part(context: &mut ToolCallContext<'_, S>) -> Result<Self, ErrorData> {
+impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, SshMcp>> for Arguments<T> {
+    fn from_context_part(context: &mut ToolCallContext<'_, SshMcp>) -> Result<Self, ErrorData> {
         serde_json::from_value(serde_json::Value::Object(
             context.arguments.take().unwrap_or_default(),
         ))
@@ -73,7 +79,7 @@ impl<S, T: DeserializeOwned> FromContextPart<ToolCallContext<'_, S>> for Argumen
                 request_id: &context.request_context.id,
                 tool: &context.name,
                 host: None,
-                identity_role: if context.name == "ssh_sudo" {
+                identity_role: if context.name == context.service.state.sudo_name {
                     IdentityRole::Elevated
                 } else {
                     IdentityRole::Ordinary
@@ -96,14 +102,78 @@ impl SshMcp {
             Duration::from_secs(config.limits().connect_timeout_secs),
             shutdown.clone(),
         );
-        let mut tool_router = Self::tool_router();
-        if !config.has_sudo() {
-            tool_router.remove_route("ssh_sudo");
+        // This is the explicit publication inventory. Each entry binds native
+        // SDK metadata and its callable handler to a target-policy identity.
+        let routes: [(ToolId, ToolRoute<Self>); 8] = [
+            (
+                ToolId::Targets,
+                (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
+            ),
+            (
+                ToolId::Exec,
+                (Self::ssh_exec_tool_attr(), Self::ssh_exec).into_tool_route(),
+            ),
+            (
+                ToolId::Run,
+                (Self::ssh_run_tool_attr(), Self::ssh_run).into_tool_route(),
+            ),
+            (
+                ToolId::ReadFile,
+                (Self::ssh_read_file_tool_attr(), Self::ssh_read_file).into_tool_route(),
+            ),
+            (
+                ToolId::WriteFile,
+                (Self::ssh_write_file_tool_attr(), Self::ssh_write_file).into_tool_route(),
+            ),
+            (
+                ToolId::Stat,
+                (Self::ssh_stat_tool_attr(), Self::ssh_stat).into_tool_route(),
+            ),
+            (
+                ToolId::ListDirectory,
+                (
+                    Self::ssh_list_directory_tool_attr(),
+                    Self::ssh_list_directory,
+                )
+                    .into_tool_route(),
+            ),
+            (
+                ToolId::Sudo,
+                (Self::ssh_sudo_tool_attr(), Self::ssh_sudo).into_tool_route(),
+            ),
+        ];
+        // Validate the full inventory before filtering: even a disabled route
+        // must not hide duplicate IDs or names from the programmer.
+        let mut tools = ToolCatalog::new(
+            routes
+                .iter()
+                .map(|(id, route)| ToolEntry {
+                    id: *id,
+                    name: route.attr.name.clone(),
+                })
+                .collect(),
+        );
+        let sudo_name = routes
+            .iter()
+            .find(|(id, _)| *id == ToolId::Sudo)
+            .expect("native registration inventory includes sudo")
+            .1
+            .attr
+            .name
+            .clone();
+        tools.retain(|id| id != ToolId::Sudo || config.has_sudo());
+        let mut tool_router = ToolRouter::new();
+        for (id, route) in routes {
+            if tools.contains(id) {
+                tool_router.add_route(route);
+            }
         }
         Self {
             tool_router,
             state: Arc::new(State {
                 config,
+                tools,
+                sudo_name,
                 pool,
                 shutdown,
                 operations: Arc::new(Semaphore::new(16)),
@@ -129,7 +199,7 @@ impl SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
-        let metadata = request.metadata(&self.state.config, &context.id);
+        let metadata = request.metadata(&self.state, &context.id);
         let budget = ReplyBudget::new(&context.id)?;
         let capture_limit = match budget.command_capture_limit() {
             Ok(limit) => limit,
@@ -175,12 +245,7 @@ impl SshMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(
-            &request.host,
-            "ssh_read_file",
-            &self.state.config,
-            &context.id,
-        );
+        let metadata = file_metadata(&request.host, ToolId::ReadFile, &self.state, &context.id);
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -205,7 +270,7 @@ impl SshMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, "ssh_stat", &self.state.config, &context.id);
+        let metadata = file_metadata(&request.host, ToolId::Stat, &self.state, &context.id);
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -232,8 +297,8 @@ impl SshMcp {
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = file_metadata(
             &request.host,
-            "ssh_list_directory",
-            &self.state.config,
+            ToolId::ListDirectory,
+            &self.state,
             &context.id,
         );
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
@@ -260,12 +325,7 @@ impl SshMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(
-            &request.host,
-            "ssh_write_file",
-            &self.state.config,
-            &context.id,
-        );
+        let metadata = file_metadata(&request.host, ToolId::WriteFile, &self.state, &context.id);
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -305,9 +365,9 @@ impl SshMcp {
     }
 }
 
-#[tool_router]
 impl SshMcp {
     #[tool(
+        name = "ssh_targets",
         description = "Discover configured logical targets, public advisory descriptions/labels, startup-permitted operations and resolved policy limits without connecting or probing. Permitted operations do not imply remote support or authorization; observed capabilities remain unknown. Limits are ceilings, further constrained by per-request escaping, request IDs and the response-wire budget. Open mode returns no target inventory and never enumerates SSH configuration. Backend aliases, credential/config paths and authentication state are not returned.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<Empty>(),
@@ -322,7 +382,7 @@ impl SshMcp {
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = Metadata {
             request_id: &context.id,
-            tool: "ssh_targets",
+            tool: self.state.tool_name(ToolId::Targets),
             host: None,
             identity_role: IdentityRole::Ordinary,
             sudo_mode: None,
@@ -338,12 +398,13 @@ impl SshMcp {
             }
         };
         let audit = Audit::start(metadata, started);
-        let reply = ToolReply::success(self.state.config.targets());
+        let reply = ToolReply::success(self.state.config.targets(&self.state.tools));
         audit.finish(None, None);
         budget.result(reply)
     }
 
     #[tool(
+        name = "ssh_exec",
         description = "Execute a stateless noninteractive remote shell script (/bin/sh by default; Bash is opt-in). Potentially destructive; not idempotent. Timeout/cancellation closes only this channel: remote work may continue, and operations are never replayed. Ordinary shell authority can bypass same-account sudo approval separation. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<ExecRequest>(),
@@ -358,6 +419,7 @@ impl SshMcp {
     }
 
     #[tool(
+        name = "ssh_run",
         description = "Execute an explicit argv on the ordinary SSH identity, with optional absolute cwd and bounded stdin. Executables may be paths or remote-PATH names. Argument boundaries are preserved, but the remote POSIX login shell still participates: this is not remote execve or a sandbox. Use ssh_exec for shell syntax/builtins. Potentially destructive and non-idempotent; ordinary authority can bypass same-account sudo approval separation. Timeout/cancellation closes only this channel, remote work may continue, and operations are never replayed. Output may be truncated within the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<RunRequest>(),
@@ -372,6 +434,7 @@ impl SshMcp {
     }
 
     #[tool(
+        name = "ssh_read_file",
         description = "Read a bounded range through an independent ordinary-identity SFTP channel. Paths are literal: no shell, tilde, environment or wildcard expansion, and no path sandbox. UTF-8 is strict, including split codepoints; use base64 for arbitrary bytes. content_sha256 is lowercase SHA-256 of returned raw bytes, excluding lookahead and before encoding. Optional expected_content_sha256 must be 64 hex characters; mismatch returns checksum_mismatch without content. This verifies only that range, not a whole-file snapshot. Reads follow server symlink semantics. No sudo, shell/SCP fallback, remote hash helper, installation or automatic retries/replay. Timeout/cancellation disconnects only this channel; remote completion is not guaranteed. The requested lossless range must fit both the configured file cap and fixed 16 MiB reply limit.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ReadRequest>(),
@@ -386,6 +449,7 @@ impl SshMcp {
     }
 
     #[tool(
+        name = "ssh_stat",
         description = "Query ordinary-identity SFTP metadata for a literal UTF-8 path. Default lstat reports a final symlink itself; follow_symlinks=true queries its target. Intermediate symlinks follow server semantics. No path sandbox, race-free no-follow guarantee, shell/SCP fallback, sudo or automatic retry. Missing attributes remain null and missing type is unknown; permissions contain only mode bits. Each call owns an independent SFTP channel under the original timeout.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<StatRequest>(),
@@ -400,6 +464,7 @@ impl SshMcp {
     }
 
     #[tool(
+        name = "ssh_list_directory",
         description = "List a literal UTF-8 directory path over an independent ordinary SFTP channel. max_entries defaults to 200 (1–1000); the complete 16 MiB reply budget can shorten it further. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 always preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. truncated means another entry was observed, not a continuation cursor or snapshot. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Timeout/cancellation closes only this channel; remote completion is not guaranteed.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ListRequest>(),
@@ -414,6 +479,7 @@ impl SshMcp {
     }
 
     #[tool(
+        name = "ssh_write_file",
         description = "Write bounded content through an independent ordinary SFTP channel. Default exclusive create refuses an existing destination, including symlinks. overwrite=true directly creates or truncates and follows server symlink semantics: a later failure can leave partial, empty or completed changes. Success requires write and close acknowledgements, not atomic replacement or durable fsync. Paths are literal UTF-8, without shell expansion or a path sandbox. Content is UTF-8 by default (NUL allowed), or canonical padded standard base64; decoded bytes must fit the configured file cap before connecting. No append, parent creation, sudo, fallback, retries, replay or rollback. Failures after a mutating OPEN is dispatched report remote_state_unknown=true and null data. Timeout/cancellation closes only this channel; remote work may continue. SFTP v3 can report concurrent exclusive-create conflicts as io_error.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<WriteRequest>(),
@@ -428,6 +494,7 @@ impl SshMcp {
     }
 
     #[tool(
+        name = "ssh_sudo",
         description = "Execute an authorized absolute executable via sudo -n -k with the target's configured identity/user/program policy. argv is not a shell script. Requires remote passwordless sudo; no passwords, PTY, environment preservation, or retries. Potentially destructive and not idempotent. Cancellation cannot guarantee remote termination. Permitted executables may themselves grant shell-like authority; sudoers remains authoritative. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<SudoRequest>(),
@@ -449,22 +516,22 @@ enum Operation {
 }
 
 impl Operation {
-    fn metadata<'a>(&'a self, config: &Config, request_id: &'a RequestId) -> Metadata<'a> {
+    fn metadata<'a>(&'a self, state: &'a State, request_id: &'a RequestId) -> Metadata<'a> {
         let (tool, host, user, program) = match self {
-            Self::Exec(request) => ("ssh_exec", request.host.as_str(), None, None),
+            Self::Exec(request) => (ToolId::Exec, request.host.as_str(), None, None),
             // Arbitrary executable/argv are payload, not safe audit metadata.
-            Self::Run(request) => ("ssh_run", request.host.as_str(), None, None),
+            Self::Run(request) => (ToolId::Run, request.host.as_str(), None, None),
             Self::Sudo(request) => (
-                "ssh_sudo",
+                ToolId::Sudo,
                 request.host.as_str(),
                 Some(request.user.as_str()),
                 request.argv.first().map(String::as_str),
             ),
         };
-        let mode = config.sudo_mode(host);
+        let mode = state.config.sudo_mode(host);
         Metadata {
             request_id,
-            tool,
+            tool: state.tool_name(tool),
             host: Some(host),
             user,
             program,
@@ -531,16 +598,16 @@ impl Operation {
 
 fn file_metadata<'a>(
     host: &'a str,
-    tool: &'static str,
-    config: &Config,
+    tool: ToolId,
+    state: &'a State,
     request_id: &'a RequestId,
 ) -> Metadata<'a> {
     Metadata {
         request_id,
-        tool,
+        tool: state.tool_name(tool),
         host: Some(host),
         identity_role: IdentityRole::Ordinary,
-        sudo_mode: Some(config.sudo_mode(host)),
+        sudo_mode: Some(state.config.sudo_mode(host)),
         user: None,
         program: None,
     }
@@ -562,6 +629,10 @@ fn request_deadline(
 }
 
 impl State {
+    fn tool_name(&self, id: ToolId) -> &str {
+        self.tools.name(id).expect("executing tool is registered")
+    }
+
     async fn command(
         &self,
         request: Operation,
@@ -570,7 +641,7 @@ impl State {
         started: Instant,
         capture_limit: u64,
     ) -> ToolReply<CommandData> {
-        let metadata = request.metadata(&self.config, &request_id);
+        let metadata = request.metadata(self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
@@ -635,7 +706,7 @@ impl State {
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ReadData> {
-        let metadata = file_metadata(&request.host, "ssh_read_file", &self.config, &request_id);
+        let metadata = file_metadata(&request.host, ToolId::ReadFile, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
@@ -693,7 +764,7 @@ impl State {
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<StatData> {
-        let metadata = file_metadata(&request.host, "ssh_stat", &self.config, &request_id);
+        let metadata = file_metadata(&request.host, ToolId::Stat, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
@@ -748,12 +819,7 @@ impl State {
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ListData> {
-        let metadata = file_metadata(
-            &request.host,
-            "ssh_list_directory",
-            &self.config,
-            &request_id,
-        );
+        let metadata = file_metadata(&request.host, ToolId::ListDirectory, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
@@ -808,7 +874,7 @@ impl State {
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<WriteData> {
-        let metadata = file_metadata(&request.host, "ssh_write_file", &self.config, &request_id);
+        let metadata = file_metadata(&request.host, ToolId::WriteFile, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
@@ -873,10 +939,14 @@ impl ServerHandler for SshMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
         if !self.tool_router.has_route(&request.name) {
-            let sudo = request.name == "ssh_sudo";
+            let sudo = request.name == self.state.sudo_name;
             Metadata {
                 request_id: &context.id,
-                tool: if sudo { "ssh_sudo" } else { "unknown" },
+                tool: if sudo {
+                    &self.state.sudo_name
+                } else {
+                    "unknown"
+                },
                 host: None,
                 identity_role: if sudo {
                     IdentityRole::Elevated

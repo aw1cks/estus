@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     path::{Path, PathBuf},
@@ -15,23 +16,62 @@ const MAX_LABEL_KEY_BYTES: usize = 64;
 const MAX_LABEL_VALUE_BYTES: usize = 256;
 const MAX_METADATA_BYTES: usize = 65_536;
 
-const ORDINARY_OPERATIONS: &[&str] = &[
-    "ssh_exec",
-    "ssh_list_directory",
-    "ssh_read_file",
-    "ssh_run",
-    "ssh_stat",
-    "ssh_write_file",
-];
-const SUDO_OPERATIONS: &[&str] = &[
-    "ssh_exec",
-    "ssh_list_directory",
-    "ssh_read_file",
-    "ssh_run",
-    "ssh_stat",
-    "ssh_sudo",
-    "ssh_write_file",
-];
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolId {
+    Targets,
+    Exec,
+    Run,
+    ReadFile,
+    WriteFile,
+    Stat,
+    ListDirectory,
+    Sudo,
+}
+
+#[derive(Debug)]
+pub(crate) struct ToolEntry {
+    pub(crate) id: ToolId,
+    pub(crate) name: Cow<'static, str>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ToolCatalog {
+    entries: Vec<ToolEntry>,
+}
+
+impl ToolCatalog {
+    pub(crate) fn new(mut entries: Vec<ToolEntry>) -> Self {
+        for (index, entry) in entries.iter().enumerate() {
+            assert!(
+                !entries[..index].iter().any(|other| other.id == entry.id),
+                "tool catalog contains duplicate IDs"
+            );
+            assert!(
+                !entries[..index]
+                    .iter()
+                    .any(|other| other.name == entry.name),
+                "tool catalog contains duplicate names"
+            );
+        }
+        entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Self { entries }
+    }
+
+    pub(crate) fn retain(&mut self, mut predicate: impl FnMut(ToolId) -> bool) {
+        self.entries.retain(|entry| predicate(entry.id));
+    }
+
+    pub(crate) fn contains(&self, id: ToolId) -> bool {
+        self.name(id).is_some()
+    }
+
+    pub(crate) fn name(&self, id: ToolId) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.name.as_ref())
+    }
+}
 
 #[derive(Parser)]
 #[command(version, about = "Stdio SSH MCP server")]
@@ -136,9 +176,8 @@ fn root_users() -> Vec<String> {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct TargetDiscovery<'a> {
     mode: TargetMode,
-    #[serde(serialize_with = "serialize_target_summaries")]
     #[schemars(with = "Vec<TargetSummary<'a>>")]
-    targets: Option<&'a BTreeMap<String, Target>>,
+    targets: TargetSummaries<'a>,
     limits: DiscoveryLimits,
 }
 
@@ -148,30 +187,60 @@ struct TargetSummary<'a> {
     sudo_mode: SudoMode,
     description: Option<&'a str>,
     labels: &'a BTreeMap<String, String>,
-    permitted_operations: &'static [&'static str],
+    #[schemars(with = "Vec<&'a str>")]
+    permitted_operations: PermittedOperations<'a>,
     observed_capabilities: ObservedCapabilities,
 }
 
 // Select only public fields as each row is serialized. In particular, do not
 // allocate a summary Vec before the shared response-budget guard is applied.
-fn serialize_target_summaries<S: Serializer>(
-    targets: &Option<&BTreeMap<String, Target>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.collect_seq(targets.iter().flat_map(|targets| targets.iter()).map(
-        |(name, target)| TargetSummary {
-            name,
-            sudo_mode: target.sudo.mode(),
-            description: target.description.as_deref(),
-            labels: &target.labels,
-            permitted_operations: if target.sudo.permits_programs() {
-                SUDO_OPERATIONS
-            } else {
-                ORDINARY_OPERATIONS
+struct TargetSummaries<'a> {
+    targets: Option<&'a BTreeMap<String, Target>>,
+    tools: &'a ToolCatalog,
+}
+
+impl Serialize for TargetSummaries<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.targets.iter().flat_map(|targets| targets.iter()).map(
+            |(name, target)| TargetSummary {
+                name,
+                sudo_mode: target.sudo.mode(),
+                description: target.description.as_deref(),
+                labels: &target.labels,
+                permitted_operations: PermittedOperations {
+                    tools: self.tools,
+                    sudo: &target.sudo,
+                },
+                observed_capabilities: ObservedCapabilities::Unknown,
             },
-            observed_capabilities: ObservedCapabilities::Unknown,
-        },
-    ))
+        ))
+    }
+}
+
+struct PermittedOperations<'a> {
+    tools: &'a ToolCatalog,
+    sudo: &'a Sudo,
+}
+
+impl Serialize for PermittedOperations<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.tools
+                .entries
+                .iter()
+                .filter(|entry| match entry.id {
+                    ToolId::Targets => false,
+                    ToolId::Exec
+                    | ToolId::Run
+                    | ToolId::ReadFile
+                    | ToolId::WriteFile
+                    | ToolId::Stat
+                    | ToolId::ListDirectory => true,
+                    ToolId::Sudo => self.sudo.permits_programs(),
+                })
+                .map(|entry| entry.name.as_ref()),
+        )
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -372,14 +441,17 @@ impl Config {
         })
     }
 
-    pub(crate) fn targets(&self) -> TargetDiscovery<'_> {
+    pub(crate) fn targets<'a>(&'a self, tools: &'a ToolCatalog) -> TargetDiscovery<'a> {
         TargetDiscovery {
             mode: if self.targets.is_some() {
                 TargetMode::Configured
             } else {
                 TargetMode::Open
             },
-            targets: self.targets.as_ref(),
+            targets: TargetSummaries {
+                targets: self.targets.as_ref(),
+                tools,
+            },
             limits: DiscoveryLimits {
                 connect_timeout_secs: self.limits.connect_timeout_secs,
                 operation_timeout_secs: self.limits.operation_timeout_secs,
@@ -778,6 +850,98 @@ mod tests {
         }
     }
 
+    // Deliberately unrelated to production wire names and declaration order.
+    fn catalog() -> ToolCatalog {
+        ToolCatalog::new(
+            [
+                (ToolId::Exec, "z-exec"),
+                (ToolId::Targets, "0-global-discovery"),
+                (ToolId::Sudo, "m-elevate"),
+                (ToolId::ReadFile, "n-read"),
+                (ToolId::WriteFile, "c-write"),
+                (ToolId::Stat, "q-stat"),
+                (ToolId::ListDirectory, "b-list"),
+                (ToolId::Run, "a-run"),
+            ]
+            .into_iter()
+            .map(|(id, name)| ToolEntry {
+                id,
+                name: name.into(),
+            })
+            .collect(),
+        )
+    }
+
+    #[test]
+    #[should_panic]
+    fn catalog_rejects_duplicate_ids_even_with_distinct_names() {
+        ToolCatalog::new(vec![
+            ToolEntry {
+                id: ToolId::Exec,
+                name: "first".into(),
+            },
+            ToolEntry {
+                id: ToolId::Exec,
+                name: "second".into(),
+            },
+        ]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn catalog_rejects_duplicate_names_before_disabled_routes_can_be_removed() {
+        let mut tools = ToolCatalog::new(vec![
+            ToolEntry {
+                id: ToolId::Exec,
+                name: "collision".into(),
+            },
+            ToolEntry {
+                id: ToolId::Sudo,
+                name: "collision".into(),
+            },
+        ]);
+        tools.retain(|id| id != ToolId::Sudo);
+    }
+
+    #[test]
+    fn discovery_intersects_target_policy_with_enabled_catalog() {
+        let config = load_text(
+            "[targets.one]\nssh_host='private'\n[targets.one.sudo]\nmode='same-account'",
+            &[],
+        )
+        .unwrap();
+        let mut tools = catalog();
+        tools.retain(|id| matches!(id, ToolId::Targets | ToolId::Exec | ToolId::Run));
+        let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+        assert_eq!(
+            discovery["targets"][0]["permitted_operations"],
+            serde_json::json!(["a-run", "z-exec"])
+        );
+        tools.retain(|_| false);
+        let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+        assert_eq!(
+            discovery["targets"][0]["permitted_operations"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn empty_program_policy_keeps_global_sudo_but_excludes_target_permission() {
+        let config = load_text(
+            "[targets.one]\nssh_host='private'\n[targets.one.sudo]\n\
+             mode='same-account'\nprograms=[]",
+            &[],
+        )
+        .unwrap();
+        let tools = catalog();
+        let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+        assert_eq!(discovery["targets"][0]["sudo_mode"], "same-account");
+        assert_eq!(
+            discovery["targets"][0]["permitted_operations"],
+            serde_json::json!(["a-run", "b-list", "c-write", "n-read", "q-stat", "z-exec"])
+        );
+    }
+
     fn load_text(text: &str, vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -799,17 +963,17 @@ mod tests {
     #[test]
     fn missing_and_present_empty_targets_are_distinct() {
         let open = load_text("", &[]).unwrap();
-        let open = serde_json::to_value(open.targets()).unwrap();
+        let open = serde_json::to_value(open.targets(&catalog())).unwrap();
         assert_eq!(open["mode"], "open");
         assert_eq!(open["targets"], serde_json::json!([]));
         let empty = load_text("[targets]", &[]).unwrap();
-        let empty = serde_json::to_value(empty.targets()).unwrap();
+        let empty = serde_json::to_value(empty.targets(&catalog())).unwrap();
         assert_eq!(empty["mode"], "configured");
         assert_eq!(empty["targets"], serde_json::json!([]));
     }
 
     #[test]
-    fn discovery_is_sorted_and_never_contains_aliases() {
+    fn discovery_sorts_supplied_names_and_targets_without_exposing_aliases() {
         let config = load_text(
             r#"
 [targets.zebra]
@@ -825,7 +989,7 @@ mode = "same-account"
             &[],
         )
         .unwrap();
-        let discovery = serde_json::to_value(config.targets()).unwrap();
+        let discovery = serde_json::to_value(config.targets(&catalog())).unwrap();
         assert_eq!(discovery["mode"], "configured");
         assert_eq!(
             discovery["targets"],
@@ -834,8 +998,8 @@ mode = "same-account"
                     "name":"alpha", "sudo_mode":"same-account",
                     "description":null, "labels":{},
                     "permitted_operations":[
-                        "ssh_exec", "ssh_list_directory", "ssh_read_file", "ssh_run",
-                        "ssh_stat", "ssh_sudo", "ssh_write_file"
+                        "a-run", "b-list", "c-write", "m-elevate",
+                        "n-read", "q-stat", "z-exec"
                     ],
                     "observed_capabilities":"unknown"
                 },
@@ -843,8 +1007,8 @@ mode = "same-account"
                     "name":"zebra", "sudo_mode":"separate-identity",
                     "description":null, "labels":{},
                     "permitted_operations":[
-                        "ssh_exec", "ssh_list_directory", "ssh_read_file", "ssh_run",
-                        "ssh_stat", "ssh_sudo", "ssh_write_file"
+                        "a-run", "b-list", "c-write", "m-elevate",
+                        "n-read", "q-stat", "z-exec"
                     ],
                     "observed_capabilities":"unknown"
                 }
@@ -996,7 +1160,7 @@ programs=['/private/program']
             &[],
         )
         .unwrap();
-        let discovery = serde_json::to_value(config.targets()).unwrap();
+        let discovery = serde_json::to_value(config.targets(&catalog())).unwrap();
         let rows = discovery["targets"].as_array().unwrap();
         for (name, mode) in [
             ("disabled", "disabled"),
@@ -1007,14 +1171,7 @@ programs=['/private/program']
             assert_eq!(row["sudo_mode"], mode);
             assert_eq!(
                 row["permitted_operations"],
-                serde_json::json!([
-                    "ssh_exec",
-                    "ssh_list_directory",
-                    "ssh_read_file",
-                    "ssh_run",
-                    "ssh_stat",
-                    "ssh_write_file"
-                ])
+                serde_json::json!(["a-run", "b-list", "c-write", "n-read", "q-stat", "z-exec"])
             );
             assert_eq!(row["observed_capabilities"], "unknown");
             assert_eq!(
@@ -1035,7 +1192,7 @@ programs=['/private/program']
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|operation| operation == "ssh_sudo")
+                .any(|operation| operation == "m-elevate")
         );
         assert!(!discovery.to_string().contains("private"));
     }
@@ -1045,7 +1202,7 @@ programs=['/private/program']
         let text = "[limits]\nconnect_timeout_secs=2\noperation_timeout_secs=3\n\
                     max_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6";
         let config = load_text(text, &[]).unwrap();
-        let limits = serde_json::to_value(config.targets()).unwrap()["limits"].clone();
+        let limits = serde_json::to_value(config.targets(&catalog())).unwrap()["limits"].clone();
         assert_eq!(
             limits,
             serde_json::json!({
@@ -1067,7 +1224,7 @@ programs=['/private/program']
             ],
         )
         .unwrap();
-        let limits = serde_json::to_value(config.targets()).unwrap()["limits"].clone();
+        let limits = serde_json::to_value(config.targets(&catalog())).unwrap()["limits"].clone();
         assert_eq!(
             limits,
             serde_json::json!({
