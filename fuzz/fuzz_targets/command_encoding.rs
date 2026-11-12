@@ -236,13 +236,29 @@ fn exercise(fixture: Fixture) -> Option<()> {
                 expected.push_str(&encoded(request.argv.iter().map(String::as_str)));
             }
             let expected_bytes = expected.len();
-            check_accounting(
-                Invocation::Argv {
-                    argv: &request.argv,
-                    cwd: request.cwd.as_deref(),
-                },
-                expected_bytes,
-            );
+            // No executable means there is no command to account; validation
+            // must reject it. The counter is exercised on actual argv layouts.
+            if !request.argv.is_empty() {
+                check_accounting(
+                    Invocation::Argv {
+                        argv: &request.argv,
+                        cwd: request.cwd.as_deref(),
+                    },
+                    expected_bytes,
+                );
+                let (program, arguments) = request.argv.split_first().unwrap();
+                check_accounting(
+                    Invocation::BoundArgv {
+                        program,
+                        arguments: arguments
+                            .iter()
+                            .map(|argument| std::borrow::Cow::Borrowed(argument.as_str()))
+                            .collect(),
+                        cwd: request.cwd.as_deref(),
+                    },
+                    expected_bytes,
+                );
+            }
             let valid = request
                 .argv
                 .first()

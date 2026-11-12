@@ -93,6 +93,24 @@ enum Outcome {
     Cancelled,
 }
 
+fn argv_command<'s, 'a>(
+    session: &'s Session,
+    program: &str,
+    arguments: impl IntoIterator<Item = &'a str>,
+    cwd: Option<&str>,
+) -> openssh::Command<'s> {
+    let mut command = if let Some(cwd) = cwd {
+        let mut command = session.command("cd");
+        // Only fixed syntax is raw; cwd, program and arguments remain escaped data.
+        command.arg("--").arg(cwd).raw_arg("&& exec");
+        command
+    } else {
+        session.command("exec")
+    };
+    command.arg("--").arg(program).args(arguments);
+    command
+}
+
 /// Run only a native mux channel. Dropping the operation closes that channel, never the master.
 pub(crate) async fn run(
     session: &Session,
@@ -115,17 +133,18 @@ pub(crate) async fn run(
                     command
                 }
                 Invocation::Argv { argv, cwd } => {
-                    let mut command = if let Some(cwd) = cwd {
-                        let mut command = session.command("cd");
-                        // Only fixed syntax is raw; cwd and argv remain escaped data.
-                        command.arg("--").arg(cwd).raw_arg("&& exec");
-                        command
-                    } else {
-                        session.command("exec")
-                    };
-                    command.arg("--").args(argv);
-                    command
+                    argv_command(session, &argv[0], argv[1..].iter().map(String::as_str), cwd)
                 }
+                Invocation::BoundArgv {
+                    program,
+                    arguments,
+                    cwd,
+                } => argv_command(
+                    session,
+                    program,
+                    arguments.iter().map(|value| value.as_ref()),
+                    cwd,
+                ),
                 Invocation::Sudo { argv, user } => {
                     let mut command = session.command("sudo");
                     command.args(sudo_arguments(user)).args(argv);

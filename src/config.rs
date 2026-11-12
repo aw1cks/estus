@@ -8,7 +8,12 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{command::MAX_COMMAND_BYTES, reply::ToolError, wire::MAX_RESPONSE_BYTES};
+use crate::{
+    bindings::{BindingId, Bindings},
+    command::MAX_COMMAND_BYTES,
+    reply::ToolError,
+    wire::MAX_RESPONSE_BYTES,
+};
 
 const MAX_DESCRIPTION_BYTES: usize = 1024;
 const MAX_LABELS: usize = 16;
@@ -26,6 +31,12 @@ pub(crate) enum ToolId {
     Stat,
     ListDirectory,
     Sudo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolKey {
+    Builtin(ToolId),
+    Binding(BindingId),
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -53,11 +64,15 @@ impl Profile {
             ToolId::Exec | ToolId::Run | ToolId::Sudo => matches!(self, Self::Baseline),
         }
     }
+
+    fn permits_bindings(self) -> bool {
+        matches!(self, Self::Baseline | Self::ActionsOnly)
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct ToolEntry {
-    pub(crate) id: ToolId,
+    pub(crate) id: ToolKey,
     pub(crate) name: Cow<'static, str>,
 }
 
@@ -67,32 +82,31 @@ pub(crate) struct ToolCatalog {
 }
 
 impl ToolCatalog {
-    pub(crate) fn new(mut entries: Vec<ToolEntry>) -> Self {
+    pub(crate) fn new(mut entries: Vec<ToolEntry>) -> Result<Self, ConfigError> {
         for (index, entry) in entries.iter().enumerate() {
-            assert!(
-                !entries[..index].iter().any(|other| other.id == entry.id),
-                "tool catalog contains duplicate IDs"
-            );
-            assert!(
-                !entries[..index]
-                    .iter()
-                    .any(|other| other.name == entry.name),
-                "tool catalog contains duplicate names"
-            );
+            if entries[..index].iter().any(|other| other.id == entry.id) {
+                return Err(invalid("tools", "tool catalogue contains duplicate IDs"));
+            }
+            if entries[..index]
+                .iter()
+                .any(|other| other.name == entry.name)
+            {
+                return Err(invalid("tools", "tool catalogue contains duplicate names"));
+            }
         }
         entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-        Self { entries }
+        Ok(Self { entries })
     }
 
-    pub(crate) fn retain(&mut self, mut predicate: impl FnMut(ToolId) -> bool) {
+    pub(crate) fn retain(&mut self, mut predicate: impl FnMut(ToolKey) -> bool) {
         self.entries.retain(|entry| predicate(entry.id));
     }
 
-    pub(crate) fn contains(&self, id: ToolId) -> bool {
+    pub(crate) fn contains(&self, id: ToolKey) -> bool {
         self.name(id).is_some()
     }
 
-    pub(crate) fn name(&self, id: ToolId) -> Option<&str> {
+    pub(crate) fn name(&self, id: ToolKey) -> Option<&str> {
         self.entries
             .iter()
             .find(|entry| entry.id == id)
@@ -120,8 +134,14 @@ pub(crate) struct ConfigError {
     reason: &'static str,
 }
 
+impl ConfigError {
+    pub(crate) fn new(field: &'static str, reason: &'static str) -> Self {
+        Self { field, reason }
+    }
+}
+
 fn invalid(field: &'static str, reason: &'static str) -> ConfigError {
-    ConfigError { field, reason }
+    ConfigError::new(field, reason)
 }
 
 pub(crate) struct Config {
@@ -129,6 +149,7 @@ pub(crate) struct Config {
     ssh_config: Option<PathBuf>,
     limits: Limits,
     targets: Option<BTreeMap<String, Target>>,
+    bindings: Bindings,
 }
 
 #[derive(Default, Deserialize)]
@@ -138,6 +159,8 @@ struct Document {
     ssh: Ssh,
     limits: Limits,
     targets: Option<BTreeMap<String, Target>>,
+    tools: BTreeMap<String, toml::Value>,
+    enabled_tools: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -229,6 +252,7 @@ struct TargetSummaries<'a> {
     targets: Option<&'a BTreeMap<String, Target>>,
     tools: &'a ToolCatalog,
     profile: Profile,
+    bindings: &'a Bindings,
 }
 
 impl Serialize for TargetSummaries<'_> {
@@ -241,6 +265,8 @@ impl Serialize for TargetSummaries<'_> {
                 labels: &target.labels,
                 permitted_operations: PermittedOperations {
                     tools: self.tools,
+                    bindings: self.bindings,
+                    target_name: name,
                     sudo: &target.sudo,
                     global_profile: self.profile,
                     target_profile: target.profile,
@@ -253,6 +279,8 @@ impl Serialize for TargetSummaries<'_> {
 
 struct PermittedOperations<'a> {
     tools: &'a ToolCatalog,
+    bindings: &'a Bindings,
+    target_name: &'a str,
     sudo: &'a Sudo,
     global_profile: Profile,
     target_profile: Profile,
@@ -264,19 +292,29 @@ impl Serialize for PermittedOperations<'_> {
             self.tools
                 .entries
                 .iter()
-                .filter(|entry| {
-                    self.global_profile.permits(entry.id)
-                        && self.target_profile.permits(entry.id)
-                        && match entry.id {
-                            ToolId::Targets => false,
-                            ToolId::Exec
-                            | ToolId::Run
-                            | ToolId::ReadFile
-                            | ToolId::WriteFile
-                            | ToolId::Stat
-                            | ToolId::ListDirectory => true,
-                            ToolId::Sudo => self.sudo.permits_programs(),
-                        }
+                .filter(|entry| match entry.id {
+                    ToolKey::Builtin(id) => {
+                        self.global_profile.permits(id)
+                            && self.target_profile.permits(id)
+                            && match id {
+                                ToolId::Targets => false,
+                                ToolId::Sudo => self.sudo.permits_programs(),
+                                ToolId::Exec
+                                | ToolId::Run
+                                | ToolId::ReadFile
+                                | ToolId::WriteFile
+                                | ToolId::Stat
+                                | ToolId::ListDirectory => true,
+                            }
+                    }
+                    ToolKey::Binding(id) => {
+                        self.global_profile.permits_bindings()
+                            && self.target_profile.permits_bindings()
+                            && self.bindings.get(id).is_some_and(|binding| {
+                                binding.enabled()
+                                    && binding.targets.iter().any(|name| name == self.target_name)
+                            })
+                    }
                 })
                 .map(|entry| entry.name.as_ref()),
         )
@@ -474,11 +512,23 @@ impl Config {
         if let Some(targets) = &document.targets {
             validate_targets(targets)?;
         }
+        let bindings = Bindings::compile(
+            document.tools,
+            &document.enabled_tools,
+            &document.limits,
+            |name| {
+                document
+                    .targets
+                    .as_ref()
+                    .is_some_and(|targets| targets.contains_key(name))
+            },
+        )?;
         Ok(Self {
             profile: document.profile,
             ssh_config,
             limits: document.limits,
             targets: document.targets,
+            bindings,
         })
     }
 
@@ -493,6 +543,7 @@ impl Config {
                 targets: self.targets.as_ref(),
                 tools,
                 profile: self.profile,
+                bindings: &self.bindings,
             },
             limits: DiscoveryLimits {
                 connect_timeout_secs: self.limits.connect_timeout_secs,
@@ -514,6 +565,39 @@ impl Config {
 
     pub(crate) fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    pub(crate) fn bindings(&self) -> &Bindings {
+        &self.bindings
+    }
+
+    pub(crate) fn binding_enabled(&self, id: BindingId) -> bool {
+        self.profile.permits_bindings()
+            && self
+                .bindings
+                .get(id)
+                .is_some_and(|binding| binding.enabled())
+    }
+
+    pub(crate) fn resolve_binding<'a>(
+        &'a self,
+        host: &'a str,
+        id: BindingId,
+    ) -> Result<ResolvedTarget<'a>, ToolError> {
+        let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        let binding = self.bindings.get(id).ok_or_else(denied)?;
+        if !self.binding_enabled(id) || !binding.targets.iter().any(|name| name == host) {
+            return Err(denied());
+        }
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .ok_or_else(denied)?;
+        if !target.profile.permits_bindings() {
+            return Err(denied());
+        }
+        self.resolve_ordinary(host)
     }
 
     pub(crate) fn tool_enabled(&self, tool: ToolId) -> bool {
@@ -553,20 +637,29 @@ impl Config {
         if !self.profile.permits(tool) {
             return Err(denied());
         }
+        if self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .is_some_and(|target| !target.profile.permits(tool))
+        {
+            return Err(denied());
+        }
+        self.resolve_ordinary(host)
+    }
+
+    fn resolve_ordinary<'a>(&'a self, host: &'a str) -> Result<ResolvedTarget<'a>, ToolError> {
         let destination = match &self.targets {
-            Some(targets) => {
-                let target = targets.get(host).ok_or_else(|| {
+            Some(targets) => targets
+                .get(host)
+                .map(|target| target.ssh_host.as_str())
+                .ok_or_else(|| {
                     ToolError::new(
                         "policy_denied",
                         "Host is not a configured logical target",
                         false,
                     )
-                })?;
-                if !target.profile.permits(tool) {
-                    return Err(denied());
-                }
-                &target.ssh_host
-            }
+                })?,
             None => {
                 destination(host, "host").map_err(|_| {
                     ToolError::new(
@@ -810,7 +903,31 @@ fn validate_profile(value: &toml::Value, field: &'static str) -> Result<(), Conf
 }
 
 fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
-    let root = table(value, "config", &["profile", "ssh", "limits", "targets"])?;
+    let root = table(
+        value,
+        "config",
+        &[
+            "profile",
+            "ssh",
+            "limits",
+            "targets",
+            "tools",
+            "enabled_tools",
+        ],
+    )?;
+    if let Some(value) = root.get("tools")
+        && !value.is_table()
+    {
+        return Err(invalid("tools", "must be a table"));
+    }
+    if let Some(value) = root.get("enabled_tools") {
+        let entries = value
+            .as_array()
+            .ok_or_else(|| invalid("enabled_tools", "must be an array of strings"))?;
+        for entry in entries {
+            string(entry, "enabled_tools")?;
+        }
+    }
     if let Some(value) = root.get("profile") {
         validate_profile(value, "profile")?;
     }
@@ -951,42 +1068,161 @@ mod tests {
             ]
             .into_iter()
             .map(|(id, name)| ToolEntry {
-                id,
+                id: ToolKey::Builtin(id),
                 name: name.into(),
             })
             .collect(),
         )
+        .unwrap()
+    }
+
+    fn builtin(key: ToolKey) -> ToolId {
+        match key {
+            ToolKey::Builtin(id) => id,
+            ToolKey::Binding(_) => panic!("builtin-only test catalogue"),
+        }
     }
 
     #[test]
-    #[should_panic]
     fn catalog_rejects_duplicate_ids_even_with_distinct_names() {
-        ToolCatalog::new(vec![
+        let error = ToolCatalog::new(vec![
             ToolEntry {
-                id: ToolId::Exec,
+                id: ToolKey::Builtin(ToolId::Exec),
                 name: "first".into(),
             },
             ToolEntry {
-                id: ToolId::Exec,
+                id: ToolKey::Builtin(ToolId::Exec),
                 name: "second".into(),
             },
-        ]);
+        ])
+        .unwrap_err();
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]
-    #[should_panic]
     fn catalog_rejects_duplicate_names_before_disabled_routes_can_be_removed() {
-        let mut tools = ToolCatalog::new(vec![
+        let error = ToolCatalog::new(vec![
             ToolEntry {
-                id: ToolId::Exec,
-                name: "collision".into(),
+                id: ToolKey::Builtin(ToolId::Exec),
+                name: "secret_collision".into(),
             },
             ToolEntry {
-                id: ToolId::Sudo,
-                name: "collision".into(),
+                id: ToolKey::Binding(BindingId(0)),
+                name: "secret_collision".into(),
             },
-        ]);
-        tools.retain(|id| id != ToolId::Sudo);
+        ])
+        .unwrap_err();
+        assert!(!format!("{error:?}").contains("secret_collision"));
+    }
+
+    fn binding_definition() -> &'static str {
+        r#"
+[tools.observe]
+description = "Observe a fixed account"
+revision = "1"
+targets = ["one"]
+authority = "ordinary"
+effects = ["read"]
+execution = { kind = "native_argv", program = "/usr/bin/id", argv = ["--", { input = "account" }] }
+input_schema = { type = "object", additionalProperties = false, required = ["account"], properties = { account = { type = "string", minLength = 1, maxLength = 32 } } }
+result = { kind = "command" }
+"#
+    }
+
+    #[test]
+    fn binding_policy_intersects_selection_profiles_and_declared_targets() {
+        for (global, globally_allowed) in [
+            ("baseline", true),
+            ("actions-only", true),
+            ("read-only-files", false),
+            ("files-only", false),
+        ] {
+            for (target, target_allowed) in [
+                ("baseline", true),
+                ("actions-only", true),
+                ("read-only-files", false),
+                ("files-only", false),
+            ] {
+                for selected in [false, true] {
+                    let text = format!(
+                        "profile='{global}'\nenabled_tools={enabled}\n\
+                         [targets.one]\nssh_host='ordinary-private'\nprofile='{target}'\n\
+                         [targets.one.sudo]\nmode='separate-identity'\nssh_host='elevated-private'\n\
+                         [targets.two]\nssh_host='other-private'\n{definition}",
+                        enabled = if selected { "['observe']" } else { "[]" },
+                        definition = binding_definition(),
+                    );
+                    let config = load_text(&text, &[]).unwrap();
+                    let (id, binding) = config.bindings().entries().next().unwrap();
+                    assert_eq!(config.binding_enabled(id), selected && globally_allowed);
+                    let allowed = selected && globally_allowed && target_allowed;
+                    let result = config.resolve_binding("one", id);
+                    assert_eq!(result.is_ok(), allowed, "{global}/{target}/{selected}");
+                    if let Ok(resolved) = result {
+                        assert_eq!(resolved.destination, "ordinary-private");
+                        assert_eq!(resolved.role, IdentityRole::Ordinary);
+                    } else {
+                        let error = result.err().unwrap();
+                        assert_eq!(error.code, "policy_denied");
+                        assert!(!error.remote_state_unknown);
+                    }
+                    for host in ["two", "ordinary-private", "elevated-private", "unknown"] {
+                        assert!(config.resolve_binding(host, id).is_err());
+                    }
+                    let tools = ToolCatalog::new(vec![ToolEntry {
+                        id: ToolKey::Binding(id),
+                        name: binding.name.clone().into(),
+                    }])
+                    .unwrap();
+                    let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+                    let rows = discovery["targets"].as_array().unwrap();
+                    let one = rows.iter().find(|row| row["name"] == "one").unwrap();
+                    assert_eq!(
+                        one["permitted_operations"],
+                        if allowed {
+                            serde_json::json!(["observe"])
+                        } else {
+                            serde_json::json!([])
+                        }
+                    );
+                    let two = rows.iter().find(|row| row["name"] == "two").unwrap();
+                    assert_eq!(two["permitted_operations"], serde_json::json!([]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binding_startup_rejects_missing_targets_selection_and_invalid_disabled_definitions() {
+        let definition = binding_definition();
+        for text in [
+            format!("enabled_tools=['observe']\n{definition}"),
+            format!("enabled_tools=['observe']\n[targets.two]\nssh_host='private'\n{definition}"),
+            format!("enabled_tools=['missing']\n[targets.one]\nssh_host='private'\n{definition}"),
+            format!(
+                "enabled_tools=['observe','observe']\n[targets.one]\nssh_host='private'\n{definition}"
+            ),
+            format!(
+                "[targets.one]\nssh_host='private'\n{}",
+                definition.replace("authority = \"ordinary\"", "authority = \"secret_payload\"")
+            ),
+        ] {
+            let error = load_text(&text, &[])
+                .err()
+                .expect("invalid binding must fail startup");
+            assert!(!format!("{error:?}").contains("secret_payload"));
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    #[test]
+    fn binding_limits_use_resolved_environment_ceiling() {
+        let text = format!(
+            "[targets.one]\nssh_host='ordinary'\n{}\n[tools.observe.limits]\nmax_output_bytes=100",
+            binding_definition(),
+        );
+        assert!(load_text(&text, &[("SSH_MCP_MAX_OUTPUT_BYTES", "99")]).is_err());
+        assert!(load_text(&text, &[("SSH_MCP_MAX_OUTPUT_BYTES", "100")]).is_ok());
     }
 
     #[test]
@@ -997,7 +1233,7 @@ mod tests {
         )
         .unwrap();
         let mut tools = catalog();
-        tools.retain(|id| matches!(id, ToolId::Targets | ToolId::Exec | ToolId::Run));
+        tools.retain(|id| matches!(builtin(id), ToolId::Targets | ToolId::Exec | ToolId::Run));
         let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
         assert_eq!(
             discovery["targets"][0]["permitted_operations"],
@@ -1041,11 +1277,11 @@ mod tests {
             )
             .unwrap();
             let mut tools = catalog();
-            tools.retain(|id| config.tool_enabled(id));
+            tools.retain(|id| config.tool_enabled(builtin(id)));
             assert_eq!(tools.entries.len(), 8);
             for entry in &tools.entries {
-                if !matches!(entry.id, ToolId::Targets | ToolId::Sudo) {
-                    let resolved = config.resolve("one", entry.id).unwrap();
+                if !matches!(builtin(entry.id), ToolId::Targets | ToolId::Sudo) {
+                    let resolved = config.resolve("one", builtin(entry.id)).unwrap();
                     assert_eq!(resolved.destination, "ordinary");
                     assert_eq!(resolved.role, IdentityRole::Ordinary);
                 }
@@ -1104,7 +1340,7 @@ mod tests {
             .unwrap();
             let all = catalog();
             let mut active = catalog();
-            active.retain(|id| config.tool_enabled(id));
+            active.retain(|id| config.tool_enabled(builtin(id)));
             assert_eq!(
                 active
                     .entries
@@ -1115,10 +1351,10 @@ mod tests {
                 "{profile}"
             );
             for entry in &all.entries {
-                if matches!(entry.id, ToolId::Targets | ToolId::Sudo) {
+                if matches!(builtin(entry.id), ToolId::Targets | ToolId::Sudo) {
                     continue;
                 }
-                let result = config.resolve("one", entry.id);
+                let result = config.resolve("one", builtin(entry.id));
                 if permitted.contains(&entry.name.as_ref()) {
                     assert_eq!(result.unwrap().destination, "private-alias", "{profile}");
                 } else {
@@ -1161,10 +1397,10 @@ mod tests {
         )
         .unwrap();
         let mut tools = catalog();
-        tools.retain(|id| config.tool_enabled(id));
-        assert!(tools.contains(ToolId::WriteFile));
-        assert!(!tools.contains(ToolId::Exec));
-        assert!(!tools.contains(ToolId::Run));
+        tools.retain(|id| config.tool_enabled(builtin(id)));
+        assert!(tools.contains(ToolKey::Builtin(ToolId::WriteFile)));
+        assert!(!tools.contains(ToolKey::Builtin(ToolId::Exec)));
+        assert!(!tools.contains(ToolKey::Builtin(ToolId::Run)));
         for name in ["base", "implicit"] {
             assert!(config.resolve(name, ToolId::WriteFile).is_ok());
             assert!(config.resolve(name, ToolId::Exec).is_err());
@@ -1172,7 +1408,7 @@ mod tests {
         assert!(config.resolve("reader", ToolId::ReadFile).is_ok());
         assert!(config.resolve("reader", ToolId::WriteFile).is_err());
         assert!(config.resolve("actions", ToolId::ReadFile).is_err());
-        tools.retain(|id| id != ToolId::Stat);
+        tools.retain(|id| id != ToolKey::Builtin(ToolId::Stat));
         let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
         let rows = discovery["targets"].as_array().unwrap();
         let operations = |name: &str| &rows.iter().find(|row| row["name"] == name).unwrap()["permitted_operations"];

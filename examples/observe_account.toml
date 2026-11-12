@@ -1,0 +1,20 @@
+# Explicit opt-in: review the executable and account allowlist before enabling.
+# This example assumes GNU id at /usr/bin/id on the configured SSH destination.
+# Revision identifies this reviewed definition, not immutable remote executable bytes.
+# Approved inputs are data, not a sandbox; cancellation does not prove remote termination.
+profile = "actions-only"
+enabled_tools = ["observe_account"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[tools.observe_account]
+description = "Observe an approved account identity using an ordinary SSH identity. The fixed executable retains its ordinary authority; approved input is data, not a sandbox. Cancellation can leave execution uncertain; do not replay automatically."
+revision = "1"
+targets = ["server"]
+authority = "ordinary"
+effects = ["read"]
+execution = { kind = "native_argv", program = "/usr/bin/id", argv = ["--", { input = "account" }] }
+input_schema = { type = "object", additionalProperties = false, required = ["account"], properties = { account = { type = "string", minLength = 1, maxLength = 32, enum = ["root"] } } }
+result = { kind = "command" }
+limits = { timeout_secs = 10, max_output_bytes = 1024 }

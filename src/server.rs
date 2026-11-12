@@ -11,7 +11,10 @@ use rmcp::{
         router::tool::{IntoToolRoute, ToolRoute, ToolRouter},
         tool::{ToolCallContext, schema_for_type},
     },
-    model::{CallToolResult, RequestId, ServerCapabilities, ServerConfig},
+    model::{
+        CallToolResult, JsonObject, RequestId, ServerCapabilities, ServerConfig, Tool,
+        ToolAnnotations,
+    },
     service::RequestContext,
     tool, tool_handler,
 };
@@ -22,10 +25,11 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     audit::{Audit, Metadata},
+    bindings::{self, BindingId, BindingRequest},
     command::{ExecRequest, Invocation, RunRequest, SudoRequest},
     config::{
-        Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery, ToolCatalog, ToolEntry,
-        ToolId,
+        Config, ConfigError, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery, ToolCatalog,
+        ToolEntry, ToolId, ToolKey,
     },
     exec::{self, RunContext},
     filedata::{
@@ -87,6 +91,8 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, SshMcp>> for Argum
                 sudo_mode: None,
                 user: None,
                 program: None,
+                binding_revision: None,
+                executor: None,
             };
             metadata.reject(Instant::now(), &error);
             ErrorData::invalid_params(error.message, None)
@@ -95,13 +101,7 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, SshMcp>> for Argum
 }
 
 impl SshMcp {
-    pub(crate) fn new(config: Config) -> Self {
-        let shutdown = CancellationToken::new();
-        let pool = Pool::new(
-            config.ssh_config().map(std::path::Path::to_path_buf),
-            Duration::from_secs(config.limits().connect_timeout_secs),
-            shutdown.clone(),
-        );
+    pub(crate) fn new(config: Config) -> Result<Self, ConfigError> {
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
         let routes: [(ToolId, ToolRoute<Self>); 8] = [
@@ -142,6 +142,46 @@ impl SshMcp {
                 (Self::ssh_sudo_tool_attr(), Self::ssh_sudo).into_tool_route(),
             ),
         ];
+        let command_output_schema = routes
+            .iter()
+            .find(|(id, _)| *id == ToolId::Exec)
+            .and_then(|(_, route)| route.attr.output_schema.as_ref())
+            .expect("command registration has its output contract")
+            .clone();
+        let binding_routes = config.bindings().entries().map(|(id, binding)| {
+            let annotations = ToolAnnotations::new()
+                .read_only(binding.read_only())
+                .destructive(!binding.read_only())
+                .idempotent(false);
+            let metadata = Tool::new(
+                binding.name.clone(),
+                format!("{} Fixed ordinary execution on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description),
+                Arc::clone(&binding.input_schema),
+            )
+            .with_raw_output_schema(Arc::clone(&command_output_schema))
+            .with_annotations(annotations)
+            .with_meta(rmcp::model::MetaObject(JsonObject::from_iter([
+                ("revision".into(), serde_json::json!(binding.revision)),
+                ("result".into(), serde_json::json!(bindings::RESULT_KIND)),
+                ("effects".into(), serde_json::json!(binding.effects())),
+                ("executor".into(), serde_json::json!(bindings::EXECUTOR_KIND)),
+            ])));
+            let route = ToolRoute::new_dyn(metadata, move |context: ToolCallContext<'_, Self>| {
+                Box::pin(async move {
+                    context.service.binding(
+                        id,
+                        context.arguments.unwrap_or_default(),
+                        context.request_context,
+                    ).await.map(Into::into)
+                })
+            });
+            (ToolKey::Binding(id), route)
+        });
+        let routes: Vec<_> = routes
+            .into_iter()
+            .map(|(id, route)| (ToolKey::Builtin(id), route))
+            .chain(binding_routes)
+            .collect();
         // Validate the full inventory before filtering: even a disabled route
         // must not hide duplicate IDs or names from the programmer.
         let mut tools = ToolCatalog::new(
@@ -152,23 +192,32 @@ impl SshMcp {
                     name: route.attr.name.clone(),
                 })
                 .collect(),
-        );
+        )?;
         let sudo_name = routes
             .iter()
-            .find(|(id, _)| *id == ToolId::Sudo)
+            .find(|(id, _)| *id == ToolKey::Builtin(ToolId::Sudo))
             .expect("native registration inventory includes sudo")
             .1
             .attr
             .name
             .clone();
-        tools.retain(|id| config.tool_enabled(id));
+        tools.retain(|id| match id {
+            ToolKey::Builtin(id) => config.tool_enabled(id),
+            ToolKey::Binding(id) => config.binding_enabled(id),
+        });
         let mut tool_router = ToolRouter::new();
         for (id, route) in routes {
             if tools.contains(id) {
                 tool_router.add_route(route);
             }
         }
-        Self {
+        let shutdown = CancellationToken::new();
+        let pool = Pool::new(
+            config.ssh_config().map(std::path::Path::to_path_buf),
+            Duration::from_secs(config.limits().connect_timeout_secs),
+            shutdown.clone(),
+        );
+        Ok(Self {
             tool_router,
             state: Arc::new(State {
                 config,
@@ -179,7 +228,7 @@ impl SshMcp {
                 operations: Arc::new(Semaphore::new(16)),
                 tasks: TaskTracker::new(),
             }),
-        }
+        })
     }
 
     pub(crate) fn shutdown_token(&self) -> CancellationToken {
@@ -235,6 +284,48 @@ impl SshMcp {
                 "Command task could not complete; remote state is unknown",
                 true,
             ))),
+        }
+    }
+
+    async fn binding(
+        &self,
+        id: BindingId,
+        arguments: JsonObject,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let binding = self
+            .state
+            .config
+            .bindings()
+            .get(id)
+            .expect("registered binding exists");
+        match binding.parse_request(arguments) {
+            Ok(request) => {
+                self.command(Operation::Binding { id, request }, context)
+                    .await
+            }
+            Err(error) => {
+                Metadata {
+                    request_id: &context.id,
+                    tool: self.state.binding_name(id),
+                    host: None,
+                    identity_role: IdentityRole::Ordinary,
+                    sudo_mode: None,
+                    user: None,
+                    program: None,
+                    binding_revision: Some(&binding.revision),
+                    executor: Some(bindings::EXECUTOR_KIND),
+                }
+                .reject(
+                    Instant::now(),
+                    &ToolError::new(
+                        "invalid_argument",
+                        "Invalid named tool argument shape",
+                        false,
+                    ),
+                );
+                Err(error)
+            }
         }
     }
 
@@ -388,6 +479,8 @@ impl SshMcp {
             sudo_mode: None,
             user: None,
             program: None,
+            binding_revision: None,
+            executor: None,
         };
         let _permit = match self.state.operations.try_acquire() {
             Ok(permit) => permit,
@@ -513,30 +606,81 @@ enum Operation {
     Exec(ExecRequest),
     Run(RunRequest),
     Sudo(SudoRequest),
+    Binding {
+        id: BindingId,
+        request: BindingRequest,
+    },
+}
+
+struct PreparedCommand<'a> {
+    target: ResolvedTarget<'a>,
+    duration: Duration,
+    invocation: Invocation<'a>,
+    stdin: Option<&'a str>,
+    max_output_bytes: u64,
 }
 
 impl Operation {
     fn metadata<'a>(&'a self, state: &'a State, request_id: &'a RequestId) -> Metadata<'a> {
-        let (tool, host, user, program) = match self {
-            Self::Exec(request) => (ToolId::Exec, request.host.as_str(), None, None),
-            // Arbitrary executable/argv are payload, not safe audit metadata.
-            Self::Run(request) => (ToolId::Run, request.host.as_str(), None, None),
+        let (tool, host, user, program, revision, executor) = match self {
+            Self::Exec(request) => (
+                ToolKey::Builtin(ToolId::Exec),
+                Some(request.host.as_str()),
+                None,
+                None,
+                None,
+                None,
+            ),
+            Self::Run(request) => (
+                ToolKey::Builtin(ToolId::Run),
+                Some(request.host.as_str()),
+                None,
+                None,
+                None,
+                None,
+            ),
             Self::Sudo(request) => (
-                ToolId::Sudo,
-                request.host.as_str(),
+                ToolKey::Builtin(ToolId::Sudo),
+                Some(request.host.as_str()),
                 Some(request.user.as_str()),
                 request.argv.first().map(String::as_str),
+                None,
+                None,
             ),
+            Self::Binding { id, request } => {
+                let binding = state
+                    .config
+                    .bindings()
+                    .get(*id)
+                    .expect("registered binding exists");
+                let host = binding
+                    .targets
+                    .contains(&request.host)
+                    .then_some(request.host.as_str());
+                (
+                    ToolKey::Binding(*id),
+                    host,
+                    None,
+                    None,
+                    Some(binding.revision.as_str()),
+                    Some(bindings::EXECUTOR_KIND),
+                )
+            }
         };
-        let mode = state.config.sudo_mode(host);
+        let mode = host.map(|host| state.config.sudo_mode(host));
         Metadata {
             request_id,
-            tool: state.tool_name(tool),
-            host: Some(host),
+            tool: state
+                .tools
+                .name(tool)
+                .expect("executing tool is registered"),
+            host,
             user,
             program,
-            sudo_mode: Some(mode),
-            identity_role: if matches!(self, Self::Sudo(_)) && mode != SudoMode::SameAccount {
+            binding_revision: revision,
+            executor,
+            sudo_mode: mode,
+            identity_role: if matches!(self, Self::Sudo(_)) && mode != Some(SudoMode::SameAccount) {
                 IdentityRole::Elevated
             } else {
                 IdentityRole::Ordinary
@@ -544,15 +688,18 @@ impl Operation {
         }
     }
 
-    fn validate<'a>(
-        &'a self,
-        config: &'a Config,
-    ) -> Result<(ResolvedTarget<'a>, Duration), ToolError> {
-        let (target, seconds) = match self {
+    fn prepare<'a>(&'a self, config: &'a Config) -> Result<PreparedCommand<'a>, ToolError> {
+        let (target, invocation, stdin, seconds) = match self {
             Self::Exec(request) => {
                 request.validate(config.limits().max_file_bytes)?;
                 (
                     config.resolve(&request.host, ToolId::Exec)?,
+                    Invocation::Shell {
+                        command: &request.command,
+                        shell: request.shell,
+                        cwd: request.cwd.as_deref(),
+                    },
+                    request.stdin.as_deref(),
                     request.timeout_secs,
                 )
             }
@@ -560,6 +707,11 @@ impl Operation {
                 request.validate(config.limits().max_file_bytes)?;
                 (
                     config.resolve(&request.host, ToolId::Run)?,
+                    Invocation::Argv {
+                        argv: &request.argv,
+                        cwd: request.cwd.as_deref(),
+                    },
+                    request.stdin.as_deref(),
                     request.timeout_secs,
                 )
             }
@@ -567,38 +719,37 @@ impl Operation {
                 request.validate(config.limits().max_file_bytes)?;
                 (
                     config.resolve_sudo(&request.host, &request.user, &request.argv[0])?,
+                    Invocation::Sudo {
+                        argv: &request.argv,
+                        user: &request.user,
+                    },
+                    request.stdin.as_deref(),
                     request.timeout_secs,
                 )
             }
+            Self::Binding { id, request } => {
+                let target = config.resolve_binding(&request.host, *id)?;
+                let binding = config
+                    .bindings()
+                    .get(*id)
+                    .expect("registered binding exists");
+                let prepared = binding.prepare(request, config.limits())?;
+                return Ok(PreparedCommand {
+                    target,
+                    duration: prepared.duration,
+                    invocation: prepared.invocation,
+                    stdin: None,
+                    max_output_bytes: prepared.max_output_bytes,
+                });
+            }
         };
-        Ok((target, config.timeout(seconds)?))
-    }
-
-    fn invocation(&self) -> (Invocation<'_>, Option<&str>) {
-        match self {
-            Self::Exec(request) => (
-                Invocation::Shell {
-                    command: &request.command,
-                    shell: request.shell,
-                    cwd: request.cwd.as_deref(),
-                },
-                request.stdin.as_deref(),
-            ),
-            Self::Run(request) => (
-                Invocation::Argv {
-                    argv: &request.argv,
-                    cwd: request.cwd.as_deref(),
-                },
-                request.stdin.as_deref(),
-            ),
-            Self::Sudo(request) => (
-                Invocation::Sudo {
-                    argv: &request.argv,
-                    user: &request.user,
-                },
-                request.stdin.as_deref(),
-            ),
-        }
+        Ok(PreparedCommand {
+            target,
+            duration: config.timeout(seconds)?,
+            invocation,
+            stdin,
+            max_output_bytes: config.limits().max_output_bytes,
+        })
     }
 }
 
@@ -616,6 +767,8 @@ fn file_metadata<'a>(
         sudo_mode: Some(state.config.sudo_mode(host)),
         user: None,
         program: None,
+        binding_revision: None,
+        executor: None,
     }
 }
 
@@ -636,7 +789,15 @@ fn request_deadline(
 
 impl State {
     fn tool_name(&self, id: ToolId) -> &str {
-        self.tools.name(id).expect("executing tool is registered")
+        self.tools
+            .name(ToolKey::Builtin(id))
+            .expect("executing tool is registered")
+    }
+
+    fn binding_name(&self, id: BindingId) -> &str {
+        self.tools
+            .name(ToolKey::Binding(id))
+            .expect("executing binding is registered")
     }
 
     async fn command(
@@ -653,12 +814,19 @@ impl State {
             metadata.reject(started, &error);
             return ToolReply::failure(error);
         }
-        let validated = request
-            .validate(&self.config)
-            .and_then(|(target, duration)| {
-                request_deadline(started, duration).map(|deadline| (target, deadline))
-            });
-        let (target, deadline) = match validated {
+        let validated = request.prepare(&self.config).and_then(|prepared| {
+            request_deadline(started, prepared.duration).map(|deadline| (prepared, deadline))
+        });
+        let (
+            PreparedCommand {
+                target,
+                invocation,
+                stdin,
+                max_output_bytes,
+                ..
+            },
+            deadline,
+        ) = match validated {
             Ok(validated) => validated,
             Err(error) => {
                 metadata.reject(started, &error);
@@ -672,13 +840,12 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let (invocation, input) = request.invocation();
                 let reply = exec::run(
                     lease.session(),
                     invocation,
-                    input,
+                    stdin,
                     RunContext {
-                        max_output_bytes: self.config.limits().max_output_bytes.min(capture_limit),
+                        max_output_bytes: max_output_bytes.min(capture_limit),
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
@@ -962,6 +1129,8 @@ impl ServerHandler for SshMcp {
                 sudo_mode: None,
                 user: None,
                 program: None,
+                binding_revision: None,
+                executor: None,
             }
             .reject(
                 Instant::now(),

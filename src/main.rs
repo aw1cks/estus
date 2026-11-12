@@ -1,4 +1,5 @@
 mod audit;
+mod bindings;
 mod command;
 mod config;
 mod exec;
@@ -25,14 +26,7 @@ use tokio_util::sync::CancellationToken;
 fn main() -> ExitCode {
     let config = match config::Config::load(config::Cli::parse()) {
         Ok(config) => config,
-        Err(error) => {
-            audit::emit(&serde_json::json!({
-                "event": "error",
-                "code": "invalid_config",
-                "message": error.to_string(),
-            }));
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return invalid_config(&error),
     };
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -55,10 +49,22 @@ async fn run(config: config::Config) -> ExitCode {
     ) else {
         return fail("signal_setup_failed");
     };
-    let application = server::SshMcp::new(config);
+    let application = match server::SshMcp::new(config) {
+        Ok(application) => application,
+        Err(error) => return invalid_config(&error),
+    };
     let result = run_session(&application, &mut interrupt, &mut terminate).await;
     application.shutdown().await;
     result
+}
+
+fn invalid_config(error: &config::ConfigError) -> ExitCode {
+    audit::emit(&serde_json::json!({
+        "event": "error",
+        "code": "invalid_config",
+        "message": error.to_string(),
+    }));
+    ExitCode::FAILURE
 }
 
 async fn run_session(

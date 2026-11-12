@@ -30,6 +30,8 @@ pub(crate) struct Metadata<'a> {
     pub(crate) sudo_mode: Option<SudoMode>,
     pub(crate) user: Option<&'a str>,
     pub(crate) program: Option<&'a str>,
+    pub(crate) binding_revision: Option<&'a str>,
+    pub(crate) executor: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -47,6 +49,10 @@ struct Record<'a> {
     user: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     program: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding_revision: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +85,8 @@ impl Metadata<'_> {
             sudo_mode: self.sudo_mode,
             user: self.user,
             program: self.program,
+            binding_revision: self.binding_revision,
+            executor: self.executor,
             duration_ms,
             exit_code,
             error_code: error.map(|error| error.code),

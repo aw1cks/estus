@@ -182,6 +182,11 @@ pub(crate) enum Invocation<'a> {
         argv: &'a [String],
         cwd: Option<&'a str>,
     },
+    BoundArgv {
+        program: &'a str,
+        arguments: Vec<Cow<'a, str>>,
+        cwd: Option<&'a str>,
+    },
     Sudo {
         argv: &'a [String],
         user: &'a str,
@@ -251,6 +256,29 @@ pub(crate) fn sudo_arguments(user: &str) -> [&str; 5] {
     ["-n", "-k", "-u", user, "--"]
 }
 
+fn argv_encoded_len<'a>(
+    program: &str,
+    arguments: impl IntoIterator<Item = &'a str>,
+    cwd: Option<&str>,
+) -> Result<usize, ToolError> {
+    let mut bytes = if let Some(cwd) = cwd {
+        let mut bytes = escaped_len("cd")?;
+        append_argument(&mut bytes, escaped_len("--")?)?;
+        append_argument(&mut bytes, escaped_len(cwd)?)?;
+        // The sole raw argument in the builder, including its internal space.
+        append_argument(&mut bytes, "&& exec".len())?;
+        bytes
+    } else {
+        escaped_len("exec")?
+    };
+    append_argument(&mut bytes, escaped_len("--")?)?;
+    append_argument(&mut bytes, escaped_len(program)?)?;
+    for argument in arguments {
+        append_argument(&mut bytes, escaped_len(argument)?)?;
+    }
+    Ok(bytes)
+}
+
 impl Invocation<'_> {
     pub(crate) fn encoded_len(&self) -> Result<usize, ToolError> {
         match self {
@@ -277,22 +305,16 @@ impl Invocation<'_> {
                 Ok(bytes)
             }
             Self::Argv { argv, cwd } => {
-                let mut bytes = if let Some(cwd) = cwd {
-                    let mut bytes = escaped_len("cd")?;
-                    append_argument(&mut bytes, escaped_len("--")?)?;
-                    append_argument(&mut bytes, escaped_len(cwd)?)?;
-                    // The sole raw argument in the builder, including its internal space.
-                    append_argument(&mut bytes, "&& exec".len())?;
-                    bytes
-                } else {
-                    escaped_len("exec")?
-                };
-                append_argument(&mut bytes, escaped_len("--")?)?;
-                for argument in *argv {
-                    append_argument(&mut bytes, escaped_len(argument)?)?;
-                }
-                Ok(bytes)
+                let (program, arguments) = argv
+                    .split_first()
+                    .ok_or_else(|| invalid("argv must contain a nonempty executable"))?;
+                argv_encoded_len(program, arguments.iter().map(String::as_str), *cwd)
             }
+            Self::BoundArgv {
+                program,
+                arguments,
+                cwd,
+            } => argv_encoded_len(program, arguments.iter().map(Cow::as_ref), *cwd),
             Self::Sudo { argv, user } => {
                 let mut bytes = escaped_len("sudo")?;
                 for argument in sudo_arguments(user)
@@ -326,6 +348,99 @@ pub(crate) fn shell_script<'a>(command: &'a str, cwd: Option<&str>) -> Cow<'a, s
     script.push_str(CWD_SUFFIX);
     script.push_str(command);
     Cow::Owned(script)
+}
+
+#[cfg(test)]
+mod bound_argv_tests {
+    use super::*;
+
+    fn actual_encoding(program: &str, arguments: &[Cow<'_, str>], cwd: Option<&str>) -> String {
+        let escape = |value: &str| shell_escape::unix::escape(Cow::Borrowed(value)).into_owned();
+        let mut encoded = match cwd {
+            Some(cwd) => format!("cd -- {} && exec --", escape(cwd)),
+            None => "exec --".into(),
+        };
+        for argument in std::iter::once(program).chain(arguments.iter().map(Cow::as_ref)) {
+            encoded.push(' ');
+            encoded.push_str(&escape(argument));
+        }
+        encoded
+    }
+
+    #[test]
+    fn mixed_bound_values_match_ordinary_argv_and_pinned_encoder() {
+        let fixed = String::from("--");
+        let input = String::from("'! $(touch nope); *\n\"\\ é🙂");
+        for cwd in [None, Some("/fixed ' !\n$(pwd)")] {
+            for number in [i64::MIN, 0, i64::MAX] {
+                let arguments = vec![
+                    Cow::Borrowed(fixed.as_str()),
+                    Cow::Borrowed(""),
+                    Cow::Borrowed(input.as_str()),
+                    Cow::Owned(number.to_string()),
+                    Cow::Borrowed("true"),
+                ];
+                let expected = actual_encoding("/bin/printf", &arguments, cwd);
+                let ordinary: Vec<String> = std::iter::once("/bin/printf")
+                    .chain(arguments.iter().map(Cow::as_ref))
+                    .map(str::to_owned)
+                    .collect();
+                let bound = Invocation::BoundArgv {
+                    program: "/bin/printf",
+                    arguments,
+                    cwd,
+                };
+                assert_eq!(bound.encoded_len().unwrap(), expected.len());
+                assert_eq!(
+                    bound.encoded_len().unwrap(),
+                    Invocation::Argv {
+                        argv: &ordinary,
+                        cwd
+                    }
+                    .encoded_len()
+                    .unwrap(),
+                );
+                // The integer occupies one literal argument even at both i64 extrema.
+                assert!(expected.ends_with(&format!(" {number} true")));
+            }
+        }
+        assert_eq!(
+            actual_encoding("/bin/x", &[Cow::Borrowed(""), Cow::Borrowed("$(id)")], None),
+            "exec -- /bin/x '' '$(id)'",
+        );
+    }
+
+    #[test]
+    fn complete_bound_command_cap_counts_fixed_prefix_and_expanded_quotes() {
+        let quoted = "'".repeat(1023);
+        for cwd in [None, Some("/fixed ' !\n")] {
+            let mut arguments = vec![Cow::Borrowed(quoted.as_str()); 15];
+            let overhead = actual_encoding("/bin/x", &arguments, cwd).len();
+            let padding = "x".repeat(MAX_COMMAND_BYTES - overhead - 1);
+            arguments.push(Cow::Borrowed(padding.as_str()));
+            let expected = actual_encoding("/bin/x", &arguments, cwd);
+            assert_eq!(expected.len(), MAX_COMMAND_BYTES);
+            let mut bound = Invocation::BoundArgv {
+                program: "/bin/x",
+                arguments,
+                cwd,
+            };
+            assert_eq!(bound.encoded_len().unwrap(), MAX_COMMAND_BYTES);
+            if let Invocation::BoundArgv {
+                program, arguments, ..
+            } = &mut bound
+            {
+                *program = "/bin/xx";
+                assert_eq!(
+                    actual_encoding(program, arguments, cwd).len(),
+                    MAX_COMMAND_BYTES + 1,
+                );
+            }
+            let error = bound.encoded_len().unwrap_err();
+            assert_eq!(error.code, "invalid_argument");
+            assert!(!error.remote_state_unknown);
+        }
+    }
 }
 
 #[cfg(test)]
