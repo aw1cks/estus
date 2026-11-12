@@ -8,6 +8,10 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs: inputs.flake-parts.lib.mkFlake { inherit inputs; } {
@@ -22,6 +26,9 @@
     perSystem = { pkgs, ... }:
       let
         craneLib = inputs.crane.mkLib pkgs;
+        msrvLib = craneLib.overrideToolchain (p:
+          (p.extend inputs.rust-overlay.overlays.default).rust-bin.stable."1.88.0".minimal
+        );
         commonArgs = {
           src = craneLib.cleanCargoSource ./.;
           strictDeps = true;
@@ -71,6 +78,14 @@
           program = "${acceptance}/bin/ssh-stdio";
         };
         checks.package = package;
+        # Compile every test target and run the network-free suite on the MSRV.
+        # Never reuse artifacts produced by the default (newer) compiler.
+        checks.msrv = msrvLib.cargoTest (commonArgs // {
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          cargoTestExtraArgs = "--all-targets";
+          preBuild = "rustc --version";
+        });
         checks.formatting = craneLib.cargoFmt {
           src = commonArgs.src;
         };
