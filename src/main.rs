@@ -3,10 +3,12 @@ mod bindings;
 mod capture;
 mod command;
 mod config;
+mod controller;
 mod exec;
 mod filedata;
 mod filemeta;
 mod files;
+mod process;
 mod reply;
 mod server;
 mod ssh;
@@ -25,6 +27,15 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 fn main() -> ExitCode {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() == Some(std::ffi::OsStr::new(process::ANCHOR_ARG))
+        && arguments.next().is_none()
+    {
+        return match process::anchor() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     let config = match config::Config::load(config::Cli::parse()) {
         Ok(config) => config,
         Err(error) => return invalid_config(&error),

@@ -161,6 +161,13 @@ struct Document {
     targets: Option<BTreeMap<String, Target>>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
+    controller: Controller,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Controller {
+    workspace_root: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -312,6 +319,7 @@ impl Serialize for PermittedOperations<'_> {
                             && self.target_profile.permits_bindings()
                             && self.bindings.get(id).is_some_and(|binding| {
                                 binding.enabled()
+                                    && !binding.is_controller()
                                     && binding.targets.iter().any(|name| name == self.target_name)
                                     && binding.sudo().is_none_or(|(user, program)| {
                                         self.sudo.permits(user, program)
@@ -364,6 +372,7 @@ pub(crate) enum SudoMode {
 pub(crate) enum IdentityRole {
     Ordinary,
     Elevated,
+    Controller,
 }
 
 pub(crate) struct ResolvedTarget<'a> {
@@ -556,6 +565,14 @@ impl Config {
         if let Some(targets) = &document.targets {
             validate_targets(targets)?;
         }
+        if let Some(root) = &document.controller.workspace_root
+            && (!root.starts_with('/') || root.len() > 1024 || root.contains('\0'))
+        {
+            return Err(invalid(
+                "controller.workspace_root",
+                "must be a bounded absolute path",
+            ));
+        }
         let bindings = Bindings::compile(
             document.tools,
             &document.enabled_tools,
@@ -566,6 +583,8 @@ impl Config {
                     .as_ref()
                     .is_some_and(|targets| targets.contains_key(name))
             },
+            document.controller.workspace_root.as_deref(),
+            document.profile.permits_bindings(),
         )?;
         // Definitions are operator capabilities even when hidden or disabled.
         // Validate their authority before exposure profiles select callable tools.
@@ -642,6 +661,14 @@ impl Config {
                 .is_some_and(|binding| binding.enabled())
     }
 
+    pub(crate) fn controller_enabled(&self, id: BindingId) -> bool {
+        self.binding_enabled(id)
+            && self
+                .bindings
+                .get(id)
+                .is_some_and(|binding| binding.is_controller())
+    }
+
     pub(crate) fn resolve_binding<'a>(
         &'a self,
         host: &'a str,
@@ -649,7 +676,10 @@ impl Config {
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
         let binding = self.bindings.get(id).ok_or_else(denied)?;
-        if !self.binding_enabled(id) || !binding.targets.iter().any(|name| name == host) {
+        if binding.is_controller()
+            || !self.binding_enabled(id)
+            || !binding.targets.iter().any(|name| name == host)
+        {
             return Err(denied());
         }
         let target = self
@@ -957,6 +987,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "targets",
             "tools",
             "enabled_tools",
+            "controller",
         ],
     )?;
     if let Some(value) = root.get("tools")
@@ -974,6 +1005,12 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     }
     if let Some(value) = root.get("profile") {
         validate_profile(value, "profile")?;
+    }
+    if let Some(value) = root.get("controller") {
+        let controller = table(value, "controller", &["workspace_root"])?;
+        if let Some(value) = controller.get("workspace_root") {
+            string(value, "controller.workspace_root")?;
+        }
     }
     if let Some(value) = root.get("ssh") {
         let ssh = table(value, "ssh", &["config_file"])?;
@@ -1859,6 +1896,65 @@ result = { kind = "command" }
                     .map(|(_, value)| OsString::from(*value))
             },
         )
+    }
+
+    #[test]
+    fn controller_activation_uses_global_profile_without_target_capabilities() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = dir.path().join("source");
+        std::fs::write(&source, b"abc").unwrap();
+        let definition = format!(
+            r#"
+[controller]
+workspace_root={root:?}
+[targets.server]
+ssh_host="never-used"
+profile="read-only-files"
+[tools.local]
+description="Controller observation"
+revision="1"
+authority="controller"
+effects=["read"]
+execution={{kind="controller_script",source={{path={source:?},content_sha256="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}},interpreter={{program="/bin/sh",argv=[]}}}}
+input_schema={{type="object",additionalProperties=false,required=[],properties={{}}}}
+result={{kind="controller_command"}}
+"#,
+            root = dir.path().to_str().unwrap(),
+            source = source.to_str().unwrap()
+        );
+        for profile in ["baseline", "actions-only"] {
+            let config = load_text(
+                &format!("profile={profile:?}\nenabled_tools=['local']\n{definition}"),
+                &[],
+            )
+            .unwrap();
+            assert!(config.controller_enabled(BindingId(0)));
+            assert!(config.resolve_binding("server", BindingId(0)).is_err());
+            let catalog = ToolCatalog::new(vec![ToolEntry {
+                id: ToolKey::Binding(BindingId(0)),
+                name: "local".into(),
+            }])
+            .unwrap();
+            let discovery = serde_json::to_value(config.targets(&catalog)).unwrap();
+            assert_eq!(
+                discovery["targets"][0]["permitted_operations"],
+                serde_json::json!([])
+            );
+        }
+        std::fs::remove_file(source).unwrap();
+        for profile in ["files-only", "read-only-files"] {
+            let config = load_text(
+                &format!("profile={profile:?}\nenabled_tools=['local']\n{definition}"),
+                &[],
+            )
+            .unwrap();
+            assert!(!config.binding_enabled(BindingId(0)));
+            assert!(!config.controller_enabled(BindingId(0)));
+        }
+        assert!(load_text(&definition, &[]).is_ok());
+        assert!(load_text(&format!("enabled_tools=['local']\n{definition}"), &[]).is_err());
     }
 
     #[test]

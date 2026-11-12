@@ -1,7 +1,13 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    io,
+    fs::{self, OpenOptions},
+    io::{self, Read},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -13,7 +19,7 @@ use serde_json::{Value, json};
 use crate::{
     command::Invocation,
     config::{ConfigError, Limits, account_name},
-    reply::ToolError,
+    reply::{ControllerError, ToolError},
 };
 pub(crate) const EXECUTOR_KIND: &str = "native_argv";
 pub(crate) const RESULT_KIND: &str = "command";
@@ -118,6 +124,58 @@ fn absolute(value: &str) -> bool {
     value.starts_with('/') && value.len() <= 4096 && !value.contains('\0')
 }
 
+fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigError> {
+    let root = root.ok_or_else(|| invalid("Active controller tools require workspace_root"))?;
+    let root =
+        fs::canonicalize(root).map_err(|_| invalid("Controller workspace is unavailable"))?;
+    let metadata =
+        fs::metadata(&root).map_err(|_| invalid("Controller workspace is unavailable"))?;
+    if root.as_os_str().as_bytes().len() > 1024
+        || !metadata.is_dir()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(invalid(
+            "Controller workspace must be an owned private directory",
+        ));
+    }
+    Ok(Arc::from(root))
+}
+
+fn controller_environment(
+    configured: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    let mut bytes = 0usize;
+    if configured.len() > 32 {
+        return Err(invalid("Controller environment exceeds entry bound"));
+    }
+    for (name, value) in &configured {
+        let application = name.strip_prefix("MCP_").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        });
+        bytes += name.len() + value.len();
+        if name.len() > 64
+            || (!application && !matches!(name.as_str(), "PATH" | "LANG" | "LC_ALL" | "TZ"))
+            || value.len() > 4096
+            || value.contains('\0')
+            || bytes > 8192
+        {
+            return Err(invalid("Invalid controller environment"));
+        }
+    }
+    let mut environment = BTreeMap::from([
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("LANG".into(), "C".into()),
+        ("LC_ALL".into(), "C".into()),
+        ("TZ".into(), "UTC".into()),
+    ]);
+    environment.extend(configured);
+    Ok(environment)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BindingId(pub(crate) usize);
 
@@ -131,7 +189,7 @@ pub(crate) struct Bindings {
 struct RawBinding {
     description: String,
     revision: String,
-    targets: Vec<String>,
+    targets: Option<Vec<String>>,
     authority: toml::Value,
     effects: Vec<Effect>,
     execution: RawExecution,
@@ -151,6 +209,12 @@ enum RawExecution {
         source: RawScriptSource,
         interpreter: RawInterpreter,
         argv: Vec<RawSlot>,
+        cwd: Option<String>,
+    },
+    ControllerScript {
+        source: RawScriptSource,
+        interpreter: RawInterpreter,
+        environment: Option<BTreeMap<String, String>>,
         cwd: Option<String>,
     },
 }
@@ -285,6 +349,7 @@ enum Slot {
 enum Authority {
     Ordinary,
     Sudo(String),
+    Controller,
 }
 
 #[derive(Debug)]
@@ -306,6 +371,9 @@ enum Execution {
         program: String,
         prefix: Vec<String>,
         cwd: Option<String>,
+    },
+    ControllerScript {
+        plan: Option<Arc<ControllerPlan>>,
     },
 }
 
@@ -336,12 +404,60 @@ pub(crate) struct PreparedBinding<'a> {
     pub(crate) max_output_bytes: u64,
 }
 
+pub(crate) enum BindingCall {
+    Remote(BindingRequest),
+    Controller(ControllerRequest),
+}
+
+pub(crate) struct ControllerRequest {
+    timeout_secs: Option<u64>,
+    values: Vec<Value>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ControllerPlan {
+    pub(crate) source: String,
+    pub(crate) interpreter: String,
+    pub(crate) interpreter_argv: Vec<String>,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) environment: BTreeMap<String, String>,
+    pub(crate) workspace_root: Arc<Path>,
+}
+
+pub(crate) struct PreparedController {
+    pub(crate) plan: Arc<ControllerPlan>,
+    pub(crate) input_json: Vec<u8>,
+    pub(crate) duration: Duration,
+    pub(crate) max_output_bytes: u64,
+}
+
+struct ControllerActivation<'a> {
+    workspace_root: Option<&'a str>,
+    permitted: bool,
+    canonical_root: Option<Arc<Path>>,
+}
+
+impl ControllerActivation<'_> {
+    fn root(&mut self) -> Result<Arc<Path>, ConfigError> {
+        match &self.canonical_root {
+            Some(root) => Ok(Arc::clone(root)),
+            None => {
+                let root = controller_root(self.workspace_root)?;
+                self.canonical_root = Some(Arc::clone(&root));
+                Ok(root)
+            }
+        }
+    }
+}
+
 impl Bindings {
     pub(crate) fn compile(
         raw: BTreeMap<String, toml::Value>,
         enabled: &[String],
         limits: &Limits,
         target_exists: impl Fn(&str) -> bool,
+        workspace_root: Option<&str>,
+        active_profile: bool,
     ) -> Result<Self, ConfigError> {
         if raw.len() > 32 {
             return Err(invalid("At most 32 named tools are allowed"));
@@ -353,6 +469,11 @@ impl Bindings {
                 "Enabled tool names must exist and be unique",
             ));
         }
+        let mut activation = ControllerActivation {
+            workspace_root,
+            permitted: active_profile,
+            canonical_root: None,
+        };
         let entries = raw
             .into_iter()
             .map(|(name, value)| {
@@ -363,7 +484,14 @@ impl Bindings {
                     .try_into()
                     .map_err(|_| invalid("Invalid named tool definition"))?;
                 let enabled = selected.contains(name.as_str());
-                CompiledBinding::compile(name, raw, enabled, limits, &target_exists)
+                CompiledBinding::compile(
+                    name,
+                    raw,
+                    enabled,
+                    limits,
+                    &target_exists,
+                    &mut activation,
+                )
             })
             .collect::<Result<_, _>>()?;
         Ok(Self { entries })
@@ -385,6 +513,7 @@ impl CompiledBinding {
         enabled: bool,
         limits: &Limits,
         target_exists: &impl Fn(&str) -> bool,
+        activation: &mut ControllerActivation<'_>,
     ) -> Result<Self, ConfigError> {
         if raw.description.is_empty() || raw.description.len() > 1024 || !identifier(&raw.revision)
         {
@@ -392,6 +521,7 @@ impl CompiledBinding {
         }
         let authority = match raw.authority {
             toml::Value::String(value) if value == "ordinary" => Authority::Ordinary,
+            toml::Value::String(value) if value == "controller" => Authority::Controller,
             toml::Value::Table(mut value) if value.len() == 1 => match value.remove("sudo") {
                 Some(toml::Value::String(user)) if user.len() <= 64 && account_name(&user) => {
                     Authority::Sudo(user)
@@ -400,13 +530,26 @@ impl CompiledBinding {
             },
             _ => return Err(invalid("Invalid fixed tool authority")),
         };
-        if raw.result.kind != RESULT_KIND {
-            return Err(invalid("Only command tool results are supported"));
+        let controller = matches!(&raw.execution, RawExecution::ControllerScript { .. });
+        if controller != matches!(authority, Authority::Controller)
+            || raw.result.kind
+                != if controller {
+                    "controller_command"
+                } else {
+                    RESULT_KIND
+                }
+        {
+            return Err(invalid("Execution, authority and result kinds must agree"));
         }
-        if raw.targets.is_empty()
-            || raw.targets.len() > 32
-            || raw.targets.iter().collect::<BTreeSet<_>>().len() != raw.targets.len()
-            || raw.targets.iter().any(|v| !target_exists(v))
+        if controller && raw.targets.is_some() {
+            return Err(invalid("Controller tools must omit targets"));
+        }
+        let targets = raw.targets.unwrap_or_default();
+        if !controller
+            && (targets.is_empty()
+                || targets.len() > 32
+                || targets.iter().collect::<BTreeSet<_>>().len() != targets.len()
+                || targets.iter().any(|v| !target_exists(v)))
         {
             return Err(invalid("Targets must be unique configured logical targets"));
         }
@@ -491,6 +634,79 @@ impl CompiledBinding {
                     separator,
                 )
             }
+            RawExecution::ControllerScript {
+                source,
+                interpreter,
+                environment,
+                cwd,
+            } => {
+                if !absolute(&source.path)
+                    || source.path.ends_with('/')
+                    || !absolute(&interpreter.program)
+                    || interpreter.program.ends_with('/')
+                    || cwd.as_deref().is_some_and(|v| !absolute(v))
+                    || interpreter.argv.len() > 64
+                    || interpreter
+                        .argv
+                        .iter()
+                        .any(|v| v.len() > 4096 || v.contains('\0'))
+                {
+                    return Err(invalid("Invalid fixed controller script layout"));
+                }
+                let mut digest = [0; 32];
+                if source.content_sha256.len() != 64
+                    || hex::decode_to_slice(&source.content_sha256, &mut digest).is_err()
+                {
+                    return Err(invalid("Invalid script content_sha256"));
+                }
+                let ceiling = limits.max_file_bytes.min(1_048_576);
+                let max_bytes = source.max_bytes.unwrap_or(ceiling);
+                if max_bytes == 0 || max_bytes > ceiling {
+                    return Err(invalid("Invalid script byte bound"));
+                }
+                let environment = controller_environment(environment.unwrap_or_default())?;
+                let plan = if enabled && activation.permitted {
+                    let root = activation.root()?;
+                    let metadata = fs::metadata(&interpreter.program)
+                        .map_err(|_| invalid("Controller runtime is unavailable"))?;
+                    if !metadata.is_file()
+                        || metadata.permissions().mode() & 0o111 == 0
+                        || cwd.as_ref().is_some_and(|path| !Path::new(path).is_dir())
+                    {
+                        return Err(invalid("Controller runtime or cwd is unavailable"));
+                    }
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+                        .open(&source.path)
+                        .map_err(|_| invalid("Controller source is unavailable"))?;
+                    if !file
+                        .metadata()
+                        .map_err(|_| invalid("Controller source is unavailable"))?
+                        .is_file()
+                    {
+                        return Err(invalid("Controller source must be a regular file"));
+                    }
+                    let mut bytes = Vec::new();
+                    file.take(max_bytes + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|_| invalid("Controller source is unavailable"))?;
+                    let source =
+                        crate::filedata::verify_script(bytes, true, &digest, max_bytes as usize)
+                            .map_err(|_| invalid("Controller source verification failed"))?;
+                    Some(Arc::new(ControllerPlan {
+                        source,
+                        interpreter: interpreter.program,
+                        interpreter_argv: interpreter.argv,
+                        cwd: cwd.map(PathBuf::from),
+                        environment,
+                        workspace_root: root,
+                    }))
+                } else {
+                    None
+                };
+                (Execution::ControllerScript { plan }, Vec::new(), false)
+            }
         };
         let timeout_secs = raw.limits.as_ref().and_then(|v| v.timeout_secs);
         let max_output_bytes = raw.limits.as_ref().and_then(|v| v.max_output_bytes);
@@ -501,7 +717,7 @@ impl CompiledBinding {
                 "Tool limits must be positive and no greater than server ceilings",
             ));
         }
-        if !schema_fits(&(&raw.input_schema, &raw.targets)) {
+        if !schema_fits(&(&raw.input_schema, &targets)) {
             return Err(invalid("Input schema exceeds metadata bound"));
         }
         let schema: RawSchema = raw
@@ -618,17 +834,21 @@ impl CompiledBinding {
                 }
             });
         }
-        if used.contains(&false) {
+        if !controller && used.contains(&false) {
             return Err(invalid("Every input must occupy an argv slot"));
         }
         let ceiling = timeout_secs.unwrap_or(limits.max_timeout_secs);
-        properties.insert("host".into(), json!({"type":"string", "enum":raw.targets}));
+        if !controller {
+            properties.insert("host".into(), json!({"type":"string", "enum":targets}));
+        }
         properties.insert(
             "timeout_secs".into(),
             json!({"type":"integer", "minimum":1, "maximum":ceiling}),
         );
         let mut required = schema.required;
-        required.push("host".into());
+        if !controller {
+            required.push("host".into());
+        }
         let metadata = json!({"type":"object", "additionalProperties":false, "properties":properties, "required":required});
         let Value::Object(metadata) = metadata else {
             return Err(invalid("Invalid schema metadata"));
@@ -641,7 +861,7 @@ impl CompiledBinding {
             name,
             description: raw.description,
             revision: raw.revision,
-            targets: raw.targets,
+            targets,
             input_schema,
             enabled,
             effects: raw.effects,
@@ -651,21 +871,36 @@ impl CompiledBinding {
             timeout_secs,
             max_output_bytes,
         };
-        let mut arguments = binding.arguments();
-        arguments.extend(binding.argv.iter().filter_map(|v| match v {
-            Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
-            Slot::Input(_) => None,
-        }));
-        let fixed = binding.invocation(arguments);
-        fixed
-            .encoded_len()
-            .map_err(|_| invalid("Fixed command exceeds encoded command bound"))?;
+        if !controller {
+            let mut arguments = binding.arguments();
+            arguments.extend(binding.argv.iter().filter_map(|v| match v {
+                Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
+                Slot::Input(_) => None,
+            }));
+            binding
+                .invocation(arguments)
+                .encoded_len()
+                .map_err(|_| invalid("Fixed command exceeds encoded command bound"))?;
+        }
         Ok(binding)
     }
     pub(crate) fn executor_kind(&self) -> &'static str {
         match self.execution {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::RemoteScript { .. } => "remote_script",
+            Execution::ControllerScript { .. } => "controller_script",
+        }
+    }
+
+    pub(crate) fn is_controller(&self) -> bool {
+        matches!(self.execution, Execution::ControllerScript { .. })
+    }
+
+    pub(crate) fn result_kind(&self) -> &'static str {
+        if self.is_controller() {
+            "controller_command"
+        } else {
+            RESULT_KIND
         }
     }
 
@@ -682,7 +917,7 @@ impl CompiledBinding {
 
     fn arguments(&self) -> Vec<Cow<'_, str>> {
         let prefix = match &self.execution {
-            Execution::NativeArgv { .. } => &[][..],
+            Execution::NativeArgv { .. } | Execution::ControllerScript { .. } => &[][..],
             Execution::RemoteScript { prefix, .. } => prefix.as_slice(),
         };
         let mut arguments = Vec::with_capacity(prefix.len() + self.argv.len());
@@ -711,6 +946,11 @@ impl CompiledBinding {
                 arguments,
                 cwd: cwd.as_deref(),
             },
+            Execution::ControllerScript { .. }
+            | Execution::NativeArgv {
+                authority: Authority::Controller,
+                ..
+            } => unreachable!("controller bindings never produce remote invocations"),
         }
     }
 
@@ -728,10 +968,14 @@ impl CompiledBinding {
     pub(crate) fn parse_request(
         &self,
         mut arguments: JsonObject,
-    ) -> Result<BindingRequest, ErrorData> {
-        let host = match arguments.remove("host") {
-            Some(Value::String(host)) => host,
-            _ => return Err(shape()),
+    ) -> Result<BindingCall, ErrorData> {
+        let host = if self.is_controller() {
+            None
+        } else {
+            match arguments.remove("host") {
+                Some(Value::String(host)) => Some(host),
+                _ => return Err(shape()),
+            }
         };
         let timeout_secs = arguments
             .remove("timeout_secs")
@@ -755,10 +999,16 @@ impl CompiledBinding {
         if !arguments.is_empty() {
             return Err(shape());
         }
-        Ok(BindingRequest {
-            host,
-            timeout_secs,
-            values,
+        Ok(match host {
+            Some(host) => BindingCall::Remote(BindingRequest {
+                host,
+                timeout_secs,
+                values,
+            }),
+            None => BindingCall::Controller(ControllerRequest {
+                timeout_secs,
+                values,
+            }),
         })
     }
     pub(crate) fn prepare<'a>(
@@ -811,7 +1061,81 @@ impl CompiledBinding {
             script: match &self.execution {
                 Execution::RemoteScript { source, .. } => Some(source),
                 Execution::NativeArgv { .. } => None,
+                Execution::ControllerScript { .. } => {
+                    return Err(bound("Controller requires local preparation"));
+                }
             },
+            duration: Duration::from_secs(timeout),
+            max_output_bytes: self.max_output_bytes.unwrap_or(limits.max_output_bytes),
+        })
+    }
+
+    pub(crate) fn prepare_controller(
+        &self,
+        request: &ControllerRequest,
+        limits: &Limits,
+    ) -> Result<PreparedController, ControllerError> {
+        let invalid = || ControllerError::new("invalid_argument", "Invalid controller tool inputs");
+        let Execution::ControllerScript { plan: Some(plan) } = &self.execution else {
+            return Err(ControllerError::new(
+                "policy_denied",
+                "Operation is not authorized",
+            ));
+        };
+        let timeout = request
+            .timeout_secs
+            .unwrap_or(self.timeout_secs.unwrap_or(limits.operation_timeout_secs));
+        if timeout == 0
+            || timeout > self.timeout_secs.unwrap_or(limits.max_timeout_secs)
+            || timeout > limits.max_timeout_secs
+            || request.values.len() != self.inputs.len()
+        {
+            return Err(invalid());
+        }
+        for (input, value) in self.inputs.iter().zip(&request.values) {
+            input.validate(value).map_err(|_| invalid())?;
+        }
+        use serde::ser::SerializeMap;
+        struct Payload<'a> {
+            inputs: &'a [Input],
+            values: &'a [Value],
+        }
+        impl Serialize for Payload<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut map = serializer.serialize_map(Some(self.inputs.len()))?;
+                for (input, value) in self.inputs.iter().zip(self.values) {
+                    map.serialize_entry(&input.name, value)?;
+                }
+                map.end()
+            }
+        }
+        struct BoundedJson(Vec<u8>);
+        impl io::Write for BoundedJson {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if bytes.len() > 65_536 - self.0.len() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "payload limit"));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = BoundedJson(Vec::new());
+        serde_json::to_writer(
+            &mut writer,
+            &Payload {
+                inputs: &self.inputs,
+                values: &request.values,
+            },
+        )
+        .map_err(|_| {
+            ControllerError::new("resource_limit", "Controller input exceeds byte bound")
+        })?;
+        Ok(PreparedController {
+            plan: Arc::clone(plan),
+            input_json: writer.0,
             duration: Duration::from_secs(timeout),
             max_output_bytes: self.max_output_bytes.unwrap_or(limits.max_output_bytes),
         })
@@ -840,10 +1164,12 @@ result = { kind = "command" }
             &["observe".into()],
             &Limits::default(),
             |v| v == "server",
+            None,
+            true,
         )
     }
     fn request(binding: &CompiledBinding, value: Value) -> BindingRequest {
-        binding
+        let BindingCall::Remote(request) = binding
             .parse_request(
                 json!({"host":"server", "value":value})
                     .as_object()
@@ -851,6 +1177,10 @@ result = { kind = "command" }
                     .clone(),
             )
             .unwrap()
+        else {
+            panic!("expected remote request")
+        };
+        request
     }
     fn property(raw: &mut toml::Value) -> &mut toml::Value {
         &mut raw["input_schema"]["properties"]["value"]
@@ -1093,7 +1423,9 @@ result = { kind = "command" }
                     BTreeMap::from([("observe".into(), raw)]),
                     &[],
                     &Limits::default(),
-                    |_| true
+                    |_| true,
+                    None,
+                    true
                 )
                 .is_err(),
                 "{schema}"
@@ -1187,7 +1519,9 @@ result = { kind = "command" }
                     BTreeMap::from([("observe".into(), definition())]),
                     &enabled,
                     &Limits::default(),
-                    |_| true
+                    |_| true,
+                    None,
+                    true
                 )
                 .is_err()
             );
@@ -1197,6 +1531,8 @@ result = { kind = "command" }
             &[],
             &Limits::default(),
             |_| true,
+            None,
+            true,
         )
         .unwrap();
         assert!(!disabled.get(BindingId(0)).unwrap().enabled());
@@ -1273,7 +1609,7 @@ result = { kind = "command" }
         let raw = (0..33)
             .map(|i| (format!("tool_{i}"), definition()))
             .collect();
-        assert!(Bindings::compile(raw, &[], &Limits::default(), |_| true).is_err());
+        assert!(Bindings::compile(raw, &[], &Limits::default(), |_| true, None, true).is_err());
     }
 
     #[test]
@@ -1307,7 +1643,7 @@ result = { kind = "command" }
         let binding = bindings.get(BindingId(0)).unwrap();
         for (token, expected) in [("1", "1"), ("1.0", "1"), ("1e0", "1"), ("2.0", "2")] {
             let value: Value = serde_json::from_str(token).unwrap();
-            let request = binding
+            let BindingCall::Remote(request) = binding
                 .parse_request(
                     json!({
                         "host":"server", "value":value, "timeout_secs":1.0
@@ -1316,7 +1652,10 @@ result = { kind = "command" }
                     .unwrap()
                     .clone(),
                 )
-                .unwrap();
+                .unwrap()
+            else {
+                panic!("expected remote request")
+            };
             let prepared = binding.prepare(&request, &Limits::default()).unwrap();
             assert_eq!(prepared.duration, Duration::from_secs(1));
             match prepared.invocation {
@@ -1326,7 +1665,7 @@ result = { kind = "command" }
         }
         for token in ["1.5", "1e100", "3.0"] {
             let value: Value = serde_json::from_str(token).unwrap();
-            if let Ok(request) = binding.parse_request(
+            if let Ok(BindingCall::Remote(request)) = binding.parse_request(
                 json!({
                     "host":"server", "value":value
                 })
@@ -1369,6 +1708,8 @@ result = { kind = "command" }
                 &["observe".into()],
                 &Limits::default(),
                 |_| true,
+                None,
+                true,
             );
             assert!(
                 result.is_err(),

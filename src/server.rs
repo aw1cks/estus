@@ -25,7 +25,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     audit::{Audit, Metadata},
-    bindings::{self, BindingId, BindingRequest},
+    bindings::{self, BindingCall, BindingId, BindingRequest, ControllerRequest},
     command::{ExecRequest, Invocation, RunRequest, SudoRequest},
     config::{
         Config, ConfigError, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery, ToolCatalog,
@@ -37,7 +37,7 @@ use crate::{
     },
     filemeta::StatData,
     files::{self, FileContext},
-    reply::{CommandData, Termination, ToolError, ToolReply},
+    reply::{CommandData, ControllerError, ControllerReply, Termination, ToolError, ToolReply},
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
 };
@@ -56,6 +56,7 @@ struct State {
     shutdown: CancellationToken,
     operations: Arc<Semaphore>,
     tasks: TaskTracker,
+    local_tasks: TaskTracker,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -148,28 +149,48 @@ impl SshMcp {
             .and_then(|(_, route)| route.attr.output_schema.as_ref())
             .expect("command registration has its output contract")
             .clone();
+        let controller_output_schema = config
+            .bindings()
+            .entries()
+            .any(|(_, binding)| binding.is_controller())
+            .then(schema_for_type::<ControllerReply>);
         let binding_routes = config.bindings().entries().map(|(id, binding)| {
             let annotations = ToolAnnotations::new()
                 .read_only(binding.read_only())
                 .destructive(!binding.read_only())
                 .idempotent(false);
-            let metadata = Tool::new(
-                binding.name.clone(),
-                format!("{} Fixed ordinary execution on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description),
-                Arc::clone(&binding.input_schema),
-            )
-            .with_raw_output_schema(Arc::clone(&command_output_schema))
-            .with_annotations(annotations)
-            .with_meta(rmcp::model::MetaObject(JsonObject::from_iter([
+            let local = binding.is_controller();
+            let description = if local {
+                format!("{} Explicit controller execution under the server's OS account, not SSH authority or a sandbox. Typed inputs use a private JSON file, never caller argv/source. Cleanup reports anchored-group signalling and direct-child reaping, not rollback or escaped-descendant containment. Operations are never replayed.", binding.description)
+            } else {
+                format!("{} Fixed remote execution with declared authority on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description)
+            };
+            let mut meta = JsonObject::from_iter([
                 ("revision".into(), serde_json::json!(binding.revision)),
-                ("result".into(), serde_json::json!(bindings::RESULT_KIND)),
+                ("result".into(), serde_json::json!(binding.result_kind())),
                 ("effects".into(), serde_json::json!(binding.effects())),
                 ("executor".into(), serde_json::json!(binding.executor_kind())),
-                ("authority".into(), binding.sudo().map_or_else(
-                    || serde_json::json!("ordinary"),
-                    |(user, _)| serde_json::json!({"sudo": user}),
-                )),
-            ])));
+                ("authority".into(), if local {
+                    serde_json::json!("controller")
+                } else {
+                    binding.sudo().map_or_else(
+                        || serde_json::json!("ordinary"),
+                        |(user, _)| serde_json::json!({"sudo": user}),
+                    )
+                }),
+            ]);
+            let output_schema = if local {
+                meta.insert("execution_location".into(), serde_json::json!("controller"));
+                controller_output_schema.as_ref().expect("controller registration has its result schema")
+            } else {
+                &command_output_schema
+            };
+            let metadata = Tool::new(
+                binding.name.clone(), description, Arc::clone(&binding.input_schema),
+            )
+            .with_raw_output_schema(Arc::clone(output_schema))
+            .with_annotations(annotations)
+            .with_meta(rmcp::model::MetaObject(meta));
             let route = ToolRoute::new_dyn(metadata, move |context: ToolCallContext<'_, Self>| {
                 Box::pin(async move {
                     context.service.binding(
@@ -231,6 +252,7 @@ impl SshMcp {
                 shutdown,
                 operations: Arc::new(Semaphore::new(16)),
                 tasks: TaskTracker::new(),
+                local_tasks: TaskTracker::new(),
             }),
         })
     }
@@ -241,9 +263,14 @@ impl SshMcp {
 
     pub(crate) async fn shutdown(&self) {
         self.state.shutdown.cancel();
+        self.state.local_tasks.close();
         self.state.tasks.close();
-        let _ = tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()).await;
-        self.state.pool.shutdown().await;
+        // Local owners must reap before runtime teardown; native cleanup keeps
+        // its existing independent bound. An unkillable OS child can delay shutdown.
+        tokio::join!(self.state.local_tasks.wait(), async {
+            let _ = tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()).await;
+            self.state.pool.shutdown().await;
+        },);
     }
 
     async fn command(
@@ -309,11 +336,26 @@ impl SshMcp {
             .filter(|host| binding.targets.iter().any(|allowed| allowed == host))
             .map(|host| self.state.config.sudo_mode(host));
         match binding.parse_request(arguments) {
-            Ok(request) => {
+            Ok(BindingCall::Remote(request)) => {
                 self.command(Operation::Binding { id, request }, context)
                     .await
             }
+            Ok(BindingCall::Controller(request)) => {
+                self.controller_binding(id, request, context).await
+            }
             Err(error) => {
+                if binding.is_controller() {
+                    self.state
+                        .controller_metadata(id, &context.id)
+                        .reject_controller(
+                            Instant::now(),
+                            &ControllerError::new(
+                                "invalid_argument",
+                                "Invalid controller tool argument shape",
+                            ),
+                        );
+                    return Err(error);
+                }
                 Metadata {
                     request_id: &context.id,
                     tool: self.state.binding_name(id),
@@ -341,6 +383,100 @@ impl SshMcp {
                 );
                 Err(error)
             }
+        }
+    }
+
+    async fn controller_binding(
+        &self,
+        id: BindingId,
+        request: ControllerRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let metadata = self.state.controller_metadata(id, &context.id);
+        let budget = ReplyBudget::new(&context.id)?;
+        let capture_limit = match budget.controller_capture_limit() {
+            Ok(limit) => limit,
+            Err(error) => {
+                metadata.reject_controller(
+                    started,
+                    &ControllerError::new(
+                        "invalid_argument",
+                        "Insufficient controller response budget",
+                    ),
+                );
+                return Err(error);
+            }
+        };
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ControllerError::new("resource_limit", "Tool operation limit reached");
+                metadata.reject_controller(started, &error);
+                return budget.controller_result(ControllerReply::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.state.local_tasks.spawn(async move {
+            // Receiver cancellation cannot drop admission, files, or child ownership.
+            let _permit = permit;
+            let metadata = state.controller_metadata(id, &context.id);
+            let prepared = (|| {
+                if state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                    return Err(ControllerError::new(
+                        "cancelled",
+                        "Controller request cancelled before dispatch",
+                    ));
+                }
+                if !state.config.controller_enabled(id) {
+                    return Err(ControllerError::new(
+                        "policy_denied",
+                        "Controller operation is not authorized",
+                    ));
+                }
+                let binding = state
+                    .config
+                    .bindings()
+                    .get(id)
+                    .expect("registered controller binding exists");
+                let prepared = binding.prepare_controller(&request, state.config.limits())?;
+                let deadline = request_deadline(started, prepared.duration)
+                    .map_err(|error| ControllerError::new(error.code, error.message))?;
+                Ok((prepared, deadline))
+            })();
+            let (prepared, deadline) = match prepared {
+                Ok(value) => value,
+                Err(error) => {
+                    metadata.reject_controller(started, &error);
+                    let _ = sender.send(ControllerReply::failure(error));
+                    return;
+                }
+            };
+            let audit = Audit::start(metadata, started);
+            let run = crate::controller::run(
+                prepared,
+                crate::controller::ControllerContext {
+                    deadline,
+                    ct: &context.ct,
+                    shutdown: &state.shutdown,
+                    started,
+                    capture_limit,
+                },
+            )
+            .await;
+            audit.finish_controller(&run.reply);
+            let _ = sender.send(run.reply);
+            if let Some(pending) = run.pending {
+                pending.finish().await;
+            }
+        });
+        match receiver.await {
+            Ok(reply) => budget.controller_result(reply),
+            Err(_) => budget.controller_result(ControllerReply::failure(ControllerError::new(
+                "io_error",
+                "Controller operation could not complete; effects may be incomplete",
+            ))),
         }
     }
 
@@ -816,6 +952,25 @@ impl State {
         self.tools
             .name(ToolKey::Binding(id))
             .expect("executing binding is registered")
+    }
+
+    fn controller_metadata<'a>(&'a self, id: BindingId, request_id: &'a RequestId) -> Metadata<'a> {
+        let binding = self
+            .config
+            .bindings()
+            .get(id)
+            .expect("registered controller binding exists");
+        Metadata {
+            request_id,
+            tool: self.binding_name(id),
+            host: None,
+            identity_role: IdentityRole::Controller,
+            sudo_mode: None,
+            user: None,
+            program: None,
+            binding_revision: Some(&binding.revision),
+            executor: Some(binding.executor_kind()),
+        }
     }
 
     async fn command(

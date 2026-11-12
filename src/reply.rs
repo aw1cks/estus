@@ -71,3 +71,80 @@ pub(crate) struct CommandData {
     pub duration_ms: u64,
     pub remote_may_still_be_running: bool,
 }
+
+/// Sanitized local failure; controller errors never describe remote state.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ControllerError {
+    pub(crate) code: &'static str,
+    pub(crate) message: &'static str,
+}
+
+impl ControllerError {
+    pub(crate) const fn new(code: &'static str, message: &'static str) -> Self {
+        Self { code, message }
+    }
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ControllerReply {
+    pub(crate) data: Option<ControllerData>,
+    pub(crate) error: Option<ControllerError>,
+}
+
+impl ControllerReply {
+    pub(crate) fn success(data: ControllerData) -> Self {
+        Self {
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    pub(crate) fn failure(error: ControllerError) -> Self {
+        Self {
+            data: None,
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ControllerTermination {
+    Exited,
+    Signalled,
+    Timeout,
+    Cancelled,
+    IoError,
+}
+
+/// Evidence about the anchored group signal and the two directly owned children.
+///
+/// `SignalledAndReaped` does not claim descendant containment, disappearance,
+/// rollback of effects, or reaping of descendants not directly owned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GroupCleanup {
+    NotStarted,
+    SignalledAndReaped,
+    Incomplete,
+}
+
+/// Local output and observed cleanup evidence, not a rollback guarantee.
+///
+/// Interrupted execution may already have produced effects. Cleanup describes
+/// only the owned anchored process group and directly owned children.
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ControllerData {
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub stdout_lossy: bool,
+    pub stderr_lossy: bool,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub termination: ControllerTermination,
+    pub duration_ms: u64,
+    pub owned_group_cleanup: GroupCleanup,
+}

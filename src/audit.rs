@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     config::{IdentityRole, SudoMode},
-    reply::ToolError,
+    reply::{ControllerError, ControllerReply, GroupCleanup, ToolError},
 };
 
 /// Best-effort JSON diagnostics; stderr failure must never interrupt cleanup.
@@ -61,9 +61,11 @@ struct Record<'a> {
     error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_state_unknown: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_group_cleanup: Option<GroupCleanup>,
 }
 
-impl Metadata<'_> {
+impl<'a> Metadata<'a> {
     fn emit(
         self,
         event: &'static str,
@@ -71,7 +73,27 @@ impl Metadata<'_> {
         exit_code: Option<i32>,
         error: Option<&ToolError>,
     ) {
-        let record = Record {
+        emit(&self.record(
+            event,
+            duration_ms,
+            exit_code,
+            error.map(|error| error.code),
+            duration_ms.map(|_| error.is_some_and(|error| error.remote_state_unknown)),
+            None,
+        ));
+    }
+
+    fn record(
+        self,
+        event: &'static str,
+        duration_ms: Option<u64>,
+        exit_code: Option<i32>,
+        error_code: Option<&'static str>,
+        remote_state_unknown: Option<bool>,
+        owned_group_cleanup: Option<GroupCleanup>,
+    ) -> Record<'a> {
+        let controller = matches!(self.identity_role, IdentityRole::Controller);
+        Record {
             event,
             timestamp_ms: millis(
                 SystemTime::now()
@@ -80,20 +102,38 @@ impl Metadata<'_> {
             ),
             request_id: self.request_id,
             tool: self.tool,
-            host: self.host,
+            host: if controller { None } else { self.host },
             identity_role: self.identity_role,
-            sudo_mode: self.sudo_mode,
-            user: self.user,
-            program: self.program,
+            sudo_mode: if controller { None } else { self.sudo_mode },
+            user: if controller { None } else { self.user },
+            program: if controller { None } else { self.program },
             binding_revision: self.binding_revision,
             executor: self.executor,
             duration_ms,
             exit_code,
-            error_code: error.map(|error| error.code),
-            remote_state_unknown: duration_ms
-                .map(|_| error.is_some_and(|error| error.remote_state_unknown)),
-        };
-        emit(&record);
+            error_code,
+            remote_state_unknown: if controller {
+                None
+            } else {
+                remote_state_unknown
+            },
+            owned_group_cleanup: if controller {
+                owned_group_cleanup
+            } else {
+                None
+            },
+        }
+    }
+
+    pub(crate) fn reject_controller(self, started: Instant, error: &ControllerError) {
+        emit(&self.record(
+            "reject",
+            Some(millis(started.elapsed())),
+            None,
+            Some(error.code),
+            None,
+            None,
+        ));
     }
 
     pub(crate) fn reject(self, started: Instant, error: &ToolError) {
@@ -126,6 +166,18 @@ impl<'a> Audit<'a> {
         );
         self.finished = true;
     }
+
+    pub(crate) fn finish_controller(mut self, reply: &ControllerReply) {
+        emit(&self.metadata.record(
+            "finish",
+            Some(millis(self.started.elapsed())),
+            reply.data.as_ref().and_then(|data| data.exit_code),
+            reply.error.as_ref().map(|error| error.code),
+            None,
+            reply.data.as_ref().map(|data| data.owned_group_cleanup),
+        ));
+        self.finished = true;
+    }
 }
 
 impl Drop for Audit<'_> {
@@ -148,3 +200,4 @@ impl Drop for Audit<'_> {
 fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
+

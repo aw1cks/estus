@@ -10,7 +10,10 @@ use rmcp::{
 };
 use serde::Serialize;
 
-use crate::reply::{CommandData, Termination, ToolError, ToolReply};
+use crate::reply::{
+    CommandData, ControllerData, ControllerError, ControllerReply, ControllerTermination,
+    GroupCleanup, Termination, ToolError, ToolReply,
+};
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16_777_216;
 
@@ -123,16 +126,20 @@ impl ReplyBudget {
         })
     }
 
-    fn tool_reply_size<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
-        let overhead = self.id_bytes + tool_overhead(reply.error.is_some());
+    fn value_size(&self, value: &impl Serialize, failed: bool) -> Result<usize, ErrorData> {
+        let overhead = self.id_bytes + tool_overhead(failed);
         let mut size = DuplicatedSize {
             bytes: overhead,
             remaining: MAX_RESPONSE_BYTES
                 .checked_sub(overhead)
                 .ok_or_else(exceeded)?,
         };
-        serde_json::to_writer(&mut size, reply).map_err(|_| exceeded())?;
+        serde_json::to_writer(&mut size, value).map_err(|_| exceeded())?;
         Ok(size.bytes)
+    }
+
+    fn tool_reply_size<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
+        self.value_size(reply, reply.error.is_some())
     }
 
     pub(crate) fn remaining<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
@@ -143,9 +150,16 @@ impl ReplyBudget {
         &self,
         reply: ToolReply<T>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.serialized_result(&reply, reply.error.is_some())
+    }
+
+    fn serialized_result(
+        &self,
+        reply: &impl Serialize,
+        failed: bool,
+    ) -> Result<CallToolResult, ErrorData> {
         // Bound before to_value/structured allocate copies and nested escaping.
-        self.tool_reply_size(&reply)?;
-        let failed = reply.error.is_some();
+        self.value_size(reply, failed)?;
         let value = serde_json::to_value(reply)
             .map_err(|_| ErrorData::internal_error("Could not serialize tool reply", None))?;
         Ok(if failed {
@@ -187,20 +201,84 @@ impl ReplyBudget {
         if let Some(data) = &mut reply.data {
             let mut stdout = std::mem::take(&mut data.stdout);
             let mut stderr = std::mem::take(&mut data.stderr);
-            let mut remaining = MAX_RESPONSE_BYTES - self.tool_reply_size(&reply)?;
-            let out_len = prefix_len(&stdout, &mut remaining);
-            let err_len = prefix_len(&stderr, &mut remaining);
+            let remaining = MAX_RESPONSE_BYTES - self.tool_reply_size(&reply)?;
             if let Some(data) = &mut reply.data {
-                data.stdout_truncated |= out_len < stdout.len();
-                data.stderr_truncated |= err_len < stderr.len();
-                stdout.truncate(out_len);
-                stderr.truncate(err_len);
+                trim_streams(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut data.stdout_truncated,
+                    &mut data.stderr_truncated,
+                    remaining,
+                );
                 data.stdout = stdout;
                 data.stderr = stderr;
             }
         }
         self.result(reply)
     }
+
+    pub(crate) fn controller_capture_limit(&self) -> Result<u64, ErrorData> {
+        let reservation = ControllerReply {
+            data: Some(ControllerData {
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_lossy: false,
+                stderr_lossy: false,
+                exit_code: Some(i32::MIN),
+                signal: Some(i32::MIN),
+                termination: ControllerTermination::Signalled,
+                duration_ms: u64::MAX,
+                owned_group_cleanup: GroupCleanup::SignalledAndReaped,
+            }),
+            error: Some(ControllerError::new(
+                "controller_resource_limit",
+                "Controller execution could not complete within the configured resource limits",
+            )),
+        };
+        // Raw capture is bounded before decoding. Exact escaping and actual
+        // error metadata are accounted for again before duplicated allocation.
+        Ok(((MAX_RESPONSE_BYTES - self.value_size(&reservation, true)?) / 2) as u64)
+    }
+
+    pub(crate) fn controller_result(
+        &self,
+        mut reply: ControllerReply,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Some(data) = &mut reply.data {
+            let mut stdout = std::mem::take(&mut data.stdout);
+            let mut stderr = std::mem::take(&mut data.stderr);
+            let remaining = MAX_RESPONSE_BYTES - self.value_size(&reply, reply.error.is_some())?;
+            if let Some(data) = &mut reply.data {
+                trim_streams(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut data.stdout_truncated,
+                    &mut data.stderr_truncated,
+                    remaining,
+                );
+                data.stdout = stdout;
+                data.stderr = stderr;
+            }
+        }
+        self.serialized_result(&reply, reply.error.is_some())
+    }
+}
+
+fn trim_streams(
+    stdout: &mut String,
+    stderr: &mut String,
+    stdout_truncated: &mut bool,
+    stderr_truncated: &mut bool,
+    mut remaining: usize,
+) {
+    let out_len = prefix_len(stdout, &mut remaining);
+    let err_len = prefix_len(stderr, &mut remaining);
+    *stdout_truncated |= out_len < stdout.len();
+    *stderr_truncated |= err_len < stderr.len();
+    stdout.truncate(out_len);
+    stderr.truncate(err_len);
 }
 
 // Deterministic stdout-first prefixes. A truncation flag changing false -> true
@@ -438,4 +516,5 @@ mod tests {
         frame.error.message.to_mut().push('x');
         assert!(!frame_fits(&frame));
     }
+
 }

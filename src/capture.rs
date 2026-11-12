@@ -23,6 +23,11 @@ impl Capture {
         self.truncated |= retained < bytes.len();
     }
 
+    // A closed drain may have missed bytes even when the byte cap was not reached.
+    pub(crate) fn incomplete(&mut self) {
+        self.truncated = true;
+    }
+
     pub(crate) fn decode(self) -> (String, bool, bool) {
         match String::from_utf8(self.bytes) {
             Ok(text) => (text, self.truncated, false),
