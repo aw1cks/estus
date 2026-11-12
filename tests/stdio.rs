@@ -2228,3 +2228,445 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
     }
     Ok(())
 }
+
+const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
+    profile = "actions-only"
+    enabled_tools = ["observe_account", "change_account"]
+    [ssh]
+    config_file = "replacement.conf"
+    [limits]
+    connect_timeout_secs = 1
+    operation_timeout_secs = 3
+    max_timeout_secs = 5
+    max_output_bytes = 4096
+    [targets.base]
+    ssh_host = "private-binding-backend.invalid"
+    [targets.base.sudo]
+    mode = "separate-identity"
+    ssh_host = "private-binding-elevated.invalid"
+    [targets.read]
+    ssh_host = "private-binding-read.invalid"
+    profile = "read-only-files"
+    [targets.files]
+    ssh_host = "private-binding-files.invalid"
+    profile = "files-only"
+    [targets.other]
+    ssh_host = "private-binding-other.invalid"
+    [tools.observe_account]
+    description = "Observe an approved account."
+    revision = "review-1"
+    targets = ["base", "read", "files"]
+    authority = "ordinary"
+    effects = ["read", "sensitive_read"]
+    execution = { kind = "native_argv", program = "/private/binding-program", cwd = "/private/binding-cwd", argv = ["private-binding-fixed", "--", { input = "account" }, { input = "count" }, { input = "verbose" }] }
+    input_schema = { type = "object", additionalProperties = false, required = ["account", "count", "verbose"], properties = { account = { type = "string", minLength = 1, maxLength = 16, enum = ["root", "operator"] }, count = { type = "integer", minimum = -2, maximum = 4 }, verbose = { type = "boolean" } } }
+    result = { kind = "command" }
+    limits = { timeout_secs = 2, max_output_bytes = 1024 }
+    [tools.change_account]
+    description = "Change an approved account."
+    revision = "change-2"
+    targets = ["base"]
+    authority = "ordinary"
+    effects = ["persistent_write"]
+    execution = { kind = "native_argv", program = "/private/binding-program", argv = ["private-binding-fixed"] }
+    input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+    result = { kind = "command" }
+    [tools.disabled_account]
+    description = "Not enabled."
+    revision = "disabled-3"
+    targets = ["base"]
+    authority = "ordinary"
+    effects = ["unknown"]
+    execution = { kind = "native_argv", program = "/private/binding-disabled", argv = [] }
+    input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+    result = { kind = "command" }
+"#};
+
+fn named_tools_server(config: &str) -> Result<(Server, tempfile::TempDir)> {
+    let directory = tempfile::tempdir()?;
+    let probe = directory.path().join("binding-must-not-probe");
+    std::fs::write(
+        directory.path().join("replacement.conf"),
+        format!(
+            "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+            probe.display()
+        ),
+    )?;
+    let path = directory.path().join("operator.toml");
+    std::fs::write(&path, config)?;
+    let server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    Ok((server, directory))
+}
+
+fn binding_public_only(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes)?;
+    for private in [
+        "private-binding",
+        "/private/binding",
+        "BINDING_INPUT_SECRET",
+        "replacement.conf",
+    ] {
+        ensure!(!text.contains(private), "binding private content disclosed");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() -> Result<()> {
+    let (mut server, directory) = named_tools_server(NAMED_TOOL_CONFIG)?;
+    let scenario = async {
+        server.initialize().await?;
+        server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
+        let listed = server.response(2).await?;
+        binding_public_only(&serde_json::to_vec(&listed)?)?;
+        let tools = listed["result"]["tools"].as_array().context("named tools")?;
+        let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
+        names.sort_unstable();
+        ensure!(names == ["change_account", "observe_account", "ssh_targets"]);
+        for (name, revision, effects, read_only, destructive) in [
+            ("observe_account", "review-1", json!(["read", "sensitive_read"]), true, false),
+            ("change_account", "change-2", json!(["persistent_write"]), false, true),
+        ] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).context("binding metadata")?;
+            ensure!(tool["_meta"]["revision"] == revision);
+            ensure!(tool["_meta"]["effects"] == effects);
+            ensure!(tool["_meta"]["result"] == "command");
+            ensure!(tool["_meta"]["executor"] == "native_argv");
+            ensure!(tool["annotations"]["readOnlyHint"] == read_only);
+            ensure!(tool["annotations"]["destructiveHint"] == destructive);
+            ensure!(tool["annotations"]["idempotentHint"] == false);
+            ensure!(tool["outputSchema"]["type"] == "object");
+            ensure!(tool["outputSchema"]["properties"]["data"].is_object());
+            ensure!(tool["outputSchema"]["properties"]["error"].is_object());
+        }
+        let observe = tools.iter().find(|tool| tool["name"] == "observe_account").context("observe tool")?;
+        let schema = &observe["inputSchema"];
+        ensure!(schema["type"] == "object" && schema["additionalProperties"] == false);
+        let hosts = schema["properties"]["host"]["enum"].as_array().context("declared binding hosts")?;
+        ensure!(hosts.len() == 3);
+        for host in ["base", "read", "files"] {
+            ensure!(hosts.contains(&json!(host)));
+        }
+        ensure!(schema["properties"]["timeout_secs"]["maximum"] == 2);
+        ensure!(schema["properties"]["account"]["enum"] == json!(["root", "operator"]));
+        ensure!(schema["properties"]["count"]["minimum"] == -2);
+        ensure!(schema["properties"]["count"]["maximum"] == 4);
+        ensure!(schema["properties"]["verbose"]["type"] == "boolean");
+        let required = schema["required"].as_array().context("required binding inputs")?;
+        ensure!(required.len() == 4);
+        for name in ["host", "account", "count", "verbose"] {
+            ensure!(required.contains(&json!(name)));
+        }
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        let discovered = server.response(3).await?;
+        binding_public_only(&serde_json::to_vec(&discovered)?)?;
+        let rows = discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("binding target rows")?;
+        for (name, expected) in [
+            ("base", json!(["change_account", "observe_account"])),
+            ("read", json!([])),
+            ("files", json!([])),
+            ("other", json!([])),
+        ] {
+            let row = rows.iter().find(|row| row["name"] == name).context("binding target")?;
+            ensure!(row["permitted_operations"] == expected, "{row}");
+        }
+        std::fs::write(
+            directory.path().join("operator.toml"),
+            NAMED_TOOL_CONFIG
+                .replace("[\"observe_account\", \"change_account\"]", "[\"disabled_account\"]")
+                .replace("review-1", "review-99"),
+        )?;
+        server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}})).await?;
+        ensure!(server.response(4).await?["result"] == listed["result"]);
+        for (index, tool) in ["disabled_account", "ssh_exec", "ssh_run", "ssh_sudo"].into_iter().enumerate() {
+            let arguments = if tool == "disabled_account" { json!({"host":"base"}) } else { profile_call_arguments(tool, "base") };
+            let id = 10 + index as u64;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602);
+        }
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    binding_public_only(&stderr)?;
+    ensure!(!directory.path().join("binding-must-not-probe").exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_tool_validation_and_target_policy_precede_ssh() -> Result<()> {
+    let (mut server, directory) = named_tools_server(NAMED_TOOL_CONFIG)?;
+    let scenario = async {
+        server.initialize().await?;
+        let valid = json!({"host":"base","account":"root","count":0,"verbose":false});
+        let mut cases = Vec::new();
+        for (field, value) in [
+            ("extra", json!("BINDING_INPUT_SECRET")),
+            ("account", json!(42)),
+            ("count", json!("BINDING_INPUT_SECRET")),
+            ("count", json!(1.5)),
+            ("verbose", json!("BINDING_INPUT_SECRET")),
+            ("host", json!(false)),
+            ("timeout_secs", json!("BINDING_INPUT_SECRET")),
+        ] {
+            let mut arguments = valid.clone();
+            arguments[field] = value;
+            cases.push((arguments, None));
+        }
+        for reserved in ["argv", "program", "cwd", "stdin", "user", "role", "authority", "execution", "profile", "env", "shell", "sudo", "command", "revision", "effects", "result", "input_schema", "enabled_tools", "_internal"] {
+            let mut arguments = valid.clone();
+            arguments[reserved] = json!("BINDING_INPUT_SECRET");
+            cases.push((arguments, None));
+        }
+        for missing in ["host", "account", "count", "verbose"] {
+            let mut arguments = valid.clone();
+            arguments.as_object_mut().context("arguments object")?.remove(missing);
+            cases.push((arguments, None));
+        }
+        for (field, value) in [
+            ("account", json!("BINDING_INPUT_SECRET")),
+            ("account", json!("")),
+            ("account", json!("roo\u{0}t")),
+            ("account", json!("--help")),
+            ("count", json!(-3)),
+            ("count", json!(5)),
+            ("timeout_secs", json!(0)),
+            ("timeout_secs", json!(3)),
+        ] {
+            let mut arguments = valid.clone();
+            arguments[field] = value;
+            cases.push((arguments, Some("invalid_argument")));
+        }
+        for host in ["other", "read", "files", "private-binding-elevated.invalid", "unconfigured.invalid"] {
+            let mut arguments = valid.clone();
+            arguments["host"] = json!(host);
+            cases.push((arguments, Some("policy_denied")));
+        }
+        for (index, (arguments, code)) in cases.into_iter().enumerate() {
+            let id = 10 + index as u64;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_account","arguments":arguments}})).await?;
+            let response = server.response(id).await?;
+            binding_public_only(&serde_json::to_vec(&response)?)?;
+            if let Some(code) = code {
+                let result = &response["result"];
+                ensure!(result["isError"] == true, "case {index}: {response}");
+                ensure!(result["structuredContent"]["data"].is_null());
+                ensure!(result["structuredContent"]["error"]["code"] == code, "case {index}: {response}");
+                ensure!(result["structuredContent"]["error"]["remote_state_unknown"] == false);
+                let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().context("binding error text")?)?;
+                ensure!(text == result["structuredContent"]);
+            } else {
+                ensure!(response["error"]["code"] == -32602, "case {index}: {response}");
+            }
+        }
+        server.send(json!({"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        discovery_data(&server.response(200).await?["result"], "configured")?;
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    binding_public_only(&stderr)?;
+    let mut audited_rejections = 0;
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        if record["tool"] == "observe_account" {
+            audited_rejections += 1;
+            ensure!(record["identity_role"] == "ordinary");
+            ensure!(record["event"] == "reject");
+            ensure!(record["remote_state_unknown"] == false);
+            ensure!(record.get("program").is_none());
+            ensure!(record["binding_revision"] == "review-1");
+            ensure!(record["executor"] == "native_argv");
+        }
+    }
+    ensure!(
+        audited_rejections > 0,
+        "binding rejections were not audited"
+    );
+    ensure!(!directory.path().join("binding-must-not-probe").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_profiles_do_not_publish_enabled_native_bindings() -> Result<()> {
+    for profile in ["read-only-files", "files-only"] {
+        let config = NAMED_TOOL_CONFIG.replace(
+            "profile = \"actions-only\"",
+            &format!("profile = \"{profile}\""),
+        );
+        let (mut server, directory) = named_tools_server(&config)?;
+        let scenario = async {
+            server.initialize().await?;
+            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
+            let listed = server.response(2).await?;
+            let tools = listed["result"]["tools"].as_array().context("profile tools")?;
+            for name in ["observe_account", "change_account", "disabled_account"] {
+                ensure!(!tools.iter().any(|tool| tool["name"] == name));
+            }
+            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_account","arguments":{"host":"base","account":"root","count":0,"verbose":false}}})).await?;
+            ensure!(server.response(3).await?["error"]["code"] == -32602);
+            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            let response = server.response(4).await?;
+            for row in discovery_data(&response["result"], "configured")?["targets"].as_array().context("profile rows")? {
+                let operations = row["permitted_operations"].as_array().context("profile operations")?;
+                ensure!(!operations.contains(&json!("observe_account")));
+                ensure!(!operations.contains(&json!("change_account")));
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        ensure!(!directory.path().join("binding-must-not-probe").exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_named_tool_definitions_fail_before_mcp_without_private_values() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("private-binding-config.toml");
+    let mut invalid = Vec::new();
+    for (from, to) in [
+        (
+            "[\"observe_account\", \"change_account\"]",
+            "[\"BINDING_CONFIG_SECRET\"]",
+        ),
+        (
+            "[\"observe_account\", \"change_account\"]",
+            "[\"observe_account\", \"observe_account\"]",
+        ),
+        (
+            "authority = \"ordinary\"",
+            "authority = \"BINDING_CONFIG_SECRET\"",
+        ),
+        ("kind = \"native_argv\"", "kind = \"BINDING_CONFIG_SECRET\""),
+        (
+            "revision = \"review-1\"",
+            "revision = \"BINDING_CONFIG_SECRET value\"",
+        ),
+        (
+            "targets = [\"base\", \"read\", \"files\"]",
+            "targets = [\"BINDING_CONFIG_SECRET\"]",
+        ),
+        (
+            "program = \"/private/binding-program\"",
+            "program = \"BINDING_CONFIG_SECRET\"",
+        ),
+        (
+            "program = \"/private/binding-program\"",
+            "program = \"\\u0000BINDING_CONFIG_SECRET\"",
+        ),
+        (
+            "effects = [\"persistent_write\"]",
+            "effects = [\"BINDING_CONFIG_SECRET\"]",
+        ),
+        (
+            "additionalProperties = false",
+            "additionalProperties = true",
+        ),
+        (
+            "required = [\"account\", \"count\", \"verbose\"]",
+            "required = [\"account\", \"count\"]",
+        ),
+        ("enum = [\"root\", \"operator\"]", "enum = [\"root\", 17]"),
+        ("maxLength = 16", "maxLength = 4097"),
+        ("minimum = -2, maximum = 4", "minimum = 5, maximum = 4"),
+        ("timeout_secs = 2", "timeout_secs = 6"),
+        ("max_output_bytes = 1024", "max_output_bytes = 4097"),
+        ("\"private-binding-fixed\", \"--\", ", ""),
+        (
+            "{ input = \"account\" }",
+            "{ input = \"BINDING_CONFIG_SECRET\" }",
+        ),
+        (
+            "account = { type = \"string\"",
+            "account = { default = \"BINDING_CONFIG_SECRET\", type = \"string\"",
+        ),
+        ("[tools.disabled_account]", "[tools.ssh_exec]"),
+        ("[tools.disabled_account]", "[tools.ssh_sudo]"),
+        ("[tools.disabled_account]", "[tools.ssh_targets]"),
+        (
+            "program = \"/private/binding-disabled\"",
+            "program = \"BINDING_CONFIG_SECRET\"",
+        ),
+    ] {
+        invalid.push(NAMED_TOOL_CONFIG.replace(from, to));
+    }
+    invalid.push(NAMED_TOOL_CONFIG.replace("account", "sudo"));
+    for (index, config) in invalid.into_iter().enumerate() {
+        std::fs::write(&path, config)?;
+        let output = timeout(
+            Duration::from_secs(5),
+            command(&["--config", path.to_str().context("config path")?]).output(),
+        )
+        .await??;
+        ensure!(
+            !output.status.success(),
+            "accepted invalid binding case {index}"
+        );
+        ensure!(
+            output.stdout.is_empty(),
+            "invalid binding started MCP in case {index}"
+        );
+        binding_public_only(&output.stderr)?;
+        let stderr = std::str::from_utf8(&output.stderr)?;
+        ensure!(!stderr.contains("BINDING_CONFIG_SECRET"));
+        ensure!(!stderr.contains(path.to_str().context("config path")?));
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(
+            diagnostic["code"] == "invalid_config",
+            "case {index}: {diagnostic}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<()> {
+    let config = NAMED_TOOL_CONFIG.replace("profile = \"actions-only\"", "profile = \"baseline\"");
+    let (mut server, directory) = named_tools_server(&config)?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(2).await?;
+        let tools = listed["result"]["tools"]
+            .as_array()
+            .context("baseline tools")?;
+        let command_schema = &tools
+            .iter()
+            .find(|tool| tool["name"] == "ssh_run")
+            .context("actual command route")?["outputSchema"];
+        ensure!(command_schema.is_object());
+        for name in ["observe_account", "change_account"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .context("named command route")?;
+            ensure!(
+                tool["outputSchema"] == *command_schema,
+                "wrong command result schema for {name}"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    binding_public_only(&stderr)?;
+    ensure!(!directory.path().join("binding-must-not-probe").exists());
+    Ok(())
+}
