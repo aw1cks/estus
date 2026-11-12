@@ -5,9 +5,33 @@ use std::{
 };
 
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
-use crate::reply::ToolError;
+use crate::{command::MAX_COMMAND_BYTES, reply::ToolError, wire::MAX_RESPONSE_BYTES};
+
+const MAX_DESCRIPTION_BYTES: usize = 1024;
+const MAX_LABELS: usize = 16;
+const MAX_LABEL_KEY_BYTES: usize = 64;
+const MAX_LABEL_VALUE_BYTES: usize = 256;
+const MAX_METADATA_BYTES: usize = 65_536;
+
+const ORDINARY_OPERATIONS: &[&str] = &[
+    "ssh_exec",
+    "ssh_list_directory",
+    "ssh_read_file",
+    "ssh_run",
+    "ssh_stat",
+    "ssh_write_file",
+];
+const SUDO_OPERATIONS: &[&str] = &[
+    "ssh_exec",
+    "ssh_list_directory",
+    "ssh_read_file",
+    "ssh_run",
+    "ssh_stat",
+    "ssh_sudo",
+    "ssh_write_file",
+];
 
 #[derive(Parser)]
 #[command(version, about = "Stdio SSH MCP server")]
@@ -80,6 +104,10 @@ impl Default for Limits {
 struct Target {
     ssh_host: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
     sudo: Sudo,
 }
 
@@ -108,13 +136,62 @@ fn root_users() -> Vec<String> {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct TargetDiscovery<'a> {
     mode: TargetMode,
-    targets: Vec<TargetSummary<'a>>,
+    #[serde(serialize_with = "serialize_target_summaries")]
+    #[schemars(with = "Vec<TargetSummary<'a>>")]
+    targets: Option<&'a BTreeMap<String, Target>>,
+    limits: DiscoveryLimits,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct TargetSummary<'a> {
     name: &'a str,
     sudo_mode: SudoMode,
+    description: Option<&'a str>,
+    labels: &'a BTreeMap<String, String>,
+    permitted_operations: &'static [&'static str],
+    observed_capabilities: ObservedCapabilities,
+}
+
+// Select only public fields as each row is serialized. In particular, do not
+// allocate a summary Vec before the shared response-budget guard is applied.
+fn serialize_target_summaries<S: Serializer>(
+    targets: &Option<&BTreeMap<String, Target>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(targets.iter().flat_map(|targets| targets.iter()).map(
+        |(name, target)| TargetSummary {
+            name,
+            sudo_mode: target.sudo.mode(),
+            description: target.description.as_deref(),
+            labels: &target.labels,
+            permitted_operations: if target.sudo.permits_programs() {
+                SUDO_OPERATIONS
+            } else {
+                ORDINARY_OPERATIONS
+            },
+            observed_capabilities: ObservedCapabilities::Unknown,
+        },
+    ))
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ObservedCapabilities {
+    Unknown,
+}
+
+/// Resolved policy ceilings; escaping and JSON framing may reduce usable bytes.
+#[derive(Serialize, schemars::JsonSchema)]
+struct DiscoveryLimits {
+    connect_timeout_secs: u64,
+    operation_timeout_secs: u64,
+    max_timeout_secs: u64,
+    max_output_bytes: u64,
+    max_file_bytes: u64,
+    max_stdin_bytes: u64,
+    max_command_bytes: usize,
+    max_encoded_command_bytes: usize,
+    max_response_bytes: usize,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -151,6 +228,17 @@ impl Sudo {
             Self::Disabled => SudoMode::Disabled,
             Self::SameAccount { .. } => SudoMode::SameAccount,
             Self::SeparateIdentity { .. } => SudoMode::SeparateIdentity,
+        }
+    }
+
+    fn permits_programs(&self) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::SameAccount { programs, .. } | Self::SeparateIdentity { programs, .. } => {
+                programs
+                    .as_ref()
+                    .is_none_or(|programs| !programs.is_empty())
+            }
         }
     }
 }
@@ -291,15 +379,18 @@ impl Config {
             } else {
                 TargetMode::Open
             },
-            targets: self
-                .targets
-                .iter()
-                .flat_map(|targets| targets.iter())
-                .map(|(name, target)| TargetSummary {
-                    name,
-                    sudo_mode: target.sudo.mode(),
-                })
-                .collect(),
+            targets: self.targets.as_ref(),
+            limits: DiscoveryLimits {
+                connect_timeout_secs: self.limits.connect_timeout_secs,
+                operation_timeout_secs: self.limits.operation_timeout_secs,
+                max_timeout_secs: self.limits.max_timeout_secs,
+                max_output_bytes: self.limits.max_output_bytes,
+                max_file_bytes: self.limits.max_file_bytes,
+                max_stdin_bytes: self.limits.max_file_bytes,
+                max_command_bytes: MAX_COMMAND_BYTES,
+                max_encoded_command_bytes: MAX_COMMAND_BYTES,
+                max_response_bytes: MAX_RESPONSE_BYTES,
+            },
         }
     }
 
@@ -433,8 +524,40 @@ fn validate_targets(targets: &BTreeMap<String, Target>) -> Result<(), ConfigErro
         .values()
         .map(|target| target.ssh_host.as_str())
         .collect();
+    let mut metadata_remaining = MAX_METADATA_BYTES;
     for target in targets.values() {
         destination(&target.ssh_host, "targets.*.ssh_host")?;
+        if target
+            .description
+            .as_ref()
+            .is_some_and(|description| description.len() > MAX_DESCRIPTION_BYTES)
+        {
+            return Err(invalid("targets.*.description", "exceeds UTF-8 byte limit"));
+        }
+        if target.labels.len() > MAX_LABELS {
+            return Err(invalid("targets.*.labels", "exceeds label count limit"));
+        }
+        for (key, value) in &target.labels {
+            if key.is_empty() || key.len() > MAX_LABEL_KEY_BYTES {
+                return Err(invalid(
+                    "targets.*.labels",
+                    "keys must be nonempty and within UTF-8 byte limit",
+                ));
+            }
+            if value.len() > MAX_LABEL_VALUE_BYTES {
+                return Err(invalid("targets.*.labels.*", "exceeds UTF-8 byte limit"));
+            }
+        }
+        for bytes in target.description.iter().map(String::len).chain(
+            target
+                .labels
+                .iter()
+                .map(|(key, value)| key.len() + value.len()),
+        ) {
+            metadata_remaining = metadata_remaining
+                .checked_sub(bytes)
+                .ok_or_else(|| invalid("targets", "exceeds aggregate metadata UTF-8 byte limit"))?;
+        }
         let (users, programs) = match &target.sudo {
             Sudo::Disabled => continue,
             Sudo::SameAccount { users, programs } => (users, programs),
@@ -570,13 +693,28 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                     "logical names must be nonempty and contain no control characters",
                 ));
             }
-            let target = table(value, "targets.*", &["ssh_host", "sudo"])?;
+            let target = table(
+                value,
+                "targets.*",
+                &["ssh_host", "sudo", "description", "labels"],
+            )?;
             string(
                 target
                     .get("ssh_host")
                     .ok_or_else(|| invalid("targets.*.ssh_host", "required field is missing"))?,
                 "targets.*.ssh_host",
             )?;
+            if let Some(value) = target.get("description") {
+                string(value, "targets.*.description")?;
+            }
+            if let Some(value) = target.get("labels") {
+                let labels = value
+                    .as_table()
+                    .ok_or_else(|| invalid("targets.*.labels", "must be a table"))?;
+                for value in labels.values() {
+                    string(value, "targets.*.labels.*")?;
+                }
+            }
             if let Some(value) = target.get("sudo") {
                 let sudo = value
                     .as_table()
@@ -661,15 +799,13 @@ mod tests {
     #[test]
     fn missing_and_present_empty_targets_are_distinct() {
         let open = load_text("", &[]).unwrap();
-        assert_eq!(
-            serde_json::to_value(open.targets()).unwrap(),
-            serde_json::json!({"mode":"open", "targets":[]})
-        );
+        let open = serde_json::to_value(open.targets()).unwrap();
+        assert_eq!(open["mode"], "open");
+        assert_eq!(open["targets"], serde_json::json!([]));
         let empty = load_text("[targets]", &[]).unwrap();
-        assert_eq!(
-            serde_json::to_value(empty.targets()).unwrap(),
-            serde_json::json!({"mode":"configured", "targets":[]})
-        );
+        let empty = serde_json::to_value(empty.targets()).unwrap();
+        assert_eq!(empty["mode"], "configured");
+        assert_eq!(empty["targets"], serde_json::json!([]));
     }
 
     #[test]
@@ -689,21 +825,294 @@ mode = "same-account"
             &[],
         )
         .unwrap();
+        let discovery = serde_json::to_value(config.targets()).unwrap();
+        assert_eq!(discovery["mode"], "configured");
         assert_eq!(
-            serde_json::to_value(config.targets()).unwrap(),
-            serde_json::json!({
-                "mode":"configured", "targets":[
-                    {"name":"alpha", "sudo_mode":"same-account"},
-                    {"name":"zebra", "sudo_mode":"separate-identity"}
-                ]
-            })
+            discovery["targets"],
+            serde_json::json!([
+                {
+                    "name":"alpha", "sudo_mode":"same-account",
+                    "description":null, "labels":{},
+                    "permitted_operations":[
+                        "ssh_exec", "ssh_list_directory", "ssh_read_file", "ssh_run",
+                        "ssh_stat", "ssh_sudo", "ssh_write_file"
+                    ],
+                    "observed_capabilities":"unknown"
+                },
+                {
+                    "name":"zebra", "sudo_mode":"separate-identity",
+                    "description":null, "labels":{},
+                    "permitted_operations":[
+                        "ssh_exec", "ssh_list_directory", "ssh_read_file", "ssh_run",
+                        "ssh_stat", "ssh_sudo", "ssh_write_file"
+                    ],
+                    "observed_capabilities":"unknown"
+                }
+            ])
         );
+        assert!(!discovery.to_string().contains("secret"));
         match &config.targets.as_ref().unwrap()["alpha"].sudo {
             Sudo::SameAccount { users, programs } => {
                 assert_eq!(users, &["root"]);
                 assert!(programs.is_none());
             }
             _ => panic!("incorrect sudo mode"),
+        }
+    }
+
+    #[test]
+    fn metadata_bounds_count_utf8_bytes_and_accept_exact_limits() {
+        let text = |description: &str, key: &str, value: &str| {
+            format!(
+                "[targets.one]\nssh_host='ordinary'\ndescription='{description}'\n\
+                 [targets.one.labels]\n'{key}'='{value}'"
+            )
+        };
+        let description = "é".repeat(512);
+        let key = "é".repeat(32);
+        let value = "é".repeat(128);
+        assert!(load_text(&text(&description, &key, &value), &[]).is_ok());
+        for (text, field) in [
+            (
+                text(&format!("{description}a"), &key, &value),
+                "targets.*.description",
+            ),
+            (
+                text(&description, &format!("{key}a"), &value),
+                "targets.*.labels",
+            ),
+            (
+                text(&description, &key, &format!("{value}a")),
+                "targets.*.labels.*",
+            ),
+            (text("", "", ""), "targets.*.labels"),
+        ] {
+            assert_eq!(load_text(&text, &[]).err().unwrap().field, field);
+        }
+        let mut labels = String::from(
+            "[targets.one]\nssh_host='ordinary'\ndescription=''\n[targets.one.labels]\n",
+        );
+        for index in 0..16 {
+            labels.push_str(&format!("label{index}=''\n"));
+        }
+        assert!(load_text(&labels, &[]).is_ok());
+        labels.push_str("extra=''\n");
+        assert_eq!(
+            load_text(&labels, &[]).err().unwrap().field,
+            "targets.*.labels"
+        );
+    }
+
+    #[test]
+    fn aggregate_metadata_bounds_include_all_targets_keys_and_values() {
+        let mut text = String::new();
+        for index in 0..48 {
+            text.push_str(&format!(
+                "[targets.target{index}]\nssh_host='ordinary'\ndescription='{}'\n\
+                 [targets.target{index}.labels]\n'{}'='{}'\n",
+                "é".repeat(512),
+                "é".repeat(32),
+                "é".repeat(128),
+            ));
+        }
+        text.push_str(&format!(
+            "[targets.last]\nssh_host='ordinary'\ndescription='{}'\n",
+            "é".repeat(512),
+        ));
+        // 48 * (1024 + 64 + 256) + 1024 = 65536 bytes, all sudo disabled.
+        assert!(load_text(&text, &[]).is_ok());
+        text.push_str("[targets.last.labels]\na=''\n");
+        assert_eq!(load_text(&text, &[]).err().unwrap().field, "targets");
+    }
+
+    #[test]
+    fn metadata_schema_and_bound_failures_never_echo_operator_content() {
+        for (metadata, field) in [
+            ("description=42".to_owned(), "targets.*.description"),
+            ("labels='secret_payload'".to_owned(), "targets.*.labels"),
+            (
+                "labels={secret_payload=['secret_payload']}".to_owned(),
+                "targets.*.labels.*",
+            ),
+            (
+                format!("description='secret_payload{}'", "é".repeat(512)),
+                "targets.*.description",
+            ),
+            (
+                format!(
+                    "labels={{'secret_payload{}'='secret_payload'}}",
+                    "é".repeat(32)
+                ),
+                "targets.*.labels",
+            ),
+            (
+                format!(
+                    "labels={{secret_payload='secret_payload{}'}}",
+                    "é".repeat(128)
+                ),
+                "targets.*.labels.*",
+            ),
+        ] {
+            let text = format!(
+                "[targets.secret_payload]\nssh_host='private_alias'\n{metadata}\n\
+                 [targets.secret_payload.sudo]\nmode='disabled'"
+            );
+            let error = load_text(&text, &[]).err().unwrap();
+            assert_eq!(error.field, field);
+            for secret in ["secret_payload", "private_alias"] {
+                assert!(!error.to_string().contains(secret));
+                assert!(!format!("{error:?}").contains(secret));
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_is_advisory_and_empty_program_allowlists_do_not_advertise_sudo() {
+        let config = load_text(
+            r#"
+[targets.disabled]
+ssh_host='private-ordinary'
+description='sudo is available'
+labels={sudo='enabled'}
+[targets.empty_same]
+ssh_host='private-same'
+[targets.empty_same.sudo]
+mode='same-account'
+programs=[]
+[targets.empty_split]
+ssh_host='private-reader'
+[targets.empty_split.sudo]
+mode='separate-identity'
+ssh_host='private-elevated'
+users=['private_user']
+programs=[]
+[targets.allowed]
+ssh_host='private-allowed'
+[targets.allowed.sudo]
+mode='same-account'
+users=['private_user']
+programs=['/private/program']
+"#,
+            &[],
+        )
+        .unwrap();
+        let discovery = serde_json::to_value(config.targets()).unwrap();
+        let rows = discovery["targets"].as_array().unwrap();
+        for (name, mode) in [
+            ("disabled", "disabled"),
+            ("empty_same", "same-account"),
+            ("empty_split", "separate-identity"),
+        ] {
+            let row = rows.iter().find(|row| row["name"] == name).unwrap();
+            assert_eq!(row["sudo_mode"], mode);
+            assert_eq!(
+                row["permitted_operations"],
+                serde_json::json!([
+                    "ssh_exec",
+                    "ssh_list_directory",
+                    "ssh_read_file",
+                    "ssh_run",
+                    "ssh_stat",
+                    "ssh_write_file"
+                ])
+            );
+            assert_eq!(row["observed_capabilities"], "unknown");
+            assert_eq!(
+                config
+                    .resolve_sudo(name, "private_user", "/private/program")
+                    .err()
+                    .unwrap()
+                    .code,
+                "policy_denied"
+            );
+        }
+        let disabled = rows.iter().find(|row| row["name"] == "disabled").unwrap();
+        assert_eq!(disabled["description"], "sudo is available");
+        assert_eq!(disabled["labels"], serde_json::json!({"sudo":"enabled"}));
+        let allowed = rows.iter().find(|row| row["name"] == "allowed").unwrap();
+        assert!(
+            allowed["permitted_operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| operation == "ssh_sudo")
+        );
+        assert!(!discovery.to_string().contains("private"));
+    }
+
+    #[test]
+    fn discovery_limits_report_resolved_toml_and_environment_policy_without_clamping() {
+        let text = "[limits]\nconnect_timeout_secs=2\noperation_timeout_secs=3\n\
+                    max_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6";
+        let config = load_text(text, &[]).unwrap();
+        let limits = serde_json::to_value(config.targets()).unwrap()["limits"].clone();
+        assert_eq!(
+            limits,
+            serde_json::json!({
+                "connect_timeout_secs":2, "operation_timeout_secs":3, "max_timeout_secs":4,
+                "max_output_bytes":5, "max_file_bytes":6, "max_stdin_bytes":6,
+                "max_command_bytes":MAX_COMMAND_BYTES,
+                "max_encoded_command_bytes":MAX_COMMAND_BYTES,
+                "max_response_bytes":MAX_RESPONSE_BYTES
+            })
+        );
+        let config = load_text(
+            text,
+            &[
+                ("SSH_MCP_CONNECT_TIMEOUT_SECS", "7"),
+                ("SSH_MCP_OPERATION_TIMEOUT_SECS", "8"),
+                ("SSH_MCP_MAX_TIMEOUT_SECS", "9"),
+                ("SSH_MCP_MAX_OUTPUT_BYTES", "20000000"),
+                ("SSH_MCP_MAX_FILE_BYTES", "30000000"),
+            ],
+        )
+        .unwrap();
+        let limits = serde_json::to_value(config.targets()).unwrap()["limits"].clone();
+        assert_eq!(
+            limits,
+            serde_json::json!({
+                "connect_timeout_secs":7, "operation_timeout_secs":8, "max_timeout_secs":9,
+                "max_output_bytes":20000000, "max_file_bytes":30000000,
+                "max_stdin_bytes":30000000, "max_command_bytes":MAX_COMMAND_BYTES,
+                "max_encoded_command_bytes":MAX_COMMAND_BYTES,
+                "max_response_bytes":MAX_RESPONSE_BYTES
+            })
+        );
+    }
+
+    #[test]
+    fn discovery_schema_describes_public_summary_array_not_private_target_map() {
+        fn resolve<'a>(
+            document: &'a serde_json::Value,
+            node: &'a serde_json::Value,
+        ) -> &'a serde_json::Value {
+            match node["$ref"].as_str() {
+                Some(reference) => document
+                    .pointer(reference.strip_prefix('#').unwrap())
+                    .unwrap(),
+                None => node,
+            }
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(TargetDiscovery<'_>)).unwrap();
+        let targets = &schema["properties"]["targets"];
+        assert_eq!(targets["type"], "array");
+        let summary = &resolve(&schema, &targets["items"])["properties"];
+        for field in [
+            "description",
+            "labels",
+            "name",
+            "observed_capabilities",
+            "permitted_operations",
+            "sudo_mode",
+        ] {
+            assert!(summary.get(field).is_some(), "missing public field {field}");
+        }
+        let limits = resolve(&schema, &schema["properties"]["limits"]);
+        assert_eq!(limits["type"], "object");
+        assert!(limits["properties"].get("max_response_bytes").is_some());
+        let encoded = schema.to_string();
+        for private_field in ["ssh_host", "config_file", "\"users\"", "\"programs\""] {
+            assert!(!encoded.contains(private_field), "{private_field}");
         }
     }
 

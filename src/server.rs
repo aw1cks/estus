@@ -308,7 +308,7 @@ impl SshMcp {
 #[tool_router]
 impl SshMcp {
     #[tool(
-        description = "List configured logical targets without connecting. Open mode does not enumerate SSH configuration.",
+        description = "Discover configured logical targets, public advisory descriptions/labels, startup-permitted operations and resolved policy limits without connecting or probing. Permitted operations do not imply remote support or authorization; observed capabilities remain unknown. Limits are ceilings, further constrained by per-request escaping, request IDs and the response-wire budget. Open mode returns no target inventory and never enumerates SSH configuration. Backend aliases, credential/config paths and authentication state are not returned.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<Empty>(),
         output_schema = schema_for_type::<ToolReply<TargetDiscovery<'static>>>()
