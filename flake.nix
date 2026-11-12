@@ -29,8 +29,16 @@
         msrvLib = craneLib.overrideToolchain (p:
           (p.extend inputs.rust-overlay.overlays.default).rust-bin.stable."1.88.0".minimal
         );
+        fuzzLib = craneLib.overrideToolchain (p:
+          (p.extend inputs.rust-overlay.overlays.default).rust-bin.nightly."2026-11-10".default.override {
+            extensions = [ "rust-src" ];
+          }
+        );
         commonArgs = {
-          src = craneLib.cleanCargoSource ./.;
+          src = craneLib.cleanCargoSource (pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: _: path != "${toString ./.}/fuzz";
+          });
           strictDeps = true;
           doCheck = true;
         };
@@ -92,6 +100,12 @@
             pkgs.coreutils
             pkgs.docker-client
           ];
+        };
+        # Optional tooling only; normal builds/checks retain their stable toolchain.
+        devShells.fuzz = fuzzLib.devShell {
+          packages = [ pkgs.cargo-fuzz pkgs.clang ];
+          CC = "${pkgs.clang}/bin/clang";
+          CXX = "${pkgs.clang}/bin/clang++";
         };
       };
   };
