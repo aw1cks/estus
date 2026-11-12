@@ -1,0 +1,1 @@
+{"kind":"write","request":{"host":"target","path":"literal/file","content":"\u00e9\u0000\u96ea","encoding":"utf8"},"limit":6}

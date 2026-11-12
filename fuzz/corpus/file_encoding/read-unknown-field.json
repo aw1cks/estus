@@ -1,0 +1,1 @@
+{"kind":"read","request":{"host":"target","path":"relative/file","sudo":true},"bytes":[97],"limit":100,"eof":true}

@@ -1,0 +1,1 @@
+{"kind":"read","request":{"host":"target","path":"relative/file","max_bytes":18446744073709551615},"bytes":[0],"limit":18446744073709551615,"eof":true}

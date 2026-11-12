@@ -1,0 +1,1 @@
+{"kind":"read","request":{"host":"target","path":"relative/file","max_bytes":1},"bytes":[255],"limit":100,"eof":true}

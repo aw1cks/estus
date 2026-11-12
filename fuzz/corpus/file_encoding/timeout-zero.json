@@ -1,0 +1,1 @@
+{"kind":"write","request":{"host":"target","path":"literal/file","content":"x","encoding":"utf8","timeout_secs":0},"limit":100}

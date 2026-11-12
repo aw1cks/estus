@@ -1,0 +1,1 @@
+{"kind":"read","request":{"host":"target","path":"relative/file","offset":18446744073709551615},"bytes":[],"limit":100,"eof":true,"digest":"match"}

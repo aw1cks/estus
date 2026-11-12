@@ -1,0 +1,1 @@
+{"kind":"write","request":{"host":"target","path":"a\u0000b","content":"x","encoding":"utf8"},"limit":100}
