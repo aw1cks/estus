@@ -251,6 +251,14 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         let tools = listed["result"]["tools"].as_array().context("tools list")?;
         ensure!(tools.iter().any(|tool| tool["name"] == "ssh_targets"));
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+        let mut names: Vec<&str> = tools.iter()
+            .map(|tool| tool["name"].as_str().context("baseline tool name"))
+            .collect::<Result<_>>()?;
+        names.sort_unstable();
+        ensure!(names == [
+            "ssh_exec", "ssh_list_directory", "ssh_read_file", "ssh_run",
+            "ssh_stat", "ssh_targets", "ssh_write_file",
+        ], "omitting a profile changed the baseline inventory");
         let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
             .context("run absent from legacy discovery")?;
         ensure!(run["annotations"]["readOnlyHint"] == false);
@@ -1732,5 +1740,491 @@ async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()>
     let (status, stderr) = finished?;
     ensure!(status.success());
     ensure!(!String::from_utf8_lossy(&stderr).contains("private-empty-policy"));
+    Ok(())
+}
+
+// Every payload is valid for its route: a JSON-RPC rejection therefore proves
+// omission, rather than accidentally testing argument deserialization.
+fn profile_call_arguments(tool: &str, host: &str) -> Value {
+    match tool {
+        "ssh_exec" => json!({"host":host,"command":"true"}),
+        "ssh_run" => json!({"host":host,"argv":["/usr/bin/true"]}),
+        "ssh_sudo" => json!({"host":host,"argv":["/usr/bin/true"]}),
+        "ssh_write_file" => {
+            json!({"host":host,"path":"/private/profile-payload","content":"PROFILE_PAYLOAD"})
+        }
+        "ssh_read_file" | "ssh_stat" | "ssh_list_directory" => {
+            json!({"host":host,"path":"/private/profile-payload"})
+        }
+        _ => panic!("unexpected profile test tool"),
+    }
+}
+
+fn profile_policy_denied(response: &Value) -> Result<()> {
+    ensure!(
+        response.get("error").is_none(),
+        "route was not registered: {response}"
+    );
+    let result = &response["result"];
+    ensure!(result["isError"] == true, "{response}");
+    let structured = &result["structuredContent"];
+    ensure!(structured["data"].is_null());
+    ensure!(structured["error"]["code"] == "policy_denied", "{response}");
+    ensure!(structured["error"]["remote_state_unknown"] == false);
+    let text: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .context("policy error text")?,
+    )?;
+    ensure!(text == *structured);
+    let encoded = serde_json::to_string(response)?;
+    for secret in [
+        "profile-payload",
+        "PROFILE_PAYLOAD",
+        "private-backend",
+        "private-identity",
+        "read-only-files",
+        "files-only",
+        "actions-only",
+    ] {
+        ensure!(
+            !encoded.contains(secret),
+            "policy error leaked private input"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Result<()> {
+    let ordinary = [
+        "ssh_exec",
+        "ssh_list_directory",
+        "ssh_read_file",
+        "ssh_run",
+        "ssh_stat",
+        "ssh_sudo",
+        "ssh_write_file",
+    ];
+    for (profile, expected) in [
+        ("baseline", ordinary.as_slice()),
+        (
+            "read-only-files",
+            &["ssh_list_directory", "ssh_read_file", "ssh_stat"][..],
+        ),
+        (
+            "files-only",
+            &[
+                "ssh_list_directory",
+                "ssh_read_file",
+                "ssh_stat",
+                "ssh_write_file",
+            ][..],
+        ),
+        ("actions-only", &[][..]),
+    ] {
+        // An empty configured target set must not change global publication.
+        for target_kind in ["sudo", "ordinary", "empty"] {
+            for modern in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let path = directory.path().join("operator.toml");
+                let replacement = directory.path().join("replacement.conf");
+                let probe = directory.path().join("must-not-probe");
+                std::fs::write(
+                    &replacement,
+                    format!(
+                        "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+                        probe.display()
+                    ),
+                )?;
+                let target = match target_kind {
+                    "sudo" => {
+                        "[targets.one]\nssh_host = 'private-backend.invalid'\nprofile = 'baseline'\n[targets.one.sudo]\nmode = 'same-account'\n"
+                    }
+                    "ordinary" => {
+                        "[targets.one]\nssh_host = 'private-backend.invalid'\nprofile = 'baseline'\n"
+                    }
+                    _ => "[targets]\n",
+                };
+                std::fs::write(
+                    &path,
+                    format!(
+                        "profile = '{profile}'\n[ssh]\nconfig_file = 'replacement.conf'\n{target}"
+                    ),
+                )?;
+                let mut server =
+                    Server::start(&["--config", path.to_str().context("config path")?])?;
+                let scenario = async {
+                    if !modern {
+                        server.initialize().await?;
+                    }
+                    let mut expected_operations: Vec<&str> = expected
+                        .iter()
+                        .copied()
+                        .filter(|name| *name != "ssh_sudo" || target_kind == "sudo")
+                        .collect();
+                    expected_operations.sort_unstable();
+                    let mut expected_routes = expected_operations.clone();
+                    expected_routes.push("ssh_targets");
+                    expected_routes.sort_unstable();
+                    let params = json!({});
+                    let request = if modern {
+                        modern_request(json!(2), "tools/list", params, MODERN_VERSION)
+                    } else {
+                        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":params})
+                    };
+                    server.send(request).await?;
+                    let listed = server.response(2).await?;
+                    let mut names: Vec<&str> = listed["result"]["tools"]
+                        .as_array()
+                        .context("profile tool list")?
+                        .iter()
+                        .map(|tool| tool["name"].as_str().context("tool name"))
+                        .collect::<Result<_>>()?;
+                    names.sort_unstable();
+                    ensure!(
+                        names == expected_routes,
+                        "{profile}/{target_kind}/{modern}: {names:?}"
+                    );
+                    let params = json!({"name":"ssh_targets","arguments":{}});
+                    let request = if modern {
+                        modern_request(json!(3), "tools/call", params, MODERN_VERSION)
+                    } else {
+                        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":params})
+                    };
+                    server.send(request).await?;
+                    let discovered = server.response(3).await?;
+                    let data = discovery_data(&discovered["result"], "configured")?;
+                    if target_kind == "empty" {
+                        ensure!(data["targets"] == json!([]));
+                    } else {
+                        ensure!(data["targets"].as_array().context("targets")?.len() == 1);
+                        ensure!(
+                            data["targets"][0]["permitted_operations"]
+                                == json!(expected_operations)
+                        );
+                        ensure!(data["targets"][0]["observed_capabilities"] == "unknown");
+                    }
+                    for (index, tool) in ordinary.iter().enumerate() {
+                        if expected_routes.contains(tool) {
+                            continue;
+                        }
+                        let id = 10 + index as u64;
+                        let params =
+                            json!({"name":tool,"arguments":profile_call_arguments(tool, "one")});
+                        let request = if modern {
+                            modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                        } else {
+                            json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                        };
+                        server.send(request).await?;
+                        let rejected = server.response(id).await?;
+                        ensure!(
+                            rejected["error"]["code"] == -32602,
+                            "{profile}/{tool}: {rejected}"
+                        );
+                        ensure!(rejected.get("result").is_none());
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                let finished = server.finish().await;
+                scenario?;
+                let (status, stderr) = finished?;
+                ensure!(status.success());
+                no_remote_dispatch(&stderr)?;
+                ensure!(!probe.exists(), "hidden route probed SSH");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("operator.toml");
+    let replacement = directory.path().join("replacement.conf");
+    let probe = directory.path().join("profile-probe");
+    std::fs::write(
+        &replacement,
+        format!(
+            "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+            probe.display()
+        ),
+    )?;
+    std::fs::write(
+        &path,
+        indoc::indoc! {"
+        profile = 'baseline'
+        [ssh]
+        config_file = 'replacement.conf'
+        [limits]
+        connect_timeout_secs = 1
+        operation_timeout_secs = 2
+        [targets.read]
+        ssh_host = 'private-backend-read.invalid'
+        profile = 'read-only-files'
+        [targets.read.sudo]
+        mode = 'separate-identity'
+        ssh_host = 'private-identity.invalid'
+        [targets.files]
+        ssh_host = 'private-backend-files.invalid'
+        profile = 'files-only'
+        [targets.files.sudo]
+        mode = 'same-account'
+        [targets.actions]
+        ssh_host = 'private-backend-actions.invalid'
+        profile = 'actions-only'
+        [targets.actions.sudo]
+        mode = 'same-account'
+        [targets.base]
+        ssh_host = 'private-backend-base.invalid'
+        profile = 'baseline'
+        [targets.empty]
+        ssh_host = 'private-backend-empty.invalid'
+        profile = 'baseline'
+        [targets.empty.sudo]
+        mode = 'same-account'
+        programs = []
+    "},
+    )?;
+    let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(2).await?;
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 8);
+        server
+            .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let discovered = server.response(3).await?;
+        let rows = discovery_data(&discovered["result"], "configured")?["targets"]
+            .as_array()
+            .context("target rows")?;
+        for (name, expected) in [
+            ("actions", json!([])),
+            (
+                "base",
+                json!([
+                    "ssh_exec",
+                    "ssh_list_directory",
+                    "ssh_read_file",
+                    "ssh_run",
+                    "ssh_stat",
+                    "ssh_write_file"
+                ]),
+            ),
+            (
+                "empty",
+                json!([
+                    "ssh_exec",
+                    "ssh_list_directory",
+                    "ssh_read_file",
+                    "ssh_run",
+                    "ssh_stat",
+                    "ssh_write_file"
+                ]),
+            ),
+            (
+                "files",
+                json!([
+                    "ssh_list_directory",
+                    "ssh_read_file",
+                    "ssh_stat",
+                    "ssh_write_file"
+                ]),
+            ),
+            (
+                "read",
+                json!(["ssh_list_directory", "ssh_read_file", "ssh_stat"]),
+            ),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row["name"] == name)
+                .context("target row")?;
+            ensure!(row["permitted_operations"] == expected, "{name}: {row}");
+        }
+        let mut id = 10;
+        for (host, forbidden) in [
+            (
+                "read",
+                &["ssh_exec", "ssh_run", "ssh_write_file", "ssh_sudo"][..],
+            ),
+            ("files", &["ssh_exec", "ssh_run", "ssh_sudo"][..]),
+            (
+                "actions",
+                &[
+                    "ssh_exec",
+                    "ssh_run",
+                    "ssh_write_file",
+                    "ssh_sudo",
+                    "ssh_read_file",
+                    "ssh_stat",
+                    "ssh_list_directory",
+                ][..],
+            ),
+            ("base", &["ssh_sudo"][..]),
+            ("empty", &["ssh_sudo"][..]),
+        ] {
+            for tool in forbidden {
+                server
+                    .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                    "params":{"name":tool,"arguments":profile_call_arguments(tool,host)}}))
+                    .await?;
+                profile_policy_denied(&server.response(id).await?)?;
+                ensure!(!probe.exists(), "{host}/{tool}: denied request probed SSH");
+                id += 1;
+            }
+        }
+        // Positive dispatch is exercised against real sshd/SFTP by the native
+        // profile scenario. Sandboxed checks must never launch SSH.
+        ensure!(!probe.exists(), "denied requests probed SSH configuration");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    for line in stderr
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["event"] != "master_start",
+            "profile denial launched SSH"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
+    let (mut server, directory) = server_with_config("profile = 'actions-only'\n[targets]\n")?;
+    let scenario = async {
+        server.initialize().await?;
+        for (index, arguments) in [
+            json!({"profile":"baseline"}),
+            json!({"host":"one","command":"true","profile":"baseline"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tool = if index == 0 {
+                "ssh_targets"
+            } else {
+                "ssh_exec"
+            };
+            let id = 10 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":tool,"arguments":arguments}}))
+                .await?;
+            ensure!(server.response(id).await?["error"]["code"] == -32602);
+        }
+        std::fs::write(
+            directory.path().join("operator.toml"),
+            "profile = 'baseline'\n[targets]\n",
+        )?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(20).await?;
+        let tools = listed["result"]["tools"]
+            .as_array()
+            .context("immutable tool list")?;
+        ensure!(tools.len() == 1 && tools[0]["name"] == "ssh_targets");
+        for (index, tool) in [
+            "ssh_exec",
+            "ssh_run",
+            "ssh_sudo",
+            "ssh_read_file",
+            "ssh_stat",
+            "ssh_list_directory",
+            "ssh_write_file",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 30 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":tool,"arguments":profile_call_arguments(tool,"one")}}))
+                .await?;
+            let response = server.response(id).await?;
+            ensure!(response["error"]["code"] == -32602 && response.get("result").is_none());
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("private-profile-config.toml");
+    for value in [
+        "'private-profile-secret'",
+        "['private-profile-secret']",
+        "42",
+        "true",
+        "{ private_profile_secret = 'private-profile-secret' }",
+    ] {
+        for target in [false, true] {
+            let text = if target {
+                format!(
+                    "[targets.private_profile_secret]\nssh_host = 'private-backend.invalid'\nprofile = {value}\n"
+                )
+            } else {
+                format!("profile = {value}\n[targets]\n")
+            };
+            std::fs::write(&path, text)?;
+            let output = timeout(
+                Duration::from_secs(5),
+                command(&["--config", path.to_str().context("config path")?]).output(),
+            )
+            .await??;
+            ensure!(!output.status.success(), "accepted profile {value}");
+            ensure!(output.stdout.is_empty(), "invalid profile started MCP");
+            let stderr = std::str::from_utf8(&output.stderr)?;
+            for secret in [
+                "private-profile-secret",
+                "private_profile_secret",
+                "private-backend",
+                path.to_str().context("config path")?,
+            ] {
+                ensure!(
+                    !stderr.contains(secret),
+                    "profile diagnostic reflected private input"
+                );
+            }
+            let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+            ensure!(diagnostic["code"] == "invalid_config");
+            let field = if target {
+                "targets.*.profile"
+            } else {
+                "profile"
+            };
+            ensure!(
+                diagnostic["message"]
+                    .as_str()
+                    .context("configuration diagnostic")?
+                    .starts_with(&format!("{field}:")),
+                "wrong profile diagnostic field: {diagnostic}"
+            );
+        }
+    }
     Ok(())
 }
