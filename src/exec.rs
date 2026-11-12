@@ -114,6 +114,18 @@ pub(crate) async fn run(
                     command.arg("-c").arg(shell_script(script, cwd));
                     command
                 }
+                Invocation::Argv { argv, cwd } => {
+                    let mut command = if let Some(cwd) = cwd {
+                        let mut command = session.command("cd");
+                        // Only fixed syntax is raw; cwd and argv remain escaped data.
+                        command.arg("--").arg(cwd).raw_arg("&& exec");
+                        command
+                    } else {
+                        session.command("exec")
+                    };
+                    command.arg("--").args(argv);
+                    command
+                }
                 Invocation::Sudo { argv, user } => {
                     let mut command = session.command("sudo");
                     command.args(sudo_arguments(user)).args(argv);

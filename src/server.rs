@@ -21,7 +21,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     audit::{Audit, Metadata},
-    command::{ExecRequest, Invocation, SudoRequest},
+    command::{ExecRequest, Invocation, RunRequest, SudoRequest},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
     exec::{self, RunContext},
     filedata::{
@@ -358,6 +358,20 @@ impl SshMcp {
     }
 
     #[tool(
+        description = "Execute an explicit argv on the ordinary SSH identity, with optional absolute cwd and bounded stdin. Executables may be paths or remote-PATH names. Argument boundaries are preserved, but the remote POSIX login shell still participates: this is not remote execve or a sandbox. Use ssh_exec for shell syntax/builtins. Potentially destructive and non-idempotent; ordinary authority can bypass same-account sudo approval separation. Timeout/cancellation closes only this channel, remote work may continue, and operations are never replayed. Output may be truncated within the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<RunRequest>(),
+        output_schema = schema_for_type::<ToolReply<CommandData>>()
+    )]
+    async fn ssh_run(
+        &self,
+        Arguments(request): Arguments<RunRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.command(Operation::Run(request), context).await
+    }
+
+    #[tool(
         description = "Read a bounded range through an independent ordinary-identity SFTP channel. Paths are literal: no shell, tilde, environment or wildcard expansion, and no path sandbox. UTF-8 is strict, including split codepoints; use base64 for arbitrary bytes. content_sha256 is lowercase SHA-256 of returned raw bytes, excluding lookahead and before encoding. Optional expected_content_sha256 must be 64 hex characters; mismatch returns checksum_mismatch without content. This verifies only that range, not a whole-file snapshot. Reads follow server symlink semantics. No sudo, shell/SCP fallback, remote hash helper, installation or automatic retries/replay. Timeout/cancellation disconnects only this channel; remote completion is not guaranteed. The requested lossless range must fit both the configured file cap and fixed 16 MiB reply limit.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ReadRequest>(),
@@ -430,6 +444,7 @@ impl SshMcp {
 
 enum Operation {
     Exec(ExecRequest),
+    Run(RunRequest),
     Sudo(SudoRequest),
 }
 
@@ -437,6 +452,8 @@ impl Operation {
     fn metadata<'a>(&'a self, config: &Config, request_id: &'a RequestId) -> Metadata<'a> {
         let (tool, host, user, program) = match self {
             Self::Exec(request) => ("ssh_exec", request.host.as_str(), None, None),
+            // Arbitrary executable/argv are payload, not safe audit metadata.
+            Self::Run(request) => ("ssh_run", request.host.as_str(), None, None),
             Self::Sudo(request) => (
                 "ssh_sudo",
                 request.host.as_str(),
@@ -469,6 +486,10 @@ impl Operation {
                 request.validate(config.limits().max_file_bytes)?;
                 (config.resolve(&request.host)?, request.timeout_secs)
             }
+            Self::Run(request) => {
+                request.validate(config.limits().max_file_bytes)?;
+                (config.resolve(&request.host)?, request.timeout_secs)
+            }
             Self::Sudo(request) => {
                 request.validate(config.limits().max_file_bytes)?;
                 (
@@ -486,6 +507,13 @@ impl Operation {
                 Invocation::Shell {
                     command: &request.command,
                     shell: request.shell,
+                    cwd: request.cwd.as_deref(),
+                },
+                request.stdin.as_deref(),
+            ),
+            Self::Run(request) => (
+                Invocation::Argv {
+                    argv: &request.argv,
                     cwd: request.cwd.as_deref(),
                 },
                 request.stdin.as_deref(),

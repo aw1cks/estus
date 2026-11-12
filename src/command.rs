@@ -41,6 +41,16 @@ pub(crate) struct ExecRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct RunRequest {
+    pub host: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub stdin: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SudoRequest {
     pub host: String,
     pub argv: Vec<String>,
@@ -68,17 +78,28 @@ impl ExecRequest {
                 "command must be nonempty, NUL-free, and at most 65536 UTF-8 bytes",
             ));
         }
-        if self
-            .cwd
-            .as_ref()
-            .is_some_and(|cwd| !cwd.starts_with('/') || cwd.contains('\0'))
-        {
-            return Err(invalid("cwd must be an absolute path without NUL"));
-        }
+        validate_cwd(self.cwd.as_deref())?;
         validate_common(self.stdin.as_deref(), self.timeout_secs, max_stdin_bytes)?;
         Invocation::Shell {
             command: &self.command,
             shell: self.shell,
+            cwd: self.cwd.as_deref(),
+        }
+        .encoded_len()
+        .map(|_| ())
+    }
+}
+
+impl RunRequest {
+    pub(crate) fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
+        if self.argv.first().is_none_or(String::is_empty) {
+            return Err(invalid("argv must contain a nonempty executable"));
+        }
+        validate_argv(&self.argv)?;
+        validate_cwd(self.cwd.as_deref())?;
+        validate_common(self.stdin.as_deref(), self.timeout_secs, max_stdin_bytes)?;
+        Invocation::Argv {
+            argv: &self.argv,
             cwd: self.cwd.as_deref(),
         }
         .encoded_len()
@@ -96,15 +117,7 @@ impl SudoRequest {
                 "argv[0] must be an absolute executable path without a trailing slash",
             ));
         }
-        let mut bytes = 0usize;
-        for argument in &self.argv {
-            if argument.contains('\0') || argument.len() > MAX_COMMAND_BYTES - bytes {
-                return Err(invalid(
-                    "argv must be NUL-free and at most 65536 combined UTF-8 bytes",
-                ));
-            }
-            bytes += argument.len();
-        }
+        validate_argv(&self.argv)?;
         // Match the configured policy's named-account syntax, excluding sudo options and IDs.
         if self.user.is_empty()
             || !self.user.bytes().enumerate().all(|(index, byte)| {
@@ -125,6 +138,26 @@ impl SudoRequest {
     }
 }
 
+fn validate_argv(argv: &[String]) -> Result<(), ToolError> {
+    let mut bytes = 0usize;
+    for argument in argv {
+        if argument.contains('\0') || argument.len() > MAX_COMMAND_BYTES - bytes {
+            return Err(invalid(
+                "argv must be NUL-free and at most 65536 combined UTF-8 bytes",
+            ));
+        }
+        bytes += argument.len();
+    }
+    Ok(())
+}
+
+fn validate_cwd(cwd: Option<&str>) -> Result<(), ToolError> {
+    if cwd.is_some_and(|cwd| !cwd.starts_with('/') || cwd.contains('\0')) {
+        return Err(invalid("cwd must be an absolute path without NUL"));
+    }
+    Ok(())
+}
+
 fn validate_common(
     stdin: Option<&str>,
     timeout_secs: Option<u64>,
@@ -143,6 +176,10 @@ pub(crate) enum Invocation<'a> {
     Shell {
         command: &'a str,
         shell: Shell,
+        cwd: Option<&'a str>,
+    },
+    Argv {
+        argv: &'a [String],
         cwd: Option<&'a str>,
     },
     Sudo {
@@ -237,6 +274,23 @@ impl Invocation<'_> {
                 }
                 script.add(command)?;
                 append_argument(&mut bytes, script.finish()?)?;
+                Ok(bytes)
+            }
+            Self::Argv { argv, cwd } => {
+                let mut bytes = if let Some(cwd) = cwd {
+                    let mut bytes = escaped_len("cd")?;
+                    append_argument(&mut bytes, escaped_len("--")?)?;
+                    append_argument(&mut bytes, escaped_len(cwd)?)?;
+                    // The sole raw argument in the builder, including its internal space.
+                    append_argument(&mut bytes, "&& exec".len())?;
+                    bytes
+                } else {
+                    escaped_len("exec")?
+                };
+                append_argument(&mut bytes, escaped_len("--")?)?;
+                for argument in *argv {
+                    append_argument(&mut bytes, escaped_len(argument)?)?;
+                }
                 Ok(bytes)
             }
             Self::Sudo { argv, user } => {
@@ -455,6 +509,115 @@ mod tests {
         let mut request = exec("cat".into());
         request.stdin = Some("é\0".into());
         assert!(request.validate(3).is_ok());
+        assert!(request.validate(2).is_err());
+        request.timeout_secs = Some(0);
+        assert!(request.validate(3).is_err());
+    }
+
+    fn run(argv: Vec<String>) -> RunRequest {
+        RunRequest {
+            host: "target".into(),
+            argv,
+            cwd: None,
+            stdin: None,
+            timeout_secs: None,
+        }
+    }
+
+    fn actual_run_encoding(argv: &[String], cwd: Option<&str>) -> String {
+        let escape =
+            |argument: &str| shell_escape::unix::escape(Cow::Borrowed(argument)).into_owned();
+        let prefix = match cwd {
+            Some(cwd) => format!("cd -- {} && exec --", escape(cwd)),
+            None => "exec --".into(),
+        };
+        argv.iter().fold(prefix, |mut encoded, argument| {
+            encoded.push(' ');
+            encoded.push_str(&escape(argument));
+            encoded
+        })
+    }
+
+    #[test]
+    fn run_encoding_counts_literal_argv_and_only_the_fixed_raw_join() {
+        for (program, cwd) in [
+            ("printf", None),
+            ("./relative", Some("/plain")),
+            ("/bin/printf", Some("/space ' !\n")),
+            ("NAME=value", None),
+            ("if", Some("/")),
+            ("-option", None),
+        ] {
+            let argv = [program, "", "'!", "$(touch nope); *\n", "é🙂"].map(str::to_owned);
+            let expected = actual_run_encoding(&argv, cwd);
+            assert_eq!(
+                Invocation::Argv { argv: &argv, cwd }.encoded_len().unwrap(),
+                expected.len(),
+                "program {program:?}, cwd {cwd:?}"
+            );
+            let mut request = run(Vec::from(argv));
+            request.cwd = cwd.map(str::to_owned);
+            request.validate(0).unwrap();
+        }
+    }
+
+    #[test]
+    fn run_encoded_cap_includes_prefix_cwd_quotes_and_empty_arguments() {
+        for (cwd, argument) in [(None, ""), (Some("/' !"), "'!")] {
+            let mut request = run(vec!["x".into(), argument.into(), String::new()]);
+            request.cwd = cwd.map(str::to_owned);
+            let overhead = actual_run_encoding(&request.argv, cwd).len();
+            // Keep the empty argument and grow a separate safe argument to the cap.
+            request
+                .argv
+                .push("x".repeat(MAX_COMMAND_BYTES - overhead - 1));
+            assert_eq!(
+                actual_run_encoding(&request.argv, cwd).len(),
+                MAX_COMMAND_BYTES
+            );
+            assert_eq!(
+                Invocation::Argv {
+                    argv: &request.argv,
+                    cwd
+                }
+                .encoded_len()
+                .unwrap(),
+                MAX_COMMAND_BYTES
+            );
+            request.validate(0).unwrap();
+            request.argv.last_mut().unwrap().push('x');
+            assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+        }
+        // Empty arguments have no raw payload, but their quotes and separators count.
+        let mut request = run(vec!["xx".into()]);
+        request.argv.resize_with(21_843, String::new);
+        assert_eq!(
+            actual_run_encoding(&request.argv, None).len(),
+            MAX_COMMAND_BYTES
+        );
+        request.validate(0).unwrap();
+        request.argv.push(String::new());
+        assert!(request.validate(0).is_err());
+    }
+
+    #[test]
+    fn run_rejects_invalid_program_arguments_cwd_stdin_and_timeout() {
+        for argv in [
+            vec![],
+            vec![String::new()],
+            vec!["bad\0program".into()],
+            vec!["printf".into(), "bad\0argument".into()],
+        ] {
+            assert_eq!(run(argv).validate(0).unwrap_err().code, "invalid_argument");
+        }
+        let mut request = run(vec!["cat".into()]);
+        for cwd in ["", "relative", "/bad\0path"] {
+            request.cwd = Some(cwd.into());
+            assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+        }
+        request.cwd = Some("/with ' quote\nand newline".into());
+        request.stdin = Some("é\0".into());
+        request.validate(3).unwrap();
         assert!(request.validate(2).is_err());
         request.timeout_secs = Some(0);
         assert!(request.validate(3).is_err());

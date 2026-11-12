@@ -208,6 +208,11 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         let tools = listed["result"]["tools"].as_array().context("tools list")?;
         ensure!(tools.iter().any(|tool| tool["name"] == "ssh_targets"));
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+        let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
+            .context("run absent from legacy discovery")?;
+        ensure!(run["annotations"]["readOnlyHint"] == false);
+        ensure!(run["annotations"]["destructiveHint"] == true);
+        ensure!(run["annotations"]["idempotentHint"] == false);
         let write = tools.iter().find(|tool| tool["name"] == "ssh_write_file")
             .context("write absent from legacy discovery")?;
         ensure!(write["annotations"]["readOnlyHint"] == false);
@@ -320,7 +325,18 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
     let path = dir.path().join("operator.toml");
     std::fs::write(
         &path,
-        "[targets.allowed]\nssh_host='ordinary.invalid'\n[targets.allowed.sudo]\nmode='separate-identity'\nssh_host='privileged.invalid'\nprograms=['/usr/bin/id']\n[targets.disabled]\nssh_host='disabled.invalid'\n",
+        indoc::indoc! {"
+            [limits]
+            max_file_bytes = 64
+            [targets.allowed]
+            ssh_host = 'ordinary.invalid'
+            [targets.allowed.sudo]
+            mode = 'separate-identity'
+            ssh_host = 'privileged.invalid'
+            programs = ['/usr/bin/id']
+            [targets.disabled]
+            ssh_host = 'disabled.invalid'
+        "},
     )?;
     let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
     let scenario = async {
@@ -329,13 +345,16 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
         let listed = server.response(2).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
         ensure!(tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
-        for (index, args) in [
-            json!({"host":"allowed","command":["DO_NOT_LOG_PAYLOAD"]}),
-            json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","shell":"interactive"}),
-            json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","sudo":true}),
+        for (index, (tool, args)) in [
+            ("ssh_exec", json!({"host":"allowed","command":["DO_NOT_LOG_PAYLOAD"]})),
+            ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","shell":"interactive"})),
+            ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","sudo":true})),
+            ("ssh_run", json!({"host":"allowed","argv":"DO_NOT_LOG_PAYLOAD"})),
+            ("ssh_run", json!({"host":"allowed","argv":["true",17]})),
+            ("ssh_run", json!({"host":"allowed","argv":["true"],"env":{"SECRET":"DO_NOT_LOG_PAYLOAD"}})),
         ].into_iter().enumerate() {
             let id = 10 + index as u64;
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"ssh_exec","arguments":args}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}})).await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602);
         }
         for (index, (tool, args, code)) in [
@@ -344,6 +363,15 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
             ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","timeout_secs":601}), "invalid_argument"),
             ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","cwd":"relative"}), "invalid_argument"),
             ("ssh_exec", json!({"host":"allowed","command":"bad\u{0}DO_NOT_LOG_PAYLOAD"}), "invalid_argument"),
+            ("ssh_run", json!({"host":"ordinary.invalid","argv":["DO_NOT_LOG_PAYLOAD"]}), "policy_denied"),
+            ("ssh_run", json!({"host":"allowed","argv":[]}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":[""]}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":["bad\u{0}DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":["true","bad\u{0}DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":["true"],"cwd":"relative"}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":["true"],"timeout_secs":0}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":["true"],"timeout_secs":601}), "invalid_argument"),
+            ("ssh_run", json!({"host":"allowed","argv":["true"],"stdin":"λ".repeat(33)}), "invalid_argument"),
             ("ssh_sudo", json!({"host":"disabled","argv":["/usr/bin/id"]}), "policy_denied"),
             ("ssh_sudo", json!({"host":"allowed","user":"service","argv":["/usr/bin/id"]}), "policy_denied"),
             ("ssh_sudo", json!({"host":"allowed","argv":["/bin/id"]}), "policy_denied"),
@@ -411,6 +439,21 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
                 "ssh_exec",
                 // Both the raw cwd and inner script fit; outer shell escaping does not.
                 json!({"host":"allowed","command":"true","cwd":format!("/{}", "'".repeat(8_000))}),
+            ),
+            (
+                "ordinary argv quote expansion",
+                "ssh_run",
+                json!({"host":"allowed","argv":["true","'".repeat(20_000)]}),
+            ),
+            (
+                "ordinary cwd quote expansion",
+                "ssh_run",
+                json!({"host":"allowed","argv":["true"],"cwd":format!("/{}", "'".repeat(20_000))}),
+            ),
+            (
+                "empty ordinary arguments",
+                "ssh_run",
+                json!({"host":"allowed","argv":&argv}),
             ),
             (
                 "empty sudo arguments",
@@ -664,10 +707,15 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_write_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+        let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
+            .context("run absent from modern discovery")?;
+        ensure!(run["annotations"]["readOnlyHint"] == false);
+        ensure!(run["annotations"]["destructiveHint"] == true);
+        ensure!(run["annotations"]["idempotentHint"] == false);
         let write = tools.iter().find(|tool| tool["name"] == "ssh_write_file")
             .context("write absent from modern discovery")?;
         ensure!(write["annotations"]["readOnlyHint"] == false);
