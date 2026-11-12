@@ -2,6 +2,8 @@ mod audit;
 mod command;
 mod config;
 mod exec;
+mod filedata;
+mod filemeta;
 mod files;
 mod reply;
 mod server;

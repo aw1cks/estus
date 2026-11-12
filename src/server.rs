@@ -24,10 +24,11 @@ use crate::{
     command::{ExecRequest, Invocation, SudoRequest},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
     exec::{self, RunContext},
-    files::{
-        self, FileContext, ListData, ListRequest, ReadData, ReadRequest, StatData, StatRequest,
-        WriteData, WriteRequest,
+    filedata::{
+        ListData, ListRequest, ReadData, ReadRequest, StatRequest, WriteData, WriteRequest,
     },
+    filemeta::StatData,
+    files::{self, FileContext},
     reply::{CommandData, Termination, ToolError, ToolReply},
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
