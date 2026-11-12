@@ -3015,6 +3015,181 @@ async fn ssh_list_directory() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_startup_file_profiles() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let config = fixture.root.path().join("file-profiles.toml");
+        let ssh_config = serde_json::to_string(&fixture.ssh_config.to_string_lossy())?;
+        fs::write(
+            &config,
+            formatdoc! {"
+            profile = 'files-only'
+            [ssh]
+            config_file = {ssh_config}
+            [targets.allowed]
+            ssh_host = 'plain'
+            profile = 'baseline'
+            [targets.allowed.sudo]
+            mode = 'same-account'
+            users = ['root']
+            programs = ['/usr/bin/true']
+            [targets.locked]
+            ssh_host = 'plain'
+            profile = 'read-only-files'
+        "},
+        )?;
+        let directory = fixture.root.path().join("profile-owned-files");
+        fs::create_dir(&directory)?;
+        let file = directory.join("preserved");
+        fs::write(&file, b"abc")?;
+        let client = Client::start(&config).await?;
+        let cases =
+            async {
+                let initial_auth = fixture.authentications();
+                let listed =
+                    timeout(Duration::from_secs(5), client.service.list_tools(None)).await??;
+                let mut names: Vec<_> =
+                    listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
+                names.sort_unstable();
+                ensure!(
+                    names
+                        == [
+                            "ssh_list_directory",
+                            "ssh_read_file",
+                            "ssh_stat",
+                            "ssh_targets",
+                            "ssh_write_file",
+                        ],
+                    "files-only published an unexpected route: {names:?}"
+                );
+
+                // These valid payloads must fail routing, not argument validation.
+                // The explicit baseline target must not restore global escape routes;
+                // configured sudo availability must not restore ssh_sudo either.
+                for host in ["allowed", "locked"] {
+                    for (name, args) in [
+                        ("ssh_exec", json!({"host":host,"command":"printf NEVER"})),
+                        ("ssh_run", json!({"host":host,"argv":["/usr/bin/true"]})),
+                        ("ssh_sudo", json!({"host":host,"argv":["/usr/bin/true"]})),
+                    ] {
+                        let result = timeout(
+                            Duration::from_secs(5),
+                            client.service.call_tool(params(name, args)),
+                        )
+                        .await?;
+                        match result {
+                            Err(rmcp::ServiceError::McpError(error)) => {
+                                ensure!(
+                                    serde_json::to_value(error)?["code"] == -32602,
+                                    "{name} did not reject the hidden route"
+                                );
+                            }
+                            other => anyhow::bail!("{name} remained reachable: {other:?}"),
+                        }
+                    }
+                }
+                let reply = client.call("ssh_write_file", json!({
+                "host":"locked","path":file,"content":"MUST_NOT_REPLACE","overwrite":true,
+            })).await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(
+                    fs::read(&file)? == b"abc",
+                    "read-only target changed existing bytes"
+                );
+                ensure!(
+                    masters(&client.log)?.is_empty(),
+                    "profile denial started an SSH master"
+                );
+                ensure!(
+                    fixture.authentications() == initial_auth,
+                    "profile denial authenticated to SSH"
+                );
+
+                for host in ["locked", "allowed"] {
+                    let reply = client
+                        .call("ssh_read_file", json!({"host":host,"path":file}))
+                        .await?;
+                    ensure!(
+                        succeeded(&reply)?
+                            == &json!({
+                                "content":"abc","encoding":"utf8","bytes_read":3,"next_offset":3,
+                                "eof":true,"content_sha256":ABC_SHA256,
+                            })
+                    );
+                    let reply = client
+                        .call("ssh_stat", json!({"host":host,"path":file}))
+                        .await?;
+                    ensure!(succeeded(&reply)? == &native_stat_data(&file, false)?);
+                    let reply = client
+                        .call(
+                            "ssh_list_directory",
+                            json!({
+                                "host":host,"path":directory,
+                            }),
+                        )
+                        .await?;
+                    ensure!(
+                        succeeded(&reply)?
+                            == &json!({
+                                "entries":[{
+                                    "name":"preserved","name_base64":STANDARD.encode(b"preserved"),
+                                    "metadata":native_stat_data(&file, false)?,
+                                }],
+                                "truncated":false,
+                            })
+                    );
+                }
+                let payload = "PROFILE_WRITE_é雪\0END";
+                let reply = client
+                    .call(
+                        "ssh_write_file",
+                        json!({
+                            "host":"allowed","path":file,"content":payload,"overwrite":true,
+                        }),
+                    )
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"bytes_written":payload.len()}));
+                ensure!(
+                    fs::read(&file)? == payload.as_bytes(),
+                    "allowed write lost bytes"
+                );
+                let reply = client
+                    .call("ssh_read_file", json!({"host":"locked","path":file}))
+                    .await?;
+                ensure!(
+                    succeeded(&reply)?["content"] == payload,
+                    "read-only target did not see the real allowed SFTP write"
+                );
+                ensure!(
+                    !masters(&client.log)?.is_empty(),
+                    "successful file calls started no master"
+                );
+                ensure!(
+                    fixture.authentications() > initial_auth,
+                    "successful file calls did not authenticate to sshd"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        stopped?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
 async fn ssh_write_file() -> Result<()> {
     let fixture = Fixture::start().await?;
     let scenario = async {
