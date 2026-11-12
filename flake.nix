@@ -90,6 +90,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/controller-scripts";
         };
+        apps.doctor-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/doctor-acceptance";
+        };
+        apps.doctor-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/doctor-acceptance";
+        };
         checks.package = package;
         # Compile every test target and run the network-free suite on the MSRV.
         # Never reuse artifacts produced by the default (newer) compiler.

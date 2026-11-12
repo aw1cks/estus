@@ -10,7 +10,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use nix::{
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
 use serde_json::{Value, json};
+use support::{Fixture, Process, assert_masters_gone};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -367,6 +372,280 @@ async fn doctor_help_and_argument_surface_are_standalone() -> Result<()> {
     report(&output, 2)?;
     private(&output, &["PRIVATE_UNKNOWN_D01"])?;
     ensure!(!fixture.marker.exists());
+    Ok(())
+}
+
+fn snapshots(fixture: &Fixture) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    [
+        "server.toml",
+        "ssh_config",
+        "included.conf",
+        "known_hosts",
+        "client",
+        "host0",
+        "host1",
+        "doctor-source",
+    ]
+    .into_iter()
+    .map(|name| {
+        let path = fixture.root.path().join(name);
+        let bytes = fs::read(&path)?;
+        Ok((path, bytes))
+    })
+    .collect()
+}
+
+fn unchanged(before: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    for (path, bytes) in before {
+        ensure!(
+            &fs::read(path)? == bytes,
+            "doctor changed fixture-owned file"
+        );
+    }
+    Ok(())
+}
+
+async fn cleaned(output: &Output) -> Result<usize> {
+    let mut owned = Vec::new();
+    for line in output
+        .stderr
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        if let Ok(record) = serde_json::from_slice::<Value>(line)
+            && record["event"] == "master_start"
+        {
+            ensure!(record["role"] == "ordinary");
+            owned.push((
+                u32::try_from(record["pid"].as_u64().context("master PID")?)?,
+                PathBuf::from(record["socket"].as_str().context("master socket")?),
+            ));
+        }
+    }
+    if !owned.is_empty() {
+        assert_masters_gone(&owned).await?;
+    }
+    Ok(owned.len())
+}
+
+fn native_privacy(output: &Output, fixture: &Fixture) -> Result<()> {
+    private(
+        output,
+        &[
+            &fixture.root.path().to_string_lossy(),
+            "plain",
+            "nosftp",
+            "PRIVATE_ELEVATED_D01",
+            "PRIVATE_DIAGNOSTIC_D01",
+            "PRIVATE_SOURCE_D01",
+        ],
+    )
+}
+
+fn native_config(fixture: &Fixture, body: &str) -> Result<()> {
+    fs::write(
+        fixture.root.path().join("doctor-source"),
+        b"PRIVATE_SOURCE_D01\n",
+    )?;
+    fs::write(
+        &fixture.config,
+        format!(
+            "[ssh]\nconfig_file = {}\n[limits]\nconnect_timeout_secs = 3\noperation_timeout_secs = 10\nmax_timeout_secs = 15\n{body}",
+            serde_json::to_string(&fixture.ssh_config.to_string_lossy())?
+        ),
+    )?;
+    Ok(())
+}
+
+fn no_commands(fixture: &Fixture, before: &[String]) -> Result<()> {
+    for (listener, before) in fixture.listeners.iter().zip(before) {
+        let after = listener.log.text();
+        let commands = |text: &str| {
+            text.lines()
+                .filter(|line| {
+                    line.contains("Starting session: command")
+                        || line.contains("Starting session: shell")
+                })
+                .count()
+        };
+        ensure!(
+            commands(&after) == commands(before),
+            "doctor executed a remote command or shell"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "native: Nix OpenSSH, non-root POSIX account, private runtime directory, loopback"]
+async fn doctor_native_restrictive_profiles_are_ordinary_read_only_and_do_not_load_keys()
+-> Result<()> {
+    // Deny every file operation; protocol INIT/VERSION and close must still work.
+    let server = Fixture::sftp_server()?;
+    let subsystem = format!(
+        "{} -P open,close,read,write,lstat,fstat,setstat,fsetstat,opendir,readdir,remove,mkdir,rmdir,realpath,stat,rename,readlink,symlink,hardlink,fsync,statvfs,fstatvfs",
+        server.display()
+    );
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        // Unix-domain socket limits are shorter than the trusted native fixture ancestry.
+        let agent_directory = tempfile::Builder::new().prefix("da-").tempdir_in("/tmp")?;
+        let agent_path = agent_directory.path().join("a");
+        let mut agent = Command::new(support::find_program("ssh-agent")?);
+        agent.args(["-D", "-a"]).arg(&agent_path);
+        let agent = Process::start(&mut agent)?;
+        let scenario = async {
+            Fixture::await_file(&agent_path).await?;
+            let ssh_add = support::find_program("ssh-add")?;
+            let empty = support::run(Command::new(&ssh_add).arg("-l").env("SSH_AUTH_SOCK", &agent_path)).await?;
+            ensure!(empty.status.code() == Some(1), "owned agent is not empty");
+            let ssh = format!(
+                "Host *\n    IdentityAgent {}\n    AddKeysToAgent yes\n    UpdateHostKeys yes\n{}",
+                agent_path.display(), fs::read_to_string(&fixture.ssh_config)?,
+            );
+            fs::write(&fixture.ssh_config, ssh)?;
+            let mut body = String::new();
+            for (name, profile) in [("alpha", "actions-only"), ("beta", "files-only"), ("gamma", "read-only-files")] {
+                body.push_str(&format!("[targets.{name}]\nssh_host = 'plain'\nprofile = '{profile}'\n[targets.{name}.sudo]\nmode = 'separate-identity'\nssh_host = 'PRIVATE_ELEVATED_D01'\n"));
+            }
+            native_config(&fixture, &body)?;
+            let config = fs::read_to_string(&fixture.config)?;
+            fs::write(&fixture.config, format!("profile = 'actions-only'\n{config}"))?;
+            let before = snapshots(&fixture)?;
+            let logs: Vec<_> = fixture.listeners.iter().map(|listener| listener.log.text()).collect();
+            let auth = fixture.authentications();
+            let output = Doctor::start(command(&fixture.config, &["--target", "gamma", "--target", "alpha", "--target", "beta"])?)?.finish().await?;
+            let value = report(&output, 0)?;
+            let targets: Vec<_> = ["alpha", "beta", "gamma"].into_iter().map(|target| json!({"target":target,"ssh":{"status":"passed"},"sftp":{"status":"passed"},"sudo":{"status":"not_tested"}})).collect();
+            ensure!(value == json!({"ok":true,"targets":targets}));
+            ensure!(cleaned(&output).await? == 3);
+            fixture.await_authentications(auth + 3).await?;
+            no_commands(&fixture, &logs)?;
+            native_privacy(&output, &fixture)?;
+            unchanged(&before)?;
+            let still_empty = support::run(Command::new(&ssh_add).arg("-l").env("SSH_AUTH_SOCK", &agent_path)).await?;
+            ensure!(still_empty.status.code() == Some(1), "doctor enrolled a key in the owned agent");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let stopped = agent.stop().await;
+        scenario?;
+        stopped
+    }.await;
+    let stopped = fixture.stop().await;
+    scenario?;
+    stopped
+}
+
+#[tokio::test]
+#[ignore = "native: Nix OpenSSH, non-root POSIX account, private runtime directory, loopback"]
+async fn doctor_native_sftp_failure_is_not_an_ssh_or_sudo_diagnosis() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        native_config(&fixture, "[targets.selected]\nssh_host = 'nosftp'\n[targets.unselected]\nssh_host = 'PRIVATE_ELEVATED_D01'\n")?;
+        let before = snapshots(&fixture)?;
+        let logs: Vec<_> = fixture.listeners.iter().map(|listener| listener.log.text()).collect();
+        let auth = fixture.authentications();
+        let output = Doctor::start(command(&fixture.config, &["--target", "selected"])?)?.finish().await?;
+        let value = report(&output, 1)?;
+        ensure!(value["targets"].as_array().context("targets")?.len() == 1);
+        let target = &value["targets"][0];
+        ensure!(target["target"] == "selected");
+        ensure!(target["ssh"] == json!({"status":"passed"}));
+        ensure!(target["sftp"]["status"] == "failed");
+        ensure!(matches!(target["sftp"]["error_code"].as_str(), Some("unsupported" | "io_error" | "connection_lost")));
+        ensure!(cleaned(&output).await? == 1);
+        fixture.await_authentications(auth + 1).await?;
+        no_commands(&fixture, &logs)?;
+        native_privacy(&output, &fixture)?;
+        unchanged(&before)
+    }.await;
+    let stopped = fixture.stop().await;
+    scenario?;
+    stopped
+}
+
+#[tokio::test]
+#[ignore = "native: Nix OpenSSH, non-root POSIX account, private runtime directory, loopback"]
+async fn doctor_native_unknown_host_key_is_not_enrolled_or_repaired() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        native_config(&fixture, "[targets.selected]\nssh_host = 'plain'\n")?;
+        fs::write(fixture.root.path().join("known_hosts"), b"")?;
+        let ssh = fs::read_to_string(&fixture.ssh_config)?.replace(
+            "StrictHostKeyChecking yes",
+            "StrictHostKeyChecking accept-new\n    UpdateHostKeys yes\n    AddKeysToAgent yes",
+        );
+        fs::write(&fixture.ssh_config, ssh)?;
+        let before = snapshots(&fixture)?;
+        let auth = fixture.authentications();
+        let output = Doctor::start(command(&fixture.config, &["--target", "selected"])?)?
+            .finish()
+            .await?;
+        let value = report(&output, 1)?;
+        ensure!(
+            value["targets"][0]["ssh"]
+                == json!({"status":"failed","error_code":"ssh_connect_failed"})
+        );
+        ensure!(value["targets"][0]["sftp"]["status"] == "not_tested");
+        cleaned(&output).await?;
+        ensure!(fixture.authentications() == auth);
+        native_privacy(&output, &fixture)?;
+        unchanged(&before)
+    }
+    .await;
+    let stopped = fixture.stop().await;
+    scenario?;
+    stopped
+}
+
+#[tokio::test]
+#[ignore = "native: Nix OpenSSH, non-root POSIX account, private runtime directory, loopback"]
+async fn doctor_native_shared_deadline_and_signals_finalize_owned_masters() -> Result<()> {
+    for signal in [None, Some(Signal::SIGINT), Some(Signal::SIGTERM)] {
+        // SFTP protocol startup stalls while SSH has already authenticated. This
+        // catches dropping the operation future instead of cancelling/finalizing it.
+        let fixture = Fixture::start_with_sftp_subsystem(
+            "",
+            "/bin/sh -c 'sleep 4; printf PRIVATE_DIAGNOSTIC_D01 >&2; exit 1'",
+        )
+        .await?;
+        let scenario = async {
+            native_config(&fixture, "[targets.alpha]\nssh_host = 'plain'\n[targets.beta]\nssh_host = 'plain'\n")?;
+            let before = snapshots(&fixture)?;
+            let logs: Vec<_> = fixture.listeners.iter().map(|listener| listener.log.text()).collect();
+            let auth = fixture.authentications();
+            let budget = if signal.is_some() { "10" } else { "1" };
+            let child = Doctor::start(command(&fixture.config, &["--target", "beta", "--target", "alpha", "--timeout-secs", budget])?)?;
+            if let Some(signal) = signal {
+                fixture.await_authentications(auth + 1).await?;
+                timeout(Duration::from_secs(5), async {
+                    loop {
+                        if fixture.listeners[0].log.text().contains("subsystem 'sftp'") {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.context("SFTP negotiation did not start")?;
+                kill(Pid::from_raw(i32::try_from(child.child.id().context("doctor PID")?)?), signal)?;
+            }
+            let output = child.finish().await?;
+            let value = report(&output, 1)?;
+            let cause = if signal.is_some() { "cancelled" } else { "timeout" };
+            ensure!(value["targets"].as_array().context("targets")?.len() == 2);
+            ensure!(value["targets"][0]["target"] == "alpha");
+            ensure!(value["targets"][0]["ssh"] == json!({"status":"passed"}));
+            ensure!(value["targets"][0]["sftp"]["error_code"] == cause);
+            ensure!(value["targets"][1] == json!({"target":"beta","ssh":{"status":"not_tested","error_code":cause},"sftp":{"status":"not_tested","error_code":cause},"sudo":{"status":"not_tested"}}));
+            ensure!(cleaned(&output).await? == 1);
+            fixture.await_authentications(auth + 1).await?;
+            no_commands(&fixture, &logs)?;
+            native_privacy(&output, &fixture)?;
+            unchanged(&before)
+        }.await;
+        let stopped = fixture.stop().await;
+        scenario?;
+        stopped?;
+    }
     Ok(())
 }
 
