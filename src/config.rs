@@ -7,7 +7,7 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::server::ToolError;
+use crate::reply::ToolError;
 
 #[derive(Parser)]
 #[command(version, about = "Stdio SSH MCP server")]

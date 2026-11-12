@@ -1,7 +1,9 @@
 mod audit;
+mod command;
 mod config;
 mod exec;
 mod files;
+mod reply;
 mod server;
 mod ssh;
 mod wire;

@@ -21,12 +21,14 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     audit::{Audit, Metadata},
+    command::{ExecRequest, Invocation, SudoRequest},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, TargetDiscovery},
-    exec::{self, CommandData, ExecRequest, Invocation, RunContext, SudoRequest, Termination},
+    exec::{self, RunContext},
     files::{
         self, FileContext, ListData, ListRequest, ReadData, ReadRequest, StatData, StatRequest,
         WriteData, WriteRequest,
     },
+    reply::{CommandData, Termination, ToolError, ToolReply},
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
 };
@@ -48,54 +50,6 @@ struct State {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Empty {}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct ToolReply<T> {
-    pub(crate) data: Option<T>,
-    pub(crate) error: Option<ToolError>,
-}
-
-impl<T> ToolReply<T> {
-    pub(crate) fn success(data: T) -> Self {
-        Self {
-            data: Some(data),
-            error: None,
-        }
-    }
-    pub(crate) fn failure(error: ToolError) -> Self {
-        Self {
-            data: None,
-            error: Some(error),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub(crate) struct ToolError {
-    pub(crate) code: &'static str,
-    pub(crate) message: &'static str,
-    pub(crate) remote_state_unknown: bool,
-}
-
-impl ToolError {
-    pub(crate) const SSH_CONNECT_FAILED: Self = Self::new(
-        "ssh_connect_failed",
-        "SSH connection failed; verify the configured alias, authentication and known hosts with your SSH client outside MCP",
-        false,
-    );
-
-    pub(crate) const fn new(
-        code: &'static str,
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self {
-            code,
-            message,
-            remote_state_unknown,
-        }
-    }
-}
 
 // RMCP 3.9 converts its Parameters extractor's errors into tool results. This
 // extractor keeps argument-shape failures at the protocol boundary and never

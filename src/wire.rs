@@ -10,10 +10,7 @@ use rmcp::{
 };
 use serde::Serialize;
 
-use crate::{
-    exec::{CommandData, Termination},
-    server::{ToolError, ToolReply},
-};
+use crate::reply::{CommandData, Termination, ToolError, ToolReply};
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16_777_216;
 

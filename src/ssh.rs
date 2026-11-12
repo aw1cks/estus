@@ -1,5 +1,5 @@
 //! Owned foreground OpenSSH masters; native mux channels never fall back to ssh.
-use crate::{audit, config::IdentityRole, server::ToolError};
+use crate::{audit, config::IdentityRole, reply::ToolError};
 use futures_util::FutureExt;
 use openssh::Session;
 use std::{

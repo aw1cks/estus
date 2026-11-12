@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     config::{IdentityRole, SudoMode},
-    server::ToolError,
+    reply::ToolError,
 };
 
 /// Best-effort JSON diagnostics; stderr failure must never interrupt cleanup.

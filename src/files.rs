@@ -32,7 +32,7 @@ use tokio::{
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
-    server::{ToolError, ToolReply},
+    reply::{ToolError, ToolReply},
     wire::{ReplyBudget, duplicated_size},
 };
 
