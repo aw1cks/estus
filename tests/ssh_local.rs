@@ -3413,3 +3413,280 @@ async fn ssh_write_close_and_write_failures() -> Result<()> {
     }
     Ok(())
 }
+
+// Keep the applet basename: find_program canonicalizes Nix multicall symlinks,
+// whereas the remote exec must invoke printf/id/sleep, not bare coreutils.
+fn binding_program(name: &str) -> Result<PathBuf> {
+    let resolved = support::find_program(name)?;
+    ensure!(
+        resolved.starts_with("/nix/store"),
+        "{name} must be Nix-provided"
+    );
+    let program = resolved
+        .parent()
+        .context("coreutils executable directory")?
+        .join(name);
+    let metadata = fs::metadata(&program)?;
+    ensure!(
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        "missing executable coreutils applet {name}"
+    );
+    Ok(program)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH/coreutils and a non-root local account"]
+async fn ssh_named_bindings() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let printf = binding_program("printf")?;
+        let id = binding_program("id")?;
+        let sleeper = binding_program("sleep")?;
+        let identity = support::run(&mut Command::new(&id)).await?;
+        ensure!(identity.status.success() && identity.stderr.is_empty());
+        let identity = String::from_utf8(identity.stdout)?;
+        let config = fixture.root.path().join("named-bindings.toml");
+        let ssh_config = serde_json::to_string(&fixture.ssh_config.to_string_lossy())?;
+        let printf_path = serde_json::to_string(&printf.to_string_lossy())?;
+        let id_path = serde_json::to_string(&id.to_string_lossy())?;
+        let sleep_path = serde_json::to_string(&sleeper.to_string_lossy())?;
+        fs::write(&config, formatdoc! {r#"
+            profile = "actions-only"
+            enabled_tools = ["literal_values", "ordinary_identity", "missing_account", "bounded_pause"]
+            [ssh]
+            config_file = {ssh_config}
+            [limits]
+            operation_timeout_secs = 10
+            max_timeout_secs = 15
+            max_output_bytes = 1024
+            [targets.plain]
+            ssh_host = "plain"
+            [targets.plain.sudo]
+            mode = "same-account"
+            users = ["root"]
+            programs = [{id_path}]
+            [targets.denied]
+            ssh_host = "must-never-connect"
+            [targets.locked]
+            ssh_host = "must-never-connect"
+            profile = "read-only-files"
+            [tools.literal_values]
+            description = "Emit bounded literal data with a fixed format."
+            revision = "literal-r1"
+            targets = ["plain", "locked"]
+            authority = "ordinary"
+            effects = ["read"]
+            execution = {{ kind = "native_argv", program = {printf_path}, argv = ["--", '%s\000%s\000%s', {{input="text"}}, {{input="number"}}, {{input="flag"}}] }}
+            input_schema = {{ type="object", additionalProperties=false, required=["text","number","flag"], properties={{ text={{type="string",maxLength=256}}, number={{type="integer",minimum=-9,maximum=9}}, flag={{type="boolean"}} }} }}
+            result = {{kind="command"}}
+            [tools.ordinary_identity]
+            description = "Observe the ordinary account without caller-selected options."
+            revision = "identity-r1"
+            targets = ["plain"]
+            authority = "ordinary"
+            effects = ["read"]
+            execution = {{kind="native_argv",program={id_path},argv=["--"]}}
+            input_schema = {{type="object",additionalProperties=false,required=[],properties={{}}}}
+            result = {{kind="command"}}
+            [tools.missing_account]
+            description = "Observe a fixed invalid empty account."
+            revision = "missing-r1"
+            targets = ["plain"]
+            authority = "ordinary"
+            effects = ["read"]
+            execution = {{kind="native_argv",program={id_path},argv=["--",""]}}
+            input_schema = {{type="object",additionalProperties=false,required=[],properties={{}}}}
+            result = {{kind="command"}}
+            [tools.bounded_pause]
+            description = "A finite fixed native sleep; cancellation is uncertain."
+            revision = "pause-r1"
+            targets = ["plain"]
+            authority = "ordinary"
+            effects = ["availability"]
+            execution = {{kind="native_argv",program={sleep_path},argv=["--","3"]}}
+            input_schema = {{type="object",additionalProperties=false,required=[],properties={{}}}}
+            result = {{kind="command"}}
+            limits = {{timeout_secs=5,max_output_bytes=128}}
+        "#})?;
+        let client = Client::start(&config).await?;
+        let cases = async {
+            let listed = timeout(Duration::from_secs(5), client.service.list_tools(None)).await??;
+            let mut names: Vec<_> = listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
+            names.sort_unstable();
+            ensure!(names == [
+                "bounded_pause", "literal_values", "missing_account",
+                "ordinary_identity", "ssh_targets",
+            ], "actions-only exposed an unexpected tool: {names:?}");
+            let initial_auth = fixture.authentications();
+            let valid = json!({"host":"plain","text":"VALID","number":1,"flag":true});
+            // Shape errors cannot override operator authority or fixed layout.
+            for extra in ["program","argv","cwd","stdin","user","role","authority","shell"] {
+                let mut args = valid.clone();
+                args[extra] = json!("BINDING_FORBIDDEN_OVERRIDE");
+                let result = timeout(
+                    Duration::from_secs(5),
+                    client.service.call_tool(params("literal_values", args)),
+                ).await?;
+                match result {
+                    Err(rmcp::ServiceError::McpError(error)) => {
+                        ensure!(serde_json::to_value(error)?["code"] == -32602);
+                    }
+                    other => anyhow::bail!("binding accepted {extra}: {other:?}"),
+                }
+            }
+            for (name,args) in [
+                ("ssh_exec",json!({"host":"plain","command":"printf NEVER"})),
+                ("ssh_run",json!({"host":"plain","argv":[id]})),
+                ("ssh_sudo",json!({"host":"plain","argv":[id]})),
+            ] {
+                let result = timeout(Duration::from_secs(5),client.service.call_tool(params(name,args))).await?;
+                match result {
+                    Err(rmcp::ServiceError::McpError(error)) => {
+                        ensure!(serde_json::to_value(error)?["code"] == -32602);
+                    }
+                    other => anyhow::bail!("actions-only raw route remained reachable: {other:?}"),
+                }
+            }
+            for (field, value) in [("number",json!("1")),("flag",json!(1)),("text",json!(false))] {
+                let mut args = valid.clone();
+                args[field] = value;
+                let result = timeout(
+                    Duration::from_secs(5),
+                    client.service.call_tool(params("literal_values", args)),
+                ).await?;
+                match result {
+                    Err(rmcp::ServiceError::McpError(error)) => {
+                        ensure!(serde_json::to_value(error)?["code"] == -32602);
+                    }
+                    other => anyhow::bail!("binding accepted wrong {field} type: {other:?}"),
+                }
+            }
+            for (field, value, code) in [
+                ("host",json!("denied"),"policy_denied"),
+                ("host",json!("unknown-target"),"policy_denied"),
+                ("host",json!("locked"),"policy_denied"),
+                ("text",json!("x".repeat(257)),"invalid_argument"),
+                ("text",json!("BINDING_NUL_SECRET\0"),"invalid_argument"),
+                ("number",json!(-10),"invalid_argument"),
+                ("number",json!(10),"invalid_argument"),
+            ] {
+                let mut args = valid.clone();
+                args[field] = value;
+                let reply = client.call("literal_values", args).await?;
+                failed(&reply, code)?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            }
+            let reply = client.call("bounded_pause",json!({"host":"plain","timeout_secs":6})).await?;
+            failed(&reply,"invalid_argument")?;
+            ensure!(masters(&client.log)?.is_empty(), "rejection acquired a master");
+            ensure!(fixture.authentications() == initial_auth, "rejection authenticated");
+            let injected = fixture.root.path().join("binding-injected");
+            let injection = format!("$(touch {}); `touch {}`",quote(&injected.to_string_lossy()),quote(&injected.to_string_lossy()));
+            let max_text = "雪".repeat(256);
+            let payloads = [
+                "", "--help", "-n", "BINDING_PAYLOAD_SECRET_09d2",
+                "single' double\" \\ $HOME ; & | < > * ? [ ] { }",
+                "日本語 🦀", "control:\n\r\t\u{1b}\u{7f}", &injection, &max_text,
+            ];
+            for (index, text) in payloads.into_iter().enumerate() {
+                let number = if index % 2 == 0 { -9 } else { 9 };
+                let flag = index % 2 == 0;
+                let reply = client.call("literal_values",json!({
+                    "host":"plain","text":text,"number":number,"flag":flag,
+                })).await?;
+                let data = succeeded(&reply)?;
+                ensure!(data["stdout"] == format!("{text}\0{number}\0{flag}"), "literal conversion lost data: {reply}");
+                ensure!(data["stderr"] == "" && data["exit_code"] == 0);
+                ensure!(data["termination"] == "exited" && data["remote_may_still_be_running"] == false);
+                ensure!(data["stdout_lossy"] == false && data["stderr_lossy"] == false);
+                ensure!(!injected.exists(), "input interpolated into remote shell syntax");
+            }
+            let reply = client.call("ordinary_identity",json!({"host":"plain"})).await?;
+            ensure!(succeeded(&reply)?["stdout"] == identity, "binding changed account identity");
+            let reply = client.call("missing_account",json!({"host":"plain"})).await?;
+            failed(&reply,"command_failed")?;
+            ensure!(reply["data"]["stdout"] == "" && reply["data"]["exit_code"] == 1);
+            ensure!(!reply["data"]["stderr"].as_str().context("id stderr")?.is_empty());
+            ensure!(reply["data"]["termination"] == "exited");
+            ensure!(reply["error"]["remote_state_unknown"] == false);
+            let owned = observed_masters(&client.log,1).await?;
+            fixture.await_authentications(initial_auth + 1).await?;
+            let timed = client.call("bounded_pause",json!({"host":"plain","timeout_secs":1})).await?;
+            failed(&timed,"timeout")?;
+            ensure!(timed["data"]["termination"] == "timeout" && timed["data"]["exit_code"].is_null());
+            ensure!(timed["data"]["remote_may_still_be_running"] == true);
+            ensure!(timed["error"]["remote_state_unknown"] == true);
+            let session_count = || fixture.listeners[0].log.text().lines()
+                .filter(|line| line.contains("Starting session: command")).count();
+            let before = session_count();
+            let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
+                "bounded_pause",json!({"host":"plain"}),
+            )));
+            let handle = timeout(Duration::from_secs(5),client.service.send_cancellable_request(
+                request,PeerRequestOptions::default(),
+            )).await??;
+            // Observe real sshd dispatch before cancellation, not a fabricated reply.
+            let dispatched = timeout(Duration::from_secs(5),async {
+                while session_count() <= before { sleep(Duration::from_millis(20)).await; }
+            }).await;
+            let cancelled = timeout(Duration::from_secs(5),handle.cancel(Some("named native cancellation".into()))).await;
+            dispatched.context("bound sleep was not dispatched")?;
+            cancelled??;
+            let audit = await_audit(&client.log,"finish","cancelled").await?;
+            ensure!(audit["tool"] == "bounded_pause" && audit["exit_code"].is_null());
+            ensure!(audit["remote_state_unknown"] == true);
+            // A later ordinary binding must still use the original transport.
+            let reply = client.call("ordinary_identity",json!({"host":"plain"})).await?;
+            ensure!(succeeded(&reply)?["stdout"] == identity);
+            let check = support::run(Command::new(&fixture.ssh)
+                .arg("-F").arg(&fixture.ssh_config).arg("-S").arg(&owned[0].1)
+                .args(["-O","check","plain"])).await?;
+            ensure!(check.status.success());
+            ensure!(String::from_utf8_lossy(&check.stderr).contains(&format!("(pid={})",owned[0].0)));
+            ensure!(masters(&client.log)? == owned, "binding replaced its healthy master");
+            fixture.await_authentications(initial_auth + 1).await?;
+            Ok::<_,anyhow::Error>(())
+        }.await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        // Fixed sleep is finite. Give dispatched work its bounded settling window
+        // even on assertion failure; neither channel teardown nor this wait proves
+        // remote termination, and there is no remote process-kill claim.
+        sleep(Duration::from_secs(4)).await;
+        cases?;
+        let log = stopped?;
+        gone?;
+        let text = log.text();
+        for secret in ["BINDING_PAYLOAD_SECRET_09d2","BINDING_NUL_SECRET","BINDING_FORBIDDEN_OVERRIDE"] {
+            ensure!(!text.contains(secret), "binding audit leaked caller payload");
+        }
+        for program in [&printf,&id,&sleeper] {
+            ensure!(!text.contains(program.to_string_lossy().as_ref()), "audit leaked fixed executable");
+        }
+        let records = log.final_records()?;
+        for (name,revision) in [
+            ("literal_values","literal-r1"),("ordinary_identity","identity-r1"),
+            ("missing_account","missing-r1"),("bounded_pause","pause-r1"),
+        ] {
+            let events: Vec<_> = records.iter().filter(|record| record["tool"] == name
+                && ["start","finish"].contains(&record["event"].as_str().unwrap_or(""))).collect();
+            ensure!(events.iter().any(|record| record["event"] == "start"));
+            ensure!(events.iter().any(|record| record["event"] == "finish"));
+            for record in events {
+                ensure!(record["identity_role"] == "ordinary");
+                ensure!(record["binding_revision"] == revision && record["executor"] == "native_argv");
+                for forbidden in ["program","argv","command","stdin","stdout","stderr","user","text","number","flag"] {
+                    ensure!(record.get(forbidden).is_none(), "binding audit exposed {forbidden}");
+                }
+            }
+        }
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
