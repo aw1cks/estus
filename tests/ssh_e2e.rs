@@ -1094,3 +1094,483 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires exact Nix fixture artifact and explicit Docker-compatible daemon"]
+async fn ssh_sudo_bound_actions() -> Result<()> {
+    const PAYLOAD_SECRET: &str = "T05_BOUND_ARG_AUDIT_SECRET";
+    const OVERRIDE_SECRET: &str = "T05_BOUND_AUTHORITY_OVERRIDE_SECRET";
+
+    let fixture = isolated::Fixture::start().await?;
+    let setup = (|| -> Result<_> {
+        // Copy the exact fixture's existing identity/program policy, not a wider
+        // test-only sudo policy. The fixture owns this additional config's path.
+        let config = fixture.config.with_file_name("sudo-bound-actions.toml");
+        let baseline = std::fs::read_to_string(&fixture.config)?;
+        std::fs::write(
+            &config,
+            format!(
+                "{}{baseline}{}",
+                indoc::indoc! {r#"
+                    profile = "actions-only"
+                    enabled_tools = ["ordinary_identity", "root_identity", "root_literal"]
+                "#},
+                indoc::indoc! {r#"
+                    [targets.locked]
+                    ssh_host = "same"
+                    profile = "read-only-files"
+                    [targets.locked.sudo]
+                    mode = "same-account"
+                    users = ["root"]
+                    programs = ["/usr/bin/id", "/usr/bin/printf"]
+                    [tools.ordinary_identity]
+                    description = "Observe the fixed ordinary account."
+                    revision = "ordinary-t05"
+                    targets = ["split", "same"]
+                    authority = "ordinary"
+                    effects = ["read"]
+                    execution = {kind="native_argv",program="/usr/bin/id",argv=["-u","--"]}
+                    input_schema = {type="object",additionalProperties=false,required=[],properties={}}
+                    result = {kind="command"}
+                    [tools.root_identity]
+                    description = "Observe a fixed elevated identity."
+                    revision = "root-id-t05"
+                    targets = ["split", "same", "locked"]
+                    authority = {sudo="root"}
+                    effects = ["read"]
+                    execution = {kind="native_argv",program="/usr/bin/id",argv=["-u","--"]}
+                    input_schema = {type="object",additionalProperties=false,required=[],properties={}}
+                    result = {kind="command"}
+                    [tools.root_literal]
+                    description = "Emit one literal value with a fixed elevated format."
+                    revision = "root-literal-t05"
+                    targets = ["split", "same", "locked"]
+                    authority = {sudo="root"}
+                    effects = ["persistent_write"]
+                    execution = {kind="native_argv",program="/usr/bin/printf",argv=["--",'%s\000',{input="text"}]}
+                    input_schema = {type="object",additionalProperties=false,required=["text"],properties={text={type="string",maxLength=256}}}
+                    result = {kind="command"}
+                "#},
+            ),
+        )?;
+        Ok((config, fixture.credential_markers()?))
+    })();
+    let (config, markers) = match setup {
+        Ok(setup) => setup,
+        Err(error) => {
+            fixture.stop().await?;
+            return Err(error);
+        }
+    };
+    let mut wire = match support::WireServer::start(&config) {
+        Ok(wire) => wire,
+        Err(error) => {
+            fixture.stop().await?;
+            return Err(error);
+        }
+    };
+    let scenario = async {
+        wire.initialize().await?;
+        let keys = fixture_fingerprints(&fixture).await?;
+        let listed = wire.request(2, "tools/list", json!({})).await?;
+        let tools = listed["result"]["tools"]
+            .as_array()
+            .context("listed tools")?;
+        let mut names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().context("tool name"))
+            .collect::<Result<_>>()?;
+        names.sort_unstable();
+        ensure!(
+            names
+                == [
+                    "ordinary_identity",
+                    "root_identity",
+                    "root_literal",
+                    "ssh_targets"
+                ],
+            "actions-only exposed an unrestricted tool: {names:?}"
+        );
+        for (name, authority, effects, read_only, destructive) in [
+            (
+                "ordinary_identity",
+                json!("ordinary"),
+                json!(["read"]),
+                true,
+                false,
+            ),
+            (
+                "root_identity",
+                json!({"sudo":"root"}),
+                json!(["read"]),
+                true,
+                false,
+            ),
+            (
+                "root_literal",
+                json!({"sudo":"root"}),
+                json!(["persistent_write"]),
+                false,
+                true,
+            ),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .context("named tool")?;
+            ensure!(tool["_meta"]["authority"] == authority);
+            ensure!(tool["_meta"]["effects"] == effects);
+            ensure!(tool["annotations"]["readOnlyHint"] == read_only);
+            ensure!(tool["annotations"]["destructiveHint"] == destructive);
+            for field in ["user", "program", "argv", "authority", "ssh_host"] {
+                ensure!(tool["inputSchema"]["properties"].get(field).is_none());
+            }
+        }
+        let mut public_markers = markers.clone();
+        public_markers.extend([
+            "split-admin".to_owned(),
+            "/usr/bin/id".to_owned(),
+            "/usr/bin/printf".to_owned(),
+        ]);
+        private_boundary(&serde_json::to_string(&listed)?, &public_markers)?;
+        let mut request_id = 3;
+        for (name, arguments) in [
+            (
+                "ssh_exec",
+                json!({"host":"split","command":"/usr/bin/id -u"}),
+            ),
+            (
+                "ssh_run",
+                json!({"host":"split","argv":["/usr/bin/id","-u"]}),
+            ),
+            (
+                "ssh_sudo",
+                json!({"host":"split","argv":["/usr/bin/id","-u"]}),
+            ),
+        ] {
+            let reply = wire
+                .request(
+                    request_id,
+                    "tools/call",
+                    json!({"name":name,"arguments":arguments}),
+                )
+                .await?;
+            request_id += 1;
+            ensure!(
+                reply["error"]["code"] == -32602,
+                "generic command remained callable"
+            );
+            private_boundary(&serde_json::to_string(&reply)?, &public_markers)?;
+        }
+        for name in ["ordinary_identity", "root_identity", "root_literal"] {
+            for field in ["user", "authority", "program", "argv", "ssh_host", "role"] {
+                let mut arguments = json!({"host":"split"});
+                if name == "root_literal" {
+                    arguments["text"] = json!("unused");
+                }
+                arguments[field] = match field {
+                    "user" => json!("mcp"),
+                    "authority" => json!({"sudo":"root"}),
+                    "ssh_host" => json!("split-admin"),
+                    _ => json!(OVERRIDE_SECRET),
+                };
+                let reply = wire
+                    .request(
+                        request_id,
+                        "tools/call",
+                        json!({"name":name,"arguments":arguments}),
+                    )
+                    .await?;
+                request_id += 1;
+                ensure!(
+                    reply["error"]["code"] == -32602,
+                    "caller overrode fixed {field}"
+                );
+            }
+        }
+        for host in ["plain", "unknown-target", "split-admin", "locked"] {
+            let reply = wire_tool(
+                &mut wire,
+                request_id,
+                "root_identity",
+                json!({"host":host}),
+                &public_markers,
+            )
+            .await?;
+            request_id += 1;
+            policy_rejected(&reply)?;
+        }
+        ensure!(
+            masters(&wire.log)?.is_empty(),
+            "rejected binding acquired a master"
+        );
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 3),
+                ("mcp-sudo", 1),
+                ("mcp-admin", 0),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+
+        let reply = wire_tool(
+            &mut wire,
+            request_id,
+            "ordinary_identity",
+            json!({"host":"split"}),
+            &public_markers,
+        )
+        .await?;
+        request_id += 1;
+        command_succeeded(&reply, "1000\n")?;
+        let ordinary = observed_master_count(&wire.log, 1).await?;
+        let reply = wire_tool(
+            &mut wire,
+            request_id,
+            "root_identity",
+            json!({"host":"split"}),
+            &public_markers,
+        )
+        .await?;
+        request_id += 1;
+        command_succeeded(&reply, "0\n")?;
+        let split = observed_master_count(&wire.log, 2).await?;
+        ensure!(
+            split[..1] == ordinary && split[0] != split[1],
+            "split authority reused ordinary ownership"
+        );
+        for (name, expected) in [("ordinary_identity", "1001\n"), ("root_identity", "0\n")] {
+            let reply = wire_tool(
+                &mut wire,
+                request_id,
+                name,
+                json!({"host":"same"}),
+                &public_markers,
+            )
+            .await?;
+            request_id += 1;
+            command_succeeded(&reply, expected)?;
+        }
+        let owned = observed_master_count(&wire.log, 3).await?;
+        ensure!(
+            owned[..2] == split,
+            "same-account sudo replaced split ownership"
+        );
+        let payloads = [
+            "",
+            "--help",
+            "-n",
+            PAYLOAD_SECRET,
+            "é雪 🦀",
+            "'\"\\$HOME `id` ! * ? [x] {a,b}; & | < >",
+            "control:\n\r\t\u{1b}\u{7f}",
+            "$(/bin/touch /tmp/t05-bound-injected); `/bin/touch /tmp/t05-bound-injected`",
+        ];
+        for host in ["split", "same"] {
+            for text in payloads {
+                let reply = wire_tool(
+                    &mut wire,
+                    request_id,
+                    "root_literal",
+                    json!({"host":host,"text":text}),
+                    &markers,
+                )
+                .await?;
+                request_id += 1;
+                command_succeeded(&reply, &format!("{text}\0"))?;
+                ensure!(reply["data"]["termination"] == "exited");
+                ensure!(reply["data"]["remote_may_still_be_running"] == false);
+            }
+        }
+        fixture
+            .primary_exec("test ! -e /tmp/t05-bound-injected")
+            .await
+            .context("bound sudo argv executed shell syntax")?;
+        // Neither a primed privileged master nor a completed elevated call may
+        // alter the next request's fixed authority or host policy.
+        for host in ["plain", "unknown-target", "split-admin", "locked"] {
+            let reply = wire_tool(
+                &mut wire,
+                request_id,
+                "root_identity",
+                json!({"host":host}),
+                &public_markers,
+            )
+            .await?;
+            request_id += 1;
+            policy_rejected(&reply)?;
+        }
+        for (host, expected) in [("split", "1000\n"), ("same", "1001\n")] {
+            let reply = wire_tool(
+                &mut wire,
+                request_id,
+                "ordinary_identity",
+                json!({"host":host}),
+                &public_markers,
+            )
+            .await?;
+            request_id += 1;
+            command_succeeded(&reply, expected)?;
+        }
+        ensure!(
+            masters(&wire.log)? == owned,
+            "bound calls changed original master ownership"
+        );
+        for ((pid, socket), alias) in owned.iter().zip(["split", "split-admin", "same"]) {
+            let check = support::run(
+                Command::new(&fixture.ssh)
+                    .arg("-F")
+                    .arg(&fixture.ssh_config)
+                    .arg("-S")
+                    .arg(socket)
+                    .args(["-O", "check", alias]),
+            )
+            .await?;
+            ensure!(
+                check.status.success()
+                    && String::from_utf8_lossy(&check.stderr).contains(&format!("(pid={pid})")),
+                "original owned authority master was replaced"
+            );
+        }
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 4),
+                ("mcp-sudo", 2),
+                ("mcp-admin", 1),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+        // An independent ordinary-account connection cannot use the privileged
+        // account's OS sudo policy, regardless of a primed elevated master.
+        let denied = fixture
+            .direct("split", "/usr/bin/sudo -n -k -u root -- /usr/bin/id -u")
+            .await?;
+        ensure!(denied.status.code() == Some(1) && denied.stdout.is_empty());
+        observed_authentications(
+            &fixture,
+            &keys,
+            &[
+                ("mcp", 5),
+                ("mcp-sudo", 2),
+                ("mcp-admin", 1),
+                ("mcp-password", 0),
+                ("mcp-tty", 0),
+            ],
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let log = wire.log.clone();
+    let server = wire.stop(false).await;
+    let master_cleanup = match masters(&log) {
+        Ok(owned) => assert_masters_gone(&owned).await,
+        Err(error) => Err(error),
+    };
+    let container_cleanup = fixture.stop().await;
+    let errors: Vec<_> = [
+        ("bound actions", scenario),
+        ("server cleanup", server.map(|_| ())),
+        ("master cleanup", master_cleanup),
+        ("container cleanup", container_cleanup),
+    ]
+    .into_iter()
+    .filter_map(|(label, result)| result.err().map(|error| format!("{label}: {error:#}")))
+    .collect();
+    ensure!(errors.is_empty(), "{}", errors.join("\n"));
+    ensure!(
+        !config.exists(),
+        "fixture-owned bound config survived cleanup"
+    );
+    let mut audit_markers = markers;
+    audit_markers.extend([
+        PAYLOAD_SECRET.to_owned(),
+        OVERRIDE_SECRET.to_owned(),
+        "split-admin".to_owned(),
+        "/usr/bin/id".to_owned(),
+        "/usr/bin/printf".to_owned(),
+        "t05-bound-injected".to_owned(),
+    ]);
+    private_boundary(&log.text(), &audit_markers)?;
+    let records = log.final_records()?;
+    let roles: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "master_start")
+        .map(|record| record["role"].as_str())
+        .collect();
+    ensure!(roles == [Some("ordinary"), Some("elevated"), Some("ordinary")]);
+    for (name, revision) in [
+        ("ordinary_identity", "ordinary-t05"),
+        ("root_identity", "root-id-t05"),
+        ("root_literal", "root-literal-t05"),
+    ] {
+        for host in ["split", "same"] {
+            let events: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record["tool"] == name
+                        && record["host"] == host
+                        && ["start", "finish"].contains(&record["event"].as_str().unwrap_or(""))
+                })
+                .collect();
+            ensure!(
+                events.iter().any(|record| record["event"] == "start"),
+                "bound start audit missing"
+            );
+            ensure!(
+                events.iter().any(|record| record["event"] == "finish"),
+                "bound finish audit missing"
+            );
+            for record in events {
+                ensure!(
+                    record["binding_revision"] == revision && record["executor"] == "native_argv"
+                );
+                let elevated = name != "ordinary_identity";
+                let role = if elevated && host == "split" {
+                    "elevated"
+                } else {
+                    "ordinary"
+                };
+                ensure!(record["identity_role"] == role);
+                if elevated {
+                    ensure!(record["user"] == "root");
+                    ensure!(
+                        record["sudo_mode"]
+                            == if host == "split" {
+                                "separate-identity"
+                            } else {
+                                "same-account"
+                            }
+                    );
+                } else {
+                    ensure!(record.get("user").is_none());
+                }
+                for field in [
+                    "program",
+                    "argv",
+                    "command",
+                    "stdin",
+                    "stdout",
+                    "stderr",
+                    "text",
+                    "ssh_host",
+                    "private_key",
+                ] {
+                    ensure!(record.get(field).is_none(), "bound audit retained {field}");
+                }
+                if record["event"] == "finish" {
+                    ensure!(record["exit_code"] == 0 && record["remote_state_unknown"] == false);
+                }
+            }
+        }
+    }
+    Ok(())
+}
