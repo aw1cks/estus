@@ -303,6 +303,19 @@ fn exercise(fixture: Fixture) -> Option<()> {
                 },
                 expected_bytes,
             );
+            if let Some((program, arguments)) = request.argv.split_first() {
+                check_accounting(
+                    Invocation::BoundSudo {
+                        program,
+                        arguments: arguments
+                            .iter()
+                            .map(|argument| Cow::Borrowed(argument.as_str()))
+                            .collect(),
+                        user: &request.user,
+                    },
+                    expected_bytes,
+                );
+            }
             // This explicit alphabet also rejects non-ASCII names and sudo IDs/options.
             let mut name = request.user.chars();
             let first_valid = name.next().is_some_and(|c| {

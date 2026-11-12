@@ -150,6 +150,18 @@ pub(crate) async fn run(
                     command.args(sudo_arguments(user)).args(argv);
                     command
                 }
+                Invocation::BoundSudo {
+                    program,
+                    arguments,
+                    user,
+                } => {
+                    let mut command = session.command("sudo");
+                    command
+                        .args(sudo_arguments(user))
+                        .arg(program)
+                        .args(arguments.iter().map(|value| value.as_ref()));
+                    command
+                }
             };
             command.stdout(Stdio::piped()).stderr(Stdio::piped());
             command.stdin(if stdin.is_some() {

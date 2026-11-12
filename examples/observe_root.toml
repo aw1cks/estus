@@ -1,0 +1,26 @@
+# Explicit opt-in; both this definition and the remote sudoers policy need review.
+# Assumes GNU id at /usr/bin/id and independently configured OpenSSH aliases.
+# The separate alias must use an appropriately restricted privileged SSH identity.
+# Revision identifies the definition, not the remote executable's content.
+profile = "actions-only"
+enabled_tools = ["observe_root"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[targets.server.sudo]
+mode = "separate-identity"
+ssh_host = "server-elevated"
+users = ["root"]
+programs = ["/usr/bin/id"]
+
+[tools.observe_root]
+description = "Observe the fixed root UID through the separately configured privileged SSH identity. This reviewed read operation does not expose arbitrary sudo, programs or run-as users. Cancellation can leave execution uncertain; never replay automatically."
+revision = "1"
+targets = ["server"]
+authority = { sudo = "root" }
+effects = ["read"]
+execution = { kind = "native_argv", program = "/usr/bin/id", argv = ["-u", "--"] }
+input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+result = { kind = "command" }
+limits = { timeout_secs = 10, max_output_bytes = 1024 }

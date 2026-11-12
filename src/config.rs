@@ -313,6 +313,9 @@ impl Serialize for PermittedOperations<'_> {
                             && self.bindings.get(id).is_some_and(|binding| {
                                 binding.enabled()
                                     && binding.targets.iter().any(|name| name == self.target_name)
+                                    && binding.sudo().is_none_or(|(user, program)| {
+                                        self.sudo.permits(user, program)
+                                    })
                             })
                     }
                 })
@@ -376,6 +379,47 @@ impl Sudo {
             Self::SameAccount { .. } => SudoMode::SameAccount,
             Self::SeparateIdentity { .. } => SudoMode::SeparateIdentity,
         }
+    }
+
+    fn permits(&self, user: &str, program: &str) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::SameAccount { users, programs }
+            | Self::SeparateIdentity {
+                users, programs, ..
+            } => {
+                users.iter().any(|allowed| allowed == user)
+                    && programs
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == program))
+            }
+        }
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        ordinary: &'a str,
+        user: &str,
+        program: &str,
+    ) -> Result<ResolvedTarget<'a>, ToolError> {
+        if !self.permits(user, program) {
+            return Err(ToolError::new(
+                "policy_denied",
+                "Elevated target, user, or program is not authorized",
+                false,
+            ));
+        }
+        let (destination, role) = match self {
+            Self::Disabled => unreachable!("disabled sudo policy cannot permit execution"),
+            Self::SameAccount { .. } => (ordinary, IdentityRole::Ordinary),
+            Self::SeparateIdentity { ssh_host, .. } => (ssh_host.as_str(), IdentityRole::Elevated),
+        };
+        Ok(ResolvedTarget {
+            name: host,
+            destination,
+            role,
+        })
     }
 
     fn permits_programs(&self) -> bool {
@@ -523,6 +567,25 @@ impl Config {
                     .is_some_and(|targets| targets.contains_key(name))
             },
         )?;
+        // Definitions are operator capabilities even when hidden or disabled.
+        // Validate their authority before exposure profiles select callable tools.
+        for (_, binding) in bindings.entries() {
+            if let Some((user, program)) = binding.sudo() {
+                for name in &binding.targets {
+                    if !document
+                        .targets
+                        .as_ref()
+                        .and_then(|targets| targets.get(name))
+                        .is_some_and(|target| target.sudo.permits(user, program))
+                    {
+                        return Err(invalid(
+                            "tools",
+                            "binding authority exceeds target sudo policy",
+                        ));
+                    }
+                }
+            }
+        }
         Ok(Self {
             profile: document.profile,
             ssh_config,
@@ -597,7 +660,10 @@ impl Config {
         if !target.profile.permits_bindings() {
             return Err(denied());
         }
-        self.resolve_ordinary(host)
+        match binding.sudo() {
+            Some((user, program)) => target.sudo.resolve(host, &target.ssh_host, user, program),
+            None => self.resolve_ordinary(host),
+        }
     }
 
     pub(crate) fn tool_enabled(&self, tool: ToolId) -> bool {
@@ -702,32 +768,7 @@ impl Config {
         if !target.profile.permits(ToolId::Sudo) {
             return Err(denied());
         }
-        let (destination, role, users, programs) = match &target.sudo {
-            Sudo::Disabled => return Err(denied()),
-            Sudo::SameAccount { users, programs } => (
-                target.ssh_host.as_str(),
-                IdentityRole::Ordinary,
-                users,
-                programs,
-            ),
-            Sudo::SeparateIdentity {
-                ssh_host,
-                users,
-                programs,
-            } => (ssh_host.as_str(), IdentityRole::Elevated, users, programs),
-        };
-        if !users.iter().any(|allowed| allowed == user)
-            || programs
-                .as_ref()
-                .is_some_and(|allowed| !allowed.iter().any(|allowed| allowed == program))
-        {
-            return Err(denied());
-        }
-        Ok(ResolvedTarget {
-            name: host,
-            destination,
-            role,
-        })
+        target.sudo.resolve(host, &target.ssh_host, user, program)
     }
 
     pub(crate) fn timeout(&self, seconds: Option<u64>) -> Result<std::time::Duration, ToolError> {
@@ -752,6 +793,16 @@ fn resolve_path(path: PathBuf, base: &Path, field: &'static str) -> Result<PathB
     } else {
         base.join(path)
     })
+}
+
+// Named POSIX-style accounts only, not sudo's numeric-ID syntax or options.
+pub(crate) fn account_name(user: &str) -> bool {
+    !user.is_empty()
+        && user.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic()
+                || byte == b'_'
+                || (index > 0 && (byte.is_ascii_digit() || byte == b'-' || byte == b'.'))
+        })
 }
 
 fn validate_targets(targets: &BTreeMap<String, Target>) -> Result<(), ConfigError> {
@@ -819,14 +870,7 @@ fn validate_targets(targets: &BTreeMap<String, Target>) -> Result<(), ConfigErro
         }
         let mut seen = BTreeSet::new();
         for user in users {
-            // Named POSIX-style accounts only, not sudo's numeric-ID syntax or options.
-            if user.is_empty()
-                || !user.bytes().enumerate().all(|(index, byte)| {
-                    byte.is_ascii_alphabetic()
-                        || byte == b'_'
-                        || (index > 0 && (byte.is_ascii_digit() || byte == b'-' || byte == b'.'))
-                })
-            {
+            if !account_name(user) {
                 return Err(invalid(
                     "targets.*.sudo.users",
                     "must contain valid account names",
@@ -1189,6 +1233,257 @@ result = { kind = "command" }
                     assert_eq!(two["permitted_operations"], serde_json::json!([]));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fixed_sudo_bindings_intersect_profiles_without_exposing_generic_sudo() {
+        let elevated = binding_definition().replace(
+            "authority = \"ordinary\"",
+            "authority = { sudo = \"root\" }",
+        );
+        let ordinary = binding_definition().replace("[tools.observe]", "[tools.ordinary]");
+        for (mode, alias, destination, role) in [
+            (
+                "same-account",
+                "",
+                "ordinary-private",
+                IdentityRole::Ordinary,
+            ),
+            (
+                "separate-identity",
+                "ssh_host='elevated-private'\n",
+                "elevated-private",
+                IdentityRole::Elevated,
+            ),
+        ] {
+            for (global, global_allowed) in [
+                ("baseline", true),
+                ("actions-only", true),
+                ("files-only", false),
+                ("read-only-files", false),
+            ] {
+                for (profile, target_allowed) in [
+                    ("baseline", true),
+                    ("actions-only", true),
+                    ("files-only", false),
+                    ("read-only-files", false),
+                ] {
+                    for selected in [false, true] {
+                        let config = load_text(
+                            &format!(
+                                "profile='{global}'\nenabled_tools={enabled}\n\
+                                 [targets.one]\nssh_host='ordinary-private'\nprofile='{profile}'\n\
+                                 [targets.one.sudo]\nmode='{mode}'\n{alias}\
+                                 users=['root']\nprograms=['/usr/bin/id']\n\
+                                 [targets.two]\nssh_host='other-private'\n{elevated}{ordinary}",
+                                enabled = if selected {
+                                    "['observe','ordinary']"
+                                } else {
+                                    "[]"
+                                },
+                            ),
+                            &[],
+                        )
+                        .unwrap();
+                        let mut entries = vec![ToolEntry {
+                            id: ToolKey::Builtin(ToolId::Sudo),
+                            name: "generic-sudo".into(),
+                        }];
+                        for (id, binding) in config.bindings().entries() {
+                            let allowed = selected && global_allowed && target_allowed;
+                            assert_eq!(config.binding_enabled(id), selected && global_allowed);
+                            let result = config.resolve_binding("one", id);
+                            assert_eq!(
+                                result.is_ok(),
+                                allowed,
+                                "{mode}/{global}/{profile}/{selected}/{}",
+                                binding.name,
+                            );
+                            if let Ok(resolved) = result {
+                                assert_eq!(resolved.name, "one");
+                                let expected = if binding.name == "observe" {
+                                    (destination, role)
+                                } else {
+                                    ("ordinary-private", IdentityRole::Ordinary)
+                                };
+                                assert_eq!((resolved.destination, resolved.role), expected);
+                            } else {
+                                let error = result.err().unwrap();
+                                assert_eq!(error.code, "policy_denied");
+                                assert!(!error.remote_state_unknown);
+                            }
+                            for host in ["two", "ordinary-private", "elevated-private", "unknown"] {
+                                assert!(config.resolve_binding(host, id).is_err(), "{host}");
+                            }
+                            entries.push(ToolEntry {
+                                id: ToolKey::Binding(id),
+                                name: binding.name.clone().into(),
+                            });
+                        }
+                        let tools = ToolCatalog::new(entries).unwrap();
+                        let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+                        let rows = discovery["targets"].as_array().unwrap();
+                        let one = rows.iter().find(|row| row["name"] == "one").unwrap();
+                        let generic_allowed = global == "baseline" && profile == "baseline";
+                        let mut expected = Vec::new();
+                        if generic_allowed {
+                            expected.push("generic-sudo");
+                        }
+                        if selected && global_allowed && target_allowed {
+                            expected.extend(["observe", "ordinary"]);
+                        }
+                        assert_eq!(one["permitted_operations"], serde_json::json!(expected));
+                        assert_eq!(
+                            config.resolve_sudo("one", "root", "/usr/bin/id").is_ok(),
+                            generic_allowed,
+                        );
+                        assert_eq!(config.tool_enabled(ToolId::Sudo), global == "baseline");
+                        for tool in [ToolId::Exec, ToolId::Run] {
+                            assert_eq!(config.resolve("one", tool).is_ok(), generic_allowed,);
+                        }
+                        let two = rows.iter().find(|row| row["name"] == "two").unwrap();
+                        assert_eq!(two["permitted_operations"], serde_json::json!([]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_fixed_sudo_definition_must_narrow_every_declared_target_policy() {
+        let definition = binding_definition().replace(
+            "authority = \"ordinary\"",
+            "authority = { sudo = \"root\" }",
+        );
+        for (mode, alias) in [
+            ("same-account", ""),
+            ("separate-identity", "ssh_host='secret_elevated'\n"),
+        ] {
+            for (policy, permitted) in [
+                ("", true),
+                ("users=['root']\nprograms=['/usr/bin/id']", true),
+                ("users=['service']\nprograms=['/usr/bin/id']", false),
+                ("programs=[]", false),
+                ("programs=['/bin/id']", false),
+                ("programs=['/usr/bin/id-other']", false),
+            ] {
+                for profile in ["baseline", "actions-only", "files-only", "read-only-files"] {
+                    for enabled in ["[]", "['observe']"] {
+                        for bad_second in [false, true] {
+                            let definition = if bad_second {
+                                definition
+                                    .replace("targets = [\"one\"]", "targets = [\"one\", \"two\"]")
+                            } else {
+                                definition.clone()
+                            };
+                            let result = load_text(
+                                &format!(
+                                    "profile='{profile}'\nenabled_tools={enabled}\n\
+                                     [targets.one]\nssh_host='secret_ordinary'\nprofile='{profile}'\n\
+                                     [targets.one.sudo]\nmode='{mode}'\n{alias}{policy}\n\
+                                     [targets.two]\nssh_host='secret_second'\n{definition}",
+                                ),
+                                &[],
+                            );
+                            assert_eq!(
+                                result.is_ok(),
+                                permitted && !bad_second,
+                                "{mode}/{policy}/{profile}/{enabled}/{bad_second}",
+                            );
+                            if let Err(error) = result {
+                                assert_eq!(error.field, "tools");
+                                assert!(std::error::Error::source(&error).is_none());
+                                let diagnostic = format!("{error:?} {error}");
+                                for secret in ["secret_", "/usr/bin/id", "/bin/id", "service"] {
+                                    assert!(!diagnostic.contains(secret), "{diagnostic}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for enabled in ["[]", "['observe']"] {
+            let error = load_text(
+                &format!(
+                    "enabled_tools={enabled}\n\
+                     [targets.one]\nssh_host='secret_ordinary'\n{definition}",
+                ),
+                &[],
+            )
+            .err()
+            .expect("disabled sudo cannot authorize a definition");
+            assert_eq!(error.field, "tools");
+        }
+    }
+
+    #[test]
+    fn binding_dispatch_and_discovery_recheck_sudo_policy_without_affecting_ordinary() {
+        let definition = binding_definition().replace(
+            "authority = \"ordinary\"",
+            "authority = { sudo = \"root\" }",
+        );
+        let ordinary = binding_definition().replace("[tools.observe]", "[tools.ordinary]");
+        for (users, programs, disabled, allowed) in [
+            (vec!["root".to_owned()], None, false, true),
+            (
+                vec!["root".to_owned()],
+                Some(vec!["/usr/bin/id".to_owned()]),
+                false,
+                true,
+            ),
+            (vec!["service".to_owned()], None, false, false),
+            (vec!["root".to_owned()], Some(vec![]), false, false),
+            (
+                vec!["root".to_owned()],
+                Some(vec!["/bin/id".to_owned()]),
+                false,
+                false,
+            ),
+            (vec!["root".to_owned()], None, true, false),
+        ] {
+            let mut config = load_text(
+                &format!(
+                    "profile='actions-only'\nenabled_tools=['observe','ordinary']\n\
+                     [targets.one]\nssh_host='ordinary-private'\nprofile='actions-only'\n\
+                     [targets.one.sudo]\nmode='same-account'\n{definition}{ordinary}",
+                ),
+                &[],
+            )
+            .unwrap();
+            // Exercise runtime/discovery independently of startup rejection.
+            config
+                .targets
+                .as_mut()
+                .unwrap()
+                .get_mut("one")
+                .unwrap()
+                .sudo = if disabled {
+                Sudo::Disabled
+            } else {
+                Sudo::SameAccount { users, programs }
+            };
+            let mut entries = Vec::new();
+            for (id, binding) in config.bindings().entries() {
+                let permitted = binding.name == "ordinary" || allowed;
+                assert_eq!(config.resolve_binding("one", id).is_ok(), permitted);
+                entries.push(ToolEntry {
+                    id: ToolKey::Binding(id),
+                    name: binding.name.clone().into(),
+                });
+            }
+            let tools = ToolCatalog::new(entries).unwrap();
+            let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+            assert_eq!(
+                discovery["targets"][0]["permitted_operations"],
+                if allowed {
+                    serde_json::json!(["observe", "ordinary"])
+                } else {
+                    serde_json::json!(["ordinary"])
+                },
+            );
+            assert!(!config.tool_enabled(ToolId::Sudo));
         }
     }
 

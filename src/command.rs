@@ -191,6 +191,11 @@ pub(crate) enum Invocation<'a> {
         argv: &'a [String],
         user: &'a str,
     },
+    BoundSudo {
+        program: &'a str,
+        arguments: Vec<Cow<'a, str>>,
+        user: &'a str,
+    },
 }
 
 fn checked_size(bytes: usize, extra: usize) -> Result<usize, ToolError> {
@@ -278,6 +283,16 @@ fn argv_encoded_len<'a>(
     }
     Ok(bytes)
 }
+fn sudo_encoded_len<'a>(
+    user: &'a str,
+    arguments: impl IntoIterator<Item = &'a str>,
+) -> Result<usize, ToolError> {
+    let mut bytes = escaped_len("sudo")?;
+    for argument in sudo_arguments(user).into_iter().chain(arguments) {
+        append_argument(&mut bytes, escaped_len(argument)?)?;
+    }
+    Ok(bytes)
+}
 
 impl Invocation<'_> {
     pub(crate) fn encoded_len(&self) -> Result<usize, ToolError> {
@@ -315,16 +330,15 @@ impl Invocation<'_> {
                 arguments,
                 cwd,
             } => argv_encoded_len(program, arguments.iter().map(Cow::as_ref), *cwd),
-            Self::Sudo { argv, user } => {
-                let mut bytes = escaped_len("sudo")?;
-                for argument in sudo_arguments(user)
-                    .into_iter()
-                    .chain(argv.iter().map(String::as_str))
-                {
-                    append_argument(&mut bytes, escaped_len(argument)?)?;
-                }
-                Ok(bytes)
-            }
+            Self::Sudo { argv, user } => sudo_encoded_len(user, argv.iter().map(String::as_str)),
+            Self::BoundSudo {
+                program,
+                arguments,
+                user,
+            } => sudo_encoded_len(
+                user,
+                std::iter::once(*program).chain(arguments.iter().map(Cow::as_ref)),
+            ),
         }
     }
 }
@@ -535,6 +549,19 @@ mod tests {
             .unwrap(),
             expected
         );
+        assert_eq!(
+            Invocation::BoundSudo {
+                program: &argv[0],
+                arguments: argv[1..]
+                    .iter()
+                    .map(|v| Cow::Borrowed(v.as_str()))
+                    .collect(),
+                user: "some-user",
+            }
+            .encoded_len()
+            .unwrap(),
+            expected,
+        );
     }
 
     #[test]
@@ -561,8 +588,23 @@ mod tests {
             MAX_COMMAND_BYTES
         );
         request.validate(0).unwrap();
+        let bound_size = |argv: &[String]| {
+            Invocation::BoundSudo {
+                program: &argv[0],
+                arguments: argv[1..]
+                    .iter()
+                    .map(|v| Cow::Borrowed(v.as_str()))
+                    .collect(),
+                user: "root",
+            }
+            .encoded_len()
+        };
+        assert_eq!(bound_size(&request.argv).unwrap(), MAX_COMMAND_BYTES);
         request.argv.push(String::new());
         assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+        let error = bound_size(&request.argv).unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
+        assert!(!error.remote_state_unknown);
     }
 
     #[test]

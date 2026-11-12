@@ -165,6 +165,10 @@ impl SshMcp {
                 ("result".into(), serde_json::json!(bindings::RESULT_KIND)),
                 ("effects".into(), serde_json::json!(binding.effects())),
                 ("executor".into(), serde_json::json!(bindings::EXECUTOR_KIND)),
+                ("authority".into(), binding.sudo().map_or_else(
+                    || serde_json::json!("ordinary"),
+                    |(user, _)| serde_json::json!({"sudo": user}),
+                )),
             ])));
             let route = ToolRoute::new_dyn(metadata, move |context: ToolCallContext<'_, Self>| {
                 Box::pin(async move {
@@ -299,6 +303,11 @@ impl SshMcp {
             .bindings()
             .get(id)
             .expect("registered binding exists");
+        let mode = arguments
+            .get("host")
+            .and_then(serde_json::Value::as_str)
+            .filter(|host| binding.targets.iter().any(|allowed| allowed == host))
+            .map(|host| self.state.config.sudo_mode(host));
         match binding.parse_request(arguments) {
             Ok(request) => {
                 self.command(Operation::Binding { id, request }, context)
@@ -309,9 +318,15 @@ impl SshMcp {
                     request_id: &context.id,
                     tool: self.state.binding_name(id),
                     host: None,
-                    identity_role: IdentityRole::Ordinary,
-                    sudo_mode: None,
-                    user: None,
+                    identity_role: if binding.sudo().is_some()
+                        && mode != Some(SudoMode::SameAccount)
+                    {
+                        IdentityRole::Elevated
+                    } else {
+                        IdentityRole::Ordinary
+                    },
+                    sudo_mode: mode,
+                    user: binding.sudo().map(|(user, _)| user),
                     program: None,
                     binding_revision: Some(&binding.revision),
                     executor: Some(bindings::EXECUTOR_KIND),
@@ -660,7 +675,7 @@ impl Operation {
                 (
                     ToolKey::Binding(*id),
                     host,
-                    None,
+                    binding.sudo().map(|(user, _)| user),
                     None,
                     Some(binding.revision.as_str()),
                     Some(bindings::EXECUTOR_KIND),
@@ -680,7 +695,7 @@ impl Operation {
             binding_revision: revision,
             executor,
             sudo_mode: mode,
-            identity_role: if matches!(self, Self::Sudo(_)) && mode != Some(SudoMode::SameAccount) {
+            identity_role: if user.is_some() && mode != Some(SudoMode::SameAccount) {
                 IdentityRole::Elevated
             } else {
                 IdentityRole::Ordinary

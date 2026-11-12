@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{
     command::Invocation,
-    config::{ConfigError, Limits},
+    config::{ConfigError, Limits, account_name},
     reply::ToolError,
 };
 pub(crate) const EXECUTOR_KIND: &str = "native_argv";
@@ -132,7 +132,7 @@ struct RawBinding {
     description: String,
     revision: String,
     targets: Vec<String>,
-    authority: String,
+    authority: toml::Value,
     effects: Vec<Effect>,
     execution: RawExecution,
     input_schema: toml::Value,
@@ -262,6 +262,12 @@ enum Slot {
     Input(usize),
 }
 #[derive(Debug)]
+enum Authority {
+    Ordinary,
+    Sudo(String),
+}
+
+#[derive(Debug)]
 pub(crate) struct CompiledBinding {
     pub(crate) name: String,
     pub(crate) description: String,
@@ -271,6 +277,7 @@ pub(crate) struct CompiledBinding {
     enabled: bool,
     effects: Vec<Effect>,
     inputs: Vec<Input>,
+    authority: Authority,
     program: String,
     argv: Vec<Slot>,
     cwd: Option<String>,
@@ -342,13 +349,21 @@ impl CompiledBinding {
         {
             return Err(invalid("Invalid description or revision"));
         }
-        if raw.authority != "ordinary"
-            || raw.execution.kind != EXECUTOR_KIND
-            || raw.result.kind != RESULT_KIND
-        {
-            return Err(invalid(
-                "Only ordinary native argv command tools are supported",
-            ));
+        let authority = match raw.authority {
+            toml::Value::String(value) if value == "ordinary" => Authority::Ordinary,
+            toml::Value::Table(mut value) if value.len() == 1 => match value.remove("sudo") {
+                Some(toml::Value::String(user)) if user.len() <= 64 && account_name(&user) => {
+                    Authority::Sudo(user)
+                }
+                _ => return Err(invalid("Invalid fixed sudo account")),
+            },
+            _ => return Err(invalid("Invalid fixed tool authority")),
+        };
+        if raw.execution.kind != EXECUTOR_KIND || raw.result.kind != RESULT_KIND {
+            return Err(invalid("Only native argv command tools are supported"));
+        }
+        if matches!(authority, Authority::Sudo(_)) && raw.execution.cwd.is_some() {
+            return Err(invalid("Elevated bindings do not support cwd"));
         }
         if raw.targets.is_empty()
             || raw.targets.len() > 32
@@ -525,15 +540,15 @@ impl CompiledBinding {
             enabled,
             effects: raw.effects,
             inputs,
+            authority,
             program: execution.program,
             argv,
             cwd: execution.cwd,
             timeout_secs,
             max_output_bytes,
         };
-        let fixed = Invocation::BoundArgv {
-            program: &binding.program,
-            arguments: binding
+        let fixed = binding.invocation(
+            binding
                 .argv
                 .iter()
                 .filter_map(|v| match v {
@@ -541,13 +556,34 @@ impl CompiledBinding {
                     Slot::Input(_) => None,
                 })
                 .collect(),
-            cwd: binding.cwd.as_deref(),
-        };
+        );
         fixed
             .encoded_len()
             .map_err(|_| invalid("Fixed command exceeds encoded command bound"))?;
         Ok(binding)
     }
+    pub(crate) fn sudo(&self) -> Option<(&str, &str)> {
+        match &self.authority {
+            Authority::Ordinary => None,
+            Authority::Sudo(user) => Some((user, &self.program)),
+        }
+    }
+
+    fn invocation<'a>(&'a self, arguments: Vec<Cow<'a, str>>) -> Invocation<'a> {
+        match &self.authority {
+            Authority::Ordinary => Invocation::BoundArgv {
+                program: &self.program,
+                arguments,
+                cwd: self.cwd.as_deref(),
+            },
+            Authority::Sudo(user) => Invocation::BoundSudo {
+                program: &self.program,
+                arguments,
+                user,
+            },
+        }
+    }
+
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
     }
@@ -638,11 +674,7 @@ impl CompiledBinding {
             };
             arguments.push(value);
         }
-        let invocation = Invocation::BoundArgv {
-            program: &self.program,
-            arguments,
-            cwd: self.cwd.as_deref(),
-        };
+        let invocation = self.invocation(arguments);
         invocation.encoded_len()?;
         Ok(PreparedBinding {
             invocation,
@@ -691,6 +723,42 @@ result = { kind = "command" }
     }
     fn put(table: &mut toml::Value, key: &str, value: toml::Value) {
         table.as_table_mut().unwrap().insert(key.into(), value);
+    }
+
+    #[test]
+    fn fixed_sudo_borrows_literal_inputs_without_exposing_authority_controls() {
+        let mut raw = definition();
+        raw["authority"] = toml::from_str("sudo = 'root'").unwrap();
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        assert!(binding.read_only());
+        let text = "-n ' \"$();\\\n雪";
+        let request = request(binding, json!(text));
+        let prepared = binding.prepare(&request, &Limits::default()).unwrap();
+        match prepared.invocation {
+            Invocation::BoundSudo {
+                program,
+                arguments,
+                user,
+            } => {
+                assert_eq!(program, "/usr/bin/printf");
+                assert_eq!(user, "root");
+                assert_eq!(arguments, [Cow::Borrowed("--"), Cow::Borrowed(text)]);
+                assert!(arguments.iter().all(|v| matches!(v, Cow::Borrowed(_))));
+            }
+            _ => panic!("Expected fixed sudo invocation"),
+        }
+        for key in ["user", "authority", "program"] {
+            let mut arguments = json!({"host":"server", "value":"ok"})
+                .as_object()
+                .unwrap()
+                .clone();
+            arguments.insert(key.into(), json!("root"));
+            assert_eq!(
+                binding.parse_request(arguments).err().unwrap().code,
+                rmcp::model::ErrorCode::INVALID_PARAMS
+            );
+        }
     }
 
     #[test]
