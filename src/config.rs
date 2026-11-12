@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
@@ -118,11 +118,34 @@ impl ToolCatalog {
 #[command(version, about = "Stdio SSH MCP server")]
 pub(crate) struct Cli {
     /// Operator TOML configuration; no file is discovered automatically.
-    #[arg(long, env = "SSH_MCP_CONFIG", hide_env_values = true)]
+    #[arg(long, global = true, env = "SSH_MCP_CONFIG", hide_env_values = true)]
     config: Option<PathBuf>,
     /// Replacement OpenSSH configuration (not an overlay).
-    #[arg(long, env = "SSH_MCP_SSH_CONFIG", hide_env_values = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SSH_MCP_SSH_CONFIG",
+        hide_env_values = true
+    )]
     ssh_config: Option<PathBuf>,
+    #[command(subcommand)]
+    pub(crate) command: Option<CliCommand>,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CliCommand {
+    /// Check configured logical targets without running commands or sudo.
+    Doctor(DoctorArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct DoctorArgs {
+    /// Configured logical target; repeat to select additional targets.
+    #[arg(long = "target", value_name = "LOGICAL_TARGET", required = true)]
+    pub targets: Vec<String>,
+    /// Deadline in seconds for the entire diagnostic run.
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
 }
 
 // Only fixed schema paths and fixed reasons enter diagnostics. In particular, neither
@@ -744,6 +767,30 @@ impl Config {
         self.resolve_ordinary(host)
     }
 
+    /// Resolve an operator diagnostic independently of MCP publication profiles.
+    /// Only configured logical names qualify, and sudo identities are never selected.
+    pub(crate) fn doctor_target<'a>(
+        &'a self,
+        host: &'a str,
+    ) -> Result<ResolvedTarget<'a>, ToolError> {
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .ok_or_else(|| {
+                ToolError::new(
+                    "policy_denied",
+                    "Host is not a configured logical target",
+                    false,
+                )
+            })?;
+        Ok(ResolvedTarget {
+            name: host,
+            destination: &target.ssh_host,
+            role: IdentityRole::Ordinary,
+        })
+    }
+
     fn resolve_ordinary<'a>(&'a self, host: &'a str) -> Result<ResolvedTarget<'a>, ToolError> {
         let destination = match &self.targets {
             Some(targets) => targets
@@ -1131,6 +1178,184 @@ mod tests {
         Cli {
             config: None,
             ssh_config: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn doctor_is_optional_and_accepts_repeated_explicit_targets() {
+        assert!(Cli::try_parse_from(["ssh-mcp"]).unwrap().command.is_none());
+        let parsed = Cli::try_parse_from([
+            "ssh-mcp",
+            "doctor",
+            "--target",
+            "two",
+            "--target",
+            "one",
+            "--timeout-secs",
+            "7",
+        ])
+        .unwrap();
+        let Some(CliCommand::Doctor(args)) = parsed.command else {
+            panic!("doctor subcommand expected");
+        };
+        assert_eq!(args.targets, ["two", "one"]);
+        assert_eq!(args.timeout_secs, Some(7));
+
+        let parsed = Cli::try_parse_from(["ssh-mcp", "doctor", "--target", "one"]).unwrap();
+        let Some(CliCommand::Doctor(args)) = parsed.command else {
+            panic!("doctor subcommand expected");
+        };
+        assert_eq!(args.timeout_secs, None);
+    }
+
+    #[test]
+    fn doctor_requires_named_targets_and_exposes_no_execution_controls() {
+        for args in [
+            vec!["ssh-mcp", "doctor"],
+            vec!["ssh-mcp", "doctor", "one"],
+            vec!["ssh-mcp", "doctor", "--target"],
+            vec!["ssh-mcp", "doctor", "--target", "one", "two"],
+            vec!["ssh-mcp", "doctor", "--all"],
+            vec!["ssh-mcp", "doctor", "--target", "one", "--sudo"],
+            vec!["ssh-mcp", "doctor", "--target", "one", "--host", "private"],
+            vec!["ssh-mcp", "doctor", "--target", "one", "--command", "id"],
+            vec!["ssh-mcp", "doctor", "--target", "one", "--identity", "key"],
+            vec![
+                "ssh-mcp",
+                "doctor",
+                "--target",
+                "one",
+                "--timeout-secs",
+                "bad",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_global_paths_work_before_and_after_subcommand_with_cli_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(
+            dir.path().join("nested/operator.toml"),
+            "[ssh]\nconfig_file='missing-private-file'\n[targets.one]\nssh_host='private-alias'\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("selected-ssh"), "").unwrap();
+        for argv in [
+            vec![
+                "ssh-mcp",
+                "--config",
+                "nested/operator.toml",
+                "--ssh-config",
+                "selected-ssh",
+                "doctor",
+                "--target",
+                "one",
+            ],
+            vec![
+                "ssh-mcp",
+                "doctor",
+                "--target",
+                "one",
+                "--config",
+                "nested/operator.toml",
+                "--ssh-config",
+                "selected-ssh",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            assert!(matches!(parsed.command, Some(CliCommand::Doctor(_))));
+            let config = Config::load_with(parsed, dir.path(), |key| match key {
+                "SSH_MCP_CONFIG" | "SSH_MCP_SSH_CONFIG" => Some("missing-env-private".into()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(
+                config.ssh_config(),
+                Some(dir.path().join("selected-ssh").as_path())
+            );
+            assert_eq!(
+                config.doctor_target("one").unwrap().destination,
+                "private-alias"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_resolves_only_configured_names_with_private_denials() {
+        for text in [
+            "",
+            "[targets]",
+            "[targets.one]\nssh_host='private-alias'\n\
+             [targets.one.sudo]\nmode='separate-identity'\nssh_host='private-elevated'",
+        ] {
+            let config = load_text(text, &[]).unwrap();
+            for host in [
+                "private-alias",
+                "private-elevated",
+                "private-unknown",
+                "user@host",
+            ] {
+                let error = config.doctor_target(host).err().unwrap();
+                assert_eq!(error.code, "policy_denied");
+                assert!(!error.remote_state_unknown);
+                let encoded = serde_json::to_string(&error).unwrap();
+                for secret in [
+                    "private-alias",
+                    "private-elevated",
+                    "private-unknown",
+                    "user@host",
+                ] {
+                    assert!(!encoded.contains(secret));
+                    assert!(!format!("{error:?}").contains(secret));
+                }
+            }
+            if config.targets.as_ref().is_none_or(BTreeMap::is_empty) {
+                assert!(config.doctor_target("one").is_err());
+            }
+        }
+        // The operator-only restriction must not close native open-host mode.
+        let open = load_text("", &[]).unwrap();
+        assert_eq!(
+            open.resolve("user@host", ToolId::Exec).unwrap().destination,
+            "user@host",
+        );
+    }
+
+    #[test]
+    fn doctor_ignores_publication_profiles_but_never_selects_sudo_identity() {
+        for global in ["baseline", "actions-only", "files-only", "read-only-files"] {
+            for target in ["baseline", "actions-only", "files-only", "read-only-files"] {
+                for sudo in [
+                    "",
+                    "[targets.one.sudo]\nmode='same-account'\n",
+                    "[targets.one.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n",
+                ] {
+                    let config = load_text(
+                        &format!(
+                            "profile='{global}'\n[targets.one]\n\
+                             ssh_host='private-ordinary'\nprofile='{target}'\n{sudo}"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+                    let resolved = config.doctor_target("one").unwrap();
+                    assert_eq!(resolved.name, "one");
+                    assert_eq!(resolved.destination, "private-ordinary");
+                    assert_eq!(resolved.role, IdentityRole::Ordinary);
+                    assert_eq!(
+                        config.resolve("one", ToolId::Exec).is_ok(),
+                        global == "baseline" && target == "baseline",
+                    );
+                    assert_eq!(
+                        config.resolve("one", ToolId::ReadFile).is_ok(),
+                        global != "actions-only" && target != "actions-only",
+                    );
+                }
+            }
         }
     }
 
@@ -1888,6 +2113,7 @@ result = { kind = "command" }
             Cli {
                 config: Some(path),
                 ssh_config: None,
+                command: None,
             },
             dir.path(),
             |key| {
@@ -2300,6 +2526,7 @@ programs=['/private/program']
             Cli {
                 config: Some("nested/operator.toml".into()),
                 ssh_config: Some("cli-ssh".into()),
+                command: None,
             },
             cwd,
             |key| match key {
@@ -2319,7 +2546,8 @@ programs=['/private/program']
             Config::load_with(
                 Cli {
                     config: Some("missing".into()),
-                    ssh_config: None
+                    ssh_config: None,
+                    command: None,
                 },
                 dir.path(),
                 |_| None
@@ -2330,7 +2558,8 @@ programs=['/private/program']
             Config::load_with(
                 Cli {
                     config: None,
-                    ssh_config: Some("missing".into())
+                    ssh_config: Some("missing".into()),
+                    command: None,
                 },
                 dir.path(),
                 |_| None
@@ -2341,7 +2570,8 @@ programs=['/private/program']
             Config::load_with(
                 Cli {
                     config: None,
-                    ssh_config: Some(dir.path().into())
+                    ssh_config: Some(dir.path().into()),
+                    command: None,
                 },
                 dir.path(),
                 |_| None

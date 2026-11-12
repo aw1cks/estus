@@ -451,6 +451,17 @@ fn combine_close<T>(result: Result<T, Failure>, close: Result<(), Failure>) -> R
     }
 }
 
+/// Negotiate and close SFTP without issuing any filesystem requests.
+pub(crate) async fn probe(session: &Session, context: FileContext<'_>) -> FileOutcome<()> {
+    run_sftp(session, context, |sftp| async move {
+        tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+            .await
+            .map_err(|_| Failure::cleanup())?
+            .map_err(sftp_failure)
+    })
+    .await
+}
+
 pub(crate) async fn read(
     session: &Session,
     spec: ReadSpec<'_>,

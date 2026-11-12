@@ -4,6 +4,7 @@ mod capture;
 mod command;
 mod config;
 mod controller;
+mod doctor;
 mod exec;
 mod filedata;
 mod filemeta;
@@ -36,16 +37,26 @@ fn main() -> ExitCode {
             Err(_) => ExitCode::FAILURE,
         };
     }
-    let config = match config::Config::load(config::Cli::parse()) {
+    let mut cli = config::Cli::parse();
+    let command = cli.command.take();
+    let diagnostic = command.is_some();
+    let config = match config::Config::load(cli) {
         Ok(config) => config,
-        Err(error) => return invalid_config(&error),
+        Err(error) => {
+            let status = invalid_config(&error);
+            return if diagnostic {
+                ExitCode::from(2)
+            } else {
+                status
+            };
+        }
     };
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => {
-            let status = runtime.block_on(run(config));
+            let status = runtime.block_on(run(config, command));
             // Tokio's blocking stdin reader cannot be cancelled while stdin stays open.
             runtime.shutdown_timeout(std::time::Duration::from_secs(2));
             status
@@ -54,13 +65,30 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(config: config::Config) -> ExitCode {
+async fn run(config: config::Config, command: Option<config::CliCommand>) -> ExitCode {
     let (Ok(mut interrupt), Ok(mut terminate)) = (
         signal(SignalKind::interrupt()),
         signal(SignalKind::terminate()),
     ) else {
         return fail("signal_setup_failed");
     };
+    if let Some(config::CliCommand::Doctor(args)) = command {
+        let shutdown = CancellationToken::new();
+        let operation = doctor::run(config, args, shutdown.clone());
+        tokio::pin!(operation);
+        let report = tokio::select! {
+            report = &mut operation => report,
+            _ = interrupt.recv() => {
+                shutdown.cancel();
+                operation.as_mut().await
+            },
+            _ = terminate.recv() => {
+                shutdown.cancel();
+                operation.as_mut().await
+            },
+        };
+        return ExitCode::from(report.publish().await);
+    }
     let application = match server::SshMcp::new(config) {
         Ok(application) => application,
         Err(error) => return invalid_config(&error),

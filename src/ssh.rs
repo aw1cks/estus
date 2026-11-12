@@ -29,9 +29,16 @@ const READINESS_POLL: Duration = Duration::from_millis(25);
 
 type Key = (String, IdentityRole);
 
+#[derive(Clone, Copy)]
+enum Policy {
+    Native,
+    Diagnostic,
+}
+
 pub(crate) struct Pool {
     entries: Mutex<HashMap<Key, Arc<Entry>>>,
     ssh_config: Option<PathBuf>,
+    policy: Policy,
     connect_timeout: Duration,
     shutdown: CancellationToken,
     stopping: CancellationToken,
@@ -136,9 +143,28 @@ impl Pool {
         connect_timeout: Duration,
         shutdown: CancellationToken,
     ) -> Arc<Self> {
+        Self::with_policy(ssh_config, connect_timeout, shutdown, Policy::Native)
+    }
+
+    /// Negotiate with configured credentials and trust, without changing either.
+    pub(crate) fn diagnostic(
+        ssh_config: Option<PathBuf>,
+        connect_timeout: Duration,
+        shutdown: CancellationToken,
+    ) -> Arc<Self> {
+        Self::with_policy(ssh_config, connect_timeout, shutdown, Policy::Diagnostic)
+    }
+
+    fn with_policy(
+        ssh_config: Option<PathBuf>,
+        connect_timeout: Duration,
+        shutdown: CancellationToken,
+        policy: Policy,
+    ) -> Arc<Self> {
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             ssh_config,
+            policy,
             connect_timeout,
             shutdown,
             stopping: CancellationToken::new(),
@@ -213,6 +239,7 @@ impl Pool {
         if launch {
             let owner = Arc::downgrade(self);
             let config = self.ssh_config.clone();
+            let policy = self.policy;
             let destination = destination.to_owned();
             // The shared launch has its own timeout. Each interested request
             // enforces its deadline independently; the last one cancels launch.
@@ -224,6 +251,7 @@ impl Pool {
             // if the request future is dropped at the very next await point.
             tokio::spawn(async move {
                 let control = EntryControl {
+                    policy,
                     deadline: connection_deadline,
                     shutdown,
                     stopping,
@@ -286,7 +314,11 @@ struct Master {
 }
 
 impl Master {
-    fn launch(config: Option<&PathBuf>, destination: &str) -> Result<(Self, Session), Failure> {
+    fn launch(
+        config: Option<&PathBuf>,
+        destination: &str,
+        policy: Policy,
+    ) -> Result<(Self, Session), Failure> {
         let directory = tempfile::Builder::new()
             .prefix("sm-")
             .tempdir_in("/tmp")
@@ -315,6 +347,17 @@ impl Master {
             "SetEnv=SSH_MCP=1",
         ] {
             command.arg("-o").arg(option);
+        }
+        if matches!(policy, Policy::Diagnostic) {
+            // Command-line values precede config parsing and cannot be relaxed
+            // by a host stanza. Keep configured known-host paths and proxies.
+            for option in [
+                "StrictHostKeyChecking=yes",
+                "UpdateHostKeys=no",
+                "AddKeysToAgent=no",
+            ] {
+                command.arg("-o").arg(option);
+            }
         }
         if let Some(config) = config {
             command.arg("-F").arg(config);
@@ -459,6 +502,7 @@ impl Drop for Master {
 }
 
 struct EntryControl {
+    policy: Policy,
     deadline: Option<Instant>,
     shutdown: CancellationToken,
     stopping: CancellationToken,
@@ -613,13 +657,14 @@ async fn run_entry(
             });
             return;
         }
-        let (mut master, session) = match Master::launch(config.as_ref(), &destination) {
-            Ok(resources) => resources,
-            Err(failure) => {
-                lock(&entry.state).failure = Some(failure);
-                return;
-            }
-        };
+        let (mut master, session) =
+            match Master::launch(config.as_ref(), &destination, control.policy) {
+                Ok(resources) => resources,
+                Err(failure) => {
+                    lock(&entry.state).failure = Some(failure);
+                    return;
+                }
+            };
         master.finalizer = finalizer.take();
         let (master, session) = resources.insert((master, Arc::new(session)));
         let pid = master.child.as_ref().and_then(Child::id);
