@@ -1,5 +1,6 @@
 mod audit;
 mod bindings;
+mod capture;
 mod command;
 mod config;
 mod exec;

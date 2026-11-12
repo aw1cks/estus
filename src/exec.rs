@@ -2,9 +2,10 @@ use std::io;
 use std::time::Instant;
 
 use openssh::{Session, Stdio};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::capture::{Capture, drain};
 use crate::command::{Invocation, shell_script, sudo_arguments};
 use crate::reply::{CommandData, Termination, ToolError, ToolReply};
 
@@ -14,50 +15,6 @@ pub(crate) struct RunContext<'a> {
     pub ct: &'a CancellationToken,
     pub shutdown: &'a CancellationToken,
     pub started: Instant,
-}
-
-struct Capture {
-    bytes: Vec<u8>,
-    limit: usize,
-    truncated: bool,
-}
-
-impl Capture {
-    fn new(limit: u64) -> Self {
-        Self {
-            bytes: Vec::new(),
-            limit: usize::try_from(limit).unwrap_or(usize::MAX),
-            truncated: false,
-        }
-    }
-
-    fn retain(&mut self, bytes: &[u8]) {
-        let retained = bytes.len().min(self.limit - self.bytes.len());
-        self.bytes.extend_from_slice(&bytes[..retained]);
-        self.truncated |= retained < bytes.len();
-    }
-
-    fn decode(self) -> (String, bool, bool) {
-        match String::from_utf8(self.bytes) {
-            Ok(text) => (text, self.truncated, false),
-            Err(error) => (
-                String::from_utf8_lossy(error.as_bytes()).into_owned(),
-                self.truncated,
-                true,
-            ),
-        }
-    }
-}
-
-async fn drain<R: AsyncRead + Unpin>(mut stream: R, capture: &mut Capture) -> io::Result<()> {
-    let mut buffer = [0u8; 8192];
-    loop {
-        let count = stream.read(&mut buffer).await?;
-        if count == 0 {
-            return Ok(());
-        }
-        capture.retain(&buffer[..count]);
-    }
 }
 
 async fn send_stdin(stream: Option<openssh::ChildStdin>, input: Option<&str>) -> io::Result<()> {
