@@ -519,7 +519,33 @@ fn pid(record: &Path, name: &str) -> Result<i32> {
 
 // Gates are explicit observable barriers. The short polling interval is not an
 // assumption that work has finished: every wait is bounded and checks its predicate.
-
+const GROUP_SCRIPT: &str = r#"
+set -eu
+record=@OBS@/${PWD##*/}
+wait_gate() {
+    attempts=0
+    while [ ! -f "$1" ]; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 3000 ] || exit 90
+        @SLEEP@ 0.01
+    done
+}
+if [ "${2-}" = worker ]; then
+    printf ready > "$record/worker-ready"
+    wait_gate "$record/release-worker"
+    exit 0
+fi
+@MKDIR@ "$record"
+printf '%s\n' "$$" > "$record/leader"
+printf '%s\n' "$0" > "$record/source"
+printf '%s\n' "$1" > "$record/input"
+@SH@ "$0" "$1" worker &
+printf '%s\n' "$!" > "$record/worker"
+printf ready > "$record/ready"
+wait_gate "$record/release-leader"
+printf 'leader completed\n'
+exit 0
+"#;
 
 #[cfg_attr(
     target_os = "macos",
@@ -848,5 +874,208 @@ async fn interpreter_disappearing_after_activation_is_local_spawn_failure_withou
     let stopped = server.stop(false).await;
     scenario?;
     stopped?;
+    Ok(())
+}
+
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "requires native process observation outside the Darwin build sandbox"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normal_exit_timeout_cancel_eof_and_sigterm_clean_actual_group_children() -> Result<()> {
+    for trigger in ["normal", "timeout", "cancel", "eof", "sigterm"] {
+        let fixture = Fixture::new(
+            GROUP_SCRIPT,
+            8192,
+            if trigger == "timeout" { 5 } else { 15 },
+        )?;
+        let mut server = Server::start(&fixture).await?;
+        let mut observed = Vec::new();
+        let scenario = async {
+            server.call(2, arguments()).await?;
+            let records = fixture.ready(1, &mut server, 2).await?;
+            let record = &records[0];
+            let leader = pid(record, "leader")?;
+            let worker = pid(record, "worker")?;
+            let (group, leader_state) = fixture
+                .process(leader)
+                .await?
+                .context("live script leader")?;
+            let (worker_group, worker_state) = fixture
+                .process(worker)
+                .await?
+                .context("live background pipe holder")?;
+            ensure!(!leader_state.starts_with('Z') && !worker_state.starts_with('Z'));
+            ensure!(
+                group == worker_group && group != leader,
+                "script was not joined to a separately retained anchor group"
+            );
+            ensure!(
+                fixture.process(group).await?.is_some(),
+                "anchor was reaped while command was live"
+            );
+            observed.extend([leader, worker, group]);
+            ensure!(
+                fixture.operation_directories()?.len() == 1,
+                "live operation lost workspace ownership"
+            );
+            match trigger {
+                "normal" => fs::write(record.join("release-leader"), b"release")?,
+                "cancel" => server.cancel(2).await?,
+                "timeout" | "eof" | "sigterm" => {}
+                _ => unreachable!(),
+            }
+            if !matches!(trigger, "eof" | "sigterm") {
+                if trigger == "cancel" {
+                    server.finished(2, "cancelled").await?;
+                } else {
+                    let frame = server.response(2).await?;
+                    let result = envelope(&frame)?;
+                    let expected = if trigger == "normal" {
+                        "exited"
+                    } else {
+                        "timeout"
+                    };
+                    ensure!(
+                        result["data"]["termination"] == expected,
+                        "{trigger}: {result}"
+                    );
+                    cleaned(&result["data"])?;
+                    if trigger == "normal" {
+                        ensure!(result["error"].is_null() && result["data"]["exit_code"] == 0);
+                        ensure!(
+                            result["data"]["stdout"] == "leader completed\n",
+                            "leader status/output lost behind inherited pipes"
+                        );
+                    } else {
+                        ensure!(
+                            !result["error"].is_null(),
+                            "interruption reported as success"
+                        );
+                    }
+                }
+                fixture.gone(&observed).await?;
+                // Direct children must actually be reaped, not merely zombies.
+                ensure!(
+                    fixture.process(leader).await?.is_none()
+                        && fixture.process(group).await?.is_none(),
+                    "direct child not reaped"
+                );
+                fixture.clean().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        // On failure unblock our fixture before asking the server to stop. On success,
+        // keep workers blocked until EOF/SIGTERM proves that shutdown itself kills them.
+        if scenario.is_err() {
+            fixture.release_all()?;
+        }
+        let stopped = server.stop(trigger == "sigterm").await;
+        let completed = async {
+            scenario.with_context(|| trigger)?;
+            let audit = stopped.with_context(|| trigger)?;
+            if matches!(trigger, "eof" | "sigterm") {
+                let records = audit
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .map(serde_json::from_slice::<Value>)
+                    .collect::<serde_json::Result<Vec<_>>>()?;
+                let finish = records
+                    .iter()
+                    .find(|event| event["event"] == "finish" && event["request_id"] == 2)
+                    .context("shutdown did not finish the controller owner")?;
+                ensure!(
+                    finish["error_code"] == "cancelled"
+                        && finish["owned_group_cleanup"] == "signalled_and_reaped",
+                    "shutdown cleanup: {finish}"
+                );
+            }
+            // Do not release fixture gates until these observations: otherwise a
+            // broken shutdown could pass merely because the test let workers exit.
+            fixture.gone(&observed).await.with_context(|| trigger)?;
+            ensure!(
+                fixture.process(observed[0]).await?.is_none()
+                    && fixture.process(observed[2]).await?.is_none(),
+                "shutdown left an unreaped direct child"
+            );
+            fixture.clean().await.with_context(|| trigger)
+        }
+        .await;
+        fixture.release_all()?;
+        if completed.is_err() {
+            fixture.gone(&observed).await?;
+        }
+        completed?;
+    }
+    Ok(())
+}
+
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "requires native process observation outside the Darwin build sandbox"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_admission_is_held_by_live_controller_owners_and_recovers_after_cleanup()
+-> Result<()> {
+    let fixture = Fixture::new(GROUP_SCRIPT, 8192, 15)?;
+    let mut server = Server::start(&fixture).await?;
+    let mut observed = Vec::new();
+    let scenario = async {
+        for id in 10..26 {
+            server.call(id, arguments()).await?;
+        }
+        let records = fixture.ready(16, &mut server, 10).await?;
+        ensure!(
+            fixture.operation_directories()?.len() == 16,
+            "admitted operations do not own distinct workspaces"
+        );
+        for record in &records {
+            observed.extend([pid(record, "leader")?, pid(record, "worker")?]);
+        }
+        server.call(100, arguments()).await?;
+        let rejected = server.response(100).await?;
+        let result = envelope(&rejected)?;
+        ensure!(
+            result["error"]["code"] == "resource_limit" && result["data"].is_null(),
+            "admission overflow: {result}"
+        );
+        ensure!(
+            fixture.records()?.len() == 16 && fixture.operation_directories()?.len() == 16,
+            "rejected call performed local work"
+        );
+        // Cancellation keeps the actual operation owner responsible for cleanup.
+        for id in 10..26 {
+            server.cancel(id).await?;
+        }
+        for id in 10..26 {
+            server.finished(id, "cancelled").await?;
+        }
+        fixture.gone(&observed).await?;
+        fixture.clean().await?;
+        server.call(101, arguments()).await?;
+        let all_records = fixture.ready(17, &mut server, 101).await?;
+        let next = all_records
+            .iter()
+            .find(|path| !records.contains(path))
+            .context("newly admitted controller")?;
+        observed.extend([pid(next, "leader")?, pid(next, "worker")?]);
+        fs::write(next.join("release-leader"), b"release")?;
+        let frame = server.response(101).await?;
+        let result = envelope(&frame)?;
+        ensure!(
+            result["error"].is_null(),
+            "admission did not recover: {result}"
+        );
+        cleaned(&result["data"])?;
+        fixture.gone(&observed).await?;
+        fixture.clean().await
+    }
+    .await;
+    fixture.release_all()?;
+    let stopped = server.stop(false).await;
+    scenario?;
+    stopped?;
+    fixture.gone(&observed).await?;
     Ok(())
 }
