@@ -478,7 +478,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let timeout_done = fixture.root.path().join("timeout-done");
     fixture.eventual_markers.push(timeout_done.clone());
     let command = format!(
-        "printf started > {}; printf partial; printf error >&2; sleep 3; printf done > {}",
+        "trap '' HUP PIPE; printf started > {}; printf partial; printf error >&2; sleep 3; printf done > {}",
         quote(&timeout_started.to_string_lossy()),
         quote(&timeout_done.to_string_lossy())
     );
@@ -521,7 +521,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let cancel_done = fixture.root.path().join("cancel-done");
     fixture.eventual_markers.push(cancel_done.clone());
     let command = format!(
-        "printf started > {}; printf cancel-partial; sleep 3; printf done > {}",
+        "trap '' HUP PIPE; printf started > {}; printf cancel-partial; sleep 3; printf done > {}",
         quote(&cancel_started.to_string_lossy()),
         quote(&cancel_done.to_string_lossy())
     );
