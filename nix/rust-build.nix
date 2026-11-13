@@ -20,7 +20,8 @@ let
     nativeCheckInputs = controllerTestPrograms;
     postFixup = ''
       wrapProgram "$out/bin/ssh-mcp" \
-        --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
+        --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]} \
+        --set-default SSH_MCP_AUTOMATION_SSH ${pkgs.openssh}/bin/ssh
     '';
   });
   acceptance = import ./ssh-acceptance.nix {

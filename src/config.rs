@@ -204,11 +204,39 @@ struct Document {
     automation: Automation,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Automation {
     required: bool,
     runtime: Option<PathBuf>,
+    workspace_root: Option<String>,
+    max_concurrent: usize,
+    max_scratch_bytes: u64,
+    max_scratch_files: usize,
+    targets: BTreeMap<String, AutomationTarget>,
+    ssh_executable: Option<PathBuf>,
+}
+
+impl Default for Automation {
+    fn default() -> Self {
+        Self {
+            required: false,
+            runtime: None,
+            ssh_executable: None,
+            workspace_root: None,
+            max_concurrent: 2,
+            max_scratch_bytes: 16 * 1024 * 1024,
+            max_scratch_files: 512,
+            targets: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AutomationTarget {
+    pub(crate) destination: String,
+    pub(crate) python: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -620,6 +648,34 @@ impl Config {
                 "must be a bounded absolute path",
             ));
         }
+        let automation = &document.automation;
+        if !(1..=16).contains(&automation.max_concurrent)
+            || automation.max_scratch_bytes == 0
+            || automation.max_scratch_bytes > 64 * 1024 * 1024
+            || !(1..=4096).contains(&automation.max_scratch_files)
+        {
+            return Err(invalid(
+                "automation",
+                "invalid concurrency or scratch bounds",
+            ));
+        }
+        if let Some(root) = &automation.workspace_root {
+            validate_runtime_path(root)?;
+        }
+        for (name, target) in &automation.targets {
+            if !document
+                .targets
+                .as_ref()
+                .is_some_and(|targets| targets.contains_key(name))
+            {
+                return Err(invalid(
+                    "automation.targets",
+                    "must name configured logical targets",
+                ));
+            }
+            destination(&target.destination, "automation.targets.destination")?;
+            validate_runtime_path(&target.python)?;
+        }
         let bindings = Bindings::compile(
             document.tools,
             &document.enabled_tools,
@@ -650,6 +706,21 @@ impl Config {
                         ));
                     }
                 }
+            }
+        }
+        for (_, binding) in bindings
+            .entries()
+            .filter(|(_, binding)| binding.is_automation())
+        {
+            if binding
+                .targets
+                .iter()
+                .any(|name| !document.automation.targets.contains_key(name))
+            {
+                return Err(invalid(
+                    "tools",
+                    "module targets require explicit automation authority",
+                ));
             }
         }
         Ok(Self {
@@ -691,6 +762,95 @@ impl Config {
             .transpose()
     }
 
+    pub(crate) async fn activate_automation(
+        &mut self,
+        ct: &tokio_util::sync::CancellationToken,
+    ) -> Result<bool, ConfigError> {
+        let active: Vec<_> = self
+            .bindings
+            .entries()
+            .filter(|(id, binding)| binding.is_automation() && self.binding_enabled(*id))
+            .map(|(id, _)| id)
+            .collect();
+        if active.is_empty() {
+            return Ok(false);
+        }
+        let ssh = self
+            .automation
+            .ssh_executable
+            .clone()
+            .or_else(|| std::env::var_os("SSH_MCP_AUTOMATION_SSH").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/usr/bin/ssh"));
+        let text = ssh.to_str().ok_or_else(|| {
+            invalid(
+                "automation.ssh_executable",
+                "must be a bounded absolute path",
+            )
+        })?;
+        validate_runtime_path(text)?;
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&ssh).map_err(|_| {
+            invalid(
+                "automation.ssh_executable",
+                "selected executable is unavailable",
+            )
+        })?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return Err(invalid(
+                "automation.ssh_executable",
+                "selected executable is unavailable",
+            ));
+        }
+        self.automation.ssh_executable = Some(ssh);
+        let runtime = self.automation_runtime()?;
+        let root = crate::bindings::controller_root(self.automation.workspace_root.as_deref())?;
+        for id in active {
+            self.bindings
+                .activate_module(id, runtime.clone(), root.clone(), ct)
+                .await?;
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn automation_concurrency(&self) -> usize {
+        self.automation.max_concurrent
+    }
+
+    pub(crate) fn automation_scratch(&self) -> (u64, usize) {
+        (
+            self.automation.max_scratch_bytes,
+            self.automation.max_scratch_files,
+        )
+    }
+
+    pub(crate) fn automation_target(
+        &self,
+        id: BindingId,
+        host: &str,
+    ) -> Result<&AutomationTarget, ToolError> {
+        let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        if !self.binding_enabled(id)
+            || !self.bindings.get(id).is_some_and(|binding| {
+                binding.is_automation() && binding.targets.iter().any(|target| target == host)
+            })
+            || !self
+                .targets
+                .as_ref()
+                .and_then(|targets| targets.get(host))
+                .is_some_and(|target| target.profile.permits_bindings())
+        {
+            return Err(denied());
+        }
+        self.automation.targets.get(host).ok_or_else(denied)
+    }
+
+    pub(crate) fn automation_hosts(&self) -> impl Iterator<Item = &String> {
+        self.automation.targets.keys()
+    }
+
+    pub(crate) fn automation_ssh(&self) -> Option<&Path> {
+        self.automation.ssh_executable.as_deref()
+    }
     pub(crate) fn targets<'a>(&'a self, tools: &'a ToolCatalog) -> TargetDiscovery<'a> {
         TargetDiscovery {
             mode: if self.targets.is_some() {
@@ -732,10 +892,16 @@ impl Config {
 
     pub(crate) fn binding_enabled(&self, id: BindingId) -> bool {
         self.profile.permits_bindings()
-            && self
-                .bindings
-                .get(id)
-                .is_some_and(|binding| binding.enabled())
+            && self.bindings.get(id).is_some_and(|binding| {
+                binding.enabled()
+                    && (!binding.is_automation()
+                        || binding.targets.iter().any(|name| {
+                            self.targets
+                                .as_ref()
+                                .and_then(|targets| targets.get(name))
+                                .is_some_and(|target| target.profile.permits_bindings())
+                        }))
+            })
     }
 
     pub(crate) fn controller_enabled(&self, id: BindingId) -> bool {
@@ -1039,7 +1205,7 @@ fn validate_targets(targets: &BTreeMap<String, Target>) -> Result<(), ConfigErro
     Ok(())
 }
 
-fn destination(value: &str, field: &'static str) -> Result<(), ConfigError> {
+pub(crate) fn destination(value: &str, field: &'static str) -> Result<(), ConfigError> {
     if value.is_empty()
         || value.starts_with('-')
         || value
@@ -1119,7 +1285,20 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
         validate_profile(value, "profile")?;
     }
     if let Some(value) = root.get("automation") {
-        let automation = table(value, "automation", &["required", "runtime"])?;
+        let automation = table(
+            value,
+            "automation",
+            &[
+                "required",
+                "runtime",
+                "workspace_root",
+                "max_concurrent",
+                "max_scratch_bytes",
+                "max_scratch_files",
+                "targets",
+                "ssh_executable",
+            ],
+        )?;
         if let Some(value) = automation.get("required")
             && !value.is_bool()
         {
@@ -1252,6 +1431,100 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_destinations_share_explicit_ssh_destination_grammar() {
+        for alias in [
+            "_alias",
+            "2001:db8::1",
+            "[2001:db8::1]",
+            "user@_alias",
+            "é-alias",
+        ] {
+            assert!(destination(alias, "automation.targets.destination").is_ok());
+        }
+        for alias in ["", "-option", "a b", "a\0b", "a\u{2003}b"] {
+            assert!(destination(alias, "automation.targets.destination").is_err());
+        }
+    }
+
+    fn automation_text(global: &str, target: &str, enabled: bool) -> String {
+        format!(
+            r#"
+profile={global:?}
+enabled_tools={}
+[targets.server]
+ssh_host='native-alias'
+profile={target:?}
+[automation]
+runtime='/unavailable/runtime.json'
+workspace_root='/unavailable/workspace'
+[automation.targets.server]
+destination='automation-alias'
+python='/unavailable/python'
+[tools.probe]
+description='Reviewed probe'
+revision='review-1'
+targets=['server']
+authority='automation'
+effects=['probe']
+execution={{kind='ansible_module',snapshot='/unavailable/snapshot.json'}}
+result={{kind='ansible_summary'}}
+input_schema={{type='object',additionalProperties=false,required=[],properties={{}}}}
+"#,
+            if enabled { "['probe']" } else { "[]" }
+        )
+    }
+
+    #[tokio::test]
+    async fn automation_activation_is_lazy_for_disabled_and_effectively_hidden_bindings() {
+        for (global, target, enabled) in [
+            ("baseline", "baseline", false),
+            ("files-only", "baseline", true),
+            ("baseline", "files-only", true),
+        ] {
+            let mut config = load_text(&automation_text(global, target, enabled), &[]).unwrap();
+            config
+                .activate_automation(&tokio_util::sync::CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(!config.binding_enabled(BindingId(0)));
+        }
+    }
+
+    #[tokio::test]
+    async fn active_automation_requires_real_startup_prerequisites() {
+        let mut config = load_text(&automation_text("baseline", "baseline", true), &[]).unwrap();
+        assert!(
+            config
+                .activate_automation(&tokio_util::sync::CancellationToken::new())
+                .await
+                .is_err()
+        );
+        let target = config.automation_target(BindingId(0), "server").unwrap();
+        assert_eq!(target.destination, "automation-alias");
+        assert!(
+            config
+                .automation_target(BindingId(0), "native-alias")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn automation_defaults_and_bounds_are_explicit() {
+        let config = load_text("", &[]).unwrap();
+        assert_eq!(config.automation_concurrency(), 2);
+        assert_eq!(config.automation_scratch(), (16 * 1024 * 1024, 512));
+        for field in [
+            "max_concurrent=0",
+            "max_concurrent=17",
+            "max_scratch_bytes=0",
+            "max_scratch_bytes=67108865",
+            "max_scratch_files=4097",
+        ] {
+            assert!(load_text(&format!("[automation]\n{field}"), &[]).is_err());
+        }
+    }
 
     fn cli() -> Cli {
         Cli {

@@ -63,6 +63,8 @@ struct Record<'a> {
     remote_state_unknown: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owned_group_cleanup: Option<GroupCleanup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<crate::reply::AutomationStatus>,
 }
 
 impl<'a> Metadata<'a> {
@@ -109,6 +111,7 @@ impl<'a> Metadata<'a> {
             program: if controller { None } else { self.program },
             binding_revision: self.binding_revision,
             executor: self.executor,
+            status: None,
             duration_ms,
             exit_code,
             error_code,
@@ -117,7 +120,7 @@ impl<'a> Metadata<'a> {
             } else {
                 remote_state_unknown
             },
-            owned_group_cleanup: if controller {
+            owned_group_cleanup: if controller || self.executor == Some("ansible_module") {
                 owned_group_cleanup
             } else {
                 None
@@ -176,6 +179,28 @@ impl<'a> Audit<'a> {
             None,
             reply.data.as_ref().map(|data| data.owned_group_cleanup),
         ));
+        self.finished = true;
+    }
+
+    pub(crate) fn finish_automation(
+        mut self,
+        reply: &crate::reply::ToolReply<crate::reply::AutomationData>,
+    ) {
+        let mut record = self.metadata.record(
+            "finish",
+            Some(millis(self.started.elapsed())),
+            reply.data.as_ref().and_then(|data| data.runner_rc),
+            reply.error.as_ref().map(|error| error.code),
+            Some(
+                reply
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.remote_state_unknown),
+            ),
+            reply.data.as_ref().map(|data| data.owned_group_cleanup),
+        );
+        record.status = reply.data.as_ref().map(|data| data.status);
+        emit(&record);
         self.finished = true;
     }
 }

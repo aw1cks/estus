@@ -126,6 +126,24 @@ impl ReplyBudget {
         })
     }
 
+    pub(crate) fn automation_reserve(&self, host: &str) -> Result<(), ErrorData> {
+        // Fixed-width evidence only: reserve every field and the widest error envelope.
+        let reservation = serde_json::json!({
+            "data":{
+                "host":"","status":"resource_limit","runner_rc":i32::MIN,
+                "changed":false,"tasks":{"ok":u32::MAX,"failed":u32::MAX,"unreachable":u32::MAX,"skipped":u32::MAX},
+                "censored":false,"complete":false,"duration_ms":u64::MAX,
+                "owned_group_cleanup":"signalled_and_reaped"
+            },
+            "error":{"code":"invalid_argument","message":"x".repeat(256),"remote_state_unknown":false}
+        });
+        let size = self.value_size(&reservation, true)?;
+        size.checked_add(duplicated_size(&host)?)
+            .filter(|size| *size <= MAX_RESPONSE_BYTES)
+            .map(|_| ())
+            .ok_or_else(exceeded)
+    }
+
     fn value_size(&self, value: &impl Serialize, failed: bool) -> Result<usize, ErrorData> {
         let overhead = self.id_bytes + tool_overhead(failed);
         let mut size = DuplicatedSize {
@@ -340,6 +358,18 @@ fn frame_fits(message: &impl Serialize) -> bool {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn fixed_automation_summary_reserves_normal_wire_budget() {
+        let budget = ReplyBudget::new(&RequestId::Number(1)).unwrap();
+        budget.automation_reserve("logical").unwrap();
+        let oversized = RequestId::String("x".repeat(MAX_RESPONSE_BYTES).into());
+        assert!(
+            ReplyBudget::new(&oversized)
+                .and_then(|budget| budget.automation_reserve("logical"))
+                .is_err()
+        );
+    }
 
     fn command(stdout: &str, stderr: &str) -> ToolReply<CommandData> {
         ToolReply::success(CommandData {

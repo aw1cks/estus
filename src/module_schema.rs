@@ -503,6 +503,54 @@ fn equal(left: &Value, right: &Value) -> bool {
     }
 }
 
+/// Protocol shape only. Value bounds, choices and conditional assertions remain policy errors.
+pub(crate) fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), &'static str> {
+    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+        let valid = match kind {
+            "object" => input.is_object(),
+            "array" => input.is_array(),
+            "string" => input.is_string(),
+            "integer" => integral(input),
+            "number" => input.is_number(),
+            "boolean" => input.is_boolean(),
+            "null" => input.is_null(),
+            _ => false,
+        };
+        if !valid {
+            return Err(INPUT);
+        }
+    }
+    if let Some(values) = input.as_object() {
+        if schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| {
+                required
+                    .iter()
+                    .any(|key| key.as_str().is_none_or(|key| !values.contains_key(key)))
+            })
+        {
+            return Err(INPUT);
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        for (key, value) in values {
+            if let Some(property) = properties.and_then(|properties| properties.get(key)) {
+                validate_input_shape(property, value)?;
+            } else if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+                return Err(INPUT);
+            }
+        }
+    }
+    if let Some(values) = input.as_array()
+        && let Some(items) = schema.get("items")
+    {
+        for value in values {
+            validate_input_shape(items, value)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
     let object = schema.as_object().ok_or(INPUT)?;
     if let Some(kind) = object.get("type").and_then(Value::as_str) {
@@ -724,6 +772,41 @@ struct Overlay {
     input_schema: Value,
     fixed_args: Map<String, Value>,
     input_map: BTreeMap<String, String>,
+}
+
+/// Validate configuration shape without reading a reviewed snapshot or runtime.
+pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
+    if !bounded(overlay) {
+        return Err(SCHEMA);
+    }
+    let overlay: Overlay = serde_json::from_value(overlay.clone()).map_err(|_| SCHEMA)?;
+    check_schema(&overlay.input_schema, true)?;
+    let public = overlay
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or(SCHEMA)?;
+    if public.keys().any(|key| !public_parameter(key)) {
+        return Err(SCHEMA);
+    }
+    let mut mapped = BTreeSet::new();
+    if overlay.fixed_args.keys().any(|key| !parameter(key)) {
+        return Err(SCHEMA);
+    }
+    for (backend, input) in overlay.input_map {
+        if !parameter(&backend)
+            || !public_parameter(&input)
+            || overlay.fixed_args.contains_key(&backend)
+            || !public.contains_key(&input)
+            || !mapped.insert(input)
+        {
+            return Err(SCHEMA);
+        }
+    }
+    if mapped.len() != public.len() {
+        return Err(SCHEMA);
+    }
+    Ok(())
 }
 
 pub(crate) struct CompiledModuleBinding {

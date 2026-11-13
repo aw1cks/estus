@@ -57,6 +57,8 @@ struct State {
     operations: Arc<Semaphore>,
     tasks: TaskTracker,
     local_tasks: TaskTracker,
+    automation: Arc<Semaphore>,
+    automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -103,6 +105,14 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, SshMcp>> for Argum
 
 impl SshMcp {
     pub(crate) fn new(config: Config) -> Result<Self, ConfigError> {
+        if config.bindings().entries().any(|(id, binding)| {
+            binding.is_automation() && config.binding_enabled(id) && !binding.automation_activated()
+        }) {
+            return Err(ConfigError::new(
+                "automation",
+                "Enabled module bindings require successful startup activation",
+            ));
+        }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
         let routes: [(ToolId, ToolRoute<Self>); 8] = [
@@ -154,6 +164,7 @@ impl SshMcp {
             .entries()
             .any(|(_, binding)| binding.is_controller())
             .then(schema_for_type::<ControllerReply>);
+        let automation_output_schema = schema_for_type::<ToolReply<crate::reply::AutomationData>>();
         let binding_routes = config.bindings().entries().map(|(id, binding)| {
             let annotations = ToolAnnotations::new()
                 .read_only(binding.read_only())
@@ -170,7 +181,9 @@ impl SshMcp {
                 ("result".into(), serde_json::json!(binding.result_kind())),
                 ("effects".into(), serde_json::json!(binding.effects())),
                 ("executor".into(), serde_json::json!(binding.executor_kind())),
-                ("authority".into(), if local {
+                ("authority".into(), if binding.is_automation() {
+                    serde_json::json!("automation")
+                } else if local {
                     serde_json::json!("controller")
                 } else {
                     binding.sudo().map_or_else(
@@ -179,7 +192,9 @@ impl SshMcp {
                     )
                 }),
             ]);
-            let output_schema = if local {
+            let output_schema = if binding.is_automation() {
+                &automation_output_schema
+            } else if local {
                 meta.insert("execution_location".into(), serde_json::json!("controller"));
                 controller_output_schema.as_ref().expect("controller registration has its result schema")
             } else {
@@ -245,6 +260,11 @@ impl SshMcp {
         Ok(Self {
             tool_router,
             state: Arc::new(State {
+                automation: Arc::new(Semaphore::new(config.automation_concurrency())),
+                automation_targets: config
+                    .automation_hosts()
+                    .map(|host| (host.clone(), Arc::new(Semaphore::new(1))))
+                    .collect(),
                 config,
                 tools,
                 sudo_name,
@@ -343,6 +363,9 @@ impl SshMcp {
             Ok(BindingCall::Controller(request)) => {
                 self.controller_binding(id, request, context).await
             }
+            Ok(BindingCall::Automation(request)) => {
+                self.automation_binding(id, request, context).await
+            }
             Err(error) => {
                 if binding.is_controller() {
                     self.state
@@ -384,6 +407,145 @@ impl SshMcp {
                 Err(error)
             }
         }
+    }
+
+    async fn automation_binding(
+        &self,
+        id: BindingId,
+        request: bindings::AutomationRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use crate::reply::AutomationData;
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        budget.automation_reserve(&request.host)?;
+        let binding = self
+            .state
+            .config
+            .bindings()
+            .get(id)
+            .expect("registered module binding");
+        let metadata = Metadata {
+            request_id: &context.id,
+            tool: self.state.binding_name(id),
+            host: binding
+                .targets
+                .iter()
+                .find(|host| **host == request.host)
+                .map(String::as_str),
+            identity_role: IdentityRole::Ordinary,
+            sudo_mode: None,
+            user: None,
+            program: None,
+            binding_revision: Some(&binding.revision),
+            executor: Some(binding.executor_kind()),
+        };
+        let reject = |code, message| {
+            let error = ToolError::new(code, message, false);
+            metadata.reject(started, &error);
+            budget.result(ToolReply::<AutomationData>::failure(error))
+        };
+        let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
+            return reject("resource_limit", "Tool operation limit reached");
+        };
+        let Ok(runtime) = self.state.automation.clone().try_acquire_owned() else {
+            return reject("resource_limit", "Automation operation limit reached");
+        };
+        // Authorize before selecting a logical target's fixed semaphore.
+        if let Err(error) = self.state.config.automation_target(id, &request.host) {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<AutomationData>::failure(error));
+        }
+        let Some(target) = self.state.automation_targets.get(&request.host) else {
+            return reject("policy_denied", "Operation is not authorized");
+        };
+        let Ok(target) = target.clone().try_acquire_owned() else {
+            return reject(
+                "resource_limit",
+                "Automation target operation limit reached",
+            );
+        };
+        let state = self.state.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.state.local_tasks.spawn(async move {
+            let _permits = (operation, runtime, target);
+            let binding = state
+                .config
+                .bindings()
+                .get(id)
+                .expect("registered module binding");
+            let metadata = Metadata {
+                request_id: &context.id,
+                tool: state.binding_name(id),
+                host: Some(&request.host),
+                identity_role: IdentityRole::Ordinary,
+                sudo_mode: None,
+                user: None,
+                program: None,
+                binding_revision: Some(&binding.revision),
+                executor: Some(binding.executor_kind()),
+            };
+            let prepared = (|| {
+                if context.ct.is_cancelled() || state.shutdown.is_cancelled() {
+                    return Err(ToolError::new(
+                        "cancelled",
+                        "Request cancelled before dispatch",
+                        false,
+                    ));
+                }
+                let target = state.config.automation_target(id, &request.host)?;
+                let (bytes, files) = state.config.automation_scratch();
+                let prepared = binding.prepare_automation(
+                    &request,
+                    state.config.limits(),
+                    bindings::AutomationTransport {
+                        target,
+                        ssh_config: state.config.ssh_config(),
+                        scratch_bytes: bytes,
+                        scratch_files: files,
+                        ssh_executable: state.config.automation_ssh().ok_or_else(|| {
+                            ToolError::new("policy_denied", "Operation is not authorized", false)
+                        })?,
+                        started,
+                    },
+                )?;
+                let deadline = request_deadline(started, prepared.controller.duration)?;
+                Ok((prepared, deadline))
+            })();
+            let (prepared, deadline) = match prepared {
+                Ok(value) => value,
+                Err(error) => {
+                    metadata.reject(started, &error);
+                    let _ = sender.send(ToolReply::<AutomationData>::failure(error));
+                    return;
+                }
+            };
+            let audit = Audit::start(metadata, started);
+            let run = crate::automation_exec::run(
+                prepared,
+                crate::controller::ControllerContext {
+                    deadline,
+                    ct: &context.ct,
+                    shutdown: &state.shutdown,
+                    started,
+                    capture_limit: 65_536,
+                },
+            )
+            .await;
+            audit.finish_automation(&run.reply);
+            let _ = sender.send(run.reply);
+            if let Some(pending) = run.pending {
+                pending.finish().await;
+            }
+        });
+        let reply = receiver.await.unwrap_or_else(|_| {
+            ToolReply::failure(ToolError::new(
+                "io_error",
+                "Automation operation could not complete; remote state is unknown",
+                true,
+            ))
+        });
+        budget.result(reply)
     }
 
     async fn controller_binding(

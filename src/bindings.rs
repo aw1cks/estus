@@ -124,7 +124,7 @@ fn absolute(value: &str) -> bool {
     value.starts_with('/') && value.len() <= 4096 && !value.contains('\0')
 }
 
-fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigError> {
+pub(crate) fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigError> {
     let root = root.ok_or_else(|| invalid("Active controller tools require workspace_root"))?;
     let root =
         fs::canonicalize(root).map_err(|_| invalid("Controller workspace is unavailable"))?;
@@ -194,6 +194,8 @@ struct RawBinding {
     effects: Vec<Effect>,
     execution: RawExecution,
     input_schema: toml::Value,
+    fixed_args: Option<toml::Value>,
+    input_map: Option<BTreeMap<String, String>>,
     result: RawResult,
     limits: Option<RawLimits>,
 }
@@ -216,6 +218,11 @@ enum RawExecution {
         interpreter: RawInterpreter,
         environment: Option<BTreeMap<String, String>>,
         cwd: Option<String>,
+    },
+    AnsibleModule {
+        snapshot: String,
+        #[serde(default)]
+        no_log: bool,
     },
 }
 #[derive(Deserialize)]
@@ -375,6 +382,13 @@ enum Execution {
     ControllerScript {
         plan: Option<Arc<ControllerPlan>>,
     },
+    AnsibleModule {
+        snapshot: PathBuf,
+        overlay: Value,
+        no_log: bool,
+        // One startup allocation keeps native bindings from reserving the large plan.
+        plan: Option<Box<ModulePlan>>,
+    },
 }
 
 #[derive(Debug)]
@@ -407,6 +421,80 @@ pub(crate) struct PreparedBinding<'a> {
 pub(crate) enum BindingCall {
     Remote(BindingRequest),
     Controller(ControllerRequest),
+    Automation(AutomationRequest),
+}
+
+pub(crate) struct AutomationRequest {
+    pub(crate) host: String,
+    timeout_secs: Option<u64>,
+    inputs: Value,
+}
+
+pub(crate) struct AutomationTransport<'a> {
+    pub target: &'a crate::config::AutomationTarget,
+    pub ssh_config: Option<&'a Path>,
+    pub ssh_executable: &'a Path,
+    pub scratch_bytes: u64,
+    pub scratch_files: usize,
+    pub started: std::time::Instant,
+}
+
+pub(crate) struct ModulePlan {
+    reviewed: crate::schema_import::ReviewedModule,
+    binding: crate::module_schema::CompiledModuleBinding,
+    source: String,
+    runtime: Value,
+    controller: Arc<ControllerPlan>,
+}
+
+impl std::fmt::Debug for ModulePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ModulePlan { reviewed: <private> }")
+    }
+}
+
+struct BoundedJson {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl io::Write for BoundedJson {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit - self.bytes.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "payload limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct ModuleContent<'a> {
+    identity: &'a crate::automation::RuntimeIdentity,
+    collection: &'a Option<crate::automation::RuntimeCollection>,
+    content_sha256: &'a str,
+    source: &'a str,
+    module: &'a str,
+}
+
+#[derive(Serialize)]
+struct ModuleSpec<'a> {
+    schema: u32,
+    invocation_id: &'a str,
+    runtime: &'a Value,
+    expected: ModuleContent<'a>,
+    destination: &'a str,
+    target_python: &'a str,
+    ssh_config: Option<&'a Path>,
+    ssh_executable: &'a Path,
+    arguments: &'a Value,
+    no_log: bool,
+    timeout_secs: f64,
+    scratch_bytes: u64,
+    scratch_files: usize,
 }
 
 pub(crate) struct ControllerRequest {
@@ -425,11 +513,11 @@ pub(crate) struct ControllerPlan {
 }
 
 pub(crate) struct PreparedController {
-    pub(crate) supervision: crate::controller::ControllerSupervision,
     pub(crate) plan: Arc<ControllerPlan>,
     pub(crate) input_json: Vec<u8>,
     pub(crate) duration: Duration,
     pub(crate) max_output_bytes: u64,
+    pub(crate) supervision: crate::controller::ControllerSupervision,
 }
 
 struct ControllerActivation<'a> {
@@ -506,8 +594,257 @@ impl Bindings {
     pub(crate) fn get(&self, id: BindingId) -> Option<&CompiledBinding> {
         self.entries.get(id.0)
     }
+
+    pub(crate) async fn activate_module(
+        &mut self,
+        id: BindingId,
+        runtime: Option<PathBuf>,
+        root: Arc<Path>,
+        ct: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), ConfigError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let check_interrupted = || {
+            if ct.is_cancelled() {
+                Err(invalid("cancelled"))
+            } else if tokio::time::Instant::now() >= deadline {
+                Err(invalid("timeout"))
+            } else {
+                Ok(())
+            }
+        };
+        check_interrupted()?;
+        let binding = self
+            .entries
+            .get_mut(id.0)
+            .ok_or_else(|| invalid("Unknown module binding"))?;
+        let Execution::AnsibleModule {
+            snapshot,
+            overlay,
+            plan,
+            ..
+        } = &mut binding.execution
+        else {
+            return Err(invalid("Not a module binding"));
+        };
+        let snapshot = snapshot.clone();
+        let overlay = overlay.clone();
+        // Await started blocking work even when cancellation arrives, retaining its ownership.
+        let prepared = tokio::task::spawn_blocking(move || {
+            let reviewed = crate::schema_import::load_reviewed(&snapshot).map_err(invalid)?;
+            if reviewed
+                .binding
+                .as_ref()
+                .is_some_and(|expected| expected != &overlay)
+            {
+                return Err(invalid(
+                    "Reviewed binding overlay does not match configuration",
+                ));
+            }
+            let compiled = crate::module_schema::compile_binding(&reviewed.contract, &overlay)
+                .map_err(invalid)?;
+            Ok((reviewed, compiled))
+        })
+        .await;
+        check_interrupted()?;
+        let (reviewed, compiled) =
+            prepared.map_err(|_| invalid("Module activation preparation failed"))??;
+        let source = crate::schema_import::verify_reviewed(
+            &reviewed,
+            runtime.clone(),
+            crate::automation::RuntimeContext {
+                deadline,
+                ct,
+                shutdown: ct,
+            },
+        )
+        .await
+        .map_err(invalid)?;
+        check_interrupted()?;
+        let selected = tokio::task::spawn_blocking(move || {
+            crate::automation::runner_runtime(runtime, root).map_err(invalid)
+        })
+        .await;
+        check_interrupted()?;
+        let selected = selected.map_err(|_| invalid("Module runtime preparation failed"))??;
+        *plan = Some(Box::new(ModulePlan {
+            reviewed,
+            binding: compiled,
+            source,
+            runtime: selected.payload,
+            controller: selected.plan,
+        }));
+        Ok(())
+    }
 }
 impl CompiledBinding {
+    fn compile_module(
+        name: String,
+        raw: RawBinding,
+        enabled: bool,
+        limits: &Limits,
+        target_exists: &impl Fn(&str) -> bool,
+    ) -> Result<Self, ConfigError> {
+        let RawExecution::AnsibleModule { snapshot, no_log } = raw.execution else {
+            unreachable!("module execution selected");
+        };
+        let targets = raw.targets.unwrap_or_default();
+        if raw.authority.as_str() != Some("automation")
+            || raw.result.kind != "ansible_summary"
+            || raw.description.is_empty()
+            || raw.description.len() > 1024
+            || !identifier(&raw.revision)
+            || !absolute(&snapshot)
+            || targets.is_empty()
+            || targets.len() > 32
+            || targets.iter().collect::<BTreeSet<_>>().len() != targets.len()
+            || targets.iter().any(|target| !target_exists(target))
+            || raw.effects.is_empty()
+            || raw.effects.iter().collect::<BTreeSet<_>>().len() != raw.effects.len()
+        {
+            return Err(invalid("Invalid module binding authority or definition"));
+        }
+        let schema =
+            serde_json::to_value(raw.input_schema).map_err(|_| invalid("Invalid module schema"))?;
+        let fixed = raw
+            .fixed_args
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| invalid("Invalid fixed module arguments"))?
+            .unwrap_or_else(|| json!({}));
+        if !fixed.is_object() {
+            return Err(invalid("Fixed module arguments must be an object"));
+        }
+        let overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
+        crate::module_schema::validate_overlay(&overlay).map_err(invalid)?;
+        let timeout_secs = raw.limits.as_ref().and_then(|limits| limits.timeout_secs);
+        if timeout_secs.is_some_and(|value| value == 0 || value > limits.max_timeout_secs)
+            || raw
+                .limits
+                .as_ref()
+                .and_then(|limits| limits.max_output_bytes)
+                .is_some()
+        {
+            return Err(invalid("Module limits only support a bounded timeout"));
+        }
+        let published = json!({
+            "type":"object","additionalProperties":false,
+            "required":["host","inputs"],
+            "properties":{
+                "host":{"type":"string","enum":targets},
+                "inputs":overlay["input_schema"],
+                "timeout_secs":{"type":"integer","minimum":1,"maximum":timeout_secs.unwrap_or(limits.max_timeout_secs)}
+            }
+        }).as_object().cloned().ok_or_else(||invalid("Invalid module metadata"))?;
+        if !schema_fits(&published) || !schema_fits(&overlay) {
+            return Err(invalid("Module metadata exceeds bound"));
+        }
+        Ok(Self {
+            name,
+            description: raw.description,
+            revision: raw.revision,
+            targets,
+            input_schema: Arc::new(published),
+            enabled,
+            effects: raw.effects,
+            inputs: Vec::new(),
+            execution: Execution::AnsibleModule {
+                snapshot: PathBuf::from(snapshot),
+                overlay,
+                no_log,
+                plan: None,
+            },
+            argv: Vec::new(),
+            timeout_secs,
+            max_output_bytes: None,
+        })
+    }
+
+    pub(crate) fn prepare_automation(
+        &self,
+        request: &AutomationRequest,
+        limits: &Limits,
+        transport: AutomationTransport<'_>,
+    ) -> Result<crate::automation_exec::PreparedAutomation, ToolError> {
+        let AutomationTransport {
+            target,
+            ssh_config,
+            ssh_executable,
+            scratch_bytes,
+            scratch_files,
+            started,
+        } = transport;
+        let Execution::AnsibleModule {
+            plan: Some(plan),
+            no_log,
+            ..
+        } = &self.execution
+        else {
+            return Err(ToolError::new(
+                "policy_denied",
+                "Operation is not authorized",
+                false,
+            ));
+        };
+        let timeout = request
+            .timeout_secs
+            .unwrap_or(self.timeout_secs.unwrap_or(limits.operation_timeout_secs));
+        if !self.targets.contains(&request.host)
+            || timeout == 0
+            || timeout > self.timeout_secs.unwrap_or(limits.max_timeout_secs)
+        {
+            return Err(bound("Invalid module host or timeout"));
+        }
+        let arguments = plan
+            .binding
+            .prepare(&request.inputs)
+            .map_err(|_| bound("Module inputs violate the reviewed binding"))?;
+        let invocation_id = crate::automation_exec::invocation_id();
+        let spec = ModuleSpec {
+            schema: 1,
+            invocation_id: &invocation_id,
+            runtime: &plan.runtime,
+            expected: ModuleContent {
+                identity: &plan.reviewed.runtime,
+                collection: &plan.reviewed.collection,
+                content_sha256: &plan.reviewed.content_sha256,
+                source: &plan.source,
+                module: &plan.reviewed.module,
+            },
+            destination: &target.destination,
+            target_python: &target.python,
+            ssh_config,
+            ssh_executable,
+            arguments: &arguments,
+            no_log: *no_log,
+            timeout_secs: Duration::from_secs(timeout)
+                .saturating_sub(started.elapsed())
+                .as_secs_f64(),
+            scratch_bytes,
+            scratch_files,
+        };
+        let mut writer = BoundedJson {
+            bytes: Vec::new(),
+            limit: 256 * 1024,
+        };
+        serde_json::to_writer(&mut writer, &spec)
+            .map_err(|_| bound("Module invocation exceeds byte bound"))?;
+        let input_json = writer.bytes;
+        Ok(crate::automation_exec::PreparedAutomation {
+            controller: PreparedController {
+                plan: Arc::clone(&plan.controller),
+                input_json,
+                duration: Duration::from_secs(timeout),
+                max_output_bytes: 65_536,
+                supervision: crate::controller::ControllerSupervision::Automation {
+                    invocation_id,
+                    scratch_bytes,
+                    scratch_files,
+                },
+            },
+            host: request.host.clone(),
+        })
+    }
+
     fn compile(
         name: String,
         raw: RawBinding,
@@ -516,6 +853,14 @@ impl CompiledBinding {
         target_exists: &impl Fn(&str) -> bool,
         activation: &mut ControllerActivation<'_>,
     ) -> Result<Self, ConfigError> {
+        if matches!(&raw.execution, RawExecution::AnsibleModule { .. }) {
+            return Self::compile_module(name, raw, enabled, limits, target_exists);
+        }
+        if raw.fixed_args.is_some() || raw.input_map.is_some() {
+            return Err(invalid(
+                "Module overlay fields require ansible_module execution",
+            ));
+        }
         if raw.description.is_empty() || raw.description.len() > 1024 || !identifier(&raw.revision)
         {
             return Err(invalid("Invalid description or revision"));
@@ -708,6 +1053,7 @@ impl CompiledBinding {
                 };
                 (Execution::ControllerScript { plan }, Vec::new(), false)
             }
+            RawExecution::AnsibleModule { .. } => unreachable!("compiled separately"),
         };
         let timeout_secs = raw.limits.as_ref().and_then(|v| v.timeout_secs);
         let max_output_bytes = raw.limits.as_ref().and_then(|v| v.max_output_bytes);
@@ -890,6 +1236,7 @@ impl CompiledBinding {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::RemoteScript { .. } => "remote_script",
             Execution::ControllerScript { .. } => "controller_script",
+            Execution::AnsibleModule { .. } => "ansible_module",
         }
     }
 
@@ -897,8 +1244,21 @@ impl CompiledBinding {
         matches!(self.execution, Execution::ControllerScript { .. })
     }
 
+    pub(crate) fn is_automation(&self) -> bool {
+        matches!(self.execution, Execution::AnsibleModule { .. })
+    }
+
+    pub(crate) fn automation_activated(&self) -> bool {
+        matches!(
+            self.execution,
+            Execution::AnsibleModule { plan: Some(_), .. }
+        )
+    }
+
     pub(crate) fn result_kind(&self) -> &'static str {
-        if self.is_controller() {
+        if self.is_automation() {
+            "ansible_summary"
+        } else if self.is_controller() {
             "controller_command"
         } else {
             RESULT_KIND
@@ -918,7 +1278,9 @@ impl CompiledBinding {
 
     fn arguments(&self) -> Vec<Cow<'_, str>> {
         let prefix = match &self.execution {
-            Execution::NativeArgv { .. } | Execution::ControllerScript { .. } => &[][..],
+            Execution::NativeArgv { .. }
+            | Execution::ControllerScript { .. }
+            | Execution::AnsibleModule { .. } => &[][..],
             Execution::RemoteScript { prefix, .. } => prefix.as_slice(),
         };
         let mut arguments = Vec::with_capacity(prefix.len() + self.argv.len());
@@ -948,6 +1310,7 @@ impl CompiledBinding {
                 cwd: cwd.as_deref(),
             },
             Execution::ControllerScript { .. }
+            | Execution::AnsibleModule { .. }
             | Execution::NativeArgv {
                 authority: Authority::Controller,
                 ..
@@ -982,6 +1345,22 @@ impl CompiledBinding {
             .remove("timeout_secs")
             .map(|v| unsigned_integer(&v).ok_or_else(shape))
             .transpose()?;
+        if self.is_automation() {
+            let inputs = arguments.remove("inputs").ok_or_else(shape)?;
+            if !arguments.is_empty() {
+                return Err(shape());
+            }
+            let Execution::AnsibleModule { overlay, .. } = &self.execution else {
+                unreachable!("module request selected");
+            };
+            crate::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
+                .map_err(|_| shape())?;
+            return Ok(BindingCall::Automation(AutomationRequest {
+                host: host.ok_or_else(shape)?,
+                timeout_secs,
+                inputs,
+            }));
+        }
         let values = self
             .inputs
             .iter()
@@ -1062,7 +1441,7 @@ impl CompiledBinding {
             script: match &self.execution {
                 Execution::RemoteScript { source, .. } => Some(source),
                 Execution::NativeArgv { .. } => None,
-                Execution::ControllerScript { .. } => {
+                Execution::ControllerScript { .. } | Execution::AnsibleModule { .. } => {
                     return Err(bound("Controller requires local preparation"));
                 }
             },
@@ -1110,20 +1489,10 @@ impl CompiledBinding {
                 map.end()
             }
         }
-        struct BoundedJson(Vec<u8>);
-        impl io::Write for BoundedJson {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                if bytes.len() > 65_536 - self.0.len() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "payload limit"));
-                }
-                self.0.extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut writer = BoundedJson(Vec::new());
+        let mut writer = BoundedJson {
+            bytes: Vec::new(),
+            limit: 65_536,
+        };
         serde_json::to_writer(
             &mut writer,
             &Payload {
@@ -1136,7 +1505,7 @@ impl CompiledBinding {
         })?;
         Ok(PreparedController {
             plan: Arc::clone(plan),
-            input_json: writer.0,
+            input_json: writer.bytes,
             duration: Duration::from_secs(timeout),
             max_output_bytes: self.max_output_bytes.unwrap_or(limits.max_output_bytes),
             supervision: crate::controller::ControllerSupervision::Script,
@@ -1147,6 +1516,169 @@ impl CompiledBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_domain_assertions_remain_nested_and_unmodified() {
+        let mut raw = module_definition();
+        let schema = json!({
+            "type":"object","additionalProperties":false,"maxProperties":1,
+            "required":["nested"],
+            "properties":{"nested":{"type":"object","additionalProperties":false,
+                "required":["items"],"properties":{"items":{"type":"array",
+                    "items":{"type":"string"}}}}},
+            "const":{"nested":{"items":["approved"]}},
+            "enum":[{"nested":{"items":["approved"]}}],
+            "if":{"properties":{"nested":{"type":"object","additionalProperties":false,
+                "properties":{"items":{"type":"array","items":{"type":"string"}}}}}},
+            "then":{"type":"object","additionalProperties":false,
+                "properties":{"nested":{"type":"object","additionalProperties":false,
+                    "properties":{"items":{"type":"array","items":{"type":"string"}}}}}}
+        });
+        raw["input_schema"] = toml::Value::try_from(schema.clone()).unwrap();
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        assert_eq!(binding.input_schema["properties"]["inputs"], schema);
+        assert_eq!(binding.input_schema["required"], json!(["host", "inputs"]));
+        assert_eq!(
+            binding.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(
+            binding
+                .parse_request(
+                    json!({
+                        "host":"server","inputs":{"nested":{"items":["not approved"]}}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn module_request_shape_is_recursive_but_bounds_remain_policy() {
+        let bindings = compile(module_definition()).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        for input in [
+            json!({"host":"server"}),
+            json!({"host":"server","inputs":[]}),
+            json!({"host":"server","inputs":{}}),
+            json!({"host":"server","inputs":{"nested":{}}}),
+            json!({"host":"server","inputs":{"nested":{"items":[false]}}}),
+            json!({"host":"server","inputs":{"nested":{"items":[],"extra":true}}}),
+            json!({"host":"server","inputs":{"nested":{"items":[]}},"extra":true}),
+            json!({"host":"server","nested":{"items":[]}}),
+        ] {
+            assert!(
+                binding
+                    .parse_request(input.as_object().unwrap().clone())
+                    .is_err()
+            );
+        }
+        for items in [json!(["a", "b", "c"]), json!(["x".repeat(33)])] {
+            assert!(
+                binding
+                    .parse_request(
+                        json!({
+                            "host":"server","inputs":{"nested":{"items":items}}
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                    )
+                    .is_ok()
+            );
+        }
+    }
+
+    fn module_definition() -> toml::Value {
+        let mut raw = definition();
+        raw["authority"] = "automation".into();
+        raw["result"]["kind"] = "ansible_summary".into();
+        raw["execution"] =
+            toml::from_str("kind='ansible_module'\nsnapshot='/unavailable/reviewed.json'").unwrap();
+        raw["input_schema"] = toml::Value::try_from(json!({
+            "type":"object","additionalProperties":false,"required":["nested"],
+            "properties":{"nested":{"type":"object","additionalProperties":false,
+                "required":["items"],"properties":{"items":{"type":"array","maxItems":2,
+                    "items":{"type":"string","maxLength":32}}}}}
+        }))
+        .unwrap();
+        raw.as_table_mut().unwrap().insert(
+            "input_map".into(),
+            toml::from_str("nested='nested'").unwrap(),
+        );
+        raw
+    }
+
+    #[test]
+    fn module_compilation_is_lazy_and_preserves_recursive_public_domain() {
+        let bindings = compile(module_definition()).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        assert!(binding.is_automation());
+        assert_eq!(binding.executor_kind(), "ansible_module");
+        assert_eq!(binding.result_kind(), "ansible_summary");
+        assert!(binding.input_schema["properties"]["inputs"]["properties"]["nested"]["properties"]["items"].is_object());
+        let input = json!({"host":"server","inputs":{"nested":{"items":["{{ literal }}"]}}});
+        let BindingCall::Automation(request) = binding
+            .parse_request(input.as_object().unwrap().clone())
+            .unwrap()
+        else {
+            panic!("module request expected");
+        };
+        assert_eq!(
+            request.inputs,
+            json!({"nested":{"items":["{{ literal }}"]}})
+        );
+        let target = crate::config::AutomationTarget {
+            destination: "fixed".into(),
+            python: "/python".into(),
+        };
+        assert!(
+            binding
+                .prepare_automation(
+                    &request,
+                    &Limits::default(),
+                    AutomationTransport {
+                        target: &target,
+                        ssh_config: None,
+                        scratch_bytes: 1024,
+                        scratch_files: 10,
+                        ssh_executable: Path::new("/usr/bin/ssh"),
+                        started: std::time::Instant::now(),
+                    }
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn module_authority_result_and_native_overlay_boundaries_are_strict() {
+        for authority in ["ordinary", "controller"] {
+            let mut raw = module_definition();
+            raw["authority"] = authority.into();
+            assert!(compile(raw).is_err());
+        }
+        let mut raw = module_definition();
+        raw["result"]["kind"] = "command".into();
+        assert!(compile(raw).is_err());
+        let mut raw = definition();
+        raw.as_table_mut()
+            .unwrap()
+            .insert("fixed_args".into(), toml::Value::Table(Default::default()));
+        assert!(compile(raw).is_err());
+        let mut raw = module_definition();
+        raw["input_schema"]["properties"]
+            .as_table_mut()
+            .unwrap()
+            .insert("host".into(), toml::from_str("type='string'").unwrap());
+        assert!(compile(raw).is_err());
+    }
 
     #[test]
     fn active_controller_rejects_unavailable_and_unverified_prerequisites() {

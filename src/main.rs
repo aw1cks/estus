@@ -69,7 +69,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(config: config::Config, command: Option<config::CliCommand>) -> ExitCode {
+async fn run(mut config: config::Config, command: Option<config::CliCommand>) -> ExitCode {
     let (Ok(mut interrupt), Ok(mut terminate)) = (
         signal(SignalKind::interrupt()),
         signal(SignalKind::terminate()),
@@ -108,7 +108,27 @@ async fn run(config: config::Config, command: Option<config::CliCommand>) -> Exi
         };
         return ExitCode::from(report);
     }
-    if config.automation_required() {
+    let shutdown = CancellationToken::new();
+    let activated = {
+        let activation = config.activate_automation(&shutdown);
+        tokio::pin!(activation);
+        tokio::select! {
+            result = &mut activation => result,
+            _ = interrupt.recv() => {
+                shutdown.cancel();
+                activation.as_mut().await
+            },
+            _ = terminate.recv() => {
+                shutdown.cancel();
+                activation.as_mut().await
+            },
+        }
+    };
+    let activated = match activated {
+        Ok(activated) if !shutdown.is_cancelled() => activated,
+        _ => return fail("automation_runtime_unavailable"),
+    };
+    if config.automation_required() && !activated {
         let shutdown = CancellationToken::new();
         let duration = match config.timeout(None) {
             Ok(duration) => duration,

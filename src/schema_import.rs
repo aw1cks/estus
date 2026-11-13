@@ -66,6 +66,56 @@ struct Snapshot {
     binding: Option<Value>,
 }
 
+/// Reviewed backend metadata. Loading never regenerates or refreshes approval.
+#[derive(Debug)]
+pub(crate) struct ReviewedModule {
+    pub module: String,
+    pub runtime: RuntimeIdentity,
+    pub collection: Option<RuntimeCollection>,
+    pub content_sha256: String,
+    pub contract: Value,
+    pub binding: Option<Value>,
+}
+
+pub(crate) fn load_reviewed(path: &Path) -> Result<ReviewedModule, &'static str> {
+    let snapshot = read_snapshot(path)?;
+    Ok(ReviewedModule {
+        module: snapshot.module,
+        runtime: snapshot.runtime,
+        collection: snapshot.collection,
+        content_sha256: snapshot.content_sha256,
+        contract: snapshot.contract,
+        binding: snapshot.binding,
+    })
+}
+
+/// Return the verified logical source path for subsequent content-only checks.
+pub(crate) async fn verify_reviewed(
+    reviewed: &ReviewedModule,
+    runtime: Option<PathBuf>,
+    context: RuntimeContext<'_>,
+) -> Result<String, &'static str> {
+    let observed = automation::import_module(runtime, &reviewed.module, context).await?;
+    if reviewed.runtime != observed.identity
+        || reviewed.collection != observed.collection
+        || reviewed.content_sha256 != observed.content_sha256
+        || reviewed.contract != module_schema::import_document(&observed.document)?
+    {
+        return Err("schema_drift");
+    }
+    let source = observed.document["doc"]["filename"]
+        .as_str()
+        .filter(|source| {
+            source.len() <= 4096
+                && !source.contains('\0')
+                && Path::new(source)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+        })
+        .ok_or("invalid_schema_snapshot")?;
+    Ok(source.to_owned())
+}
+
 #[derive(Serialize)]
 pub(crate) struct Report {
     ok: bool,

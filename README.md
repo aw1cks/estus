@@ -152,7 +152,70 @@ typed named parameters such as `argv`; unspecified types elsewhere still fail.
 Content digests detect changes to the selected Ansible/module collection source
 trees; they are not a sandbox, an immutable-environment attestation, or protection
 against a same-user attacker replacing trusted files. Mutable content can still
-change after verification. Module execution remains a separate implementation slice.
+change after verification. Enabled module execution checks selected source content
+again before dispatch; this is drift detection, not immutable attestation.
+
+## Ordinary Ansible modules
+
+[`examples/automation_probe.toml`](examples/automation_probe.toml) enables one real,
+fixed `ansible.builtin.ping` binding. Provision its private workspace and import
+the snapshot from the same selected runtime before startup:
+
+```sh
+nix run .#automation-msrv -- schema import ansible.builtin.ping \
+  --output /etc/ssh-mcp/ping.schema.json
+nix run .#automation-msrv -- --config examples/automation_probe.toml
+```
+
+The example's conventional absolute paths must be provisioned for the MCP account.
+The wheel's `ssh-mcp` command accepts the same configuration with its installed
+`ansible` extra. Installing dependencies still does not enable a tool.
+
+Module calls use `{"host":"server","inputs":{}}`; optional `timeout_secs` is a
+transport field. The entire reviewed domain schema is published under `inputs`,
+preserving conditional, property-count, enum and const constraints without
+mixing them with transport controls. Native/controller tool input shapes are
+unchanged. Malformed input shapes produce protocol errors; valid shapes violating
+reviewed bounds or choices produce tool errors before execution.
+
+Each module definition fixes `execution.snapshot`, `authority = "automation"`,
+`result.kind = "ansible_summary"`, effects, logical targets, `input_schema`,
+`fixed_args` and `input_map`. A stored snapshot overlay, when present, must match.
+Only explicitly enabled/profile-effective definitions inspect snapshots or start
+Python. Enabled stale/incompatible bindings fail before MCP starts; requests
+never regenerate approval or install dependencies.
+
+`[automation.targets.<logical>]` fixes the SSH destination and absolute target
+Python interpreter independently of native sudo authority. No become support is
+added. OpenSSH still resolves operator aliases and the configured replacement SSH
+file. Runner connections do not use the Rust pool: sharing, forwarding, host-key
+updates, password prompts and remote TTY allocation are disabled. OpenSSH is
+selected by `automation.ssh_executable`, then `SSH_MCP_AUTOMATION_SSH`, then
+`/usr/bin/ssh`; the Nix package supplies its pinned default.
+An existing bounded absolute `SSH_AUTH_SOCK` reference is preserved for an
+out-of-band agent. The product does not load keys, create an agent, prompt for
+credentials or accept key/password contents as tool inputs.
+
+Results contain only logical host, status, Runner return code, bounded task
+counts, observed change/censorship/completion, duration and local cleanup evidence.
+No raw module output, arguments, facts, events or diagnostics are forwarded.
+`no_log` remains censored. Strings in nested module data are serialized with
+documented `!unsafe` tags, not evaluated as caller-supplied Jinja.
+
+`automation.max_concurrent` defaults to 2; each logical target admits one module
+invocation at a time. The existing global operation cap also applies. Admission
+and private workspaces remain owned through cleanup, including client loss.
+Cancellation first lets the owned CLI propagate termination through Ansible's
+worker cleanup; bounded fallback remains available. Neither local cleanup nor a
+cancelled reply proves remote termination, rollback or escaped-child containment.
+No operation is automatically replayed.
+
+Scratch defaults to 16 MiB/512 entries. Byte/file polling cancels on an observed
+watermark, not a hard filesystem or memory quota. Runner's unavoidable private
+metadata/transient files can contain secrets; supported duplicate output/event
+capture is suppressed and invocation files are removed after ownership ends.
+Crash recovery does not promise secure erasure. Roles, privilege escalation,
+retained raw events and result-field projections are not enabled by this slice.
 
 ## Native / Nix
 
