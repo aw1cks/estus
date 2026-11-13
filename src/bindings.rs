@@ -407,6 +407,7 @@ enum Execution {
     Ansible {
         snapshot: PathBuf,
         source: AnsibleSource,
+        authority: AutomationAuthority,
         overlay: Value,
         no_log: bool,
         projection: Option<Arc<crate::projection::Plan>>,
@@ -420,6 +421,53 @@ enum AnsibleSource {
     Module,
     Role { path: Option<PathBuf> },
     Playbook { project_root: PathBuf },
+}
+
+#[derive(Debug)]
+pub(crate) enum AutomationAuthority {
+    Ordinary,
+    Named(String),
+}
+
+impl AutomationAuthority {
+    fn parse(value: &toml::Value) -> Result<Self, ConfigError> {
+        match value.as_str() {
+            Some("automation") => Ok(Self::Ordinary),
+            Some(value) => {
+                let name = value
+                    .strip_prefix("automation:")
+                    .ok_or_else(|| invalid("Invalid automation authority"))?;
+                if name.is_empty()
+                    || name.len() > 64
+                    || !name.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_alphabetic()
+                            || byte == b'_'
+                            || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
+                    })
+                {
+                    return Err(invalid("Invalid automation authority"));
+                }
+                Ok(Self::Named(name.to_owned()))
+            }
+            None => Err(invalid("Invalid automation authority")),
+        }
+    }
+
+    pub(crate) fn identity_role(&self) -> crate::config::IdentityRole {
+        match self {
+            Self::Ordinary => crate::config::IdentityRole::Ordinary,
+            Self::Named(_) => crate::config::IdentityRole::Automation,
+        }
+    }
+}
+
+impl Serialize for AutomationAuthority {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Ordinary => serializer.serialize_str("automation"),
+            Self::Named(name) => serializer.collect_str(&format_args!("automation:{name}")),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -462,9 +510,7 @@ pub(crate) struct AutomationRequest {
 }
 
 pub(crate) struct AutomationTransport<'a> {
-    pub target: &'a crate::config::AutomationTarget,
-    pub ssh_config: Option<&'a Path>,
-    pub ssh_executable: &'a Path,
+    pub authority: crate::config::ResolvedAutomation<'a>,
     pub scratch_bytes: u64,
     pub scratch_files: usize,
     pub started: std::time::Instant,
@@ -610,6 +656,14 @@ enum ExpectedContent<'a> {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum AgentReference<'a> {
+    Inherit,
+    Disabled,
+    Fixed { socket: &'a Path },
+}
+
+#[derive(Serialize)]
 struct AutomationSpec<'a> {
     schema: u32,
     invocation_id: &'a str,
@@ -619,6 +673,8 @@ struct AutomationSpec<'a> {
     target_python: &'a str,
     ssh_config: Option<&'a Path>,
     ssh_executable: &'a Path,
+    r#become: Option<&'a crate::config::AutomationBecome>,
+    agent: AgentReference<'a>,
     arguments: &'a Value,
     no_log: bool,
     projection: Option<&'a crate::projection::Plan>,
@@ -730,6 +786,7 @@ impl Bindings {
         id: BindingId,
         runtime: Option<PathBuf>,
         root: Arc<Path>,
+        agent_socket: Option<std::ffi::OsString>,
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<(), ConfigError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -842,7 +899,7 @@ impl Bindings {
         }
         check_interrupted()?;
         let selected = tokio::task::spawn_blocking(move || {
-            crate::automation::runner_runtime(runtime, root).map_err(invalid)
+            crate::automation::runner_runtime(runtime, root, agent_socket).map_err(invalid)
         })
         .await;
         check_interrupted()?;
@@ -903,12 +960,11 @@ impl CompiledBinding {
             _ => unreachable!("automation execution selected"),
         };
         let targets = raw.targets.unwrap_or_default();
-        if raw.authority.as_str() != Some("automation")
-            || !matches!(
-                &raw.result,
-                RawResult::AnsibleSummary {} | RawResult::AnsibleProjection { .. }
-            )
-            || raw.description.is_empty()
+        let authority = AutomationAuthority::parse(&raw.authority)?;
+        if !matches!(
+            &raw.result,
+            RawResult::AnsibleSummary {} | RawResult::AnsibleProjection { .. }
+        ) || raw.description.is_empty()
             || raw.description.len() > 1024
             || !identifier(&raw.revision)
             || !absolute(&snapshot)
@@ -1009,6 +1065,7 @@ impl CompiledBinding {
             execution: Execution::Ansible {
                 snapshot: PathBuf::from(snapshot),
                 source,
+                authority,
                 overlay,
                 no_log,
                 projection,
@@ -1027,9 +1084,7 @@ impl CompiledBinding {
         transport: AutomationTransport<'_>,
     ) -> Result<crate::automation_exec::PreparedAutomation, ToolError> {
         let AutomationTransport {
-            target,
-            ssh_config,
-            ssh_executable,
+            authority,
             scratch_bytes,
             scratch_files,
             started,
@@ -1066,10 +1121,16 @@ impl CompiledBinding {
             invocation_id: &invocation_id,
             runtime: &plan.runtime,
             expected: plan.reviewed.expected(),
-            destination: &target.destination,
-            target_python: &target.python,
-            ssh_config,
-            ssh_executable,
+            destination: &authority.target.destination,
+            target_python: &authority.target.python,
+            ssh_config: authority.ssh_config,
+            ssh_executable: authority.ssh_executable,
+            r#become: authority.r#become,
+            agent: match authority.agent {
+                crate::config::AutomationAgent::Inherit => AgentReference::Inherit,
+                crate::config::AutomationAgent::Disabled => AgentReference::Disabled,
+                crate::config::AutomationAgent::Fixed(socket) => AgentReference::Fixed { socket },
+            },
             arguments: &arguments,
             no_log: *no_log,
             projection: projection.as_deref(),
@@ -1523,6 +1584,13 @@ impl CompiledBinding {
 
     pub(crate) fn is_automation(&self) -> bool {
         matches!(self.execution, Execution::Ansible { .. })
+    }
+
+    pub(crate) fn automation_authority(&self) -> Option<&AutomationAuthority> {
+        match &self.execution {
+            Execution::Ansible { authority, .. } => Some(authority),
+            _ => None,
+        }
     }
 
     pub(crate) fn automation_activated(&self) -> bool {
@@ -2214,11 +2282,15 @@ mod tests {
                     &request,
                     &Limits::default(),
                     AutomationTransport {
-                        target: &target,
-                        ssh_config: None,
+                        authority: crate::config::ResolvedAutomation {
+                            target: &target,
+                            ssh_config: None,
+                            ssh_executable: Path::new("/usr/bin/ssh"),
+                            r#become: None,
+                            agent: crate::config::AutomationAgent::Inherit,
+                        },
                         scratch_bytes: 1024,
                         scratch_files: 10,
-                        ssh_executable: Path::new("/usr/bin/ssh"),
                         started: std::time::Instant::now(),
                     }
                 )

@@ -686,8 +686,8 @@ class Cancellation:
 
 def validate(spec):
     keys(spec, ("schema", "invocation_id", "runtime", "expected", "destination", "target_python",
-                "ssh_config", "ssh_executable", "arguments", "no_log", "timeout_secs", "scratch_bytes", "scratch_files",
-                "projection"))
+                "ssh_config", "ssh_executable", "become", "agent", "arguments", "no_log",
+                "timeout_secs", "scratch_bytes", "scratch_files", "projection"))
     require(type(spec["schema"]) is int and spec["schema"] == 2)
     require(type(spec["invocation_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", spec["invocation_id"]))
     expected = spec["expected"]
@@ -721,6 +721,19 @@ def validate(spec):
     require(ssh.is_file() and os.access(ssh, os.X_OK))
     if spec["ssh_config"] is not None:
         require(absolute(spec["ssh_config"]).is_file())
+    become = spec["become"]
+    if become is not None:
+        keys(become, ("method", "user"))
+        require(become["method"] == "sudo" and type(become["user"]) is str
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", become["user"]) is not None)
+    agent = spec["agent"]
+    require(type(agent) is dict)
+    if agent.get("mode") == "fixed":
+        keys(agent, ("mode", "socket"))
+        absolute(agent["socket"])
+    else:
+        keys(agent, ("mode",))
+        require(agent["mode"] in ("inherit", "disabled"))
     require(type(spec["no_log"]) is bool and type(spec["arguments"]) is dict)
     arguments(spec["arguments"])
     require(type(spec["timeout_secs"]) in (int, float) and math.isfinite(spec["timeout_secs"])
@@ -815,24 +828,24 @@ def layout(workspace, spec, roots, selected_path):
     (workspace / "control" / "owner.json").write_text(
         json.dumps({"schema": 1, "pid": os.getpid()}, separators=(",", ":")), encoding="ascii")
     project = workspace / "project"
-    document(project / "arguments.yml", {"estus_arguments": literal(spec["arguments"])})
     expected = spec["expected"]
     role = "role" in expected
     playbook = "playbook" in expected
+    become = spec["become"] is not None
     if playbook:
         tasks = []
     elif role:
         tasks = [{"name": "estus_role", "no_log": spec["no_log"],
                   "ansible.builtin.include_role": {
                       "name": expected["role"], "tasks_from": expected["entry_point"],
-                      "public": False, "apply": {"no_log": spec["no_log"], "become": False}},
+                      "public": False, "apply": {"no_log": spec["no_log"], "become": become}},
                   "vars": {key: "{{ estus_arguments['" + key + "'] }}"
                            for key in spec["arguments"]}}]
     else:
-        tasks = [{"name": TASK, "no_log": spec["no_log"], "become": False,
+        tasks = [{"name": TASK, "no_log": spec["no_log"], "become": become,
                   expected["module"]: {key: "{{ estus_arguments['" + key + "'] }}"
                                        for key in spec["arguments"]}}]
-    play = {"name": "estus_play", "hosts": HOST, "gather_facts": False, "become": False,
+    play = {"name": "estus_play", "hosts": HOST, "gather_facts": False, "become": become,
             "strategy": "linear", "vars_files": ["arguments.yml"], "tasks": tasks}
     if (role or playbook) and spec["projection"] is not None:
         # post_tasks run after ordinary role handlers, so their censorship is
@@ -858,22 +871,38 @@ def layout(workspace, spec, roots, selected_path):
     )
     if spec["ssh_config"] is not None:
         ssh_args += " -F " + shlex.quote(spec["ssh_config"])
-    inventory = {"all": {"hosts": {HOST: literal({
+    transport = {
         "ansible_host": spec["destination"], "ansible_connection": "ssh",
         "ansible_python_interpreter": spec["target_python"],
         "ansible_ssh_executable": spec["ssh_executable"],
         "ansible_ssh_args": ssh_args, "ansible_ssh_transfer_method": "piped",
         "ansible_ssh_use_tty": False,
         "ansible_ssh_password_mechanism": "disable",
-        "ansible_become": False,
-    })}}}
+        "ansible_become": become,
+    }
+    if become:
+        # The sudo plugin's aliases can override the generic become variables.
+        # Fix both public forms; never provide a password or sudo's stdin flag.
+        transport.update({
+            "ansible_become_method": "ansible.builtin.sudo",
+            "ansible_become_user": spec["become"]["user"],
+            "ansible_become_exe": "/usr/bin/sudo",
+            "ansible_become_flags": "-H -n -k",
+            "ansible_sudo_user": spec["become"]["user"],
+            "ansible_sudo_exe": "/usr/bin/sudo",
+            "ansible_sudo_flags": "-H -n -k",
+            # A truthy password option makes Core remove -n and enable prompts.
+            "ansible_become_password": "",
+            "ansible_become_pass": "",
+            "ansible_sudo_pass": "",
+        })
+    inventory = {"all": {"hosts": {HOST: literal(transport)}}}
     document(workspace / "inventory" / "hosts.yml", inventory)
-    if playbook:
-        # Only this generated file carries high-precedence backend variables.
-        # Caller literals remain nested, never arbitrary Ansible extra vars.
-        controls = dict(inventory["all"]["hosts"][HOST])
-        controls["estus_arguments"] = literal(spec["arguments"])
-        document(project / "arguments.yml", controls)
+    # Every execution mode uses this generated, high-precedence transport.
+    # Caller literals stay nested and role argument variables stay task-scoped.
+    controls = dict(inventory["all"]["hosts"][HOST])
+    controls["estus_arguments"] = literal(spec["arguments"])
+    document(project / "arguments.yml", controls)
     config = workspace / "ansible.cfg"
     config.write_text("[defaults]\ncollections_scan_sys_path = False\nretry_files_enabled = False\n"
                       "fact_caching = memory\nhost_key_checking = True\ndisplay_args_to_stdout = False\n"
@@ -918,10 +947,12 @@ def layout(workspace, spec, roots, selected_path):
         environment["ANSIBLE_ROLES_PATH"] = (
             str(Path(expected["role_path"]).parent) if expected["role_path"] is not None
             else str(workspace / "no-roles"))
-    agent = os.environ.get("SSH_AUTH_SOCK")
-    if agent is not None:
-        absolute(agent)
-        environment["SSH_AUTH_SOCK"] = agent
+    agent = spec["agent"]
+    socket = (os.environ.get("SSH_AUTH_SOCK") if agent["mode"] == "inherit"
+              else agent["socket"] if agent["mode"] == "fixed" else None)
+    if socket is not None:
+        absolute(socket)
+        environment["SSH_AUTH_SOCK"] = socket
     os.environ.clear()
     os.environ.update(environment)
 
@@ -965,10 +996,9 @@ def main():
             runner = run(private_data_dir=str(workspace), project_dir=str(workspace / "project"),
                          artifact_dir=str(workspace / "artifacts"), ident="run",
                          inventory=str(workspace / "inventory" / "hosts.yml"), playbook="playbook.yml",
-                         limit=HOST if "playbook" in spec["expected"] else None,
-                         cmdline=("--extra-vars " + shlex.quote(
-                             "@" + str(workspace / "project" / "arguments.yml"))
-                             if "playbook" in spec["expected"] else None),
+                         limit=HOST,
+                         cmdline="--extra-vars " + shlex.quote(
+                             "@" + str(workspace / "project" / "arguments.yml")),
                          forks=1, quiet=True, process_isolation=False, fact_cache_type="memory",
                          suppress_env_files=True, suppress_output_file=True, suppress_ansible_output=True,
                          omit_event_data=False, only_failed_event_data=False,

@@ -252,8 +252,8 @@ Python. Enabled stale/incompatible bindings fail before MCP starts; requests
 never regenerate approval or install dependencies.
 
 `[automation.targets.<logical>]` fixes the SSH destination and absolute target
-Python interpreter independently of native sudo authority. No become support is
-added. OpenSSH still resolves operator aliases and the configured replacement SSH
+Python interpreter independently of native sudo authority. This ordinary authority
+never becomes; named broader authorities below are separate. OpenSSH resolves operator aliases and the replacement SSH
 file. Runner connections do not use the Rust pool: sharing, forwarding, host-key
 updates, password prompts and remote TTY allocation are disabled. OpenSSH is
 selected by `automation.ssh_executable`, then `ESTUS_AUTOMATION_SSH`, then
@@ -409,6 +409,56 @@ automatic replay, dependency installation or rollback guarantee is added.
 
 `nix run .#playbook-acceptance-msrv` runs the installed real SSH/Runner suite with
 the same non-root/private-directory prerequisites as role acceptance.
+
+## Explicit broader automation authorities
+
+`authority="automation"` remains ordinary. A reviewed module, role or playbook
+binding may instead select `authority="automation:ops"` and be explicitly enabled.
+Configure that private capability independently from native sudo allowlists:
+
+```toml
+[automation.authorities.ops]
+ssh_config_file = "/etc/estus/automation-ssh.conf"
+runtime = "/opt/estus/ansible-runtime"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.ops.targets.server]
+destination = "server-automation"
+python = "/usr/bin/python3"
+```
+
+The replacement SSH configuration selects independently provisioned credentials
+through ordinary OpenSSH `IdentityFile` or `IdentityAgent` settings. No privileged
+key is installed on ordinary targets. An optional `ssh_auth_sock` selects an
+existing bounded absolute agent socket; omitting it disables ambient agent
+inheritance for this authority. Estus never loads keys or creates agents.
+
+`runtime` may be omitted to inherit the existing selected runtime at startup.
+An explicit authority runtime does not depend on an unused ordinary runtime or
+ambient agent. Import the binding snapshot against that same runtime using the
+operator authoring configuration. Source/runtime approval is not refreshed on calls.
+
+Profiles name declared logical targets only, never fallback native/elevated aliases.
+Missing profiles/mappings and malformed definitions fail startup even if disabled;
+inactive valid file/runtime references remain unopened. Global and target startup
+profiles still apply, and all authorities share admission for the same logical target.
+Public metadata advertises only the logical authority name. Audit uses
+`identity_role="automation"` and authoritative automation finish `complete`; it
+does not expose private destinations, configuration, socket or key paths.
+
+Sudo fixes its builtin plugin, user, `/usr/bin/sudo` and `-H -n -k`. Generated
+high-precedence transport variables apply in all execution modes; password aliases
+are empty, and caller fields cannot choose become/user/authority/runtime/credentials.
+Password-required sudo fails noninteractively even with a valid cached ticket.
+With a command, [`-k`](https://www.sudo.ws/docs/man/1.9.17/sudo.man/#k) bypasses the
+ticket; it does not promise to revoke it. Ordinary bindings are fixed no-become.
+The target's actual sudoers policy remains an independently provisioned requirement.
+
+Permission to run an interpreter as root is broad authority, not a narrow executable
+allowlist. Trusted controller/project/plugin code still has its OS account's power;
+this is policy/credential selection, not a security sandbox. Privileged mutation
+and partial failures remain observable; cancellation never implies rollback or
+remote quiescence.
 
 ## Typed module result fields
 

@@ -269,8 +269,8 @@ impl Estus {
                 ("result".into(), serde_json::json!(binding.result_kind())),
                 ("effects".into(), serde_json::json!(binding.effects())),
                 ("executor".into(), serde_json::json!(binding.executor_kind())),
-                ("authority".into(), if binding.is_automation() {
-                    serde_json::json!("automation")
+                ("authority".into(), if let Some(authority) = binding.automation_authority() {
+                    serde_json::json!(authority)
                 } else if local {
                     serde_json::json!("controller")
                 } else {
@@ -474,14 +474,14 @@ impl Estus {
                     request_id: &context.id,
                     tool: self.state.binding_name(id),
                     host: None,
-                    identity_role: if binding.sudo().is_some()
-                        && mode != Some(SudoMode::SameAccount)
-                    {
+                    identity_role: if let Some(authority) = binding.automation_authority() {
+                        authority.identity_role()
+                    } else if binding.sudo().is_some() && mode != Some(SudoMode::SameAccount) {
                         IdentityRole::Elevated
                     } else {
                         IdentityRole::Ordinary
                     },
-                    sudo_mode: mode,
+                    sudo_mode: if binding.is_automation() { None } else { mode },
                     user: binding.sudo().map(|(user, _)| user),
                     program: None,
                     binding_revision: Some(&binding.revision),
@@ -527,7 +527,10 @@ impl Estus {
                 .iter()
                 .find(|host| **host == request.host)
                 .map(String::as_str),
-            identity_role: IdentityRole::Ordinary,
+            identity_role: binding
+                .automation_authority()
+                .expect("automation binding")
+                .identity_role(),
             sudo_mode: None,
             user: None,
             program: None,
@@ -572,7 +575,10 @@ impl Estus {
                 request_id: &context.id,
                 tool: state.binding_name(id),
                 host: Some(&request.host),
-                identity_role: IdentityRole::Ordinary,
+                identity_role: binding
+                    .automation_authority()
+                    .expect("automation binding")
+                    .identity_role(),
                 sudo_mode: None,
                 user: None,
                 program: None,
@@ -593,13 +599,9 @@ impl Estus {
                     &request,
                     state.config.limits(),
                     bindings::AutomationTransport {
-                        target,
-                        ssh_config: state.config.ssh_config(),
+                        authority: target,
                         scratch_bytes: bytes,
                         scratch_files: files,
-                        ssh_executable: state.config.automation_ssh().ok_or_else(|| {
-                            ToolError::new("policy_denied", "Operation is not authorized", false)
-                        })?,
                         started,
                     },
                 )?;

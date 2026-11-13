@@ -65,6 +65,8 @@ struct Record<'a> {
     owned_group_cleanup: Option<GroupCleanup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<crate::reply::AutomationStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complete: Option<bool>,
 }
 
 impl<'a> Metadata<'a> {
@@ -112,6 +114,7 @@ impl<'a> Metadata<'a> {
             binding_revision: self.binding_revision,
             executor: self.executor,
             status: None,
+            complete: None,
             duration_ms,
             exit_code,
             error_code,
@@ -200,6 +203,7 @@ impl<'a> Audit<'a> {
             reply.data.as_ref().map(|data| data.owned_group_cleanup),
         );
         record.status = reply.data.as_ref().map(|data| data.status);
+        record.complete = reply.data.as_ref().map(|data| data.complete);
         emit(&record);
         self.finished = true;
     }

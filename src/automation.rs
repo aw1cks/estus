@@ -462,6 +462,7 @@ pub(crate) struct RunnerRuntime {
 pub(crate) fn runner_runtime(
     runtime: Option<PathBuf>,
     workspace_root: Arc<Path>,
+    agent_socket: Option<OsString>,
 ) -> Result<RunnerRuntime, &'static str> {
     let loaded = load_selected(runtime, || std::env::var_os("ESTUS_PYTHON_RUNTIME"))?;
     let payload =
@@ -474,7 +475,7 @@ pub(crate) fn runner_runtime(
         include_str!("automation_runner.py")
     );
     let mut environment = BTreeMap::new();
-    if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK") {
+    if let Some(socket) = agent_socket {
         let socket = socket
             .to_str()
             .filter(|value| valid_private_path(value))

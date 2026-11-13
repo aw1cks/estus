@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
-    bindings::{BindingId, Bindings},
+    bindings::{AutomationAuthority, BindingId, Bindings},
     command::MAX_COMMAND_BYTES,
     reply::ToolError,
     wire::MAX_RESPONSE_BYTES,
@@ -121,12 +121,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true, env = "ESTUS_CONFIG", hide_env_values = true)]
     config: Option<PathBuf>,
     /// Replacement OpenSSH configuration (not an overlay).
-    #[arg(
-        long,
-        global = true,
-        env = "ESTUS_SSH_CONFIG",
-        hide_env_values = true
-    )]
+    #[arg(long, global = true, env = "ESTUS_SSH_CONFIG", hide_env_values = true)]
     ssh_config: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Option<CliCommand>,
@@ -214,6 +209,7 @@ struct Automation {
     max_scratch_bytes: u64,
     max_scratch_files: usize,
     targets: BTreeMap<String, AutomationTarget>,
+    authorities: BTreeMap<String, NamedAutomationAuthority>,
     ssh_executable: Option<PathBuf>,
 }
 
@@ -228,6 +224,7 @@ impl Default for Automation {
             max_scratch_bytes: 16 * 1024 * 1024,
             max_scratch_files: 512,
             targets: BTreeMap::new(),
+            authorities: BTreeMap::new(),
         }
     }
 }
@@ -237,6 +234,36 @@ impl Default for Automation {
 pub(crate) struct AutomationTarget {
     pub(crate) destination: String,
     pub(crate) python: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedAutomationAuthority {
+    ssh_config_file: PathBuf,
+    runtime: Option<PathBuf>,
+    ssh_auth_sock: Option<PathBuf>,
+    r#become: AutomationBecome,
+    targets: BTreeMap<String, AutomationTarget>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "lowercase", deny_unknown_fields)]
+pub(crate) enum AutomationBecome {
+    Sudo { user: String },
+}
+
+pub(crate) enum AutomationAgent<'a> {
+    Inherit,
+    Disabled,
+    Fixed(&'a Path),
+}
+
+pub(crate) struct ResolvedAutomation<'a> {
+    pub(crate) target: &'a AutomationTarget,
+    pub(crate) ssh_config: Option<&'a Path>,
+    pub(crate) ssh_executable: &'a Path,
+    pub(crate) r#become: Option<&'a AutomationBecome>,
+    pub(crate) agent: AutomationAgent<'a>,
 }
 
 #[derive(Default, Deserialize)]
@@ -448,6 +475,7 @@ pub(crate) enum IdentityRole {
     Ordinary,
     Elevated,
     Controller,
+    Automation,
 }
 
 pub(crate) struct ResolvedTarget<'a> {
@@ -676,6 +704,13 @@ impl Config {
             destination(&target.destination, "automation.targets.destination")?;
             validate_runtime_path(&target.python)?;
         }
+        for authority in automation.authorities.values() {
+            validate_automation_targets(
+                &authority.targets,
+                document.targets.as_ref(),
+                "automation.authorities.*.targets",
+            )?;
+        }
         let bindings = Bindings::compile(
             document.tools,
             &document.enabled_tools,
@@ -712,10 +747,22 @@ impl Config {
             .entries()
             .filter(|(_, binding)| binding.is_automation())
         {
+            let targets = match binding.automation_authority() {
+                Some(AutomationAuthority::Ordinary) => &document.automation.targets,
+                Some(AutomationAuthority::Named(name)) => {
+                    &document
+                        .automation
+                        .authorities
+                        .get(name)
+                        .ok_or_else(|| invalid("tools", "automation authority is not configured"))?
+                        .targets
+                }
+                None => unreachable!("automation binding has a typed authority"),
+            };
             if binding
                 .targets
                 .iter()
-                .any(|name| !document.automation.targets.contains_key(name))
+                .any(|name| !targets.contains_key(name))
             {
                 return Err(invalid(
                     "tools",
@@ -802,11 +849,75 @@ impl Config {
             ));
         }
         self.automation.ssh_executable = Some(ssh);
-        let runtime = self.automation_runtime()?;
+        let needs_inherited_runtime = active.iter().any(|id| {
+            match self
+                .bindings
+                .get(*id)
+                .and_then(|binding| binding.automation_authority())
+            {
+                Some(AutomationAuthority::Ordinary) => true,
+                Some(AutomationAuthority::Named(name)) => self
+                    .automation
+                    .authorities
+                    .get(name)
+                    .is_some_and(|authority| authority.runtime.is_none()),
+                None => false,
+            }
+        });
+        let inherited_runtime = if needs_inherited_runtime {
+            self.automation_runtime()?
+        } else {
+            None
+        };
         let root = crate::bindings::controller_root(self.automation.workspace_root.as_deref())?;
+        let mut inspected = BTreeSet::new();
         for id in active {
+            let (runtime, agent_socket) = match self
+                .bindings
+                .get(id)
+                .and_then(|binding| binding.automation_authority())
+            {
+                Some(AutomationAuthority::Named(name)) => {
+                    let (name, authority) = self
+                        .automation
+                        .authorities
+                        .get_key_value(name)
+                        .ok_or_else(|| {
+                            invalid("tools", "automation authority is not configured")
+                        })?;
+                    if inspected.insert(name.as_str()) {
+                        let config = authority.ssh_config_file.clone();
+                        let socket = authority.ssh_auth_sock.clone();
+                        tokio::task::spawn_blocking(move || {
+                            inspect_automation_authority(&config, socket.as_deref())
+                        })
+                        .await
+                        .map_err(|_| {
+                            invalid(
+                                "automation.authorities.*",
+                                "cannot inspect selected authority",
+                            )
+                        })??;
+                    }
+                    (
+                        authority
+                            .runtime
+                            .as_ref()
+                            .or(inherited_runtime.as_ref())
+                            .cloned(),
+                        authority
+                            .ssh_auth_sock
+                            .as_ref()
+                            .map(|path| path.as_os_str().to_owned()),
+                    )
+                }
+                Some(AutomationAuthority::Ordinary) => {
+                    (inherited_runtime.clone(), std::env::var_os("SSH_AUTH_SOCK"))
+                }
+                None => return Err(invalid("tools", "automation authority is not configured")),
+            };
             self.bindings
-                .activate_automation(id, runtime.clone(), root.clone(), ct)
+                .activate_automation(id, runtime, root.clone(), agent_socket, ct)
                 .await?;
         }
         Ok(true)
@@ -827,7 +938,7 @@ impl Config {
         &self,
         id: BindingId,
         host: &str,
-    ) -> Result<&AutomationTarget, ToolError> {
+    ) -> Result<ResolvedAutomation<'_>, ToolError> {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
         if !self.binding_enabled(id)
             || !self.bindings.get(id).is_some_and(|binding| {
@@ -841,16 +952,44 @@ impl Config {
         {
             return Err(denied());
         }
-        self.automation.targets.get(host).ok_or_else(denied)
+        let ssh_executable = self
+            .automation
+            .ssh_executable
+            .as_deref()
+            .ok_or_else(denied)?;
+        match self
+            .bindings
+            .get(id)
+            .and_then(|binding| binding.automation_authority())
+        {
+            Some(AutomationAuthority::Ordinary) => Ok(ResolvedAutomation {
+                target: self.automation.targets.get(host).ok_or_else(denied)?,
+                ssh_config: self.ssh_config.as_deref(),
+                ssh_executable,
+                r#become: None,
+                agent: AutomationAgent::Inherit,
+            }),
+            Some(AutomationAuthority::Named(name)) => {
+                let authority = self.automation.authorities.get(name).ok_or_else(denied)?;
+                Ok(ResolvedAutomation {
+                    target: authority.targets.get(host).ok_or_else(denied)?,
+                    ssh_config: Some(&authority.ssh_config_file),
+                    ssh_executable,
+                    r#become: Some(&authority.r#become),
+                    agent: authority
+                        .ssh_auth_sock
+                        .as_deref()
+                        .map_or(AutomationAgent::Disabled, AutomationAgent::Fixed),
+                })
+            }
+            None => Err(denied()),
+        }
     }
 
     pub(crate) fn automation_hosts(&self) -> impl Iterator<Item = &String> {
-        self.automation.targets.keys()
+        self.targets.iter().flat_map(|targets| targets.keys())
     }
 
-    pub(crate) fn automation_ssh(&self) -> Option<&Path> {
-        self.automation.ssh_executable.as_deref()
-    }
     pub(crate) fn targets<'a>(&'a self, tools: &'a ToolCatalog) -> TargetDiscovery<'a> {
         TargetDiscovery {
             mode: if self.targets.is_some() {
@@ -1081,6 +1220,187 @@ impl Config {
     }
 }
 
+fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
+    let authorities = value
+        .as_table()
+        .ok_or_else(|| invalid("automation.authorities", "must be a table"))?;
+    if authorities.len() > 16 {
+        return Err(invalid(
+            "automation.authorities",
+            "must contain at most 16 authorities",
+        ));
+    }
+    for (name, value) in authorities {
+        if name.is_empty()
+            || name.len() > 64
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || byte == b'_'
+                    || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
+            })
+        {
+            return Err(invalid(
+                "automation.authorities",
+                "invalid authority identifier",
+            ));
+        }
+        let authority = table(
+            value,
+            "automation.authorities.*",
+            &[
+                "ssh_config_file",
+                "runtime",
+                "ssh_auth_sock",
+                "become",
+                "targets",
+            ],
+        )?;
+        for (key, field, required) in [
+            (
+                "ssh_config_file",
+                "automation.authorities.*.ssh_config_file",
+                true,
+            ),
+            ("runtime", "automation.authorities.*.runtime", false),
+            (
+                "ssh_auth_sock",
+                "automation.authorities.*.ssh_auth_sock",
+                false,
+            ),
+        ] {
+            match authority.get(key) {
+                Some(value) => {
+                    let path = value
+                        .as_str()
+                        .ok_or_else(|| invalid(field, "must be a string"))?;
+                    authority_path(path, field)?;
+                }
+                None if required => return Err(invalid(field, "required field is missing")),
+                None => {}
+            }
+        }
+        let r#become = authority.get("become").ok_or_else(|| {
+            invalid(
+                "automation.authorities.*.become",
+                "required field is missing",
+            )
+        })?;
+        let r#become = table(
+            r#become,
+            "automation.authorities.*.become",
+            &["method", "user"],
+        )?;
+        if r#become.get("method").and_then(toml::Value::as_str) != Some("sudo") {
+            return Err(invalid(
+                "automation.authorities.*.become.method",
+                "must be sudo",
+            ));
+        }
+        if !r#become
+            .get("user")
+            .and_then(toml::Value::as_str)
+            .is_some_and(account_name)
+        {
+            return Err(invalid(
+                "automation.authorities.*.become.user",
+                "must be a named POSIX account",
+            ));
+        }
+        let mappings = authority
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| {
+                invalid(
+                    "automation.authorities.*.targets",
+                    "required target table is missing or invalid",
+                )
+            })?;
+        for value in mappings.values() {
+            let mapping = table(
+                value,
+                "automation.authorities.*.targets.*",
+                &["destination", "python"],
+            )?;
+            let destination_value = mapping
+                .get("destination")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    invalid(
+                        "automation.authorities.*.targets.*.destination",
+                        "required string field is missing or invalid",
+                    )
+                })?;
+            destination(
+                destination_value,
+                "automation.authorities.*.targets.*.destination",
+            )?;
+            let python = mapping
+                .get("python")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    invalid(
+                        "automation.authorities.*.targets.*.python",
+                        "required string field is missing or invalid",
+                    )
+                })?;
+            authority_path(python, "automation.authorities.*.targets.*.python")?;
+        }
+    }
+    Ok(())
+}
+
+fn authority_path(value: &str, field: &'static str) -> Result<(), ConfigError> {
+    if !Path::new(value).is_absolute() || value.len() > 4096 || value.contains('\0') {
+        return Err(invalid(field, "must be a bounded absolute path"));
+    }
+    Ok(())
+}
+
+fn validate_automation_targets(
+    mappings: &BTreeMap<String, AutomationTarget>,
+    targets: Option<&BTreeMap<String, Target>>,
+    field: &'static str,
+) -> Result<(), ConfigError> {
+    for (name, target) in mappings {
+        if !targets.is_some_and(|targets| targets.contains_key(name)) {
+            return Err(invalid(field, "must name configured logical targets"));
+        }
+        destination(&target.destination, field)?;
+        authority_path(&target.python, field)?;
+    }
+    Ok(())
+}
+
+fn inspect_automation_authority(config: &Path, socket: Option<&Path>) -> Result<(), ConfigError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(config)
+        .map_err(|_| {
+            invalid(
+                "automation.authorities.*.ssh_config_file",
+                "cannot read replacement SSH configuration",
+            )
+        })?;
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Err(invalid(
+            "automation.authorities.*.ssh_config_file",
+            "must be a readable file",
+        ));
+    }
+    if let Some(socket) = socket {
+        use std::os::unix::fs::FileTypeExt;
+        if !std::fs::metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            return Err(invalid(
+                "automation.authorities.*.ssh_auth_sock",
+                "selected agent socket is unavailable",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn resolve_path(path: PathBuf, base: &Path, field: &'static str) -> Result<PathBuf, ConfigError> {
     if path.as_os_str().is_empty() {
         return Err(invalid(field, "path must not be empty"));
@@ -1296,6 +1616,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 "max_scratch_bytes",
                 "max_scratch_files",
                 "targets",
+                "authorities",
                 "ssh_executable",
             ],
         )?;
@@ -1309,6 +1630,9 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 .as_str()
                 .ok_or_else(|| invalid("automation.runtime", "must be a string"))?;
             validate_runtime_path(value)?;
+        }
+        if let Some(value) = automation.get("authorities") {
+            validate_authorities_schema(value)?;
         }
     }
     if let Some(value) = root.get("controller") {
@@ -1433,6 +1757,227 @@ mod tests {
     use super::*;
 
     #[test]
+    fn named_authorities_require_complete_private_capabilities_and_bounded_count() {
+        let text = named_authority_text("baseline", "baseline", false);
+        for invalid_text in [
+            text.replace("ssh_config_file='/private-authority/config'\n", ""),
+            text.replace("become={method='sudo',user='root'}\n", ""),
+            text.replace(
+                "[automation.authorities.ops.targets.server]\ndestination='private-authority-alias'\npython='/private-authority/python'\n",
+                "",
+            ),
+            (0..17).fold(text.clone(), |text, index| text + &format!(
+                "\n[automation.authorities.extra{index}]\nssh_config_file='/private-authority/config'\nbecome={{method='sudo',user='root'}}\ntargets={{}}\n"
+            )),
+        ] {
+            let error = load_text(&invalid_text, &[]).err().unwrap();
+            assert!(error.field.starts_with("automation.authorities"));
+            assert!(!error.to_string().contains("private-authority"));
+        }
+    }
+
+    #[test]
+    fn active_authority_inspection_rejects_missing_config_and_non_socket_agent_privately() {
+        let text = named_authority_text("baseline", "baseline", true);
+        let config = load_text(&text, &[]).unwrap();
+        let authority = &config.automation.authorities["ops"];
+        let error = inspect_automation_authority(
+            &authority.ssh_config_file,
+            authority.ssh_auth_sock.as_deref(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.field, "automation.authorities.*.ssh_config_file");
+        assert!(!error.to_string().contains("private-authority"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let ssh_config = dir.path().join("config");
+        std::fs::write(&ssh_config, "").unwrap();
+        let text = text.replace(
+            "ssh_config_file='/private-authority/config'",
+            &format!(
+                "ssh_config_file={:?}\nssh_auth_sock={:?}",
+                ssh_config.to_str().unwrap(),
+                ssh_config.to_str().unwrap()
+            ),
+        );
+        let config = load_text(&text, &[]).unwrap();
+        let authority = &config.automation.authorities["ops"];
+        let error = inspect_automation_authority(
+            &authority.ssh_config_file,
+            authority.ssh_auth_sock.as_deref(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.field, "automation.authorities.*.ssh_auth_sock");
+        assert!(!error.to_string().contains(dir.path().to_str().unwrap()));
+        let fifo = dir.path().join("config-fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(inspect_automation_authority(&fifo, None).map_err(|error| error.field))
+                .unwrap();
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("named SSH configuration inspection blocked on a FIFO");
+        assert_eq!(
+            result.err(),
+            Some("automation.authorities.*.ssh_config_file")
+        );
+        worker.join().unwrap();
+    }
+
+    fn named_authority_text(global: &str, target: &str, enabled: bool) -> String {
+        automation_text(global, target, enabled)
+            .replace("authority='automation'", "authority='automation:ops'")
+            + r#"
+[automation.authorities.ops]
+ssh_config_file='/private-authority/config'
+runtime='/private-authority/runtime'
+become={method='sudo',user='root'}
+[automation.authorities.ops.targets.server]
+destination='private-authority-alias'
+python='/private-authority/python'
+"#
+    }
+
+    #[tokio::test]
+    async fn inactive_named_authorities_do_not_inspect_private_files() {
+        for (global, target, enabled) in [
+            ("baseline", "baseline", false),
+            ("files-only", "baseline", true),
+            ("baseline", "files-only", true),
+        ] {
+            let text = named_authority_text(global, target, enabled).replace(
+                "become={",
+                "ssh_auth_sock='/private-authority/socket'\nbecome={",
+            );
+            let mut config = load_text(&text, &[]).unwrap();
+            assert!(
+                !config
+                    .activate_automation(&tokio_util::sync::CancellationToken::new())
+                    .await
+                    .unwrap()
+            );
+            assert!(config.automation_target(BindingId(0), "server").is_err());
+        }
+    }
+
+    #[test]
+    fn missing_named_authority_or_mapping_rejects_even_disabled_bindings() {
+        let text = named_authority_text("baseline", "baseline", false);
+        for invalid_text in [
+            automation_text("baseline", "baseline", false)
+                .replace("authority='automation'", "authority='automation:ops'"),
+            text.replace(
+                "automation.authorities.ops.targets.server",
+                "automation.authorities.ops.targets.other",
+            ),
+            text.replace("targets=['server']", "targets=['server','second']")
+                + "\n[targets.second]\nssh_host='second-native'\n",
+        ] {
+            let error = load_text(&invalid_text, &[]).err().unwrap();
+            assert!(!error.to_string().contains("private-authority"));
+        }
+    }
+
+    #[test]
+    fn named_authority_resolution_never_falls_back_to_native_or_ordinary_credentials() {
+        let text = named_authority_text("baseline", "baseline", true).replace(
+            "[automation]\n",
+            "[automation]\nssh_executable='/selected/ssh'\n",
+        );
+        for (socket_config, fixed) in [("", false), ("ssh_auth_sock='/selected/agent'\n", true)] {
+            let config = load_text(
+                &text.replace("become={", &format!("{socket_config}become={{")),
+                &[],
+            )
+            .unwrap();
+            let authority = config.automation_target(BindingId(0), "server").unwrap();
+            assert_eq!(authority.target.destination, "private-authority-alias");
+            assert_eq!(authority.target.python, "/private-authority/python");
+            assert_eq!(
+                authority.ssh_config,
+                Some(Path::new("/private-authority/config"))
+            );
+            assert_eq!(authority.ssh_executable, Path::new("/selected/ssh"));
+            assert_eq!(
+                serde_json::to_value(authority.r#become).unwrap(),
+                serde_json::json!({"method":"sudo","user":"root"})
+            );
+            match authority.agent {
+                AutomationAgent::Fixed(socket) if fixed => {
+                    assert_eq!(socket, Path::new("/selected/agent"))
+                }
+                AutomationAgent::Disabled if !fixed => {}
+                _ => panic!("named authority must not inherit the ambient agent"),
+            }
+            for host in [
+                "native-alias",
+                "automation-alias",
+                "private-authority-alias",
+                "untrusted-secret-host",
+            ] {
+                let error = config.automation_target(BindingId(0), host).err().unwrap();
+                assert_eq!(error.code, "policy_denied");
+            }
+            let tools = ToolCatalog::new(Vec::new()).unwrap();
+            let discovery = serde_json::to_string(&config.targets(&tools)).unwrap();
+            assert!(!discovery.contains("private-authority"));
+            assert!(!discovery.contains("/selected/"));
+        }
+    }
+
+    #[test]
+    fn named_authority_invalid_private_values_have_fixed_diagnostics() {
+        let text = named_authority_text("baseline", "baseline", false);
+        for replacement in [
+            (
+                "ssh_config_file='/private-authority/config'",
+                "ssh_config_file='private-secret'",
+            ),
+            (
+                "runtime='/private-authority/runtime'",
+                "runtime=['private-secret']",
+            ),
+            (
+                "become={method='sudo',user='root'}",
+                "become={method='private-secret',user='root'}",
+            ),
+            (
+                "become={method='sudo',user='root'}",
+                "become={method='sudo',user='#private-secret'}",
+            ),
+            (
+                "become={method='sudo',user='root'}",
+                "become={method='sudo',user='root',password='private-secret'}",
+            ),
+            (
+                "destination='private-authority-alias'",
+                "destination='private-secret invalid'",
+            ),
+            (
+                "python='/private-authority/python'",
+                "python='private-secret'",
+            ),
+            (
+                "[automation.authorities.ops]",
+                "[automation.authorities.'private-secret!']",
+            ),
+        ] {
+            let error = load_text(&text.replace(replacement.0, replacement.1), &[])
+                .err()
+                .unwrap();
+            let diagnostic = error.to_string();
+            assert!(diagnostic.starts_with("automation.authorities"));
+            assert!(!diagnostic.contains("private-secret"));
+            assert!(!diagnostic.contains("private-authority"));
+        }
+    }
+
+    #[test]
     fn automation_destinations_share_explicit_ssh_destination_grammar() {
         for alias in [
             "_alias",
@@ -1505,7 +2050,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
                 .is_err()
         );
         let target = config.automation_target(BindingId(0), "server").unwrap();
-        assert_eq!(target.destination, "automation-alias");
+        assert_eq!(target.target.destination, "automation-alias");
         assert!(
             config
                 .automation_target(BindingId(0), "native-alias")
@@ -1569,14 +2114,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
     fn doctor_runtime_selection_allows_no_targets_or_combined_targets() {
         for argv in [
             vec!["estus", "doctor", "--runtime", "ansible"],
-            vec![
-                "estus",
-                "doctor",
-                "--runtime",
-                "ansible",
-                "--target",
-                "one",
-            ],
+            vec!["estus", "doctor", "--runtime", "ansible", "--target", "one"],
         ] {
             let parsed = Cli::try_parse_from(argv).unwrap();
             let Some(CliCommand::Doctor(args)) = parsed.command else {
