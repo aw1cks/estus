@@ -148,3 +148,40 @@ pub(crate) struct ControllerData {
     pub duration_ms: u64,
     pub owned_group_cleanup: GroupCleanup,
 }
+
+/// Bounded evidence only; backend values and event payloads are never public.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AutomationData {
+    pub host: String,
+    pub status: AutomationStatus,
+    pub runner_rc: Option<i32>,
+    pub changed: Option<bool>,
+    pub tasks: AutomationTasks,
+    pub censored: bool,
+    pub complete: bool,
+    pub duration_ms: u64,
+    pub owned_group_cleanup: GroupCleanup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationStatus {
+    NotStarted,
+    Successful,
+    Failed,
+    Unreachable,
+    Cancelled,
+    Timeout,
+    InvalidResult,
+    ResourceLimit,
+    WorkerLost,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AutomationTasks {
+    pub ok: u32,
+    pub failed: u32,
+    pub unreachable: u32,
+    pub skipped: u32,
+}

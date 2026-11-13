@@ -425,6 +425,7 @@ pub(crate) struct ControllerPlan {
 }
 
 pub(crate) struct PreparedController {
+    pub(crate) supervision: crate::controller::ControllerSupervision,
     pub(crate) plan: Arc<ControllerPlan>,
     pub(crate) input_json: Vec<u8>,
     pub(crate) duration: Duration,
@@ -1138,6 +1139,7 @@ impl CompiledBinding {
             input_json: writer.0,
             duration: Duration::from_secs(timeout),
             max_output_bytes: self.max_output_bytes.unwrap_or(limits.max_output_bytes),
+            supervision: crate::controller::ControllerSupervision::Script,
         })
     }
 }

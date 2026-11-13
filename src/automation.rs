@@ -746,6 +746,7 @@ async fn run_loaded(
             .deadline
             .saturating_duration_since(tokio::time::Instant::now()),
         max_output_bytes: limit,
+        supervision: controller::ControllerSupervision::Script,
     };
     let run = controller::run(
         prepared,
