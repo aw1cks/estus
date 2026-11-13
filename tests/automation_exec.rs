@@ -2,6 +2,9 @@
 #![cfg(unix)]
 
 #[allow(dead_code)]
+#[path = "support/isolated.rs"]
+mod isolated;
+#[allow(dead_code)]
 mod support;
 
 use std::{
@@ -697,6 +700,112 @@ async fn scenarios(a: &mut Acceptance) -> Result<()> {
     .await;
     let cleanup = a.stop(server).await;
     limited_result?;
+    cleanup
+}
+
+/// Linux FHS target consumer, separate from the unprivileged localhost fixture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires automation Nix fixture artifact, explicit DOCKER_HOST, Nix Docker CLI and pinned Runner runtime"]
+async fn real_runner_isolated_fixture_smoke() -> Result<()> {
+    let runtime = fs::canonicalize(
+        std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME")
+            .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
+    )?;
+    let private = tempfile::Builder::new()
+        .prefix("runner-isolated-private-")
+        .tempdir()?;
+    fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))?;
+    let workspace = private.path().join("workspaces");
+    fs::create_dir(&workspace)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    let snapshot = private.path().join("ping-reviewed.json");
+    let overlay_path = private.path().join("ping-overlay.json");
+    let overlay = json!({
+        "input_schema":{"type":"object","properties":{"data":{"type":"string","enum":["pong"]}},
+            "required":["data"],"additionalProperties":false,"maxProperties":1},
+        "fixed_args":{},"input_map":{"data":"data"}
+    });
+    fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
+    let result: Result<()> = async {
+        let assert_private = |output: &str| -> Result<()> {
+            for secret in [PRIVATE, private.path().to_str().context("private path")?,
+                runtime.to_str().context("runtime path")?,
+                fixture.config.parent().context("fixture root")?.to_str().context("fixture path")?] {
+                ensure!(!output.contains(secret), "isolated summary/audit disclosed private paths or payloads");
+            }
+            Ok(())
+        };
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+        config.insert("automation".into(), table(json!({"runtime":text(&runtime)?}))?);
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut import = support::server_command(&fixture.config)?;
+        import.args(["schema","import","ansible.builtin.ping"])
+            .arg("--output").arg(&snapshot).arg("--overlay").arg(&overlay_path);
+        let imported = support::run(&mut import).await?;
+        ensure!(imported.status.success(), "isolated real schema import failed");
+        let report: Value = serde_json::from_slice(&imported.stdout)?;
+        ensure!(report["binding_validated"] == true);
+        config.insert("enabled_tools".into(), table(json!(["isolated_probe"]))?);
+        let mut binding = json!({
+            "description":"Explicit pinned Linux fixture probe","revision":"fixture-1",
+            "targets":["plain"],"authority":"automation","effects":["probe"],
+            "execution":{"kind":"ansible_module","snapshot":text(&snapshot)?,"no_log":false},
+            "result":{"kind":"ansible_summary"},"limits":{"timeout_secs":15}
+        });
+        for key in ["input_schema","fixed_args","input_map"] {
+            binding[key] = overlay[key].clone();
+        }
+        config.insert("tools".into(), table(json!({"isolated_probe":binding}))?);
+        config.insert("automation".into(), table(json!({
+            "required":true,"runtime":text(&runtime)?,"workspace_root":text(&workspace)?,
+            "ssh_executable":text(&fixture.ssh)?,
+            "targets":{"plain":{"destination":"plain","python":"/usr/bin/python3"}}
+        }))?);
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut server = WireServer::start(&fixture.config)?;
+        let calls: Result<Value> = async {
+            server.initialize().await?;
+            let response = server.request(2,"tools/call",json!({
+                "name":"isolated_probe","arguments":{"host":"plain","inputs":{"data":"pong"}}
+            })).await?;
+            assert_private(&response.to_string())?;
+            ensure!(response["error"].is_null(), "isolated MCP call rejected: {response}");
+            let envelope = &response["result"]["structuredContent"];
+            ensure!(envelope["error"].is_null()
+                && envelope["data"]["host"] == "plain"
+                && envelope["data"]["status"] == "successful"
+                && envelope["data"]["runner_rc"] == 0
+                && envelope["data"]["tasks"]["ok"] == 1
+                && envelope["data"]["complete"] == true
+                && envelope["data"]["owned_group_cleanup"] == "signalled_and_reaped",
+                "real isolated Runner probe failed: {response}");
+            // Observe the distinct Linux/Python target via the existing native MCP path.
+            let native = server.request(3,"tools/call",json!({
+                "name":"ssh_exec","arguments":{"host":"plain",
+                    "command":"uname -s; /usr/bin/python3 -I -c 'import sys; print(\"%s.%s\" % sys.version_info[:2])'"}
+            })).await?;
+            let observed = &native["result"]["structuredContent"];
+            ensure!(native["error"].is_null() && observed["error"].is_null()
+                && observed["data"]["exit_code"] == 0
+                && observed["data"]["stdout"] == "Linux\n3.14\n",
+                "automation fixture target is not the pinned Linux Python consumer: {native}");
+            ensure!(fs::read_dir(&workspace)?.next().is_none(),
+                "isolated Runner workspace survived its response");
+            Ok(response)
+        }.await;
+        // Also on failed assertions: EOF, await shutdown, drain audit, then report failure.
+        let stopped = server.stop(None).await;
+        let log = stopped?;
+        assert_private(&log.text())?;
+        let response = calls?;
+        assert_private(&response.to_string())?;
+        ensure!(fs::read_dir(&workspace)?.next().is_none(),
+            "isolated Runner workspace survived shutdown");
+        Ok(())
+    }.await;
+    let cleanup = fixture.stop().await;
+    result?;
     cleanup
 }
 
