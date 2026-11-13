@@ -2,11 +2,8 @@
 use std::{io, sync::LazyLock};
 
 use rmcp::{
-    ErrorData, RoleServer,
-    model::{
-        CallToolResult, ClientJsonRpcMessage, JsonRpcResponse, RequestId, ServerJsonRpcMessage,
-    },
-    transport::Transport,
+    ErrorData,
+    model::{CallToolResult, JsonRpcResponse, RequestId},
 };
 use serde::Serialize;
 
@@ -41,7 +38,7 @@ fn exceeded() -> ErrorData {
     ErrorData::invalid_params("Request leaves insufficient response budget", None)
 }
 
-fn size_error() -> io::Error {
+pub(crate) fn size_error() -> io::Error {
     io::Error::other("response budget exceeded")
 }
 
@@ -364,37 +361,8 @@ fn prefix_len(text: &str, remaining: &mut usize) -> usize {
     end
 }
 
-/// Final size guard on the existing RMCP transport, not another dispatcher.
-pub(crate) struct BoundedTransport<T>(pub(crate) T);
-
-impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for BoundedTransport<T> {
-    type Error = io::Error;
-
-    fn send(
-        &mut self,
-        message: ServerJsonRpcMessage,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        // Validate the actual SDK message, including protocol errors and any
-        // version-specific fields, before its encoder allocates the wire frame.
-        let send = frame_fits(&message).then(|| self.0.send(message));
-        async move {
-            match send {
-                Some(send) => send.await,
-                None => Err(size_error()),
-            }
-        }
-    }
-
-    fn receive(&mut self) -> impl Future<Output = Option<ClientJsonRpcMessage>> + Send {
-        self.0.receive()
-    }
-
-    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.0.close()
-    }
-}
-
-fn frame_fits(message: &impl Serialize) -> bool {
+/// Final size guard, shared by the live transport and serialization oracles.
+pub(crate) fn frame_fits(message: &impl Serialize) -> bool {
     // The SDK encoder adds exactly one newline after compact JSON.
     serialized_size(message).is_ok_and(|bytes| bytes < MAX_RESPONSE_BYTES)
 }

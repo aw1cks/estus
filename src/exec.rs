@@ -16,6 +16,7 @@ pub(crate) struct RunContext<'a> {
     pub shutdown: &'a CancellationToken,
     pub started: Instant,
     pub retention: Option<crate::output::Session>,
+    pub progress: crate::progress::Reporter,
 }
 
 async fn send_stdin(stream: Option<openssh::ChildStdin>, input: Option<&str>) -> io::Result<()> {
@@ -85,6 +86,8 @@ pub(crate) async fn run(
     };
     let mut stdout = capture();
     let mut stderr = capture();
+    stdout.report_to(context.progress.clone());
+    stderr.report_to(context.progress.clone());
     let mut stdout_complete = false;
     let mut stderr_complete = false;
     let outcome = {
@@ -137,6 +140,7 @@ pub(crate) async fn run(
                 Stdio::null()
             });
             let mut child = command.spawn().await?;
+            context.progress.output_started();
             let input = child.stdin().take();
             let output = child
                 .stdout()
@@ -193,6 +197,7 @@ pub(crate) async fn run(
         // All operation-owned pipes and the wait/spawn future are dropped here before
         // captures are decoded; no task owns output that cancellation could discard.
     };
+    context.progress.stop();
 
     let (exit_code, termination, error, unknown) = match outcome {
         Outcome::Completed(completion) => {

@@ -15,6 +15,7 @@ mod module_schema;
 mod output;
 mod playbook_import;
 mod process;
+mod progress;
 mod projection;
 mod reply;
 mod role_import;
@@ -204,7 +205,7 @@ async fn run_session(
         inner: input,
         shutdown: shutdown.clone(),
     };
-    let transport = wire::BoundedTransport(rmcp::transport::async_rw::AsyncRwTransport::<
+    let transport = progress::BoundedTransport::new(rmcp::transport::async_rw::AsyncRwTransport::<
         rmcp::RoleServer,
         _,
         _,

@@ -49,6 +49,7 @@ pub(crate) struct FileContext<'a> {
     pub(crate) deadline: tokio::time::Instant,
     pub(crate) ct: &'a CancellationToken,
     pub(crate) shutdown: &'a CancellationToken,
+    pub(crate) progress: crate::progress::Reporter,
 }
 
 pub(crate) struct FileOutcome<T> {
@@ -911,6 +912,7 @@ where
                     .await
                     .map_err(ssh_failure)?,
             );
+            context.progress.stage(crate::progress::Stage::SftpOpened);
             let channel = child.as_mut().ok_or_else(Failure::io)?;
             let stdin = channel.stdin().take().ok_or_else(Failure::io)?;
             let stdout = channel.stdout().take().ok_or_else(Failure::io)?;
@@ -922,7 +924,14 @@ where
                 let sftp = Sftp::new(stdin, stdout, SftpOptions::default())
                     .await
                     .map_err(sftp_failure)?;
-                operation(sftp).await
+                context.progress.stage(crate::progress::Stage::SftpReady);
+                let result = operation(sftp).await;
+                if result.is_ok() {
+                    context
+                        .progress
+                        .stage(crate::progress::Stage::SftpAcknowledged);
+                }
+                result
             };
             let drain = async { tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await };
             tokio::pin!(protocol, drain);
@@ -970,6 +979,7 @@ where
             result = operation => result,
         }
     };
+    context.progress.stop();
     // Operation futures and every File/Sftp handle have now been dropped. Wake
     // blocked protocol reads before disconnecting ONLY this child, not its master.
     cancel.cancel();

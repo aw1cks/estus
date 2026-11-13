@@ -1135,6 +1135,7 @@ async fn run_loaded(
             started: Instant::now(),
             capture_limit: limit,
             retention: None,
+            progress: crate::progress::Reporter::default(),
         },
     )
     .await;

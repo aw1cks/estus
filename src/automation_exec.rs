@@ -214,6 +214,7 @@ pub(crate) struct Evidence {
     projection: Option<ModuleProjection>,
     projection_seen: bool,
     projection_bad: bool,
+    progress: crate::progress::Reporter,
 }
 
 impl Evidence {
@@ -233,7 +234,12 @@ impl Evidence {
             projection: None,
             projection_seen: false,
             projection_bad: false,
+            progress: crate::progress::Reporter::default(),
         }
+    }
+
+    pub(crate) fn report_to(&mut self, progress: crate::progress::Reporter) {
+        self.progress = progress;
     }
 
     pub(crate) fn failed(&self) -> bool {
@@ -452,6 +458,12 @@ impl Evidence {
             self.invalid = true;
             return;
         }
+        // Only accepted current-invocation frames may expose fixed milestones.
+        let stage = match &frame {
+            Frame::Ready { .. } => Some(crate::progress::Stage::RunnerReady),
+            Frame::Task { .. } | Frame::RoleTask { .. } => Some(crate::progress::Stage::RunnerTask),
+            _ => None,
+        };
         match frame {
             Frame::Ready { .. } => {
                 if self.ready || self.task.is_some() {
@@ -585,6 +597,14 @@ impl Evidence {
                 ..
             } => {
                 self.role_terminal(status, rc, changed, tasks, censored, complete);
+            }
+        }
+        if !self.failed() {
+            if let Some(stage) = stage {
+                self.progress.stage(stage);
+            }
+            if self.terminal.is_some() {
+                self.progress.stop();
             }
         }
     }
@@ -980,6 +1000,7 @@ mod spawn_failures {
                 started: Instant::now(),
                 capture_limit: 1024,
                 retention: None,
+                progress: crate::progress::Reporter::default(),
             },
         )
         .await;

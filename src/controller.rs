@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bindings::{ControllerPlan, PreparedController};
 use crate::capture::{Capture, drain};
 use crate::process::Children;
+use crate::progress::{Reporter, Stage};
 use crate::reply::{
     ControllerData, ControllerError, ControllerReply, ControllerTermination, GroupCleanup,
 };
@@ -48,6 +49,7 @@ pub(crate) struct ControllerContext<'a> {
     pub started: Instant,
     pub capture_limit: u64,
     pub retention: Option<crate::output::Session>,
+    pub progress: Reporter,
 }
 
 pub(crate) struct ControllerRun {
@@ -577,6 +579,9 @@ pub(crate) async fn run(
             scratch: Some((scratch_bytes, scratch_files)),
         },
     };
+    if let Some(evidence) = monitoring.automation.as_mut() {
+        evidence.report_to(context.progress.clone());
+    }
     let mut owner = PendingCleanup::new();
     let plan = prepared.plan;
     let setup_plan = Arc::clone(&plan);
@@ -600,6 +605,10 @@ pub(crate) async fn run(
     };
     let mut output = capture();
     let mut errors = capture();
+    if !automation {
+        output.report_to(context.progress.clone());
+        errors.report_to(context.progress.clone());
+    }
     let mut stdout = None;
     let mut stderr = None;
 
@@ -650,6 +659,11 @@ pub(crate) async fn run(
             Ok((out, err)) => {
                 stdout = Some(out);
                 stderr = Some(err);
+                if automation {
+                    context.progress.stage(Stage::RunnerStarted);
+                } else {
+                    context.progress.output_started();
+                }
             }
             Err(_) if owner.children.script.is_some() => return Outcome::Io,
             Err(_) => return Outcome::Spawn,
@@ -667,6 +681,8 @@ pub(crate) async fn run(
     })
     .catch_unwind()
     .await;
+    // The observed outcome ends reporting before any owned cleanup or pipe tails.
+    context.progress.stop();
     let mut outcome = operation.unwrap_or(Outcome::Io);
     let started = owner.children.started();
     if let Some(evidence) = monitoring.automation.as_mut() {

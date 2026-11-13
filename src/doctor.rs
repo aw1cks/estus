@@ -231,6 +231,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
                         deadline,
                         ct: &shutdown,
                         shutdown: &shutdown,
+                        progress: crate::progress::Reporter::default(),
                     },
                 )
                 .await;

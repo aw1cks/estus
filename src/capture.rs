@@ -9,6 +9,7 @@ pub(crate) struct Capture {
     total_bytes: u64,
     incomplete: bool,
     raw_incomplete: bool,
+    progress: crate::progress::Reporter,
 }
 
 impl Capture {
@@ -20,6 +21,7 @@ impl Capture {
             total_bytes: 0,
             incomplete: false,
             raw_incomplete: false,
+            progress: crate::progress::Reporter::default(),
         }
     }
 
@@ -34,7 +36,12 @@ impl Capture {
         capture
     }
 
+    pub(crate) fn report_to(&mut self, progress: crate::progress::Reporter) {
+        self.progress = progress;
+    }
+
     pub(crate) fn retain(&mut self, bytes: &[u8]) {
+        self.progress.bytes(bytes.len());
         self.total_bytes = self
             .total_bytes
             .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));

@@ -61,6 +61,7 @@ struct State {
     tasks: TaskTracker,
     local_tasks: TaskTracker,
     outputs: OutputStore,
+    progress: crate::progress::Registry,
     automation: Arc<Semaphore>,
     automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
 }
@@ -398,6 +399,7 @@ impl Estus {
                 tasks: TaskTracker::new(),
                 local_tasks: TaskTracker::new(),
                 outputs,
+                progress: crate::progress::Registry::default(),
             }),
         })
     }
@@ -450,7 +452,7 @@ impl Estus {
         // drops this handler's JoinHandle. Admission above bounds these tasks.
         let task = self.state.tasks.spawn(async move {
             let reply = state
-                .command(request, context.id, context.ct, started, capture_limit)
+                .command(request, context, started, capture_limit)
                 .await;
             (permit, reply)
         });
@@ -661,6 +663,7 @@ impl Estus {
                     started,
                     capture_limit: 65_536,
                     retention: None,
+                    progress: crate::progress::Reporter::from_context(&context),
                 },
             )
             .await;
@@ -758,6 +761,7 @@ impl Estus {
                     started,
                     capture_limit,
                     retention,
+                    progress: crate::progress::Reporter::from_context(&context),
                 },
             )
             .await;
@@ -794,9 +798,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .read_file(request, context.id, context.ct, started, budget)
-                .await
+            state.read_file(request, context, started, budget).await
         })
         .await
     }
@@ -819,9 +821,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .stat_file(request, context.id, context.ct, started, budget)
-                .await
+            state.stat_file(request, context, started, budget).await
         })
         .await
     }
@@ -850,7 +850,7 @@ impl Estus {
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
             state
-                .list_directory(request, context.id, context.ct, started, budget)
+                .list_directory(request, context, started, budget)
                 .await
         })
         .await
@@ -874,9 +874,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .write_file(request, context.id, context.ct, started, budget)
-                .await
+            state.write_file(request, context, started, budget).await
         })
         .await
     }
@@ -899,9 +897,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .mkdir(request, context.id, context.ct, started, budget)
-                .await
+            state.mkdir(request, context, started, budget).await
         })
         .await
     }
@@ -924,9 +920,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .rename(request, context.id, context.ct, started, budget)
-                .await
+            state.rename(request, context, started, budget).await
         })
         .await
     }
@@ -949,9 +943,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .remove_file(request, context.id, context.ct, started, budget)
-                .await
+            state.remove_file(request, context, started, budget).await
         })
         .await
     }
@@ -980,7 +972,7 @@ impl Estus {
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
             state
-                .remove_directory(request, context.id, context.ct, started, budget)
+                .remove_directory(request, context, started, budget)
                 .await
         })
         .await
@@ -1004,9 +996,7 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state
-                .replace_file(request, context.id, context.ct, started, budget)
-                .await
+            state.replace_file(request, context, started, budget).await
         })
         .await
     }
@@ -1551,11 +1541,13 @@ impl State {
     async fn command(
         &self,
         request: Operation,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         capture_limit: u64,
     ) -> ToolReply<CommandData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = request.metadata(self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1601,6 +1593,8 @@ impl State {
                                 deadline,
                                 ct: &ct,
                                 shutdown: &self.shutdown,
+                                // The reviewed-script fetch is preparation, not command output.
+                                progress: crate::progress::Reporter::default(),
                             },
                         )
                         .await;
@@ -1651,6 +1645,7 @@ impl State {
                             shutdown: &self.shutdown,
                             started,
                             retention,
+                            progress,
                         },
                     )
                     .await
@@ -1677,11 +1672,13 @@ impl State {
     async fn read_file(
         &self,
         request: ReadRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ReadData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::ReadFile, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1717,6 +1714,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -1735,11 +1733,13 @@ impl State {
     async fn stat_file(
         &self,
         request: StatRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<StatData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::Stat, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1772,6 +1772,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -1790,11 +1791,13 @@ impl State {
     async fn list_directory(
         &self,
         request: ListRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ListData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::ListDirectory, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1827,6 +1830,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -1845,11 +1849,13 @@ impl State {
     async fn write_file(
         &self,
         request: WriteRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<WriteData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::WriteFile, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1885,6 +1891,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -1903,11 +1910,13 @@ impl State {
     async fn mkdir(
         &self,
         request: MkdirRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<MkdirData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::Mkdir, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1940,6 +1949,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -1958,11 +1968,13 @@ impl State {
     async fn rename(
         &self,
         request: RenameRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<RenameData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::Rename, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -1995,6 +2007,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -2013,11 +2026,13 @@ impl State {
     async fn remove_file(
         &self,
         request: RemoveFileRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<RemoveFileData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::RemoveFile, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -2050,6 +2065,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -2068,11 +2084,13 @@ impl State {
     async fn remove_directory(
         &self,
         request: RemoveDirectoryRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<RemoveDirectoryData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::RemoveDirectory, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -2107,6 +2125,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -2125,11 +2144,13 @@ impl State {
     async fn replace_file(
         &self,
         request: ReplaceRequest,
-        request_id: RequestId,
-        ct: CancellationToken,
+        context: RequestContext<RoleServer>,
         started: Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ReplaceData> {
+        let progress = crate::progress::Reporter::from_context(&context);
+        let request_id = context.id;
+        let ct = context.ct;
         let metadata = file_metadata(&request.host, ToolId::ReplaceFile, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
@@ -2165,6 +2186,7 @@ impl State {
                         deadline,
                         ct: &ct,
                         shutdown: &self.shutdown,
+                        progress,
                     },
                 )
                 .await;
@@ -2192,7 +2214,7 @@ impl ServerHandler for Estus {
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        context: RequestContext<RoleServer>,
+        mut context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
         if !self.tool_router.has_route(&request.name) {
             let sudo = request.name == self.state.sudo_name;
@@ -2221,9 +2243,19 @@ impl ServerHandler for Estus {
             );
             return Err(ErrorData::invalid_params("Tool is not registered", None));
         }
-        self.tool_router
+        let scope = self
+            .state
+            .progress
+            .start(&context, &self.state.shutdown, &self.state.tasks);
+        if let Some(scope) = &scope {
+            context.extensions.insert(scope.reporter.clone());
+        }
+        let result = self
+            .tool_router
             .call(ToolCallContext::new(self, request, context))
-            .await
+            .await;
+        drop(scope);
+        result
     }
 }
 
