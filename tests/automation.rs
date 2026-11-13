@@ -2002,3 +2002,152 @@ async fn real_role_schema_rejects_malformed_sources_and_explicit_contracts() -> 
     role_no_effects(&fixture)
 }
 
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> {
+    let actual = real_runtime()?;
+    let owner = tempfile::tempdir()?;
+    let runtime = linked_runtime(&actual, owner.path())?;
+    fs::remove_file(runtime.join("collections"))?;
+    let roots = runtime.join("collections/ansible_collections");
+    fs::create_dir_all(&roots)?;
+    for entry in fs::read_dir(actual.join("collections/ansible_collections"))? {
+        let entry = entry?;
+        symlink(entry.path(), roots.join(entry.file_name()))?;
+    }
+    let collection = roots.join("acceptance/tools");
+    fs::create_dir_all(collection.join("roles"))?;
+    fs::write(
+        collection.join("MANIFEST.json"),
+        serde_json::to_vec(&json!({
+            "collection_info":{"namespace":"acceptance","name":"tools","version":"1.0.0"}
+        }))?,
+    )?;
+    let fixture = configured_runtime(&runtime, false)?;
+    let role = standalone_role(
+        &fixture,
+        "probe",
+        Some(
+            "argument_specs:\n  main:\n    options:\n      count:\n        type: int\n        required: true\n",
+        ),
+    )?;
+    let selected = collection.join("roles/probe");
+    fs::rename(role, &selected)?;
+    let inside = collection.join("review.json");
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command
+        .args(["schema", "import-role", "acceptance.tools.probe"])
+        .arg("--output")
+        .arg(&inside);
+    let rejected = output(command).await?;
+    ensure!(
+        schema_report(&fixture, &rejected, false)?["error_code"] == "role_output_inside_source"
+    );
+    ensure!(!inside.exists());
+    let snapshot = fixture.root.path().join("collection.json");
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command
+        .args(["schema", "import-role", "acceptance.tools.probe"])
+        .arg("--output")
+        .arg(&snapshot);
+    let imported = output(command).await?;
+    schema_report(&fixture, &imported, true)?;
+    let value = role_snapshot(&fixture, &snapshot)?;
+    ensure!(value["collection"]["name"] == "acceptance.tools");
+    ensure!(value["contract"]["schema"]["properties"]["count"]["type"] == "integer");
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command.args(["schema", "verify-role"]).arg(&snapshot);
+    schema_report(&fixture, &output(command).await?, true)?;
+    fs::write(
+        selected.join("tasks/main.yml"),
+        "[]\n# changed implementation\n",
+    )?;
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command.args(["schema", "verify-role"]).arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
+    role_no_effects(&fixture)
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_embedded_argspec_rejects_colon_and_literal_variable_parents() -> Result<()>
+{
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let schema = fixture.root.path().join("explicit.json");
+    fs::write(
+        &schema,
+        serde_json::to_vec(&json!({
+            "type":"object","properties":{},"additionalProperties":false
+        }))?,
+    )?;
+    for parent in [format!("{SECRET}:roles"), format!("${SECRET}")] {
+        let role = standalone_role(&fixture, "embedded", None)?;
+        fs::write(
+            role.join("meta/main.yml"),
+            "dependencies:\n  - role: acceptance_dependency\nargument_specs:\n  main:\n    options:\n      token:\n        type: str\n        required: true\n",
+        )?;
+        let parent = fixture.root.path().join(parent);
+        fs::create_dir(&parent)?;
+        let selected = parent.join("embedded");
+        fs::rename(role, &selected)?;
+        let snapshot = fixture.root.path().join("review.json");
+        // Public ansible-doc must not silently lose embedded metadata when its
+        // roles path is split on ':' or expanded as an environment variable.
+        let mut command = role_import_command(&fixture, "embedded", &selected, "main", &snapshot)?;
+        command.arg("--schema").arg(&schema);
+        let rejected = output(command).await?;
+        ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_role_source");
+        ensure!(!snapshot.exists(), "weaker explicit contract was published");
+        role_no_effects(&fixture)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_rejects_output_inside_source_and_symlinked_parent() -> Result<()> {
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let role = standalone_role(
+        &fixture,
+        "output_boundary",
+        Some(
+            "argument_specs:\n  main:\n    options:\n      token:\n        type: str\n        required: true\n",
+        ),
+    )?;
+    let linked = fixture.root.path().join("linked-role");
+    symlink(&role, &linked)?;
+    for snapshot in [role.join("review.json"), linked.join("review.json")] {
+        let rejected = output(role_import_command(
+            &fixture,
+            "output_boundary",
+            &role,
+            "main",
+            &snapshot,
+        )?)
+        .await?;
+        ensure!(
+            schema_report(&fixture, &rejected, false)?["error_code"] == "role_output_inside_source"
+        );
+        ensure!(
+            !snapshot.exists(),
+            "self-invalidating snapshot was published"
+        );
+        role_no_effects(&fixture)?;
+    }
+    let snapshot = fixture.root.path().join("review.json");
+    let imported = output(role_import_command(
+        &fixture,
+        "output_boundary",
+        &role,
+        "main",
+        &snapshot,
+    )?)
+    .await?;
+    schema_report(&fixture, &imported, true)?;
+    let value = role_snapshot(&fixture, &snapshot)?;
+    ensure!(value["contract"]["schema"]["required"] == json!(["token"]));
+    let verified = output(role_verify_command(&fixture, &snapshot, &role)?).await?;
+    schema_report(&fixture, &verified, true)?;
+    role_no_effects(&fixture)
+}
