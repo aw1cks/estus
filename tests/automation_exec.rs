@@ -1227,7 +1227,10 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
         ensure!(imported.status.success(), "isolated real schema import failed");
         let report: Value = serde_json::from_slice(&imported.stdout)?;
         ensure!(report["binding_validated"] == true);
-        config.insert("enabled_tools".into(), table(json!(["isolated_probe"]))?);
+        let facts_snapshot = private.path().join("facts-reviewed.json");
+        let facts_overlay = facts_overlay();
+        import_reviewed(&fixture.config, &facts_snapshot, "ansible.builtin.setup", &facts_overlay).await?;
+        config.insert("enabled_tools".into(), table(json!(["isolated_probe","isolated_facts"]))?);
         let mut binding = json!({
             "description":"Explicit pinned Linux fixture probe","revision":"fixture-1",
             "targets":["plain"],"authority":"automation","effects":["probe"],
@@ -1237,7 +1240,18 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
         for key in ["input_schema","fixed_args","input_map"] {
             binding[key] = overlay[key].clone();
         }
-        config.insert("tools".into(), table(json!({"isolated_probe":binding}))?);
+        let mut facts_binding = json!({
+            "description":"Explicit pinned Linux projected facts","revision":"fixture-1",
+            "targets":["plain"],"authority":"automation","effects":["probe"],
+            "execution":{"kind":"ansible_module","snapshot":text(&facts_snapshot)?,"no_log":false},
+            "result":facts_result(),"limits":{"timeout_secs":15}
+        });
+        for key in ["input_schema","fixed_args","input_map"] {
+            facts_binding[key] = facts_overlay[key].clone();
+        }
+        config.insert("tools".into(), table(json!({
+            "isolated_probe":binding,"isolated_facts":facts_binding
+        }))?);
         config.insert("automation".into(), table(json!({
             "required":true,"runtime":text(&runtime)?,"workspace_root":text(&workspace)?,
             "ssh_executable":text(&fixture.ssh)?,
@@ -1271,6 +1285,14 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
                 && observed["data"]["exit_code"] == 0
                 && observed["data"]["stdout"] == "Linux\n3.14\n",
                 "automation fixture target is not the pinned Linux Python consumer: {native}");
+            let projected = server.request(4,"tools/call",json!({
+                "name":"isolated_facts","arguments":{"host":"plain","inputs":{}}
+            })).await?;
+            assert_private(&projected.to_string())?;
+            ensure!(projected["error"].is_null(), "isolated projected facts MCP rejection: {projected}");
+            let facts = projected_facts(&projected["result"]["structuredContent"])?;
+            ensure!(facts.platform == "Linux" && facts.python.starts_with("3.14."),
+                "projected facts did not describe the pinned Linux Python 3.14 image");
             ensure!(fs::read_dir(&workspace)?.next().is_none(),
                 "isolated Runner workspace survived its response");
             Ok(response)
