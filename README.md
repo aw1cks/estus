@@ -101,24 +101,52 @@ Process ownership and isolation are not a security sandbox.
 
 ## Offline module contracts
 
-Import public metadata from the explicitly selected installed runtime, without
-connecting to a target, executing a module or registering a tool:
+Import metadata from the explicitly selected, already-provisioned environment:
 
 ```sh
-nix run .#automation-msrv -- schema import ansible.builtin.stat --output ./stat.schema.json
-nix run .#automation-msrv -- schema verify ./stat.schema.json
+nix run .#automation-msrv -- schema import ansible.builtin.stat \
+  --output ./stat.schema.json --overlay ./stat.binding.json
+nix run .#automation-msrv -- schema verify ./stat.schema.json \
+  --input ./stat.request.json
 ```
 
-The wheel public command accepts the same `schema` commands. Output must be new:
-imports never overwrite review. Snapshots retain recursive structure, aliases,
-documentation-only defaults and runtime/selected-collection/source/schema digests.
-Verification reimports actual content and refuses drift, never silently refreshes.
-Unsupported source types/constraints fail explicitly. Public documentation omits
-some runtime rules: preserved prose needs operator review. This is not complete
-Ansible argument-spec emulation or immutable-environment attestation. Hashing the
-selected Ansible/collection source trees does not sandbox trusted code, attest all
-transitive dependencies, or prevent same-user replacement after verification.
-`--timeout-secs` bounds the selected worker; no installer or online catalog runs.
+The same `schema` commands work through the wheel's public `ssh-mcp` launcher.
+No target connection, module execution, dependency installation, online catalog or
+tool registration occurs. `--output` must be new: imports never overwrite a reviewed
+snapshot. `--timeout-secs` bounds the selected worker's lifetime.
+
+For example, `stat.binding.json` fixes the backend path and exposes only a boolean:
+
+```json
+{
+  "input_schema": {
+    "type": "object",
+    "properties": {"follow": {"type": "boolean"}},
+    "required": ["follow"],
+    "additionalProperties": false
+  },
+  "fixed_args": {"path": "/srv/frontend/config"},
+  "input_map": {"follow": "follow"}
+}
+```
+
+`stat.request.json` can contain `{"follow": false}`. Verification validates the
+fully assembled backend argument object without printing its values or executing
+it. A request cannot supply `path` or an undeclared argument. An optional
+`schema verify --overlay FILE` checks an alternate reviewed overlay without
+changing the snapshot.
+
+Snapshots record runtime provenance, imported recursive structure/aliases and
+reviewed schema/content digests. Verification reimports installed metadata and
+rejects drift; it never silently refreshes approval. Documentation defaults remain
+metadata, not supplied arguments. Unsupported types/constraints fail explicitly;
+this is not complete Ansible argument-spec emulation. Effects, target authority and
+execution policy are not inferred from documentation.
+
+Content digests detect changes to the selected Ansible/module collection source
+trees; they are not a sandbox, an immutable-environment attestation, or protection
+against a same-user attacker replacing trusted files. Mutable content can still
+change after verification. Module execution remains a separate implementation slice.
 
 ## Native / Nix
 

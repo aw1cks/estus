@@ -17,7 +17,6 @@ use crate::config::Config;
 use crate::module_schema;
 
 const SNAPSHOT_LIMIT: usize = 1_048_576;
-#[cfg(test)]
 const INPUT_LIMIT: usize = 65_536;
 
 #[derive(Args)]
@@ -36,9 +35,20 @@ enum SchemaCommand {
         module: String,
         #[arg(long)]
         output: PathBuf,
+        /// Reviewed JSON input_schema, fixed_args and input_map.
+        #[arg(long)]
+        overlay: Option<PathBuf>,
     },
     /// Detect runtime/content/schema drift and validate an optional binding/input.
-    Verify { snapshot: PathBuf },
+    Verify {
+        snapshot: PathBuf,
+        /// Validate this overlay instead of the snapshot's stored overlay.
+        #[arg(long)]
+        overlay: Option<PathBuf>,
+        /// Validate request JSON without executing it or printing argument values.
+        #[arg(long)]
+        input: Option<PathBuf>,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -296,26 +306,47 @@ async fn perform(
     let reference = config
         .automation_runtime()
         .map_err(|_| "runtime_unavailable")?;
-    let (module, output, previous) =
-        tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
-            match args.command {
-                SchemaCommand::Import { module, output } => {
-                    if !module_schema::valid_fqcn(&module) {
-                        return Err("invalid_module_name");
-                    }
-                    Ok((module, Some(output), None))
+    // Join filesystem work even when interrupted: dropping blocking I/O is not cancellation.
+    let command = tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
+        match args.command {
+            SchemaCommand::Import {
+                module,
+                output,
+                overlay,
+            } => {
+                if !module_schema::valid_fqcn(&module) {
+                    return Err("invalid_module_name");
                 }
-                SchemaCommand::Verify { snapshot } => {
-                    let snapshot = read_snapshot(&snapshot)?;
-                    if snapshot.binding.is_some() {
-                        return Err("invalid_schema_snapshot");
-                    }
-                    Ok((snapshot.module.clone(), None, Some(snapshot)))
-                }
+                let binding = overlay
+                    .map(|path| read_json(&path, INPUT_LIMIT))
+                    .transpose()?;
+                Ok((module, Some(output), None, binding, None))
             }
-        })
-        .await
-        .map_err(|_| "schema_file_unavailable")??;
+            SchemaCommand::Verify {
+                snapshot,
+                overlay,
+                input,
+            } => {
+                let snapshot = read_snapshot(&snapshot)?;
+                let binding = overlay
+                    .map(|path| read_json(&path, INPUT_LIMIT))
+                    .transpose()?;
+                let input = input
+                    .map(|path| read_json(&path, INPUT_LIMIT))
+                    .transpose()?;
+                Ok((
+                    snapshot.module.clone(),
+                    None,
+                    Some(snapshot),
+                    binding,
+                    input,
+                ))
+            }
+        }
+    })
+    .await
+    .map_err(|_| "schema_file_unavailable")??;
+    let (module, output, previous, binding, input) = command;
     stopped(&shutdown, deadline)?;
     let observed = automation::import_module(
         reference,
@@ -337,6 +368,21 @@ async fn perform(
     {
         return Err("schema_drift");
     }
+    let binding = binding.or_else(|| previous.and_then(|p| p.binding));
+    if let Some(overlay) = &binding {
+        let compiled = module_schema::compile_binding(&contract, overlay)?;
+        if let Some(input) = &input {
+            compiled.prepare(input)?;
+        }
+    } else if input.is_some() {
+        return Err("schema_binding_required");
+    }
+    let report = Report {
+        ok: true,
+        error_code: None,
+        binding_validated: Some(binding.is_some()),
+        input_validated: Some(input.is_some()),
+    };
     if let Some(output) = output {
         let mut snapshot = Snapshot {
             schema: 1,
@@ -344,9 +390,9 @@ async fn perform(
             runtime: observed.identity,
             collection: observed.collection,
             content_sha256: observed.content_sha256,
-            contract,
             schema_sha256: String::new(),
-            binding: None,
+            contract,
+            binding,
         };
         snapshot.schema_sha256 = digest(&snapshot)?;
         stopped(&shutdown, deadline)?;
@@ -354,12 +400,7 @@ async fn perform(
             .await
             .map_err(|_| "schema_output_failed")??;
     }
-    Ok(Report {
-        ok: true,
-        error_code: None,
-        binding_validated: None,
-        input_validated: None,
-    })
+    Ok(report)
 }
 
 #[cfg(test)]
