@@ -101,7 +101,8 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
           } ''
             mkdir -p "$out/bin"
-            makeWrapper ${harness}/libexec/automation_exec "$out/bin/runner-acceptance" \
+            ${pkgs.lib.concatMapStrings (entry: ''
+            makeWrapper ${harness}/libexec/automation_exec "$out/bin/${entry.name}" \
               --set SSH_MCP_TEST_BINARY ${native}/bin/ssh-mcp \
               --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
               --set SSH_MCP_TEST_TARGET_PYTHON ${pkgs.python314}/bin/python3 \
@@ -109,7 +110,11 @@
                 [ pkgs.openssh pkgs.coreutils pkgs.bash ]
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
               )} \
-              --add-flags '--ignored --exact real_runner_fixture_acceptance --nocapture'
+              --add-flags '--ignored --exact ${entry.scenario} --nocapture'
+            '') [
+              { name = "runner-acceptance"; scenario = "real_runner_fixture_acceptance"; }
+              { name = "projection-acceptance"; scenario = "real_runner_projection_acceptance"; }
+            ]}
           '';
       in
       {
@@ -160,6 +165,14 @@
         apps.runner-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/runner-acceptance";
+        };
+        apps.projection-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/projection-acceptance";
+        };
+        apps.projection-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/projection-acceptance";
         };
         apps.wheel-acceptance = {
           type = "app";
