@@ -537,45 +537,7 @@ impl ReadRequest {
                 Ok(digest)
             })
             .transpose()?;
-        let max_bytes = self
-            .max_bytes
-            .unwrap_or(DEFAULT_READ_BYTES.min(max_file_bytes));
-        if max_bytes == 0 || max_bytes > max_file_bytes {
-            return Err(invalid(
-                "max_bytes must be positive and within the configured file limit",
-            ));
-        }
-        // Reserve the complete duplicated reply, actual request ID included, before
-        // opening SSH or allocating content. False and u64::MAX are widest.
-        let reservation = ToolReply {
-            data: Some(ReadData {
-                content: String::new(),
-                content_sha256: String::new(),
-                encoding: self.encoding,
-                bytes_read: u64::MAX,
-                next_offset: u64::MAX,
-                eof: false,
-            }),
-            error: Some(ToolError::SSH_CONNECT_FAILED),
-        };
-        // The empty string reserves the digest property and its quotes. Its 64
-        // ASCII hex characters appear twice and require no JSON escaping.
-        let remaining = budget
-            .remaining(&reservation)
-            .ok()
-            .and_then(|remaining| remaining.checked_sub(128))
-            .ok_or_else(|| {
-                invalid("Request leaves insufficient response budget for a lossless read")
-            })?;
-        let max_bytes = usize::try_from(max_bytes)
-            .map_err(|_| invalid("max_bytes cannot be represented on this platform"))?;
-        if max_bytes.checked_add(1).is_none()
-            || wire_content_cost(max_bytes, self.encoding).is_none_or(|cost| cost > remaining)
-        {
-            return Err(invalid(
-                "max_bytes exceeds the response budget for a lossless read",
-            ));
-        }
+        let max_bytes = validate_read_range(self.max_bytes, self.encoding, max_file_bytes, budget)?;
         Ok(ReadSpec {
             path: &self.path,
             offset: self.offset,
@@ -584,6 +546,52 @@ impl ReadRequest {
             expected_content_sha256,
         })
     }
+}
+
+/// Validate the common local/remote byte range before acquiring any IO owner.
+pub(crate) fn validate_read_range(
+    requested: Option<u64>,
+    encoding: Encoding,
+    max_file_bytes: u64,
+    budget: ReplyBudget,
+) -> Result<usize, ToolError> {
+    let max_bytes = requested.unwrap_or(DEFAULT_READ_BYTES.min(max_file_bytes));
+    if max_bytes == 0 || max_bytes > max_file_bytes {
+        return Err(invalid(
+            "max_bytes must be positive and within the configured file limit",
+        ));
+    }
+    // Reserve the complete duplicated reply, actual request ID included.
+    let reservation = ToolReply {
+        data: Some(ReadData {
+            content: String::new(),
+            content_sha256: String::new(),
+            encoding,
+            bytes_read: u64::MAX,
+            next_offset: u64::MAX,
+            eof: false,
+        }),
+        error: Some(ToolError::SSH_CONNECT_FAILED),
+    };
+    // The empty string reserves the digest property and its quotes. Its 64
+    // ASCII hex characters appear twice and require no JSON escaping.
+    let remaining = budget
+        .remaining(&reservation)
+        .ok()
+        .and_then(|remaining| remaining.checked_sub(128))
+        .ok_or_else(|| {
+            invalid("Request leaves insufficient response budget for a lossless read")
+        })?;
+    let max_bytes = usize::try_from(max_bytes)
+        .map_err(|_| invalid("max_bytes cannot be represented on this platform"))?;
+    if max_bytes.checked_add(1).is_none()
+        || wire_content_cost(max_bytes, encoding).is_none_or(|cost| cost > remaining)
+    {
+        return Err(invalid(
+            "max_bytes exceeds the response budget for a lossless read",
+        ));
+    }
+    Ok(max_bytes)
 }
 
 fn wire_content_cost(bytes: usize, encoding: Encoding) -> Option<usize> {
@@ -600,13 +608,26 @@ pub(crate) struct RawRead {
     pub(crate) eof: bool,
 }
 
-pub(crate) fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> {
-    raw.bytes.truncate(spec.max_bytes);
+pub(crate) fn encode(raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> {
+    encode_range(
+        raw,
+        spec.offset,
+        spec.max_bytes,
+        spec.encoding,
+        spec.expected_content_sha256,
+    )
+}
+
+pub(crate) fn encode_range(
+    mut raw: RawRead,
+    offset: u64,
+    max_bytes: usize,
+    encoding: Encoding,
+    expected_content_sha256: Option<[u8; 32]>,
+) -> Result<ReadData, ToolError> {
+    raw.bytes.truncate(max_bytes);
     let digest: [u8; 32] = Sha256::digest(&raw.bytes).into();
-    if spec
-        .expected_content_sha256
-        .is_some_and(|expected| expected != digest)
-    {
+    if expected_content_sha256.is_some_and(|expected| expected != digest) {
         return Err(ToolError::new(
             "checksum_mismatch",
             "Returned bytes do not match expected_content_sha256",
@@ -614,11 +635,10 @@ pub(crate) fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, 
         ));
     }
     let bytes_read = raw.bytes.len() as u64;
-    let next_offset = spec
-        .offset
+    let next_offset = offset
         .checked_add(bytes_read)
         .ok_or_else(|| invalid("Returned file offset cannot be represented"))?;
-    let content = match spec.encoding {
+    let content = match encoding {
         Encoding::Utf8 => String::from_utf8(raw.bytes.into()).map_err(|_| ToolError::new(
             "invalid_encoding",
             "Returned bytes are not complete UTF-8; use encoding base64 for lossless byte ranges",
@@ -629,7 +649,7 @@ pub(crate) fn encode(mut raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, 
     Ok(ReadData {
         content,
         content_sha256: hex::encode(digest),
-        encoding: spec.encoding,
+        encoding,
         bytes_read,
         next_offset,
         eof: raw.eof,
