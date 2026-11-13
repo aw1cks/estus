@@ -2081,7 +2081,13 @@ async fn real_role_schema_embedded_argspec_rejects_colon_and_literal_variable_pa
             "type":"object","properties":{},"additionalProperties":false
         }))?,
     )?;
-    for parent in [format!("{SECRET}:roles"), format!("${SECRET}")] {
+    for parent in [
+        format!("{SECRET}:roles"),
+        format!("${SECRET}"),
+        "{{ 1 + 1 }}".to_owned(),
+        "{% if true %}roles{% endif %}".to_owned(),
+        "{# roles #}".to_owned(),
+    ] {
         let role = standalone_role(&fixture, "embedded", None)?;
         fs::write(
             role.join("meta/main.yml"),

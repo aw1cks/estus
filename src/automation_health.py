@@ -187,7 +187,7 @@ def check(payload, role_request=False):
     if role_request:
         try:
             collection_roots = [root.resolve(strict=True) for root in collection_roots]
-            require(all(":" not in str(root) and "$" not in str(root)
+            require(all(not any(token in str(root) for token in (":", "$", "{{", "{%", "{#"))
                         for root in collection_roots), "invalid_role_source")
         except (OSError, RuntimeError, ValueError):
             raise HealthFailure("invalid_role_source") from None
@@ -405,8 +405,8 @@ def import_document(module, roots):
     return entry, content, selected_collection
 
 
-def role_documentation(role, entry_point, role_path, output, roots):
-    """Acquire public metadata only; output must remain outside every hashed tree."""
+def role_content(role, entry_point, role_path, roots):
+    """Resolve and attest role/Core/collection bytes without invoking ansible-doc."""
     require(isinstance(role, str) and len(role) <= 256 and re.fullmatch(
         r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){0,2}", role)
         and len(role.split(".")) in (1, 3)
@@ -414,31 +414,10 @@ def role_documentation(role, entry_point, role_path, output, roots):
     require(isinstance(entry_point, str) and len(entry_point) <= 128
             and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry_point),
             "invalid_role_entry_point")
-    destination = None
-    if output is not None:
-        try:
-            require(isinstance(output, str) and 0 < len(output.encode("utf-8")) <= 4096
-                    and "\0" not in output and Path(output).is_absolute()
-                    and Path(output).name not in ("", ".", ".."), "invalid_role_output")
-            # Publication replaces the final directory entry: resolve only its
-            # existing parent, not an existing final symlink's target.
-            path = Path(output)
-            parent = path.parent.resolve(strict=True)
-            require(parent.is_dir(), "invalid_role_output")
-            destination = parent / path.name
-        except (OSError, RuntimeError, UnicodeError, ValueError):
-            raise HealthFailure("invalid_role_output") from None
-    os.environ["LC_ALL"] = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
-    os.environ["LANG"] = os.environ["LC_ALL"]
-    # Defaults and playbook-relative role paths must not participate in selection.
-    private = absolute_path(os.environ.get("TMPDIR"))
-    os.environ["ANSIBLE_ROLES_PATH"] = str(private / "no-roles")
-    os.chdir(private)
     import ansible
     trees = [("ansible", Path(ansible.__file__).parent.resolve(strict=True))]
     selected_collection = None
     collection = None
-    arguments = ["ansible-doc", "--type", "role", "--json"]
     if "." in role:
         require(role_path is None, "invalid_role_source")
         namespace, name, simple = role.split(".")
@@ -477,15 +456,11 @@ def role_documentation(role, entry_point, role_path, output, roots):
         except (OSError, RuntimeError, UnicodeError, ValueError):
             raise HealthFailure("invalid_role_source") from None
         require(directory.name == role and directory.is_dir()
-                and ":" not in str(directory.parent) and "$" not in str(directory.parent),
+                and not any(token in str(directory.parent) for token in (":", "$", "{{", "{%", "{#")),
                 "invalid_role_source")
-        arguments.extend(["--roles-path", str(directory.parent)])
         expected_path = directory
         trees.append(("role", directory))
     require(directory.is_dir(), "role_not_found")
-    if destination is not None:
-        require(not any(destination.is_relative_to(root) for _, root in trees),
-                "role_output_inside_source")
     tasks = [directory / "tasks" / (entry_point + suffix) for suffix in ("", ".yml", ".yaml")]
     present = [path for path in tasks if path.exists() or path.is_symlink()]
     require(len(present) == 1, "role_entry_point_not_found")
@@ -499,6 +474,39 @@ def role_documentation(role, entry_point, role_path, output, roots):
         raise HealthFailure(error.code.replace("module_", "role_", 1)) from None
     except (OSError, UnicodeError, ValueError):
         raise HealthFailure("role_content_failed") from None
+    return directory, expected_path, collection, content, selected_collection, trees
+
+
+def role_documentation(role, entry_point, role_path, output, roots):
+    """Acquire public metadata only; output must remain outside every hashed tree."""
+    destination = None
+    if output is not None:
+        try:
+            require(isinstance(output, str) and 0 < len(output.encode("utf-8")) <= 4096
+                    and "\0" not in output and Path(output).is_absolute()
+                    and Path(output).name not in ("", ".", ".."), "invalid_role_output")
+            # Publication replaces the final directory entry: resolve only its
+            # existing parent, not an existing final symlink's target.
+            path = Path(output)
+            parent = path.parent.resolve(strict=True)
+            require(parent.is_dir(), "invalid_role_output")
+            destination = parent / path.name
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            raise HealthFailure("invalid_role_output") from None
+    os.environ["LC_ALL"] = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
+    os.environ["LANG"] = os.environ["LC_ALL"]
+    # Defaults and playbook-relative role paths must not participate in selection.
+    private = absolute_path(os.environ.get("TMPDIR"))
+    os.environ["ANSIBLE_ROLES_PATH"] = str(private / "no-roles")
+    os.chdir(private)
+    directory, expected_path, collection, content, selected_collection, trees = role_content(
+        role, entry_point, role_path, roots)
+    if destination is not None:
+        require(not any(destination.is_relative_to(root) for _, root in trees),
+                "role_output_inside_source")
+    arguments = ["ansible-doc", "--type", "role", "--json"]
+    if role_path is not None:
+        arguments.extend(["--roles-path", str(directory.parent)])
     for name in tuple(sys.modules):
         if name == "ansible_collections" or name.startswith("ansible_collections."):
             del sys.modules[name]
