@@ -26,9 +26,8 @@
     perSystem = { pkgs, ... }:
       let
         craneLib = inputs.crane.mkLib pkgs;
-        msrvLib = craneLib.overrideToolchain (p:
-          (p.extend inputs.rust-overlay.overlays.default).rust-bin.stable."1.88.0".minimal
-        );
+        msrvToolchain = (pkgs.extend inputs.rust-overlay.overlays.default).rust-bin.stable."1.88.0".minimal;
+        msrvLib = craneLib.overrideToolchain msrvToolchain;
         fuzzLib = craneLib.overrideToolchain (p:
           (p.extend inputs.rust-overlay.overlays.default).rust-bin.nightly."2026-11-10".default.override {
             extensions = [ "rust-src" ];
@@ -56,6 +55,7 @@
         };
         inherit (defaultBuild) package acceptance;
         automationRuntime = import ./nix/automation-runtime.nix { inherit pkgs; };
+        wheel = import ./nix/wheel.nix { inherit pkgs; craneLib = msrvLib; };
         withAutomation = native: pkgs.runCommand "ssh-mcp-automation-${native.version}" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
           meta.mainProgram = "ssh-mcp";
@@ -87,6 +87,7 @@
           ssh-acceptance-msrv = msrvBuild.acceptance;
           automation-runtime = automationRuntime;
           inherit automation;
+          inherit wheel;
           automation-msrv = automationMsrv;
           automation-acceptance = automationAcceptance package acceptance automation;
           automation-acceptance-msrv = automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv;

@@ -21,8 +21,8 @@ ssh-mcp --config /absolute/path/to/operator.toml
 
 Alternatively, run the local wheel with `uvx --from ./dist/ssh_mcp-*.whl ssh-mcp`.
 These instructions use locally built artifacts; no public-index release is implied.
-Current wheel acceptance targets Python 3.14. Portable release artifacts and a
-broader compatibility matrix are not yet established.
+Current wheel acceptance targets CPython 3.14 on arm64 macOS/Linux; older-OS runtime
+compatibility and x86_64 execution are not implied by the artifact tags.
 
 The wheel contains a private Rust executable and a Python console launcher that
 immediately replaces itself with that executable. It requires Python for bootstrap
@@ -33,6 +33,23 @@ SSH identity, host-key policy and configuration still apply.
 The base wheel does not depend on Ansible, install packages at startup, or enable
 additional tools. An explicitly selected existing runtime bundle remains usable
 through the native application's configuration.
+
+## Pinned Nix wheel build and acceptance
+
+Nix orchestrates the same PEP 517 build and metadata, with Rust 1.88 and the pinned
+Python/build-backend inputs. It does not copy the native Nix wrapper into the wheel.
+
+```sh
+nix build .#wheel
+uv tool install --python 3.14 ./result/ssh_mcp-*.whl
+uvx --from ./result/ssh_mcp-*.whl ssh-mcp
+uv run --no-project --with ./result/ssh_mcp-*.whl ssh-mcp
+```
+
+The producer declares macOS 11.0 for the arm64 Mach-O payload and manylinux glibc
+2.17 for Linux. These are build/audit baselines for our executable, not a promise
+that every optional dependency supports the same minimum OS. The wheel needs no
+Nix runtime; compatible Python and host OpenSSH remain external prerequisites.
 
 ## Optional Ansible environment
 
