@@ -52,6 +52,7 @@
           cargoTestExtraArgs = "--all-targets";
         };
         inherit (defaultBuild) package acceptance;
+        automationRuntime = import ./nix/automation-runtime.nix { inherit pkgs; };
       in
       {
         packages = {
@@ -59,6 +60,7 @@
           msrv = msrvBuild.package;
           ssh-acceptance = acceptance;
           ssh-acceptance-msrv = msrvBuild.acceptance;
+          automation-runtime = automationRuntime;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
         };
