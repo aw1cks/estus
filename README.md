@@ -49,3 +49,6 @@ Native Nix packaging supplies OpenSSH and has no Python/Ansible runtime dependen
 The separate `.#automation-msrv` output supplies the optional pinned Ansible runtime;
 see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
 That health check verifies imports and identity, not Ansible workload execution.
+
+Runtime health reports pinned bundle provenance as `provenance.kind = "nix_bundle"`
+with its runtime ID. This is distinct from observed installer-managed identity.

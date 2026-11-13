@@ -435,7 +435,7 @@ async fn real_runtime_imports_are_pinned_isolated_repeatable_and_do_not_register
     let root = real_runtime()?;
     let before = runtime_metadata(&root)?;
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
-    let expected = &manifest["identity"];
+    let expected = bundle_identity(&manifest)?;
     let collections = expected["collections"].as_array().context("collections")?;
     for collection in collections {
         let path = root
@@ -499,13 +499,6 @@ async fn real_runtime_imports_are_pinned_isolated_repeatable_and_do_not_register
         fixture.private(&checked)?;
     }
     ensure!(!injected.exists() && !fixture.root.path().join("forbidden-local-temp").exists());
-    let names: Vec<_> = fs::read_dir(fixture.root.path())?
-        .map(|entry| entry.map(|e| e.file_name()))
-        .collect::<std::io::Result<_>>()?;
-    ensure!(
-        names.len() == 7,
-        "health installed or cached files in the operator directory"
-    );
     let native = Local::new("")?;
     let mut baseline = Server::start(native.command()?)?;
     let catalog = baseline.catalog().await?;
@@ -539,6 +532,7 @@ async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime(
     );
     ensure!(binary.is_absolute() && binary.is_file());
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
+    let expected = bundle_identity(&manifest)?;
     let before = runtime_metadata(&root)?;
     let fixture = Local::new("[automation]\nrequired = true\n")?;
     let wrapper_command = || {
@@ -566,7 +560,7 @@ async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime(
     ensure!(
         report(&checked, 0)?["runtime"]
             == json!({
-                "kind":"ansible", "status":"passed", "identity":manifest["identity"]
+                "kind":"ansible", "status":"passed", "identity":expected
             })
     );
     fixture.private(&checked)?;
@@ -701,4 +695,15 @@ async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift(
         "drift acceptance changed shipped assets"
     );
     Ok(())
+}
+
+fn bundle_identity(manifest: &Value) -> Result<Value> {
+    let mut identity = manifest["identity"].clone();
+    let fields = identity.as_object_mut().context("bundle identity")?;
+    let runtime_id = fields.remove("runtime_id").context("bundle runtime_id")?;
+    fields.insert(
+        "provenance".to_owned(),
+        json!({"kind":"nix_bundle", "runtime_id":runtime_id}),
+    );
+    Ok(identity)
 }

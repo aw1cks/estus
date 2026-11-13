@@ -2,6 +2,7 @@
 //! This does not attest execution compatibility or run automation workloads.
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -22,6 +23,7 @@ const HEALTH: &str = include_str!("automation_health.py");
 const MANIFEST_LIMIT: usize = 16 * 1024;
 const REPORT_LIMIT: u64 = 16 * 1024;
 const PATH_LIMIT: usize = 4096;
+const DESCRIPTOR_LIMIT: usize = 65_536;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,13 +36,51 @@ pub(crate) struct RuntimeCollection {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeIdentity {
-    pub runtime_id: String,
+    pub provenance: RuntimeProvenance,
     pub platform: String,
     pub python: String,
     pub ansible_core: String,
     pub ansible_runner: String,
     pub collection_bundle: String,
     pub collections: Vec<RuntimeCollection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RuntimeProvenance {
+    NixBundle { runtime_id: String },
+    PythonEnvironment {},
+}
+
+// The immutable Nix manifest retains its schema-1 wire layout.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleIdentity {
+    runtime_id: String,
+    platform: String,
+    python: String,
+    ansible_core: String,
+    ansible_runner: String,
+    collection_bundle: String,
+    collections: Vec<RuntimeCollection>,
+}
+
+fn bundle_identity<'de, D>(deserializer: D) -> Result<RuntimeIdentity, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let identity = BundleIdentity::deserialize(deserializer)?;
+    Ok(RuntimeIdentity {
+        provenance: RuntimeProvenance::NixBundle {
+            runtime_id: identity.runtime_id,
+        },
+        platform: identity.platform,
+        python: identity.python,
+        ansible_core: identity.ansible_core,
+        ansible_runner: identity.ansible_runner,
+        collection_bundle: identity.collection_bundle,
+        collections: identity.collections,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -98,6 +138,7 @@ struct Manifest {
     schema: u32,
     health_sha256: String,
     site_packages: String,
+    #[serde(deserialize_with = "bundle_identity")]
     identity: RuntimeIdentity,
 }
 
@@ -138,9 +179,81 @@ impl HealthError {
 }
 
 struct Loaded {
-    root: PathBuf,
     interpreter: String,
-    identity: RuntimeIdentity,
+    source: Source,
+}
+
+enum Source {
+    Bundle {
+        root: PathBuf,
+        identity: RuntimeIdentity,
+    },
+    PythonEnvironment {
+        prefix: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PythonDescriptor {
+    schema: u32,
+    interpreter: String,
+    prefix: String,
+}
+
+fn valid_private_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= PATH_LIMIT
+        && !value.contains('\0')
+        && Path::new(value).is_absolute()
+}
+
+fn parse_descriptor(raw: &OsStr) -> Result<PythonDescriptor, &'static str> {
+    let invalid = "invalid_runtime_manifest";
+    if raw.len() > DESCRIPTOR_LIMIT {
+        return Err(invalid);
+    }
+    let descriptor: PythonDescriptor =
+        serde_json::from_str(raw.to_str().ok_or(invalid)?).map_err(|_| invalid)?;
+    if descriptor.schema != 1
+        || !valid_private_path(&descriptor.interpreter)
+        || !valid_private_path(&descriptor.prefix)
+    {
+        return Err(invalid);
+    }
+    Ok(descriptor)
+}
+
+fn load_selected(
+    runtime: Option<PathBuf>,
+    descriptor: impl FnOnce() -> Option<OsString>,
+) -> Result<Loaded, &'static str> {
+    if let Some(runtime) = runtime {
+        return load(runtime);
+    }
+    let raw = descriptor().ok_or("runtime_unavailable")?;
+    let descriptor = parse_descriptor(&raw)?;
+    // Follow the symlink for validation only; executing its original pathname
+    // is essential to Python's virtual-environment discovery.
+    let metadata = fs::metadata(&descriptor.interpreter).map_err(|_| "runtime_unavailable")?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("runtime_unavailable");
+    }
+    Ok(Loaded {
+        interpreter: descriptor.interpreter,
+        source: Source::PythonEnvironment {
+            prefix: descriptor.prefix,
+        },
+    })
+}
+
+fn current_platform() -> String {
+    let os = if std::env::consts::OS == "macos" {
+        "darwin"
+    } else {
+        std::env::consts::OS
+    };
+    format!("{}-{os}", std::env::consts::ARCH)
 }
 
 fn lower_hash(value: &str) -> bool {
@@ -159,8 +272,10 @@ fn public_token(value: &str, limit: usize) -> bool {
 }
 
 fn valid_identity(identity: &RuntimeIdentity) -> bool {
-    lower_hash(&identity.runtime_id)
-        && public_token(&identity.platform, 64)
+    (match &identity.provenance {
+        RuntimeProvenance::NixBundle { runtime_id } => lower_hash(runtime_id),
+        RuntimeProvenance::PythonEnvironment {} => true,
+    }) && public_token(&identity.platform, 64)
         && [
             &identity.python,
             &identity.ansible_core,
@@ -204,12 +319,6 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, &'static str> {
     }
     let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| invalid)?;
     let site = Path::new(&manifest.site_packages);
-    let platform_os = if std::env::consts::OS == "macos" {
-        "darwin"
-    } else {
-        std::env::consts::OS
-    };
-    let platform = format!("{}-{platform_os}", std::env::consts::ARCH);
     if manifest.schema != 1
         || !lower_hash(&manifest.health_sha256)
         || manifest.health_sha256 != hex::encode(Sha256::digest(HEALTH.as_bytes()))
@@ -220,7 +329,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, &'static str> {
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
         || !valid_identity(&manifest.identity)
-        || manifest.identity.platform != platform
+        || manifest.identity.platform != current_platform()
     {
         return Err(invalid);
     }
@@ -265,8 +374,10 @@ fn load(runtime: PathBuf) -> Result<Loaded, &'static str> {
     }
     Ok(Loaded {
         interpreter: interpreter.to_str().ok_or(invalid)?.to_owned(),
-        root,
-        identity: manifest.identity,
+        source: Source::Bundle {
+            root,
+            identity: manifest.identity,
+        },
     })
 }
 
@@ -280,7 +391,7 @@ fn interrupted(ctx: &RuntimeContext<'_>) -> Option<&'static str> {
     }
 }
 
-fn report(stdout: &str, expected: &RuntimeIdentity) -> RuntimeCheck {
+fn report(stdout: &str, source: &Source) -> RuntimeCheck {
     let parsed = if stdout.len() <= REPORT_LIMIT as usize {
         serde_json::from_str::<HealthReport>(stdout).ok()
     } else {
@@ -288,10 +399,19 @@ fn report(stdout: &str, expected: &RuntimeIdentity) -> RuntimeCheck {
     };
     match parsed {
         Some(HealthReport::Passed {
-            schema: 1,
+            schema: 2,
             identity,
         }) if valid_identity(&identity) => {
-            if &identity == expected {
+            let matches_source = match source {
+                Source::Bundle {
+                    identity: expected, ..
+                } => &identity == expected,
+                Source::PythonEnvironment { .. } => {
+                    identity.provenance == RuntimeProvenance::PythonEnvironment {}
+                        && identity.platform == current_platform()
+                }
+            };
+            if matches_source {
                 RuntimeCheck {
                     kind: RuntimeKind::Ansible,
                     status: RuntimeStatus::Passed,
@@ -303,14 +423,14 @@ fn report(stdout: &str, expected: &RuntimeIdentity) -> RuntimeCheck {
             }
         }
         Some(HealthReport::Failed {
-            schema: 1,
+            schema: 2,
             error_code,
         }) => RuntimeCheck::failed(error_code.code()),
         _ => RuntimeCheck::failed("runtime_protocol_error"),
     }
 }
 
-fn observed(reply: ControllerReply, expected: &RuntimeIdentity) -> RuntimeCheck {
+fn observed(reply: ControllerReply, source: &Source) -> RuntimeCheck {
     let Some(data) = reply.data else {
         return RuntimeCheck::failed("runtime_check_failed");
     };
@@ -340,19 +460,19 @@ fn observed(reply: ControllerReply, expected: &RuntimeIdentity) -> RuntimeCheck 
     if data.stdout_truncated || data.stdout_lossy || data.stderr_truncated || data.stderr_lossy {
         return RuntimeCheck::failed("runtime_protocol_error");
     }
-    report(&data.stdout, expected)
+    report(&data.stdout, source)
 }
 
 pub(crate) async fn check(runtime: Option<PathBuf>, ctx: RuntimeContext<'_>) -> RuntimeCheck {
-    let Some(runtime) = runtime else {
-        return RuntimeCheck::failed("runtime_unavailable");
-    };
     if let Some(code) = interrupted(&ctx) {
         return RuntimeCheck::not_tested(code);
     }
     // Never select away from started blocking I/O: join it before observing
     // cancellation. As with the controller owner, a broken OS may delay return.
-    let loaded = tokio::task::spawn_blocking(move || load(runtime)).await;
+    let loaded = tokio::task::spawn_blocking(move || {
+        load_selected(runtime, || std::env::var_os("SSH_MCP_PYTHON_RUNTIME"))
+    })
+    .await;
     if let Some(code) = interrupted(&ctx) {
         return RuntimeCheck::not_tested(code);
     }
@@ -389,15 +509,9 @@ pub(crate) async fn check(runtime: Option<PathBuf>, ctx: RuntimeContext<'_>) -> 
 }
 
 async fn check_loaded(loaded: Loaded, workspace: &Path, ctx: &RuntimeContext<'_>) -> RuntimeCheck {
-    #[derive(Serialize)]
-    struct Input<'a> {
-        runtime_root: &'a Path,
-    }
-    let input_json = match serde_json::to_vec(&Input {
-        runtime_root: &loaded.root,
-    }) {
+    let input_json = match request(&loaded) {
         Ok(input) => input,
-        Err(_) => return RuntimeCheck::failed("invalid_runtime_manifest"),
+        Err(code) => return RuntimeCheck::failed(code),
     };
     let prepared = PreparedController {
         plan: Arc::new(ControllerPlan {
@@ -428,7 +542,39 @@ async fn check_loaded(loaded: Loaded, workspace: &Path, ctx: &RuntimeContext<'_>
     if let Some(pending) = run.pending {
         pending.finish().await;
     }
-    observed(run.reply, &loaded.identity)
+    observed(run.reply, &loaded.source)
+}
+
+fn request(loaded: &Loaded) -> Result<Vec<u8>, &'static str> {
+    #[derive(Serialize)]
+    #[serde(tag = "source", rename_all = "snake_case")]
+    enum Input<'a> {
+        Bundle {
+            schema: u32,
+            runtime_root: &'a Path,
+        },
+        PythonEnvironment {
+            schema: u32,
+            interpreter: &'a str,
+            prefix: &'a str,
+        },
+    }
+    let input = match &loaded.source {
+        Source::Bundle { root, .. } => Input::Bundle {
+            schema: 1,
+            runtime_root: root,
+        },
+        Source::PythonEnvironment { prefix } => Input::PythonEnvironment {
+            schema: 1,
+            interpreter: &loaded.interpreter,
+            prefix,
+        },
+    };
+    let bytes = serde_json::to_vec(&input).map_err(|_| "invalid_runtime_manifest")?;
+    if bytes.len() > MANIFEST_LIMIT {
+        return Err("invalid_runtime_manifest");
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -506,7 +652,15 @@ mod tests {
         bytes.resize(MANIFEST_LIMIT, b' ');
         fs::write(root.path().join("runtime.json"), &bytes).unwrap();
         let exact = load(root.path().to_owned()).unwrap();
-        assert_eq!(exact.identity.runtime_id, "a".repeat(64));
+        let Source::Bundle { identity, .. } = exact.source else {
+            panic!("bundle source expected");
+        };
+        assert_eq!(
+            identity.provenance,
+            RuntimeProvenance::NixBundle {
+                runtime_id: "a".repeat(64)
+            }
+        );
         bytes.push(b' ');
         fs::write(root.path().join("runtime.json"), &bytes).unwrap();
         assert!(matches!(
@@ -524,26 +678,32 @@ mod tests {
         let expected = parse_manifest(&serde_json::to_vec(&manifest()).unwrap())
             .unwrap()
             .identity;
+        let source = Source::Bundle {
+            root: PathBuf::from("/private/bundle"),
+            identity: expected.clone(),
+        };
         for text in [
-            "{\"schema\":1,\"status\":\"failed\",\"error_code\":\"unknown\"}",
-            "{\"schema\":1,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\",\"identity\":null}",
-            "{\"schema\":2,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\"}",
-            "{\"schema\":1,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\"} {}",
+            "{\"schema\":2,\"status\":\"failed\",\"error_code\":\"unknown\"}",
+            "{\"schema\":2,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\",\"identity\":null}",
+            "{\"schema\":1,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\"}",
+            "{\"schema\":2,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\"} {}",
+            "{\"schema\":2,\"schema\":2,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\"}",
+            "{\"schema\":2,\"status\":\"failed\",\"error_code\":\"runtime_import_failed\",\"source\":\"bundle\"}",
         ] {
             assert_eq!(
-                report(text, &expected).error_code,
+                report(text, &source).error_code,
                 Some("runtime_protocol_error")
             );
         }
         let mut changed = expected.clone();
         changed.python = "3.14.9".to_owned();
-        let text = json!({"schema": 1, "status": "passed", "identity": changed}).to_string();
+        let text = json!({"schema": 2, "status": "passed", "identity": changed}).to_string();
         assert_eq!(
-            report(&text, &expected).error_code,
+            report(&text, &source).error_code,
             Some("runtime_identity_mismatch")
         );
         assert_eq!(
-            report(&" ".repeat(REPORT_LIMIT as usize + 1), &expected).error_code,
+            report(&" ".repeat(REPORT_LIMIT as usize + 1), &source).error_code,
             Some("runtime_protocol_error")
         );
     }
