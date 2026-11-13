@@ -3062,6 +3062,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             "ssh_list_directory",
                             "ssh_mkdir",
                             "ssh_read_file",
+                            "ssh_remove_directory",
                             "ssh_remove_file",
                             "ssh_rename",
                             "ssh_stat",
@@ -3202,6 +3203,23 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 );
                 ensure!(fs::read_dir(&created_directory)?.next().is_none());
                 ensure!(fs::read(&file)? == b"abc", "mkdir changed its sibling file");
+                let created_inode = fs::symlink_metadata(&created_directory)?.ino();
+                let reply = client
+                    .call("ssh_remove_directory", json!({"host":"locked","path":created_directory}))
+                    .await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(fs::symlink_metadata(&created_directory)?.ino() == created_inode);
+                ensure!(fs::read_dir(&created_directory)?.next().is_none());
+                let reply = client
+                    .call("ssh_remove_directory", json!({"host":"allowed","path":created_directory}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"removed":true}));
+                ensure!(
+                    matches!(fs::symlink_metadata(&created_directory), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                    "files-only profile did not remove the actual allowed empty directory"
+                );
+                ensure!(fs::read(&file)? == b"abc", "rmdir changed its sibling file");
                 let payload = "PROFILE_WRITE_é雪\0END";
                 let reply = client
                     .call(
@@ -3255,7 +3273,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     fs::symlink_metadata(&renamed).is_err(),
                     "files-only profile did not unlink the actual allowed entry"
                 );
-                ensure!(created_directory.is_dir() && fs::read_dir(&directory)?.count() == 1);
+                ensure!(fs::read_dir(&directory)?.next().is_none());
                 ensure!(
                     !masters(&client.log)?.is_empty(),
                     "successful file calls started no master"
@@ -5521,6 +5539,395 @@ async fn ssh_remove_file_prehandshake_timeout() -> Result<()> {
     let removed = work.close();
     scenario?;
     cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let mut config = fs::read_to_string(&fixture.config)?;
+        config.push_str(
+            "\n[targets.rmdir-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+        );
+        fs::write(&fixture.config, config)?;
+        let directory = fixture.root.path().join("rmdir-private");
+        fs::create_dir(&directory)?;
+        let empty = directory.join("empty");
+        let tree = directory.join("tree");
+        let nested = tree.join("nested");
+        let child = nested.join("child");
+        let sibling = directory.join("wildcard-KEEP");
+        fs::create_dir(&empty)?;
+        fs::create_dir_all(&nested)?;
+        fs::write(&child, b"KEEP_NESTED_CHILD\0BYTES")?;
+        fs::write(&sibling, b"KEEP_LITERAL_SIBLING")?;
+        let empty_inode = fs::symlink_metadata(&empty)?.ino();
+        let tree_inode = fs::symlink_metadata(&tree)?.ino();
+        let nested_inode = fs::symlink_metadata(&nested)?.ino();
+        let child_inode = fs::symlink_metadata(&child)?.ino();
+        let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
+        let missing = directory.join("missing");
+        let mut links = Vec::new();
+        for (index, target) in [&empty, &tree, &sibling, &missing].into_iter().enumerate() {
+            let link = directory.join(format!("final-link-{index}"));
+            symlink(target, &link)?;
+            let inode = fs::symlink_metadata(&link)?.ino();
+            links.push((link, target, inode));
+        }
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let initial_auth = fixture.authentications();
+            for args in [
+                json!({"host":"plain","path":""}),
+                json!({"host":"plain","path":"rmdir\0invalid"}),
+                json!({"host":"plain","path":empty,"timeout_secs":0}),
+                json!({"host":"plain","path":empty,"timeout_secs":16}),
+            ] {
+                let reply = client.call("ssh_remove_directory", args).await?;
+                failed(&reply, "invalid_argument")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            }
+            let reply = client
+                .call("ssh_remove_directory", json!({"host":"rmdir-locked","path":empty}))
+                .await?;
+            failed(&reply, "policy_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(masters(&client.log)?.is_empty(), "rejected rmdir acquired SSH");
+            ensure!(fixture.authentications() == initial_auth, "rejected rmdir authenticated");
+            ensure!(fs::symlink_metadata(&empty)?.ino() == empty_inode);
+            ensure!(fs::read_dir(&empty)?.next().is_none());
+
+            succeeded(&exec(&client, "printf RMDIR_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            // Plain final links must fail RMDIR, never fall back to REMOVE.
+            // OpenSSH also maps ENOTDIR (file/final-link operands) to NO_SUCH_FILE.
+            for (link, target, inode) in &links {
+                let reply = client
+                    .call("ssh_remove_directory", json!({"host":"plain","path":link}))
+                    .await?;
+                ensure!(
+                    matches!(reply["error"]["code"].as_str(), Some("not_found" | "permission_denied" | "io_error")),
+                    "final symlink rmdir did not fail: {reply}"
+                );
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+                let metadata = fs::symlink_metadata(link)?;
+                ensure!(metadata.file_type().is_symlink() && metadata.ino() == *inode);
+                ensure!(fs::read_link(link)? == **target);
+                ensure!(fs::symlink_metadata(&empty)?.ino() == empty_inode);
+                ensure!(fs::read_dir(&empty)?.next().is_none());
+                ensure!(fs::symlink_metadata(&tree)?.ino() == tree_inode);
+                ensure!(fs::symlink_metadata(&nested)?.ino() == nested_inode);
+                ensure!(fs::symlink_metadata(&child)?.ino() == child_inode);
+                ensure!(fs::read(&child)? == b"KEEP_NESTED_CHILD\0BYTES");
+                ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+                ensure!(fs::read(&sibling)? == b"KEEP_LITERAL_SIBLING");
+                ensure!(fs::symlink_metadata(&missing).is_err());
+            }
+            for path in [&tree, &nested, &sibling] {
+                let reply = client
+                    .call("ssh_remove_directory", json!({"host":"plain","path":path}))
+                    .await?;
+                ensure!(
+                    matches!(reply["error"]["code"].as_str(), Some("not_found" | "permission_denied" | "io_error")),
+                    "nonempty directory/file rmdir did not fail: {reply}"
+                );
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+                ensure!(fs::symlink_metadata(&tree)?.is_dir());
+                ensure!(fs::symlink_metadata(&tree)?.ino() == tree_inode);
+                ensure!(fs::symlink_metadata(&nested)?.is_dir());
+                ensure!(fs::symlink_metadata(&nested)?.ino() == nested_inode);
+                ensure!(fs::symlink_metadata(&child)?.is_file());
+                ensure!(fs::symlink_metadata(&child)?.ino() == child_inode);
+                ensure!(fs::read(&child)? == b"KEEP_NESTED_CHILD\0BYTES");
+                ensure!(fs::read_dir(&tree)?.count() == 1);
+                ensure!(fs::read_dir(&nested)?.count() == 1);
+                ensure!(fs::symlink_metadata(&sibling)?.is_file());
+                ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+                ensure!(fs::read(&sibling)? == b"KEEP_LITERAL_SIBLING");
+            }
+            for name in [
+                "  é雪 entry  ",
+                "wildcard-*",
+                "'\";~$*\n$(printf EVALUATED)",
+                "${HOME} {{rmdir}}\n'\";*",
+            ] {
+                let literal = directory.join(name);
+                fs::create_dir(&literal)?;
+                let reply = client
+                    .call("ssh_remove_directory", json!({"host":"plain","path":literal}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"removed":true}), "{name:?}: {reply}");
+                ensure!(
+                    matches!(fs::symlink_metadata(&literal), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                    "{name:?}: empty directory survived"
+                );
+                ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+                ensure!(fs::read(&sibling)? == b"KEEP_LITERAL_SIBLING");
+            }
+            let reply = client
+                .call("ssh_remove_directory", json!({"host":"plain","path":empty}))
+                .await?;
+            ensure!(succeeded(&reply)? == &json!({"removed":true}));
+            ensure!(
+                matches!(fs::symlink_metadata(&empty), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                "successful rmdir retained its entry"
+            );
+            // Neither a missing entry nor a repeated deletion is missing_ok.
+            for path in [&empty, &missing] {
+                let reply = client
+                    .call("ssh_remove_directory", json!({"host":"plain","path":path}))
+                    .await?;
+                failed(&reply, "not_found")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            }
+            let mut entries = fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort();
+            let mut expected = [
+                "tree", "wildcard-KEEP", "final-link-0", "final-link-1",
+                "final-link-2", "final-link-3",
+            ].map(std::ffi::OsString::from);
+            expected.sort();
+            ensure!(entries == expected, "rmdir expanded literal paths or removed siblings");
+            let reply = client
+                .call("ssh_read_file", json!({"host":"plain","path":sibling}))
+                .await?;
+            ensure!(succeeded(&reply)?["content"] == "KEEP_LITERAL_SIBLING");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "rmdir discarded the shared healthy master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(!log.text().contains("rmdir-private"), "rmdir audit disclosed private paths");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_remove_directory_dispatch_refusal_is_not_replayed() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let requests = work.path().join("sftp-requests");
+    let launches = work.path().join("sftp-launches");
+    let server = Fixture::sftp_server()?;
+    let script = format!(
+        "echo launch >> {}; exec {} -P rmdir -e -l VERBOSE 2>> {}",
+        launches.display(),
+        server.display(),
+        requests.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf RMDIR_REFUSAL_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("rmdir-refusal-private");
+            fs::create_dir(&directory)?;
+            let empty = directory.join("denied");
+            let sibling = directory.join("sibling");
+            fs::create_dir(&empty)?;
+            fs::write(&sibling, b"KEEP_REFUSAL_SIBLING")?;
+            let inode = fs::symlink_metadata(&empty)?.ino();
+            let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
+            let reply = client
+                .call("ssh_remove_directory", json!({"host":"plain","path":empty}))
+                .await?;
+            failed(&reply, "permission_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(fs::symlink_metadata(&empty)?.is_dir());
+            ensure!(
+                fs::symlink_metadata(&empty)?.ino() == inode,
+                "refusal caused fallback rmdir"
+            );
+            ensure!(fs::read_dir(&empty)?.next().is_none());
+            ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+            ensure!(fs::read(&sibling)? == b"KEEP_REFUSAL_SIBLING");
+            ensure!(fs::read_dir(&directory)?.count() == 2);
+            let audit = await_audit(&client.log, "finish", "permission_denied").await?;
+            ensure!(audit["remote_state_unknown"] == true && audit["identity_role"] == "ordinary");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "refused rmdir discarded a healthy shared master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(
+            !log.text().contains("rmdir-refusal-private"),
+            "rmdir audit disclosed private paths"
+        );
+        ensure!(
+            fs::read_to_string(&launches)?.lines().count() == 1,
+            "refused rmdir replayed the SFTP session"
+        );
+        let log = fs::read_to_string(&requests)?;
+        ensure!(
+            log.lines()
+                .filter(|line| line.contains("Refusing") && line.contains("rmdir request"))
+                .count()
+                == 1,
+            "expected exactly one actual RMDIR refusal, without retry: {log}"
+        );
+        ensure!(
+            !log.lines().any(|line| {
+                [
+                    "lstat name ",
+                    "stat name ",
+                    "readlink ",
+                    "opendir ",
+                    "readdir ",
+                    "remove name ",
+                    "Refusing remove request",
+                    "mkdir name ",
+                    "rename old ",
+                    "open \"",
+                    "setstat name ",
+                ]
+                .iter()
+                .any(|operation| line.contains(operation))
+            }),
+            "rmdir performed a preflight or mutation fallback: {log}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_remove_directory_prehandshake_timeout() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let started = work.path().join("sftp-started");
+    let done = work.path().join("sftp-delay-done");
+    let requests = work.path().join("sftp-requests");
+    fs::write(&requests, b"")?;
+    let server = Fixture::sftp_server()?;
+    let script = format!(
+        "trap \"\" HUP; echo launch >> {}; sleep 3; printf done > {}; exec {} -e -l VERBOSE 2>> {}",
+        started.display(),
+        done.display(),
+        server.display(),
+        requests.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf RMDIR_DELAY_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("rmdir-delay-private");
+            fs::create_dir(&directory)?;
+            let empty = directory.join("never-dispatched");
+            let sibling = directory.join("sibling");
+            fs::create_dir(&empty)?;
+            fs::write(&sibling, b"KEEP_DELAY_SIBLING")?;
+            let inode = fs::symlink_metadata(&empty)?.ino();
+            let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
+            let reply = client
+                .call(
+                    "ssh_remove_directory",
+                    json!({
+                        "host":"plain","path":empty,"timeout_secs":1
+                    }),
+                )
+                .await?;
+            Fixture::await_file(&started).await?;
+            failed(&reply, "timeout")?;
+            ensure!(
+                reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false,
+                "handshake timeout acquired mutation uncertainty: {reply}"
+            );
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "handshake timeout discarded the healthy sibling transport"
+            );
+            Fixture::await_file(&done).await?;
+            ensure!(
+                fs::read_to_string(&started)?.lines().count() == 1,
+                "timeout replayed SFTP"
+            );
+            ensure!(fs::symlink_metadata(&empty)?.is_dir());
+            ensure!(fs::symlink_metadata(&empty)?.ino() == inode);
+            ensure!(fs::read_dir(&empty)?.next().is_none());
+            ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+            ensure!(fs::read(&sibling)? == b"KEEP_DELAY_SIBLING");
+            ensure!(fs::read_dir(&directory)?.count() == 2);
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        // Await the finite remote guard even when an assertion failed.
+        let completed = if started.exists() {
+            Fixture::await_file(&done).await
+        } else {
+            Ok(())
+        };
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        completed?;
+        gone?;
+        ensure!(
+            !log.text().contains("rmdir-delay-private"),
+            "rmdir audit disclosed private paths"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let log = fs::read_to_string(&requests);
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    let log = log?;
+    ensure!(
+        !log.contains("rmdir name ") && !log.contains("remove name "),
+        "handshake timeout dispatched a mutation: {log}"
+    );
     removed?;
     Ok(())
 }

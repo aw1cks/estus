@@ -28,9 +28,9 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
     filedata::{
-        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RemoveFileData,
-        RemoveFileSpec, RenameData, RenameSpec, StatSpec, WriteData, WriteSpec, encode,
-        verify_script,
+        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RemoveDirectoryData,
+        RemoveDirectorySpec, RemoveFileData, RemoveFileSpec, RenameData, RenameSpec, StatSpec,
+        WriteData, WriteSpec, encode, verify_script,
     },
     filemeta::{ListEntry, StatData, metadata_data},
     reply::{ToolError, ToolReply},
@@ -489,6 +489,27 @@ async fn remove_file_sftp(
     combine_close(result, close)
 }
 
+async fn remove_directory_sftp(
+    sftp: Sftp,
+    spec: RemoveDirectorySpec<'_>,
+    mutation_started: &mut bool,
+) -> Result<RemoveDirectoryData, Failure> {
+    let result = async {
+        let mut fs = sftp.fs();
+        // RMDIR itself enforces emptiness; a prior listing cannot replace it.
+        // Set before polling: cancellation may hide the acknowledgement.
+        *mutation_started = true;
+        fs.remove_dir(spec.path).await.map_err(sftp_failure)?;
+        Ok(RemoveDirectoryData { removed: true })
+    }
+    .await;
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> {
     let result = {
         // Fs retains library resources: drop it before waiting for Sftp::close.
@@ -693,6 +714,22 @@ pub(crate) async fn remove_file(
     let mut mutation_started = false;
     let mut outcome = run_sftp(session, context, |sftp| {
         remove_file_sftp(sftp, spec, &mut mutation_started)
+    })
+    .await;
+    if let Some(error) = &mut outcome.reply.error {
+        error.remote_state_unknown = mutation_started;
+    }
+    outcome
+}
+
+pub(crate) async fn remove_directory(
+    session: &Session,
+    spec: RemoveDirectorySpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<RemoveDirectoryData> {
+    let mut mutation_started = false;
+    let mut outcome = run_sftp(session, context, |sftp| {
+        remove_directory_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
     if let Some(error) = &mut outcome.reply.error {

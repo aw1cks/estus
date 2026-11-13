@@ -248,6 +248,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/remove-file-acceptance";
         };
+        apps.remove-directory-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/remove-directory-acceptance";
+        };
+        apps.remove-directory-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/remove-directory-acceptance";
+        };
         apps.controller-scripts = {
           type = "app";
           program = "${acceptance}/bin/controller-scripts";

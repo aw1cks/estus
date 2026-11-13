@@ -33,8 +33,9 @@ use crate::{
     },
     exec::{self, RunContext},
     filedata::{
-        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RemoveFileData,
-        RemoveFileRequest, RenameData, RenameRequest, StatRequest, WriteData, WriteRequest,
+        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RemoveDirectoryData,
+        RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest, RenameData, RenameRequest,
+        StatRequest, WriteData, WriteRequest,
     },
     filemeta::StatData,
     files::{self, FileContext},
@@ -204,7 +205,7 @@ impl Estus {
         }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
-        let routes: [(ToolId, ToolRoute<Self>); 11] = [
+        let routes: [(ToolId, ToolRoute<Self>); 12] = [
             (
                 ToolId::Targets,
                 (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
@@ -236,6 +237,14 @@ impl Estus {
             (
                 ToolId::RemoveFile,
                 (Self::ssh_remove_file_tool_attr(), Self::ssh_remove_file).into_tool_route(),
+            ),
+            (
+                ToolId::RemoveDirectory,
+                (
+                    Self::ssh_remove_directory_tool_attr(),
+                    Self::ssh_remove_directory,
+                )
+                    .into_tool_route(),
             ),
             (
                 ToolId::Stat,
@@ -931,6 +940,36 @@ impl Estus {
         .await
     }
 
+    async fn remove_directory(
+        &self,
+        request: RemoveDirectoryRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(
+            &request.host,
+            ToolId::RemoveDirectory,
+            &self.state,
+            &context.id,
+        );
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<RemoveDirectoryData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .remove_directory(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -1126,6 +1165,21 @@ impl Estus {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.remove_file(request, context).await
+    }
+
+    #[tool(
+        name = "ssh_remove_directory",
+        description = "Remove one empty directory through an independently owned ordinary SFTP channel. path is literal UTF-8 without shell, tilde, variable or wildcard expansion or a path sandbox. The server's RMDIR enforces emptiness; nonempty directories, files and missing entries remain backend errors, never recursive deletion or missing_ok success. No directory walk, REMOVE, canonicalization, sudo, shell/SCP fallback, retry or replay. Path components, symlinks and trailing slashes retain server filesystem semantics; no race-free no-follow or entry-identity guarantee is added. Success returns removed=true only after RMDIR acknowledgement and bounded cleanup. Any failure after RMDIR dispatch retains remote-state uncertainty, including server refusal or cleanup failure. Channel closure never proves rollback.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<RemoveDirectoryRequest>(),
+        output_schema = schema_for_type::<ToolReply<RemoveDirectoryData>>()
+    )]
+    async fn ssh_remove_directory(
+        &self,
+        Arguments(request): Arguments<RemoveDirectoryRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.remove_directory(request, context).await
     }
 
     #[tool(
@@ -1858,6 +1912,63 @@ impl State {
         {
             Ok(lease) => {
                 let outcome = files::remove_file(
+                    lease.session(),
+                    spec,
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn remove_directory(
+        &self,
+        request: RemoveDirectoryRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<RemoveDirectoryData> {
+        let metadata = file_metadata(&request.host, ToolId::RemoveDirectory, self, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request.validate(budget).and_then(|spec| {
+            let target = self
+                .config
+                .resolve(&request.host, ToolId::RemoveDirectory)?;
+            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+            Ok((spec, target, deadline))
+        });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::remove_directory(
                     lease.session(),
                     spec,
                     FileContext {

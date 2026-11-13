@@ -207,6 +207,47 @@ impl RemoveFileRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct RemoveDirectoryRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RemoveDirectorySpec<'a> {
+    pub(crate) path: &'a str,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct RemoveDirectoryData {
+    pub(crate) removed: bool,
+}
+
+impl RemoveDirectoryRequest {
+    pub(crate) fn validate(
+        &self,
+        budget: ReplyBudget,
+    ) -> Result<RemoveDirectorySpec<'_>, ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        budget
+            .remaining(&ToolReply {
+                data: Some(RemoveDirectoryData { removed: true }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            })
+            .map_err(|_| {
+                invalid("Request leaves insufficient response budget for directory removal")
+            })?;
+        Ok(RemoveDirectorySpec { path: &self.path })
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StatRequest {
     pub(crate) host: String,
     pub(crate) path: String,

@@ -160,6 +160,30 @@ operation is never replayed and channel closure never proves rollback.
 `nix run .#remove-file-acceptance-msrv` exercises actual entries, preserved link
 targets, literal names and dispatch uncertainty with the same native prerequisites.
 
+## Ordinary SFTP empty-directory removal
+
+`ssh_remove_directory` removes one empty directory:
+
+```json
+{"host":"server","path":"/srv/example/empty-directory","timeout_secs":10}
+```
+
+One SFTP RMDIR performs the server's emptiness check. Nonempty directories and their
+children survive; files and missing entries remain backend errors. There is no
+recursive walk, wildcard expansion, `missing_ok`, REMOVE/unlink fallback,
+canonicalization, sudo or shell/SCP fallback. Paths are literal UTF-8; components,
+symlinks and trailing slashes retain server filesystem rules, not a no-follow,
+entry-identity or path-sandbox guarantee.
+
+Success returns `{"removed":true}` in the standard envelope after acknowledgement
+and bounded cleanup. Policy, admission, pre-SSH validation and channel ownership
+match the other ordinary SFTP mutations. Errors after RMDIR polling retain
+`remote_state_unknown=true`, including negative server replies and cleanup failure.
+There is no replay or rollback inference.
+
+`nix run .#remove-directory-acceptance-msrv` proves empty-only effects, preserved
+contents and dispatch uncertainty with the same native prerequisites.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

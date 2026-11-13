@@ -256,7 +256,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .collect::<Result<_>>()?;
         names.sort_unstable();
         ensure!(names == [
-            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_remove_file", "ssh_rename", "ssh_run",
+            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_run",
             "ssh_stat", "ssh_targets", "ssh_write_file",
         ], "omitting a profile changed the baseline inventory");
         let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
@@ -422,6 +422,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                         "ssh_list_directory",
                         "ssh_mkdir",
                         "ssh_read_file",
+                        "ssh_remove_directory",
                         "ssh_remove_file",
                         "ssh_rename",
                         "ssh_run",
@@ -435,6 +436,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                         "ssh_list_directory",
                         "ssh_mkdir",
                         "ssh_read_file",
+                        "ssh_remove_directory",
                         "ssh_remove_file",
                         "ssh_rename",
                         "ssh_run",
@@ -919,6 +921,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
                     "ssh_run",
@@ -981,6 +984,10 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
             ),
             (
                 "ssh_remove_file",
+                json!({"host":"127.0.0.1","path":"budget-private-path"}),
+            ),
+            (
+                "ssh_remove_directory",
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
         ] {
@@ -1147,7 +1154,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_file", "ssh_rename", "ssh_write_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -2189,7 +2196,12 @@ fn profile_call_arguments(tool: &str, host: &str) -> Value {
         "ssh_write_file" => {
             json!({"host":host,"path":"/private/profile-payload","content":"PROFILE_PAYLOAD"})
         }
-        "ssh_read_file" | "ssh_stat" | "ssh_list_directory" | "ssh_mkdir" | "ssh_remove_file" => {
+        "ssh_read_file"
+        | "ssh_stat"
+        | "ssh_list_directory"
+        | "ssh_mkdir"
+        | "ssh_remove_directory"
+        | "ssh_remove_file" => {
             json!({"host":host,"path":"/private/profile-payload"})
         }
         _ => panic!("unexpected profile test tool"),
@@ -2238,6 +2250,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
         "ssh_list_directory",
         "ssh_mkdir",
         "ssh_read_file",
+        "ssh_remove_directory",
         "ssh_remove_file",
         "ssh_rename",
         "ssh_run",
@@ -2257,6 +2270,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                 "ssh_list_directory",
                 "ssh_mkdir",
                 "ssh_read_file",
+                "ssh_remove_directory",
                 "ssh_remove_file",
                 "ssh_rename",
                 "ssh_stat",
@@ -2438,7 +2452,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
             .await?;
         let listed = server.response(2).await?;
-        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 11);
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 12);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}}))
@@ -2456,6 +2470,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
                     "ssh_run",
@@ -2470,6 +2485,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
                     "ssh_run",
@@ -2483,6 +2499,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
                     "ssh_stat",
@@ -2509,6 +2526,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_run",
                     "ssh_write_file",
                     "ssh_mkdir",
+                    "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
                     "ssh_sudo",
@@ -2526,6 +2544,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_stat",
                     "ssh_list_directory",
                     "ssh_mkdir",
+                    "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
                 ][..],
@@ -2611,6 +2630,7 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
             "ssh_list_directory",
             "ssh_write_file",
             "ssh_mkdir",
+            "ssh_remove_directory",
             "ssh_remove_file",
             "ssh_rename",
         ]
@@ -4672,6 +4692,19 @@ async fn remote_transport_failure_never_executes_controller_source_as_fallback()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_dispatch()
 -> Result<()> {
+    remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch("ssh_remove_file").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_remove_directory_validation_schema_and_private_inputs_reject_before_ssh_dispatch()
+-> Result<()> {
+    remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch("ssh_remove_directory")
+        .await
+}
+
+async fn remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
+    tool: &str,
+) -> Result<()> {
     for modern in [false, true] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("operator.toml");
@@ -4712,7 +4745,7 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
                 .as_array()
                 .context("tool catalog")?
                 .iter()
-                .find(|tool| tool["name"] == "ssh_remove_file")
+                .find(|entry| entry["name"] == tool)
                 .context("remove file route")?;
             ensure!(remove["annotations"]["readOnlyHint"] == false);
             ensure!(remove["annotations"]["destructiveHint"] == true);
@@ -4779,7 +4812,7 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
                 let id = 100 + index as u64;
                 let mut arguments = valid.clone();
                 arguments[field] = value;
-                let params = json!({"name":"ssh_remove_file","arguments":arguments});
+                let params = json!({"name":tool,"arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -4816,6 +4849,29 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
                     );
                 }
             }
+            // Inclusive timeout boundaries and the optional default must reach
+            // target policy, not be mistaken for malformed destructive calls.
+            for (index, requested_timeout) in
+                [json!(1), json!(3), Value::Null].into_iter().enumerate()
+            {
+                let id = 150 + index as u64;
+                let mut arguments = valid.clone();
+                arguments["host"] = json!("denied");
+                arguments["timeout_secs"] = requested_timeout;
+                let params = json!({"name":tool,"arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let rejected = server.response(id).await?;
+                profile_policy_denied(&rejected)?;
+                ensure!(
+                    !serde_json::to_string(&rejected)?.contains("REMOVE_FILE_PRIVATE_"),
+                    "{tool}: timeout-boundary policy rejection disclosed private input"
+                );
+            }
             for (index, (control, value)) in [
                 ("recursion", json!(true)),
                 ("recursive", json!(true)),
@@ -4829,6 +4885,14 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
                 ("argv", json!(["REMOVE_FILE_PRIVATE_ARGV"])),
                 ("source", json!("REMOVE_FILE_PRIVATE_SOURCE")),
                 ("destination", json!("REMOVE_FILE_PRIVATE_DESTINATION")),
+                ("force", json!(true)),
+                ("parents", json!(true)),
+                ("dry_run", json!(true)),
+                ("empty_only", json!(false)),
+                ("no_follow", json!(true)),
+                ("ssh_host", json!("REMOVE_FILE_PRIVATE_HOST")),
+                ("config_file", json!("REMOVE_FILE_PRIVATE_CONFIG")),
+                ("content", json!("REMOVE_FILE_PRIVATE_CONTENT")),
                 ("timeout_secs", json!(-1)),
                 ("timeout_secs", json!(1.5)),
                 ("timeout_secs", json!("1")),
@@ -4842,7 +4906,7 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
                 let id = 200 + index as u64;
                 let mut arguments = valid.clone();
                 arguments[control] = value;
-                let params = json!({"name":"ssh_remove_file","arguments":arguments});
+                let params = json!({"name":tool,"arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -4866,7 +4930,7 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
                     .as_object_mut()
                     .context("remove file arguments")?
                     .remove(field);
-                let params = json!({"name":"ssh_remove_file","arguments":arguments});
+                let params = json!({"name":tool,"arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -4914,7 +4978,7 @@ async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_
         for line in audit.lines() {
             let record: Value = serde_json::from_str(line)?;
             ensure!(
-                record["tool"] != "ssh_remove_file" || record["event"] == "reject",
+                record["tool"] != tool || record["event"] == "reject",
                 "remove file admitted before prevalidation"
             );
             for field in ["source", "destination", "path", "content", "payload"] {
