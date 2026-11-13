@@ -17,6 +17,7 @@ mod reply;
 mod schema_import;
 mod server;
 mod ssh;
+mod strict_json;
 mod wire;
 
 use std::{
