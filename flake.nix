@@ -264,6 +264,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/replace-file-acceptance";
         };
+        apps.output-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/output-acceptance";
+        };
+        apps.output-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/output-acceptance";
+        };
         apps.controller-scripts = {
           type = "app";
           program = "${acceptance}/bin/controller-scripts";

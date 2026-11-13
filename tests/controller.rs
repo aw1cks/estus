@@ -16,6 +16,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
@@ -1077,5 +1078,231 @@ async fn global_admission_is_held_by_live_controller_owners_and_recovers_after_c
     scenario?;
     stopped?;
     fixture.gone(&observed).await?;
+    Ok(())
+}
+
+async fn controller_output_read(server: &mut Server, id: u64, arguments: Value) -> Result<Value> {
+    server
+        .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+        "params":{"name":"ssh_read_output","arguments":arguments}}))
+        .await?;
+    let frame = server.response(id).await?;
+    let result = &frame["result"];
+    let reply = &result["structuredContent"];
+    ensure!(reply.is_object(), "missing local output envelope: {frame}");
+    let text: Value = serde_json::from_str(
+        result["content"][0]["text"]
+            .as_str()
+            .context("output compatibility text")?,
+    )?;
+    ensure!(text == *reply);
+    ensure!(result["isError"].as_bool().unwrap_or(false) == !reply["error"].is_null());
+    Ok(reply.clone())
+}
+
+fn controller_output_entries(path: &Path) -> Result<Vec<PathBuf>> {
+    Ok(fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn controller_output_exact_raw_ranges_default_permissions_and_shutdown() -> Result<()> {
+    let fixture = Fixture::new(
+        "printf 'abc\\000\\303\\251\\377Z'; printf 'err\\000\\376' >&2\n",
+        4,
+        15,
+    )?;
+    let temporary = fixture.temp.path().join("ambient-tmp");
+    fs::create_dir(&temporary)?;
+    let mut config = fs::read_to_string(&fixture.config)?;
+    config.push_str("\n[output]\nper_stream_bytes = 64\ntotal_bytes = 256\nmax_handles = 2\n");
+    fs::write(&fixture.config, config)?;
+    let mut server = Server::start(&fixture).await?;
+    let scenario = async {
+        server.call(2, arguments()).await?;
+        let frame = server.response(2).await?;
+        let result = envelope(&frame)?;
+        ensure!(result["error"].is_null());
+        ensure!(result["data"].get("output").is_none());
+        ensure!(controller_output_entries(&temporary)?.is_empty(), "default created artifacts");
+        let mut request = arguments();
+        request["retain_output"] = json!(true);
+        server.call(3, request).await?;
+        let frame = server.response(3).await?;
+        let result = envelope(&frame)?;
+        let data = &result["data"];
+        ensure!(result["error"].is_null());
+        cleaned(data)?;
+        ensure!(data["exit_code"] == 0 && data["termination"] == "exited");
+        ensure!(data["stdout"] == "abc\0" && data["stderr"] == "err\0");
+        ensure!(data["stdout_truncated"] == true && data["stderr_truncated"] == true);
+        let receipt = &data["output"];
+        ensure!(receipt["status"] == "ready", "output receipt: {receipt}");
+        let handle = receipt["handle"].as_str().context("retained controller handle")?.to_owned();
+        ensure!(handle.len() == 32 && handle.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        for (stream, size) in [("stdout", 8), ("stderr", 5)] {
+            ensure!(receipt[stream] == json!({"bytes_retained":size,"total_bytes":size,"truncated":false}));
+        }
+        let directories = controller_output_entries(&temporary)?;
+        ensure!(directories.len() == 1);
+        ensure!(fs::metadata(&directories[0])?.permissions().mode() & 0o777 == 0o700);
+        let files = controller_output_entries(&directories[0])?;
+        ensure!(files.len() == 2);
+        let mut contents = Vec::new();
+        for file in files {
+            ensure!(fs::metadata(&file)?.permissions().mode() & 0o777 == 0o600);
+            contents.push(fs::read(file)?);
+        }
+        ensure!(contents.contains(&b"abc\0\xc3\xa9\xffZ".to_vec()));
+        ensure!(contents.contains(&b"err\0\xfe".to_vec()));
+        for (index, (stream, offset, limit, bytes, eof, encoding)) in [
+            ("stdout", 0, 8, &b"abc\0\xc3\xa9\xffZ"[..], true, "base64"),
+            ("stderr", 0, 5, &b"err\0\xfe"[..], true, "base64"),
+            ("stdout", 0, 3, &b"abc"[..], false, "utf8"),
+            ("stdout", 3, 1, &b"\0"[..], false, "utf8"),
+            ("stdout", 4, 2, &b"\xc3\xa9"[..], false, "utf8"),
+            ("stdout", 8, 1, &b""[..], true, "utf8"),
+            ("stderr", 99, 1, &b""[..], true, "base64"),
+        ].into_iter().enumerate() {
+            let reply = controller_output_read(&mut server, 10 + index as u64, json!({
+                "handle":handle,"stream":stream,"offset":offset,"max_bytes":limit,"encoding":encoding,
+            })).await?;
+            let content = if encoding == "base64" { STANDARD.encode(bytes) }
+                else { std::str::from_utf8(bytes)?.to_owned() };
+            ensure!(reply["error"].is_null());
+            ensure!(reply["data"] == json!({
+                "content":content,"encoding":encoding,"bytes_read":bytes.len(),
+                "next_offset":offset + bytes.len() as u64,"eof":eof,
+                "content_sha256":hex::encode(Sha256::digest(bytes)),
+            }), "range reply: {reply}");
+        }
+        for (id, offset) in [(20, 4), (21, 5), (22, 6)] {
+            let reply = controller_output_read(&mut server, id, json!({
+                "handle":handle,"stream":"stdout","offset":offset,"max_bytes":1,
+            })).await?;
+            ensure!(reply["data"].is_null() && reply["error"]["code"] == "invalid_encoding");
+            ensure!(reply["error"]["remote_state_unknown"] == false);
+        }
+        fixture.clean().await?;
+        Ok::<_, anyhow::Error>(handle)
+    }.await;
+    let stopped = server.stop(false).await;
+    let clean = fixture.clean().await;
+    let handle = scenario?;
+    let audit = stopped?;
+    clean?;
+    ensure!(
+        controller_output_entries(&temporary)?.is_empty(),
+        "shutdown leaked retained output"
+    );
+    ensure!(!String::from_utf8_lossy(&audit).contains(&handle));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn controller_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result<()> {
+    for mode in [
+        "quota", "disabled", "storage", "expiry", "timeout", "signal",
+    ] {
+        let script = match mode {
+            "timeout" => "printf abc; printf err >&2; @SLEEP@ 10\n",
+            "signal" => "printf abc; printf err >&2; kill -TERM \"$$\"\n",
+            _ => {
+                "x=oooooooooooooooo; y=eeeeeeeeeeeeeeee; i=0; while [ \"$i\" -lt 14 ]; do x=$x$x; y=$y$y; i=$((i+1)); done; printf '%s' \"$x\"; printf '%s' \"$y\" >&2; printf done > @OBS@/drained; exit 23\n"
+            }
+        };
+        let fixture = Fixture::new(script, 4, if mode == "timeout" { 1 } else { 15 })?;
+        let temporary = fixture.temp.path().join("ambient-tmp");
+        if mode == "storage" {
+            fs::write(&temporary, b"not a directory")?;
+        } else {
+            fs::create_dir(&temporary)?;
+        }
+        let mut config = fs::read_to_string(&fixture.config)?;
+        config.push_str(&format!(
+            "\n[output]\nenabled = {}\nper_stream_bytes = 8\ntotal_bytes = 16\nmax_handles = 1\nttl_secs = {}\n",
+            mode != "disabled", if mode == "expiry" { 1 } else { 300 },
+        ));
+        fs::write(&fixture.config, config)?;
+        let mut server = Server::start(&fixture).await?;
+        let scenario = async {
+            let mut request = arguments();
+            request["retain_output"] = json!(true);
+            server.call(2, request.clone()).await?;
+            let frame = server.response(2).await?;
+            let result = envelope(&frame)?;
+            let data = &result["data"];
+            cleaned(data)?;
+            match mode {
+                "timeout" => {
+                    ensure!(result["error"]["code"] == "timeout" && data["termination"] == "timeout");
+                    ensure!(data["exit_code"].is_null());
+                }
+                "signal" => {
+                    ensure!(!result["error"].is_null());
+                    ensure!(data["termination"] == "signalled" && data["signal"] == 15);
+                }
+                _ => {
+                    ensure!(result["error"]["code"] == "command_failed");
+                    ensure!(data["exit_code"] == 23 && data["termination"] == "exited");
+                    ensure!(data["stdout"] == "oooo" && data["stderr"] == "eeee");
+                    ensure!(fs::read(fixture.observations.join("drained"))? == b"done");
+                }
+            }
+            if matches!(mode, "disabled" | "storage") {
+                ensure!(data["output"] == json!({"status":"unavailable","reason":
+                    if mode == "disabled" {"retention_disabled"} else {"io_error"}}));
+                if mode == "disabled" { ensure!(controller_output_entries(&temporary)?.is_empty()); }
+            } else {
+                let receipt = &data["output"];
+                ensure!(receipt["status"] == "ready", "receipt: {receipt}");
+                let handle = receipt["handle"].as_str().context("handle")?.to_owned();
+                if matches!(mode, "quota" | "expiry") {
+                    for stream in ["stdout", "stderr"] {
+                        ensure!(receipt[stream] == json!({
+                            "bytes_retained":8,"total_bytes":262144,"truncated":true,
+                        }));
+                        let expected = if stream == "stdout" { b"oooooooo" } else { b"eeeeeeee" };
+                        let reply = controller_output_read(&mut server,
+                            if stream == "stdout" { 3 } else { 4 },
+                            json!({"handle":handle,"stream":stream,"max_bytes":8})).await?;
+                        ensure!(reply["error"].is_null());
+                        ensure!(reply["data"] == json!({
+                            "content":std::str::from_utf8(expected)?,"encoding":"utf8","bytes_read":8,
+                            "next_offset":8,"eof":true,"content_sha256":hex::encode(Sha256::digest(expected)),
+                        }));
+                    }
+                    if mode == "quota" {
+                        server.call(5, request).await?;
+                        let frame = server.response(5).await?;
+                        let reply = envelope(&frame)?;
+                        cleaned(&reply["data"])?;
+                        ensure!(reply["error"]["code"] == "command_failed" && reply["data"]["exit_code"] == 23);
+                        ensure!(reply["data"]["output"] == json!({"status":"unavailable","reason":"resource_limit"}));
+                    } else {
+                        timeout(WAIT, async {
+                            while !controller_output_entries(&temporary)?.is_empty() { sleep(Duration::from_millis(10)).await; }
+                            Ok::<_, anyhow::Error>(())
+                        }).await??;
+                        let reply = controller_output_read(&mut server, 5,
+                            json!({"handle":handle,"stream":"stdout"})).await?;
+                        ensure!(reply["error"]["code"] == "not_found" && reply["error"]["remote_state_unknown"] == false);
+                    }
+                }
+            }
+            fixture.clean().await
+        }.await;
+        let stopped = server.stop(false).await;
+        let clean = fixture.clean().await;
+        scenario.with_context(|| mode)?;
+        stopped?;
+        clean?;
+        if mode == "storage" {
+            ensure!(fs::read(&temporary)? == b"not a directory");
+        } else {
+            ensure!(controller_output_entries(&temporary)?.is_empty());
+        }
+    }
     Ok(())
 }

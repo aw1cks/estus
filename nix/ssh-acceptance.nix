@@ -50,6 +50,21 @@ craneLib.mkCargoDerivation (commonArgs // {
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
       --add-flags '--ignored --nocapture --test-threads=2 ssh_replace_file'
+    makeWrapper "$out/libexec/ssh_local" "$out/bin/output-native" \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
+      --add-flags '--ignored --nocapture --test-threads=2 ssh_output_'
+    makeWrapper "$out/libexec/controller" "$out/bin/output-controller" \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
+      --prefix PATH : ${pkgs.lib.makeBinPath controllerTestPrograms} \
+      --add-flags '--include-ignored --nocapture --test-threads=2 controller_output_'
+    cat > "$out/bin/output-acceptance" <<EOF
+    #!${pkgs.runtimeShell}
+    set -eu
+    "$out/bin/output-native"
+    "$out/bin/output-controller"
+    EOF
+    chmod +x "$out/bin/output-acceptance"
     makeWrapper "$out/libexec/ssh_e2e" "$out/bin/ssh-baseline" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils ]} \

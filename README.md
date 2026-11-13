@@ -226,6 +226,67 @@ retains its existing non-atomic contract.
 `nix run .#replace-file-acceptance-msrv` exercises atomic visibility, metadata,
 failure cleanup and real lost-rename-ack uncertainty with native prerequisites.
 
+## Opt-in bounded command output retrieval
+
+Native shell/argv/sudo commands and configured native/remote/controller scripts
+accept an optional envelope control `retain_output=true`:
+
+```json
+{"host":"server","argv":["/usr/bin/printf","diagnostic output\n"],"retain_output":true}
+```
+
+Execution remains synchronous, with its original remote deadline. By default no
+raw output, artifact directories or handles are retained, and the result's
+`output` field is omitted. Automation module/role/playbook requests reject this
+control: private Runner/control output is never exposed.
+
+A requested result includes `output.status`: `ready` supplies an opaque `handle`,
+expiry and separate stdout/stderr `bytes_retained`, `total_bytes` observed, and
+`truncated` flags. `unavailable` supplies a fixed local reason without changing the
+command's observed exit code, termination, signal, uncertainty or cleanup evidence.
+Inline truncation/lossiness is independent of exact raw artifact bytes.
+
+Use the returned handle with `ssh_read_output(handle, stream, offset, max_bytes,
+encoding)`, where stream is `stdout` or `stderr`. Reads use strict UTF-8 or padded
+lossless base64 and SHA-256 of the returned raw range. `eof` means end of the
+retained prefix, not proof that the original stream was complete. File/read limits
+and actual-ID reply budgeting still apply. The read tool is local and hostless:
+no SSH is opened, no caller pathname is accepted, and expired/unknown/foreign
+process-session handles fail without disclosing secrets. Handles are capabilities;
+keep them private. They and output bytes/paths are excluded from audit records.
+
+Operator-only limits, shown at their defaults:
+
+```toml
+[output]
+enabled = true
+per_stream_bytes = 1048576
+total_bytes = 16777216
+max_handles = 8
+ttl_secs = 300
+```
+
+Per-stream limits allow 1 byte–4 MiB; aggregate storage must cover both stream
+reservations and be at most64 MiB; handles allow1–64 and expiry1–3600 seconds.
+Pending captures/publications, stored artifacts and active read leases retain
+their resource credits. Outstanding read workers are independently bounded, so
+full storage remains readable. Disabled/quota-exhausted retention still executes
+and drains the command, returning an unavailable receipt.
+
+Bounded raw prefixes stay in memory while streams drain: no local storage IO can
+block remote draining. After execution evidence is observed, publication writes
+private mode0600 files in mode0700 request-owned directories, with at most250ms
+local finalization grace. A storage failure never triggers command replay or
+rewrites its result. Ready handles expire even while idle; expiry/shutdown remove
+owned artifacts when active IO leases finish. A running blocking filesystem call
+cannot be forcibly cancelled: its bounded resource owner keeps credits and cleanup
+until it returns and cannot publish after timeout/shutdown. This is not a hard
+shutdown guarantee on a broken OS.
+
+`nix run .#output-acceptance-msrv` exercises real SSH/controller streams, exact
+ranges, expiry, permissions, quota/storage failures and cleanup with native test
+prerequisites.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`
