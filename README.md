@@ -99,6 +99,27 @@ Rust runs the fixed health helper in an isolated, bounded subprocess with privat
 configuration/temp paths and no ambient Ansible configuration or Python search path.
 Process ownership and isolation are not a security sandbox.
 
+## Offline module contracts
+
+Import public metadata from the explicitly selected installed runtime, without
+connecting to a target, executing a module or registering a tool:
+
+```sh
+nix run .#automation-msrv -- schema import ansible.builtin.stat --output ./stat.schema.json
+nix run .#automation-msrv -- schema verify ./stat.schema.json
+```
+
+The wheel public command accepts the same `schema` commands. Output must be new:
+imports never overwrite review. Snapshots retain recursive structure, aliases,
+documentation-only defaults and runtime/selected-collection/source/schema digests.
+Verification reimports actual content and refuses drift, never silently refreshes.
+The snapshot records public ansible-doc metadata, not an executable binding or
+complete runtime argument specification. Preserved prose needs operator review.
+This is not immutable-environment attestation. Hashing the
+selected Ansible/collection source trees does not sandbox trusted code, attest all
+transitive dependencies, or prevent same-user replacement after verification.
+`--timeout-secs` bounds the selected worker; no installer or online catalog runs.
+
 ## Native / Nix
 
 The same application remains available without a Python launcher:

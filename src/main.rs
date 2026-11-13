@@ -10,8 +10,10 @@ mod exec;
 mod filedata;
 mod filemeta;
 mod files;
+mod module_schema;
 mod process;
 mod reply;
+mod schema_import;
 mod server;
 mod ssh;
 mod wire;
@@ -73,9 +75,24 @@ async fn run(config: config::Config, command: Option<config::CliCommand>) -> Exi
     ) else {
         return fail("signal_setup_failed");
     };
-    if let Some(config::CliCommand::Doctor(args)) = command {
+    if let Some(command) = command {
         let shutdown = CancellationToken::new();
-        let operation = doctor::run(config, args, shutdown.clone());
+        let operation = async {
+            match command {
+                config::CliCommand::Doctor(args) => {
+                    doctor::run(config, args, shutdown.clone())
+                        .await
+                        .publish()
+                        .await
+                }
+                config::CliCommand::Schema(args) => {
+                    schema_import::run(config, args, shutdown.clone())
+                        .await
+                        .publish()
+                        .await
+                }
+            }
+        };
         tokio::pin!(operation);
         let report = tokio::select! {
             report = &mut operation => report,
@@ -88,7 +105,7 @@ async fn run(config: config::Config, command: Option<config::CliCommand>) -> Exi
                 operation.as_mut().await
             },
         };
-        return ExitCode::from(report.publish().await);
+        return ExitCode::from(report);
     }
     if config.automation_required() {
         let shutdown = CancellationToken::new();

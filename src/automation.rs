@@ -1,5 +1,5 @@
-//! Optional, explicitly requested import/identity health for a private runtime.
-//! This does not attest execution compatibility or run automation workloads.
+//! Optional selected-runtime health and explicit public module documentation import.
+//! Neither path executes automation workloads or attests execution compatibility.
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -22,6 +22,7 @@ use crate::reply::{ControllerReply, ControllerTermination, GroupCleanup};
 const HEALTH: &str = include_str!("automation_health.py");
 const MANIFEST_LIMIT: usize = 16 * 1024;
 const REPORT_LIMIT: u64 = 16 * 1024;
+const MODULE_REPORT_LIMIT: u64 = 2 * 1024 * 1024 + REPORT_LIMIT;
 const PATH_LIMIT: usize = 4096;
 const DESCRIPTOR_LIMIT: usize = 65_536;
 // A selected descriptor may contain four full paths. Leave bounded room for
@@ -46,6 +47,13 @@ pub(crate) struct RuntimeIdentity {
     pub ansible_runner: String,
     pub collection_bundle: String,
     pub collections: Vec<RuntimeCollection>,
+}
+
+pub(crate) struct ModuleImport {
+    pub identity: RuntimeIdentity,
+    pub document: serde_json::Value,
+    pub content_sha256: String,
+    pub collection: Option<RuntimeCollection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +164,83 @@ enum HealthReport {
         schema: u32,
         error_code: HealthError,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModuleReport {
+    schema: u32,
+    status: ModuleStatus,
+    #[serde(default, deserialize_with = "present_field")]
+    identity: Option<RuntimeIdentity>,
+    #[serde(default, deserialize_with = "present_field")]
+    document: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present_field")]
+    content_sha256: Option<String>,
+    #[serde(default, deserialize_with = "present_field")]
+    collection: Option<Option<RuntimeCollection>>,
+    #[serde(default, deserialize_with = "present_field")]
+    error_code: Option<ModuleError>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ModuleStatus {
+    Passed,
+    Failed,
+}
+
+// Missing fields are None, but explicitly present null is not absence.
+fn present_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+enum RuntimeFailure {
+    NotTested(&'static str),
+    Failed(&'static str),
+}
+
+impl RuntimeFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::NotTested(code) | Self::Failed(code) => code,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ModuleError {
+    InvalidModuleIdentifier,
+    ModuleOutputLimit,
+    ModuleContentLimit,
+    ModuleContentFailed,
+    ModuleContentSymlink,
+    ModuleNotFound,
+    ModuleDocumentationFailed,
+    ModuleIdentifierMismatch,
+    #[serde(untagged)]
+    Health(HealthError),
+}
+
+impl ModuleError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::InvalidModuleIdentifier => "invalid_module_identifier",
+            Self::ModuleOutputLimit => "module_output_limit",
+            Self::ModuleContentLimit => "module_content_limit",
+            Self::ModuleContentFailed => "module_content_failed",
+            Self::ModuleContentSymlink => "module_content_symlink",
+            Self::ModuleNotFound => "module_not_found",
+            Self::ModuleDocumentationFailed => "module_documentation_failed",
+            Self::ModuleIdentifierMismatch => "module_identifier_mismatch",
+            Self::Health(error) => error.code(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -282,7 +367,23 @@ fn public_token(value: &str, limit: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
 }
 
-fn valid_identity(identity: &RuntimeIdentity) -> bool {
+pub(crate) fn valid_collection(collection: &RuntimeCollection) -> bool {
+    let mut parts = collection.name.split('.');
+    let namespace = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    parts.next().is_none()
+        && [namespace, name].iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 64
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+        && public_token(&collection.version, 64)
+        && lower_hash(&collection.manifest_sha256)
+}
+
+pub(crate) fn valid_identity(identity: &RuntimeIdentity) -> bool {
     (match &identity.provenance {
         RuntimeProvenance::NixBundle { runtime_id } => lower_hash(runtime_id),
         RuntimeProvenance::PythonEnvironment {} => true,
@@ -296,21 +397,7 @@ fn valid_identity(identity: &RuntimeIdentity) -> bool {
         .iter()
         .all(|value| public_token(value, 64))
         && (2..=16).contains(&identity.collections.len())
-        && identity.collections.iter().all(|collection| {
-            let mut parts = collection.name.split('.');
-            let namespace = parts.next().unwrap_or_default();
-            let name = parts.next().unwrap_or_default();
-            parts.next().is_none()
-                && [namespace, name].iter().all(|part| {
-                    !part.is_empty()
-                        && part.len() <= 64
-                        && part.bytes().all(|byte| {
-                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
-                        })
-                })
-                && public_token(&collection.version, 64)
-                && lower_hash(&collection.manifest_sha256)
-        })
+        && identity.collections.iter().all(valid_collection)
         && identity
             .collections
             .windows(2)
@@ -390,11 +477,6 @@ fn load(runtime: PathBuf) -> Result<Loaded, &'static str> {
             identity: manifest.identity,
         },
     })
-}
-
-enum RuntimeFailure {
-    NotTested(&'static str),
-    Failed(&'static str),
 }
 
 fn interrupted(ctx: &RuntimeContext<'_>) -> Option<&'static str> {
@@ -490,16 +572,101 @@ fn observed(reply: ControllerReply, source: &Source) -> RuntimeCheck {
 }
 
 pub(crate) async fn check(runtime: Option<PathBuf>, ctx: RuntimeContext<'_>) -> RuntimeCheck {
-    match run_selected(runtime, &ctx).await {
+    match run_selected(runtime, &ctx, None).await {
         Ok((reply, source)) => observed(reply, &source),
         Err(RuntimeFailure::NotTested(code)) => RuntimeCheck::not_tested(code),
         Err(RuntimeFailure::Failed(code)) => RuntimeCheck::failed(code),
     }
 }
 
+pub(crate) async fn import_module(
+    runtime: Option<PathBuf>,
+    module: &str,
+    ctx: RuntimeContext<'_>,
+) -> Result<ModuleImport, &'static str> {
+    if !crate::module_schema::valid_fqcn(module) {
+        return Err("invalid_module_identifier");
+    }
+    let (reply, source) = run_selected(runtime, &ctx, Some(module))
+        .await
+        .map_err(RuntimeFailure::code)?;
+    module_report(&observed_stdout(reply)?, &source, module)
+}
+
+fn module_report(
+    stdout: &str,
+    source: &Source,
+    module: &str,
+) -> Result<ModuleImport, &'static str> {
+    if stdout.len() > MODULE_REPORT_LIMIT as usize {
+        return Err("runtime_protocol_error");
+    }
+    match serde_json::from_str::<ModuleReport>(stdout).map_err(|_| "runtime_protocol_error")? {
+        ModuleReport {
+            schema: 2,
+            status: ModuleStatus::Passed,
+            identity: Some(identity),
+            document: Some(document),
+            content_sha256: Some(content_sha256),
+            collection: Some(collection),
+            error_code: None,
+        } if valid_identity(&identity) && lower_hash(&content_sha256) => {
+            if !matches_source(&identity, source) {
+                return Err("runtime_identity_mismatch");
+            }
+            let collection_name = module
+                .match_indices('.')
+                .nth(1)
+                .map(|(index, _)| &module[..index])
+                .ok_or("runtime_protocol_error")?;
+            match &collection {
+                None if collection_name == "ansible.builtin" => {}
+                Some(selected)
+                    if collection_name != "ansible.builtin"
+                        && selected.name == collection_name
+                        && valid_collection(selected) =>
+                {
+                    if identity
+                        .collections
+                        .iter()
+                        .any(|baseline| baseline.name == selected.name && baseline != selected)
+                    {
+                        return Err("runtime_collection_mismatch");
+                    }
+                }
+                _ => return Err("runtime_collection_mismatch"),
+            }
+            let doc = document
+                .get("doc")
+                .and_then(serde_json::Value::as_object)
+                .ok_or("runtime_protocol_error")?;
+            if doc.get("plugin_name").and_then(serde_json::Value::as_str) != Some(module) {
+                return Err("module_identifier_mismatch");
+            }
+            Ok(ModuleImport {
+                identity,
+                document,
+                content_sha256,
+                collection,
+            })
+        }
+        ModuleReport {
+            schema: 2,
+            status: ModuleStatus::Failed,
+            identity: None,
+            document: None,
+            content_sha256: None,
+            collection: None,
+            error_code: Some(error_code),
+        } => Err(error_code.code()),
+        _ => Err("runtime_protocol_error"),
+    }
+}
+
 async fn run_selected(
     runtime: Option<PathBuf>,
     ctx: &RuntimeContext<'_>,
+    module: Option<&str>,
 ) -> Result<(ControllerReply, Source), RuntimeFailure> {
     if let Some(code) = interrupted(ctx) {
         return Err(RuntimeFailure::NotTested(code));
@@ -531,7 +698,7 @@ async fn run_selected(
     let result = if let Some(code) = interrupted(ctx) {
         Err(RuntimeFailure::NotTested(code))
     } else {
-        run_loaded(loaded, root.path(), ctx).await
+        run_loaded(loaded, root.path(), ctx, module).await
     };
     // The private root outlives the controller's pending process-group owner.
     if !matches!(
@@ -547,9 +714,24 @@ async fn run_loaded(
     loaded: Loaded,
     workspace: &Path,
     ctx: &RuntimeContext<'_>,
+    module: Option<&str>,
 ) -> Result<(ControllerReply, Source), RuntimeFailure> {
-    let input_json = request(&loaded).map_err(RuntimeFailure::Failed)?;
-    let limit = REPORT_LIMIT;
+    let mut input_json = request(&loaded).map_err(RuntimeFailure::Failed)?;
+    if let Some(module) = module {
+        let mut input: serde_json::Value = serde_json::from_slice(&input_json)
+            .map_err(|_| RuntimeFailure::Failed("invalid_runtime_manifest"))?;
+        input["module"] = serde_json::Value::String(module.to_owned());
+        input_json = serde_json::to_vec(&input)
+            .map_err(|_| RuntimeFailure::Failed("invalid_runtime_manifest"))?;
+        if input_json.len() > REQUEST_LIMIT {
+            return Err(RuntimeFailure::Failed("invalid_runtime_manifest"));
+        }
+    }
+    let limit = if module.is_some() {
+        MODULE_REPORT_LIMIT
+    } else {
+        REPORT_LIMIT
+    };
     let prepared = PreparedController {
         plan: Arc::new(ControllerPlan {
             source: Cow::Borrowed(HEALTH),
@@ -997,6 +1179,180 @@ mod tests {
         assert_eq!(
             report(failure, &environment).error_code,
             Some("runtime_import_failed")
+        );
+    }
+}
+
+#[cfg(test)]
+mod module_import_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn identity() -> RuntimeIdentity {
+        RuntimeIdentity {
+            provenance: RuntimeProvenance::PythonEnvironment {},
+            platform: current_platform(),
+            python: "3.14.8".to_owned(),
+            ansible_core: "2.21.5".to_owned(),
+            ansible_runner: "2.4.3".to_owned(),
+            collection_bundle: "14.4.0".to_owned(),
+            collections: ["ansible.posix", "community.general"]
+                .into_iter()
+                .map(|name| RuntimeCollection {
+                    name: name.to_owned(),
+                    version: "1.0.0".to_owned(),
+                    manifest_sha256: "a".repeat(64),
+                })
+                .collect(),
+        }
+    }
+
+    fn source() -> Source {
+        Source::PythonEnvironment {
+            prefix: "/private/selected".to_owned(),
+            package_root: "/private/selected/site/ssh_mcp".to_owned(),
+            scripts: "/private/selected/bin".to_owned(),
+        }
+    }
+
+    #[test]
+    fn module_protocol_binds_identity_document_and_content() {
+        let document = json!({"doc": {
+            "plugin_name": "ansible.builtin.copy", "collection": "ansible.builtin",
+            "filename": "ansible/modules/copy.py", "options": {}
+        }, "examples": "", "return": {}});
+        let base = json!({"schema": 2, "status": "passed", "identity": identity(),
+            "document": document, "content_sha256": "b".repeat(64), "collection": null});
+        let imported = module_report(&base.to_string(), &source(), "ansible.builtin.copy").unwrap();
+        assert_eq!(imported.identity, identity());
+        assert_eq!(imported.document, document);
+        assert_eq!(imported.content_sha256, "b".repeat(64));
+        assert_eq!(imported.collection, None);
+        assert!(!imported.document.to_string().contains("/private"));
+        assert!(matches!(
+            module_report(&base.to_string(), &source(), "ansible.builtin.file"),
+            Err("module_identifier_mismatch")
+        ));
+        let mut changed = base.clone();
+        changed["identity"]["platform"] = json!("wrong-platform");
+        assert!(matches!(
+            module_report(&changed.to_string(), &source(), "ansible.builtin.copy"),
+            Err("runtime_identity_mismatch")
+        ));
+        for field in ["content_sha256", "identity", "document"] {
+            let mut changed = base.clone();
+            changed[field] = json!(null);
+            assert!(
+                module_report(&changed.to_string(), &source(), "ansible.builtin.copy").is_err()
+            );
+        }
+        for error_code in [json!(null), json!("module_not_found")] {
+            let mut changed = base.clone();
+            changed["error_code"] = error_code;
+            assert!(
+                module_report(&changed.to_string(), &source(), "ansible.builtin.copy").is_err()
+            );
+        }
+        for field in ["identity", "document", "content_sha256", "collection"] {
+            for value in [json!(null), base[field].clone()] {
+                let mut changed = json!({"schema": 2, "status": "failed",
+                    "error_code": "module_not_found"});
+                changed[field] = value;
+                assert!(
+                    module_report(&changed.to_string(), &source(), "ansible.builtin.copy").is_err()
+                );
+            }
+        }
+        let mut changed = base.clone();
+        changed["content_sha256"] = json!("B".repeat(64));
+        assert!(module_report(&changed.to_string(), &source(), "ansible.builtin.copy").is_err());
+        let mut changed = base.clone();
+        changed["private_path"] = json!("/private/selected");
+        assert!(module_report(&changed.to_string(), &source(), "ansible.builtin.copy").is_err());
+        assert!(module_report(&format!("{base} {{}}"), &source(), "ansible.builtin.copy").is_err());
+        assert!(
+            module_report(
+                &" ".repeat(MODULE_REPORT_LIMIT as usize + 1),
+                &source(),
+                "ansible.builtin.copy"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_collection_provenance_is_required_and_bound() {
+        for name in ["community.general", "other.collection"] {
+            let selected = RuntimeCollection {
+                name: name.to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest_sha256: "a".repeat(64),
+            };
+            let module = format!("{name}.nested.module");
+            let base = json!({"schema": 2, "status": "passed", "identity": identity(),
+                "document": {"doc": {"plugin_name": module}}, "content_sha256": "b".repeat(64),
+                "collection": selected});
+            let imported = module_report(&base.to_string(), &source(), &module).unwrap();
+            assert_eq!(imported.collection, Some(selected));
+            let mut missing = base.clone();
+            missing.as_object_mut().unwrap().remove("collection");
+            assert!(module_report(&missing.to_string(), &source(), &module).is_err());
+            for changed in [
+                json!(null),
+                json!({"name": "wrong.collection", "version": "1.0.0", "manifest_sha256": "a".repeat(64)}),
+                json!({"name": name, "version": "/private/version", "manifest_sha256": "a".repeat(64)}),
+                json!({"name": name, "version": "1.0.0", "manifest_sha256": "A".repeat(64)}),
+            ] {
+                let mut report = base.clone();
+                report["collection"] = changed;
+                assert!(matches!(
+                    module_report(&report.to_string(), &source(), &module),
+                    Err("runtime_collection_mismatch")
+                ));
+            }
+            if name == "community.general" {
+                let mut drift = base;
+                drift["collection"]["version"] = json!("2.0.0");
+                assert!(matches!(
+                    module_report(&drift.to_string(), &source(), &module),
+                    Err("runtime_collection_mismatch")
+                ));
+            }
+        }
+        let report = json!({"schema": 2, "status": "passed", "identity": identity(),
+            "document": {"doc": {"plugin_name": "ansible.builtin.copy"}},
+            "content_sha256": "b".repeat(64),
+            "collection": {"name": "ansible.builtin", "version": "1.0.0",
+                "manifest_sha256": "a".repeat(64)}});
+        assert!(matches!(
+            module_report(&report.to_string(), &source(), "ansible.builtin.copy"),
+            Err("runtime_collection_mismatch")
+        ));
+    }
+
+    #[test]
+    fn module_failure_codes_are_closed_and_privacy_safe() {
+        for code in [
+            "module_not_found",
+            "module_identifier_mismatch",
+            "module_output_limit",
+            "module_content_limit",
+            "module_content_failed",
+            "module_content_symlink",
+            "module_documentation_failed",
+            "runtime_import_failed",
+            "runtime_check_failed",
+        ] {
+            let report = json!({"schema": 2, "status": "failed", "error_code": code});
+            assert_eq!(
+                module_report(&report.to_string(), &source(), "ansible.builtin.copy").err(),
+                Some(code)
+            );
+        }
+        let report = json!({"schema": 2, "status": "failed", "error_code": "/private/selected"});
+        assert_eq!(
+            module_report(&report.to_string(), &source(), "ansible.builtin.copy").err(),
+            Some("runtime_protocol_error")
         );
     }
 }

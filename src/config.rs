@@ -136,6 +136,8 @@ pub(crate) struct Cli {
 pub(crate) enum CliCommand {
     /// Check runtime health or configured targets without executing automation or commands.
     Doctor(DoctorArgs),
+    /// Import and verify reviewed offline Ansible module contracts; never execute them.
+    Schema(crate::schema_import::SchemaArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
