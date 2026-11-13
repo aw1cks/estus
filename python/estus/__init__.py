@@ -8,9 +8,9 @@ import sys
 
 def main() -> None:
     package_root = Path(__file__).resolve(strict=True).parent
-    executable = package_root / "_bin" / "ssh-mcp"
+    executable = package_root / "_bin" / "estus"
     # Preserve the interpreter pathname: resolving its symlink would lose a venv.
-    os.environ["SSH_MCP_PYTHON_RUNTIME"] = json.dumps(
+    os.environ["ESTUS_PYTHON_RUNTIME"] = json.dumps(
         {
             "schema": 2,
             "interpreter": os.path.abspath(sys.executable),

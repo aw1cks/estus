@@ -3,7 +3,7 @@ requires = ["setuptools==84.2.1", "setuptools-rust==1.13.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ssh-mcp"
+name = "estus"
 version = "0.1.0"
 description = "Stdio MCP server for operator-configured SSH authority"
 readme = "README.md"
@@ -21,14 +21,14 @@ classifiers = [
 ansible = ["ansible==14.4.0", "ansible-core==2.21.5", "ansible-runner==2.4.3"]
 
 [project.scripts]
-ssh-mcp = "ssh_mcp:main"
+estus = "estus:main"
 
 [tool.setuptools.packages.find]
 where = ["python"]
 namespaces = false
 
 [[tool.setuptools-rust.ext-modules]]
-target = { "ssh-mcp" = "ssh_mcp._bin.ssh-mcp" }
+target = { "estus" = "estus._bin.estus" }
 binding = "Exec"
 cargo-manifest-args = ["--locked"]
 rust-version = ">=1.88"

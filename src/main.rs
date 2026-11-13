@@ -174,7 +174,7 @@ async fn run(mut config: config::Config, command: Option<config::CliCommand>) ->
             return fail("automation_runtime_unavailable");
         }
     }
-    let application = match server::SshMcp::new(config) {
+    let application = match server::Estus::new(config) {
         Ok(application) => application,
         Err(error) => return invalid_config(&error),
     };
@@ -193,7 +193,7 @@ fn invalid_config(error: &config::ConfigError) -> ExitCode {
 }
 
 async fn run_session(
-    application: &server::SshMcp,
+    application: &server::Estus,
     interrupt: &mut tokio::signal::unix::Signal,
     terminate: &mut tokio::signal::unix::Signal,
 ) -> ExitCode {

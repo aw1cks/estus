@@ -106,9 +106,9 @@ def environment_paths(payload):
     require(interpreter.is_file() and os.access(interpreter, os.X_OK))
     package_root = absolute_path(payload["package_root"]).resolve(strict=True)
     scripts = absolute_path(payload["scripts"]).resolve(strict=True)
-    require(package_root.name == "ssh_mcp" and (package_root / "__init__.py").is_file()
-            and (package_root / "_bin" / "ssh-mcp").is_file())
-    require(scripts.is_dir() and (scripts / "ssh-mcp").is_file())
+    require(package_root.name == "estus" and (package_root / "__init__.py").is_file()
+            and (package_root / "_bin" / "estus").is_file())
+    require(scripts.is_dir() and (scripts / "estus").is_file())
     paths = sysconfig.get_paths()
     interpreter_sites = list(dict.fromkeys(absolute_path(paths[key]) for key in ("purelib", "platlib")))
     require(all(path.resolve().is_relative_to(prefix.resolve()) for path in interpreter_sites))
@@ -261,7 +261,7 @@ class BoundedOutput(io.StringIO):
         return super().write(value)
 
 
-def content_hash(trees, documented, domain=b"ssh-mcp-module-content-v1\0", skip_generated=True):
+def content_hash(trees, documented, domain=b"estus-module-content-v1\0", skip_generated=True):
     result = hashlib.sha256(domain)
     total = 0
     entries = 0
@@ -468,7 +468,7 @@ def role_content(role, entry_point, role_path, roots):
     # Hash before ansible-doc reads metadata, bounding and rejecting unsafe tree
     # entries first. The common walker retains module hashes exactly as before.
     try:
-        domain = b"ssh-mcp-role-content-v1\0" + role.encode("ascii") + b"\0" + entry_point.encode("ascii") + b"\0"
+        domain = b"estus-role-content-v1\0" + role.encode("ascii") + b"\0" + entry_point.encode("ascii") + b"\0"
         content = content_hash(trees, present[0], domain, skip_generated=False)
     except HealthFailure as error:
         raise HealthFailure(error.code.replace("module_", "role_", 1)) from None
@@ -521,7 +521,7 @@ def playbook_content(playbook, project_root, roots, output=None):
         entry = directory / playbook
         require(entry.exists() and entry.is_file() and not entry.is_symlink(),
                 "playbook_not_found")
-        domain = b"ssh-mcp-playbook-content-v1\0" + playbook.encode("utf-8") + b"\0"
+        domain = b"estus-playbook-content-v1\0" + playbook.encode("utf-8") + b"\0"
         content = content_hash(trees, entry, domain, skip_generated=False)
     except HealthFailure as error:
         raise HealthFailure(error.code.replace("module_", "playbook_", 1)) from None

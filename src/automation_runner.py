@@ -13,8 +13,8 @@ import threading
 import time
 
 
-HOST = "ssh_mcp_target"
-TASK = "ssh_mcp_module"
+HOST = "estus_target"
+TASK = "estus_module"
 LIMIT = 256 * 1024
 
 
@@ -514,7 +514,7 @@ class RoleEvidence(Evidence):
                 self.frames.emit("role_task", outcome=outcome,
                                  changed=None if self.censored else changed,
                                  censored=self.censored, ignored=ignored)
-            collector = (data.get("task") == "ssh_mcp_result" and short == "debug"
+            collector = (data.get("task") == "estus_result" and short == "debug"
                          and data.get("task_path", "").rsplit(":", 1)[0] == self.playbook)
             if collector:
                 require(self.projection is not None and not self.collected)
@@ -726,9 +726,9 @@ def validate(spec):
 
 def selected_runtime(spec, workspace):
     helper = workspace / "health.py"
-    helper.write_text(_SSH_MCP_HEALTH_SOURCE, encoding="utf-8")
-    namespace = {"__name__": "ssh_mcp_health", "__file__": str(helper)}
-    exec(compile(_SSH_MCP_HEALTH_SOURCE, str(helper), "exec"), namespace)
+    helper.write_text(_ESTUS_HEALTH_SOURCE, encoding="utf-8")
+    namespace = {"__name__": "estus_health", "__file__": str(helper)}
+    exec(compile(_ESTUS_HEALTH_SOURCE, str(helper), "exec"), namespace)
     observed, roots = namespace["check"](
         spec["runtime"], role_request=any(key in spec["expected"] for key in ("role", "playbook")))
     expected = spec["expected"]
@@ -810,35 +810,35 @@ def layout(workspace, spec, roots, selected_path):
     (workspace / "control" / "owner.json").write_text(
         json.dumps({"schema": 1, "pid": os.getpid()}, separators=(",", ":")), encoding="ascii")
     project = workspace / "project"
-    document(project / "arguments.yml", {"ssh_mcp_arguments": literal(spec["arguments"])})
+    document(project / "arguments.yml", {"estus_arguments": literal(spec["arguments"])})
     expected = spec["expected"]
     role = "role" in expected
     playbook = "playbook" in expected
     if playbook:
         tasks = []
     elif role:
-        tasks = [{"name": "ssh_mcp_role", "no_log": spec["no_log"],
+        tasks = [{"name": "estus_role", "no_log": spec["no_log"],
                   "ansible.builtin.include_role": {
                       "name": expected["role"], "tasks_from": expected["entry_point"],
                       "public": False, "apply": {"no_log": spec["no_log"], "become": False}},
-                  "vars": {key: "{{ ssh_mcp_arguments['" + key + "'] }}"
+                  "vars": {key: "{{ estus_arguments['" + key + "'] }}"
                            for key in spec["arguments"]}}]
     else:
         tasks = [{"name": TASK, "no_log": spec["no_log"], "become": False,
-                  expected["module"]: {key: "{{ ssh_mcp_arguments['" + key + "'] }}"
+                  expected["module"]: {key: "{{ estus_arguments['" + key + "'] }}"
                                        for key in spec["arguments"]}}]
-    play = {"name": "ssh_mcp_play", "hosts": HOST, "gather_facts": False, "become": False,
+    play = {"name": "estus_play", "hosts": HOST, "gather_facts": False, "become": False,
             "strategy": "linear", "vars_files": ["arguments.yml"], "tasks": tasks}
     if (role or playbook) and spec["projection"] is not None:
         # post_tasks run after ordinary role handlers, so their censorship is
         # known before the only domain-bearing result can leave this process.
-        play["post_tasks"] = [{"name": "ssh_mcp_result", "no_log": spec["no_log"],
+        play["post_tasks"] = [{"name": "estus_result", "no_log": spec["no_log"],
                                "ansible.builtin.debug": {"msg": {
                                    "present": "{{ mcp_result is defined }}",
                                    "value": "{{ mcp_result | default(none) }}"}}}]
     if playbook:
         imported = Path(expected["project_root"]) / expected["playbook"]
-        plays = [{"name": "ssh_mcp_import", "ansible.builtin.import_playbook": str(imported)}]
+        plays = [{"name": "estus_import", "ansible.builtin.import_playbook": str(imported)}]
         if spec["projection"] is not None:
             plays.append(play)
         document(project / "playbook.yml", plays)
@@ -867,7 +867,7 @@ def layout(workspace, spec, roots, selected_path):
         # Only this generated file carries high-precedence backend variables.
         # Caller literals remain nested, never arbitrary Ansible extra vars.
         controls = dict(inventory["all"]["hosts"][HOST])
-        controls["ssh_mcp_arguments"] = literal(spec["arguments"])
+        controls["estus_arguments"] = literal(spec["arguments"])
         document(project / "arguments.yml", controls)
     config = workspace / "ansible.cfg"
     config.write_text("[defaults]\ncollections_scan_sys_path = False\nretry_files_enabled = False\n"
@@ -876,7 +876,7 @@ def layout(workspace, spec, roots, selected_path):
     # A selected uv overlay may not be on the interpreter's isolated sys.path.
     # Rebuild the public CLI's path from health-validated roots, never PYTHONPATH.
     cli = workspace / "control" / "playbook.py"
-    cli.write_text(_SSH_MCP_CLI_SOURCE, encoding="utf-8")
+    cli.write_text(_ESTUS_CLI_SOURCE, encoding="utf-8")
     (workspace / "control" / "playbook_main.py").write_text(
         "import sys, runpy\nsys.path[:] = " + repr(sys.path) +
         "\nrunpy.run_module('ansible.cli.playbook', run_name='__main__')\n", encoding="utf-8")

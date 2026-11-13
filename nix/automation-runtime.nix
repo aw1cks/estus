@@ -20,7 +20,7 @@ let
   });
   collectionSource = "${bundle}/${python.sitePackages}/ansible_collections";
 in
-pkgs.runCommand "ssh-mcp-automation-runtime" {
+pkgs.runCommand "estus-automation-runtime" {
   nativeBuildInputs = [ pkgs.jq pkgs.coreutils ];
 } ''
   mkdir -p "$out/bin" "$out/collections/ansible_collections/ansible" \

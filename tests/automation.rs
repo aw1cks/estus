@@ -67,7 +67,7 @@ impl Local {
             .current_dir(self.root.path())
             .env("HOME", self.root.path())
             .env("XDG_CONFIG_HOME", self.root.path())
-            .env_remove("SSH_MCP_ANSIBLE_RUNTIME");
+            .env_remove("ESTUS_ANSIBLE_RUNTIME");
         Ok(command)
     }
 
@@ -75,7 +75,7 @@ impl Local {
         let binary = installed_path(reference)?;
         let mut command = Command::new(binary);
         for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("SSH_MCP_") {
+            if name.to_string_lossy().starts_with("ESTUS_") {
                 command.env_remove(name);
             }
         }
@@ -109,9 +109,9 @@ impl Local {
             }
         }
         for reference in [
-            "SSH_MCP_TEST_WHEEL_BINARY",
-            "SSH_MCP_TEST_BASE_WHEEL_BINARY",
-            "SSH_MCP_TEST_MUTABLE_PYTHON",
+            "ESTUS_TEST_WHEEL_BINARY",
+            "ESTUS_TEST_BASE_WHEEL_BINARY",
+            "ESTUS_TEST_MUTABLE_PYTHON",
         ] {
             if let Some(binary) = std::env::var_os(reference)
                 && let Some(prefix) = Path::new(&binary).parent().and_then(Path::parent)
@@ -306,14 +306,14 @@ async fn native_startup_ignores_absent_bad_and_disabled_runtime_references() -> 
         "/AUTOMATION_PRIVATE_SENTINEL/no-runtime",
     ] {
         let mut command = missing.command()?;
-        command.env("SSH_MCP_ANSIBLE_RUNTIME", reference);
+        command.env("ESTUS_ANSIBLE_RUNTIME", reference);
         let mut server = Server::start(command)?;
         ensure!(server.catalog().await? == expected);
         server.stop().await?;
     }
     for descriptor in ["{".to_owned(), "x".repeat(65_537)] {
         let mut command = missing.command()?;
-        command.env("SSH_MCP_PYTHON_RUNTIME", descriptor);
+        command.env("ESTUS_PYTHON_RUNTIME", descriptor);
         let mut server = Server::start(command)?;
         ensure!(server.catalog().await? == expected);
         server.stop().await?;
@@ -366,7 +366,7 @@ async fn doctor_runtime_only_and_invalid_targets_are_private_and_network_free() 
         let mut command = fixture.doctor()?;
         command
             .args(&args)
-            .env("SSH_MCP_ANSIBLE_RUNTIME", "relative-private-invalid");
+            .env("ESTUS_ANSIBLE_RUNTIME", "relative-private-invalid");
         let rejected = output(command).await?;
         let expected = if args.contains(&"--timeout-secs") {
             "invalid_timeout"
@@ -419,12 +419,12 @@ async fn automation_config_and_cli_rejections_do_not_disclose_private_values() -
 
 fn real_runtime() -> Result<PathBuf> {
     // Explicit acceptance never silently substitutes a Cargo binary or ambient Python.
-    let binary = std::env::var_os("SSH_MCP_TEST_BINARY")
-        .context("set SSH_MCP_TEST_BINARY to the installed native executable")?;
+    let binary = std::env::var_os("ESTUS_TEST_BINARY")
+        .context("set ESTUS_TEST_BINARY to the installed native executable")?;
     ensure!(Path::new(&binary).is_absolute() && Path::new(&binary).is_file());
     let root = PathBuf::from(
-        std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME")
-            .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME to the shipped runtime")?,
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the shipped runtime")?,
     );
     ensure!(root.is_absolute() && root.join("runtime.json").is_file());
     Ok(root)
@@ -596,7 +596,7 @@ fn runtime_metadata(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>, u32)>> {
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_runtime_imports_are_pinned_isolated_repeatable_and_do_not_register_tools()
 -> Result<()> {
     let root = real_runtime()?;
@@ -655,7 +655,7 @@ async fn real_runtime_imports_are_pinned_isolated_repeatable_and_do_not_register
                 fixture.root.path().join("forbidden-local-temp"),
             )
             .env(
-                "SSH_MCP_ANSIBLE_RUNTIME",
+                "ESTUS_ANSIBLE_RUNTIME",
                 "/AUTOMATION_PRIVATE_SENTINEL/ignored-env",
             );
         let checked = output(command).await?;
@@ -690,12 +690,12 @@ async fn real_runtime_imports_are_pinned_isolated_repeatable_and_do_not_register
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_AUTOMATION_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_AUTOMATION_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime() -> Result<()> {
     let root = real_runtime()?;
     let binary = PathBuf::from(
-        std::env::var_os("SSH_MCP_TEST_AUTOMATION_BINARY")
-            .context("set SSH_MCP_TEST_AUTOMATION_BINARY to the installed automation wrapper")?,
+        std::env::var_os("ESTUS_TEST_AUTOMATION_BINARY")
+            .context("set ESTUS_TEST_AUTOMATION_BINARY to the installed automation wrapper")?,
     );
     ensure!(binary.is_absolute() && binary.is_file());
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
@@ -704,7 +704,7 @@ async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime(
     let wrapper_command = || {
         let mut command = Command::new(&binary);
         for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("SSH_MCP_") {
+            if name.to_string_lossy().starts_with("ESTUS_") {
                 command.env_remove(name);
             }
         }
@@ -714,7 +714,7 @@ async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime(
             .current_dir(fixture.root.path())
             .env("HOME", fixture.root.path())
             .env(
-                "SSH_MCP_ANSIBLE_RUNTIME",
+                "ESTUS_ANSIBLE_RUNTIME",
                 "/AUTOMATION_PRIVATE_SENTINEL/must-be-overridden",
             )
             .kill_on_drop(true);
@@ -758,7 +758,7 @@ fn linked_runtime(actual: &Path, parent: &Path) -> Result<PathBuf> {
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift() -> Result<()> {
     let actual = real_runtime()?;
     let before = runtime_metadata(&actual)?;
@@ -906,7 +906,7 @@ async fn schema_authoring_rejects_invalid_names_and_duplicate_json_without_runti
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_schema_import_review_and_fixed_binding_validation_never_execute() -> Result<()> {
     let root = real_runtime()?;
     let fixture = configured_runtime(&root, false)?;
@@ -1019,7 +1019,7 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_schema_verify_detects_implementation_drift_without_documentation_changes()
 -> Result<()> {
     let actual = real_runtime()?;
@@ -1064,32 +1064,32 @@ mod wheel {
 
     fn environment_descriptor(interpreter: &Path, prefix: &Path) -> Value {
         json!({"schema":2, "interpreter":interpreter, "prefix":prefix,
-            "package_root":prefix.join("lib/python3.14/site-packages/ssh_mcp"),
+            "package_root":prefix.join("lib/python3.14/site-packages/estus"),
             "scripts":prefix.join("bin")})
     }
 
     #[tokio::test]
-    #[ignore = "requires SSH_MCP_TEST_WHEEL_BINARY extra and SSH_MCP_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launchers; no network"]
+    #[ignore = "requires ESTUS_TEST_WHEEL_BINARY extra and ESTUS_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launchers; no network"]
     async fn installed_extra_is_observed_and_required_without_changing_native_catalog() -> Result<()>
     {
-        let prefix = wheel_prefix("SSH_MCP_TEST_WHEEL_BINARY")?;
-        let base_prefix = wheel_prefix("SSH_MCP_TEST_BASE_WHEEL_BINARY")?;
+        let prefix = wheel_prefix("ESTUS_TEST_WHEEL_BINARY")?;
+        let base_prefix = wheel_prefix("ESTUS_TEST_BASE_WHEEL_BINARY")?;
         let native = Local::new("")?;
         let mut baseline =
-            Server::start(native.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?)?;
+            Server::start(native.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?)?;
         let catalog = baseline.catalog().await?;
         baseline.stop().await?;
         let fixture = Local::new("[automation]\nrequired = true\n")?;
         let mut observed = None;
         for _ in 0..2 {
-            let mut command = fixture.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+            let mut command = fixture.installed_command("ESTUS_TEST_WHEEL_BINARY")?;
             command
                 .args(["doctor", "--runtime", "ansible"])
                 // No activation; another real interpreter is first on PATH. The launcher must also
                 // replace a caller's descriptor instead of trusting this broken selection.
                 .env("PATH", base_prefix.join("bin"))
                 .env_remove("VIRTUAL_ENV")
-                .env("SSH_MCP_PYTHON_RUNTIME", "{");
+                .env("ESTUS_PYTHON_RUNTIME", "{");
             let checked = output(command).await?;
             let identity = observed_environment_identity(&report(&checked, 0)?, &prefix)?;
             if let Some(previous) = &observed {
@@ -1101,7 +1101,7 @@ mod wheel {
             observed = Some(identity);
             fixture.private(&checked)?;
         }
-        let mut command = fixture.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let mut command = fixture.installed_command("ESTUS_TEST_WHEEL_BINARY")?;
         command
             .env("PATH", base_prefix.join("bin"))
             .env_remove("VIRTUAL_ENV");
@@ -1120,21 +1120,21 @@ mod wheel {
     }
 
     #[tokio::test]
-    #[ignore = "requires SSH_MCP_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launcher without Ansible; no network"]
+    #[ignore = "requires ESTUS_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launcher without Ansible; no network"]
     async fn installed_base_remains_native_only_and_requested_extra_fails_before_mcp() -> Result<()>
     {
         let native = Local::new("")?;
         let mut server =
-            Server::start(native.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?)?;
+            Server::start(native.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?)?;
         server.catalog().await?;
         server.stop().await?;
         let required = Local::new("[automation]\nrequired = true\n")?;
-        let mut doctor = required.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?;
+        let mut doctor = required.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?;
         doctor.args(["doctor", "--runtime", "ansible"]);
         let checked = output(doctor).await?;
         runtime_failed(&report(&checked, 1)?, "runtime_import_failed")?;
         required.private(&checked)?;
-        let startup = output(required.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?).await?;
+        let startup = output(required.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?).await?;
         ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
         let error: Value = serde_json::from_slice(&startup.stderr)?;
         ensure!(error["event"] == "error" && error["code"] == "automation_runtime_unavailable");
@@ -1142,26 +1142,26 @@ mod wheel {
     }
 
     #[tokio::test]
-    #[ignore = "requires SSH_MCP_TEST_WHEEL_BINARY, SSH_MCP_TEST_BINARY raw native, and SSH_MCP_TEST_ANSIBLE_RUNTIME Nix bundle; no network"]
+    #[ignore = "requires ESTUS_TEST_WHEEL_BINARY, ESTUS_TEST_BINARY raw native, and ESTUS_TEST_ANSIBLE_RUNTIME Nix bundle; no network"]
     async fn explicit_bundle_config_and_environment_precede_launcher_without_fallback() -> Result<()>
     {
         let root = real_runtime()?;
         let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
         let expected = bundle_identity(&manifest)?;
         let configured = configured_runtime(&root, false)?;
-        let mut command = configured.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let mut command = configured.installed_command("ESTUS_TEST_WHEEL_BINARY")?;
         command.args(["doctor", "--runtime", "ansible"]).env(
-            "SSH_MCP_ANSIBLE_RUNTIME",
+            "ESTUS_ANSIBLE_RUNTIME",
             "/AUTOMATION_PRIVATE_SENTINEL/broken",
         );
         let checked = output(command).await?;
         ensure!(report(&checked, 0)?["runtime"]["identity"] == expected);
         configured.private(&checked)?;
         let selected = Local::new("")?;
-        let mut command = selected.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let mut command = selected.installed_command("ESTUS_TEST_WHEEL_BINARY")?;
         command
             .args(["doctor", "--runtime", "ansible"])
-            .env("SSH_MCP_ANSIBLE_RUNTIME", &root);
+            .env("ESTUS_ANSIBLE_RUNTIME", &root);
         let checked = output(command).await?;
         ensure!(report(&checked, 0)?["runtime"]["identity"] == expected);
         selected.private(&checked)?;
@@ -1176,15 +1176,15 @@ mod wheel {
             } else {
                 std::ffi::OsStr::new("/AUTOMATION_PRIVATE_SENTINEL/broken")
             };
-            let mut command = broken.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+            let mut command = broken.installed_command("ESTUS_TEST_WHEEL_BINARY")?;
             command
                 .args(["doctor", "--runtime", "ansible"])
-                .env("SSH_MCP_ANSIBLE_RUNTIME", reference);
+                .env("ESTUS_ANSIBLE_RUNTIME", reference);
             let checked = output(command).await?;
             runtime_failed(&report(&checked, 1)?, "runtime_unavailable")?;
             broken.private(&checked)?;
-            let mut command = broken.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
-            command.env("SSH_MCP_ANSIBLE_RUNTIME", reference);
+            let mut command = broken.installed_command("ESTUS_TEST_WHEEL_BINARY")?;
+            command.env("ESTUS_ANSIBLE_RUNTIME", reference);
             let startup = output(command).await?;
             ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
             let error: Value = serde_json::from_slice(&startup.stderr)?;
@@ -1195,12 +1195,12 @@ mod wheel {
     }
 
     #[tokio::test]
-    #[ignore = "requires SSH_MCP_TEST_BINARY raw native plus SSH_MCP_TEST_WHEEL_BINARY and SSH_MCP_TEST_BASE_WHEEL_BINARY Python3.14 environments; no network"]
+    #[ignore = "requires ESTUS_TEST_BINARY raw native plus ESTUS_TEST_WHEEL_BINARY and ESTUS_TEST_BASE_WHEEL_BINARY Python3.14 environments; no network"]
     async fn selected_environment_worker_ignores_toxic_python_ansible_cwd_and_executable_path()
     -> Result<()> {
-        installed_path("SSH_MCP_TEST_BINARY")?;
-        let prefix = wheel_prefix("SSH_MCP_TEST_WHEEL_BINARY")?;
-        let base = wheel_prefix("SSH_MCP_TEST_BASE_WHEEL_BINARY")?;
+        installed_path("ESTUS_TEST_BINARY")?;
+        let prefix = wheel_prefix("ESTUS_TEST_WHEEL_BINARY")?;
+        let base = wheel_prefix("ESTUS_TEST_BASE_WHEEL_BINARY")?;
         let interpreter = prefix.join("bin/python");
         ensure!(interpreter.is_file());
         ensure!(
@@ -1231,7 +1231,7 @@ mod wheel {
         let descriptor = environment_descriptor(&interpreter, &prefix).to_string();
         let mut command = fixture.doctor()?;
         command
-            .env("SSH_MCP_PYTHON_RUNTIME", &descriptor)
+            .env("ESTUS_PYTHON_RUNTIME", &descriptor)
             .env("PATH", &poisoned)
             .env("VIRTUAL_ENV", &base)
             .env("PYTHONPATH", fixture.root.path())
@@ -1257,7 +1257,7 @@ mod wheel {
         ensure!(!fixture.root.path().join("forbidden-local-temp").exists());
         let mut missing_package = environment_descriptor(&interpreter, &prefix);
         missing_package["package_root"] =
-            json!(fixture.root.path().join("missing-package/ssh_mcp"));
+            json!(fixture.root.path().join("missing-package/estus"));
         let mut missing_scripts = environment_descriptor(&interpreter, &prefix);
         missing_scripts["scripts"] = json!(fixture.root.path().join("missing-scripts"));
         for bad_descriptor in [
@@ -1268,7 +1268,7 @@ mod wheel {
         ] {
             let mut command = fixture.doctor()?;
             command
-                .env("SSH_MCP_PYTHON_RUNTIME", bad_descriptor.to_string())
+                .env("ESTUS_PYTHON_RUNTIME", bad_descriptor.to_string())
                 .env("PATH", prefix.join("bin"));
             let checked = output(command).await?;
             let value = report(&checked, 1)?;
@@ -1283,27 +1283,27 @@ mod wheel {
     }
 
     #[tokio::test]
-    #[ignore = "requires raw SSH_MCP_TEST_BINARY, SSH_MCP_TEST_WHEEL_BINARY, SSH_MCP_TEST_BASE_WHEEL_BINARY, owned copied SSH_MCP_TEST_MUTABLE_PYTHON and SSH_MCP_TEST_MUTABLE_PREFIX; no network"]
+    #[ignore = "requires raw ESTUS_TEST_BINARY, ESTUS_TEST_WHEEL_BINARY, ESTUS_TEST_BASE_WHEEL_BINARY, owned copied ESTUS_TEST_MUTABLE_PYTHON and ESTUS_TEST_MUTABLE_PREFIX; no network"]
     async fn owned_environment_reports_manifest_observations_and_rejects_real_asset_drift()
     -> Result<()> {
-        installed_path("SSH_MCP_TEST_BINARY")?;
-        let interpreter = installed_path("SSH_MCP_TEST_MUTABLE_PYTHON")?;
+        installed_path("ESTUS_TEST_BINARY")?;
+        let interpreter = installed_path("ESTUS_TEST_MUTABLE_PYTHON")?;
         let prefix = PathBuf::from(
-            std::env::var_os("SSH_MCP_TEST_MUTABLE_PREFIX").context("set owned mutable prefix")?,
+            std::env::var_os("ESTUS_TEST_MUTABLE_PREFIX").context("set owned mutable prefix")?,
         );
         ensure!(prefix.is_absolute() && prefix.is_dir());
         ensure!(interpreter.parent() == Some(prefix.join("bin").as_path()));
         // Refuse the supplied original environments even if accidentally configured as mutable.
         for reference in [
-            "SSH_MCP_TEST_WHEEL_BINARY",
-            "SSH_MCP_TEST_BASE_WHEEL_BINARY",
+            "ESTUS_TEST_WHEEL_BINARY",
+            "ESTUS_TEST_BASE_WHEEL_BINARY",
         ] {
             ensure!(fs::canonicalize(&prefix)? != fs::canonicalize(wheel_prefix(reference)?)?);
         }
         let descriptor = environment_descriptor(&interpreter, &prefix).to_string();
         let fixture = Local::new("[automation]\nrequired = true\n")?;
         let mut command = fixture.doctor()?;
-        command.env("SSH_MCP_PYTHON_RUNTIME", &descriptor);
+        command.env("ESTUS_PYTHON_RUNTIME", &descriptor);
         let checked = output(command).await?;
         let original = observed_environment_identity(&report(&checked, 0)?, &prefix)?;
         fixture.private(&checked)?;
@@ -1331,7 +1331,7 @@ mod wheel {
                 "mutable assets must not resolve outside their owned environment"
             );
             let mut command = fixture.doctor()?;
-            command.env("SSH_MCP_PYTHON_RUNTIME", &descriptor);
+            command.env("ESTUS_PYTHON_RUNTIME", &descriptor);
             let bytes = fs::read(path)?;
             match case {
                 "observed_hash" => {
@@ -1382,17 +1382,17 @@ mod wheel {
             fixture.private(&checked)?;
         }
         let mut command = fixture.doctor()?;
-        command.env("SSH_MCP_PYTHON_RUNTIME", descriptor);
+        command.env("ESTUS_PYTHON_RUNTIME", descriptor);
         let checked = output(command).await?;
         ensure!(observed_environment_identity(&report(&checked, 0)?, &prefix)? == original);
         fixture.private(&checked)
     }
 
     #[tokio::test]
-    #[ignore = "requires raw SSH_MCP_TEST_BINARY and an installed SSH_MCP_TEST_WHEEL_BINARY extra; no network"]
+    #[ignore = "requires raw ESTUS_TEST_BINARY and an installed ESTUS_TEST_WHEEL_BINARY extra; no network"]
     async fn schema_import_uses_selected_environment_without_ambient_python_or_execution()
     -> Result<()> {
-        let prefix = wheel_prefix("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let prefix = wheel_prefix("ESTUS_TEST_WHEEL_BINARY")?;
         let fixture = Local::new("")?;
         let snapshot = fixture.root.path().join("ping.json");
         let descriptor = environment_descriptor(&prefix.join("bin/python"), &prefix).to_string();
@@ -1407,7 +1407,7 @@ mod wheel {
             .args(["schema", "import", "ansible.builtin.ping"])
             .arg("--output")
             .arg(&snapshot)
-            .env("SSH_MCP_PYTHON_RUNTIME", &descriptor)
+            .env("ESTUS_PYTHON_RUNTIME", &descriptor)
             .env("PYTHONPATH", fixture.root.path())
             .env("PATH", "/nonexistent");
         let imported = output(command).await?;
@@ -1419,7 +1419,7 @@ mod wheel {
         command
             .args(["schema", "verify"])
             .arg(&snapshot)
-            .env("SSH_MCP_PYTHON_RUNTIME", descriptor)
+            .env("ESTUS_PYTHON_RUNTIME", descriptor)
             .env("PATH", "/nonexistent");
         let verified = output(command).await?;
         schema_report(&fixture, &verified, true)?;
@@ -1428,7 +1428,7 @@ mod wheel {
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_schema_import_refuses_unreadable_snapshot_envelope() -> Result<()> {
     let fixture = configured_runtime(&real_runtime()?, false)?;
     let overlay = fixture.root.path().join("boundary.json");
@@ -1512,7 +1512,7 @@ fn role_import_command(
     entry: &str,
     snapshot: &Path,
 ) -> Result<Command> {
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command
         .args(["schema", "import-role", role, "--entry-point", entry])
         .arg("--role-path")
@@ -1523,7 +1523,7 @@ fn role_import_command(
 }
 
 fn role_verify_command(fixture: &Local, snapshot: &Path, source: &Path) -> Result<Command> {
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command
         .args(["schema", "verify-role"])
         .arg(snapshot)
@@ -1562,7 +1562,7 @@ fn role_snapshot(fixture: &Local, path: &Path) -> Result<Value> {
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_role_schema_argspec_aliases_required_defaults_entrypoints_and_drift() -> Result<()> {
     let fixture = configured_runtime(&real_runtime()?, false)?;
     let argspec = r#"argument_specs:
@@ -1768,7 +1768,7 @@ async fn real_role_schema_argspec_aliases_required_defaults_entrypoints_and_drif
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_role_schema_missing_argspec_explicit_nested_schema_and_conditional_overlay()
 -> Result<()> {
     let fixture = configured_runtime(&real_runtime()?, false)?;
@@ -1854,7 +1854,7 @@ async fn real_role_schema_missing_argspec_explicit_nested_schema_and_conditional
         role_no_effects(&fixture)?;
     }
     // Verification must be supplied an exact source again, not search ambient roles.
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command.args(["schema", "verify-role"]).arg(&snapshot);
     let rejected = output(command).await?;
     ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "role_source_required");
@@ -1862,7 +1862,7 @@ async fn real_role_schema_missing_argspec_explicit_nested_schema_and_conditional
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_role_schema_rejects_malformed_sources_and_explicit_contracts() -> Result<()> {
     let fixture = configured_runtime(&real_runtime()?, false)?;
     let role = standalone_role(&fixture, "selection", None)?;
@@ -1920,7 +1920,7 @@ async fn real_role_schema_rejects_malformed_sources_and_explicit_contracts() -> 
         }
         ensure!(!snapshot.exists());
     }
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command
         .args([
             "schema",
@@ -2003,7 +2003,7 @@ async fn real_role_schema_rejects_malformed_sources_and_explicit_contracts() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> {
     let actual = real_runtime()?;
     let owner = tempfile::tempdir()?;
@@ -2034,7 +2034,7 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
     let selected = collection.join("roles/probe");
     fs::rename(role, &selected)?;
     let inside = collection.join("review.json");
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command
         .args(["schema", "import-role", "acceptance.tools.probe"])
         .arg("--output")
@@ -2045,7 +2045,7 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
     );
     ensure!(!inside.exists());
     let snapshot = fixture.root.path().join("collection.json");
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command
         .args(["schema", "import-role", "acceptance.tools.probe"])
         .arg("--output")
@@ -2055,14 +2055,14 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
     let value = role_snapshot(&fixture, &snapshot)?;
     ensure!(value["collection"]["name"] == "acceptance.tools");
     ensure!(value["contract"]["schema"]["properties"]["count"]["type"] == "integer");
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command.args(["schema", "verify-role"]).arg(&snapshot);
     schema_report(&fixture, &output(command).await?, true)?;
     fs::write(
         selected.join("tasks/main.yml"),
         "[]\n# changed implementation\n",
     )?;
-    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command.args(["schema", "verify-role"]).arg(&snapshot);
     let rejected = output(command).await?;
     ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
@@ -2070,7 +2070,7 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_role_schema_embedded_argspec_rejects_colon_and_literal_variable_parents() -> Result<()>
 {
     let fixture = configured_runtime(&real_runtime()?, false)?;
@@ -2111,7 +2111,7 @@ async fn real_role_schema_embedded_argspec_rejects_colon_and_literal_variable_pa
 }
 
 #[tokio::test]
-#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
 async fn real_role_schema_rejects_output_inside_source_and_symlinked_parent() -> Result<()> {
     let fixture = configured_runtime(&real_runtime()?, false)?;
     let role = standalone_role(

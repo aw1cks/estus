@@ -53,27 +53,27 @@ struct Acceptance {
 
 impl Acceptance {
     async fn start() -> Result<Self> {
-        let runtime = match std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME") {
+        let runtime = match std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME") {
             Some(path) => RuntimeSource::Bundle(fs::canonicalize(path)?),
             None => {
                 let launcher = support::executable(Path::new(
-                    &std::env::var_os("SSH_MCP_TEST_WHEEL_BINARY")
-                        .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME or SSH_MCP_TEST_WHEEL_BINARY")?,
+                    &std::env::var_os("ESTUS_TEST_WHEEL_BINARY")
+                        .context("set ESTUS_TEST_ANSIBLE_RUNTIME or ESTUS_TEST_WHEEL_BINARY")?,
                 ))?;
                 let selected = support::executable(Path::new(
-                    &std::env::var_os("SSH_MCP_TEST_BINARY")
-                        .context("installed runtime acceptance requires SSH_MCP_TEST_BINARY to select the public wheel launcher")?,
+                    &std::env::var_os("ESTUS_TEST_BINARY")
+                        .context("installed runtime acceptance requires ESTUS_TEST_BINARY to select the public wheel launcher")?,
                 ))?;
                 ensure!(
                     fs::canonicalize(launcher)? == fs::canonicalize(selected)?,
-                    "SSH_MCP_TEST_BINARY must select SSH_MCP_TEST_WHEEL_BINARY for installed runtime acceptance"
+                    "ESTUS_TEST_BINARY must select ESTUS_TEST_WHEEL_BINARY for installed runtime acceptance"
                 );
                 RuntimeSource::InstalledLauncher
             }
         };
         let python = support::executable(Path::new(
-            &std::env::var_os("SSH_MCP_TEST_TARGET_PYTHON")
-                .context("set SSH_MCP_TEST_TARGET_PYTHON to the pinned target interpreter")?,
+            &std::env::var_os("ESTUS_TEST_TARGET_PYTHON")
+                .context("set ESTUS_TEST_TARGET_PYTHON to the pinned target interpreter")?,
         ))?;
         let mut fixture = Fixture::start().await?;
         // The second existing isolated listener supplies a real refused SSH destination.
@@ -698,7 +698,7 @@ async fn projection_reducer_probes(a: &Acceptance) -> Result<()> {
     let interpreter = match &a.runtime {
         RuntimeSource::Bundle(root) => root.join("python/bin/python"),
         RuntimeSource::InstalledLauncher => PathBuf::from(
-            std::env::var_os("SSH_MCP_TEST_WHEEL_BINARY")
+            std::env::var_os("ESTUS_TEST_WHEEL_BINARY")
                 .context("installed launcher for reducer interpreter")?,
         )
         .parent()
@@ -714,7 +714,7 @@ async fn projection_reducer_probes(a: &Acceptance) -> Result<()> {
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     fs::write(source.path(), include_str!("../src/automation_runner.py"))?;
-    let bridge = "import json,runpy,sys; module=runpy.run_path(sys.argv[1],run_name='ssh_mcp_projection_probe'); plan=json.loads(sys.argv[2]); result=json.loads(sys.argv[3]); print(json.dumps(module['Projection'](plan).reduce(result,False)))";
+    let bridge = "import json,runpy,sys; module=runpy.run_path(sys.argv[1],run_name='estus_projection_probe'); plan=json.loads(sys.argv[2]); result=json.loads(sys.argv[3]); print(json.dumps(module['Projection'](plan).reduce(result,False)))";
     let cases = [
         (
             projection_result(
@@ -1189,8 +1189,8 @@ async fn scenarios(a: &mut Acceptance) -> Result<()> {
 #[ignore = "requires automation Nix fixture artifact, explicit DOCKER_HOST, Nix Docker CLI and pinned Runner runtime"]
 async fn real_runner_isolated_fixture_smoke() -> Result<()> {
     let runtime = fs::canonicalize(
-        std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME")
-            .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
     )?;
     let private = tempfile::Builder::new()
         .prefix("runner-isolated-private-")
@@ -1920,7 +1920,7 @@ if __name__ == "__main__":
     )?;
     fs::write(
         project.join("templates/document.json.j2"),
-        "{{ {'instance': ssh_mcp_arguments.instance, 'config': ssh_mcp_arguments.config, 'source': reviewed_label} | to_json }}\n",
+        "{{ {'instance': estus_arguments.instance, 'config': estus_arguments.config, 'source': reviewed_label} | to_json }}\n",
     )?;
     fs::write(
         project.join("tasks/first.yml"),
@@ -1931,13 +1931,13 @@ if __name__ == "__main__":
         r#"---
 - name: Prove first play executed
   ansible.builtin.copy:
-    dest: "{{ ssh_mcp_arguments.first_marker }}"
+    dest: "{{ estus_arguments.first_marker }}"
     content: first-play
     mode: '0600'
 - name: Render reviewed project template with literal caller data
   ansible.builtin.template:
     src: "{{ playbook_dir }}/templates/document.json.j2"
-    dest: "{{ ssh_mcp_arguments.destination }}"
+    dest: "{{ estus_arguments.destination }}"
     mode: '0600'
 "#,
     )?;
@@ -1959,20 +1959,20 @@ if __name__ == "__main__":
   tasks:
     - name: Prove second play executed
       ansible.builtin.copy:
-        dest: "{{ ssh_mcp_arguments.second_marker }}"
+        dest: "{{ estus_arguments.second_marker }}"
         content: second-play
         mode: '0600'
     - name: Read actual converged bytes
       reviewed.fixture.read_file:
-        path: "{{ ssh_mcp_arguments.destination }}"
+        path: "{{ estus_arguments.destination }}"
       register: observed_document
     - name: Publish typed receipt
       ansible.builtin.set_fact:
         mcp_result:
-          instance: "{{ ssh_mcp_arguments.instance }}"
-          path: "{{ ssh_mcp_arguments.destination }}"
+          instance: "{{ estus_arguments.instance }}"
+          path: "{{ estus_arguments.destination }}"
           checksum: "{{ observed_document.content | b64decode | hash('sha256') }}"
-          verified: "{{ (observed_document.content | b64decode | from_json).config == ssh_mcp_arguments.config }}"
+          verified: "{{ (observed_document.content | b64decode | from_json).config == estus_arguments.config }}"
 "#,
     )?;
     fs::write(
@@ -1984,7 +1984,7 @@ if __name__ == "__main__":
   tasks:
     - name: Mutate before ordinary failure
       ansible.builtin.copy:
-        dest: "{{ ssh_mcp_arguments.first_marker }}"
+        dest: "{{ estus_arguments.first_marker }}"
         content: partial-change
         mode: '0600'
     - name: Deliberate known failure
@@ -2007,7 +2007,7 @@ if __name__ == "__main__":
         r#"---
 - name: Observable drift workload
   ansible.builtin.copy:
-    dest: "{{ ssh_mcp_arguments.first_marker }}"
+    dest: "{{ estus_arguments.first_marker }}"
     content: drift-workload-ran
     mode: '0600'
 "#,

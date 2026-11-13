@@ -2067,7 +2067,7 @@ mod tests {
             "become",
             "connection",
             "interpreter",
-            "ssh_mcp_arguments",
+            "estus_arguments",
         ] {
             for field in ["fixed_args", "input_map"] {
                 let mut raw = playbook_definition();
@@ -2158,7 +2158,7 @@ mod tests {
     fn role_backend_controls_are_rejected_even_without_activation() {
         for name in [
             "mcp_result",
-            "ssh_mcp_arguments",
+            "estus_arguments",
             "ansible_connection",
             "connection",
             "become_user",

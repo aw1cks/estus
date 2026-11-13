@@ -33,8 +33,8 @@ pub enum ImageKind {
 impl ImageKind {
     fn prefix(self) -> &'static str {
         match self {
-            Self::Native => "ssh-mcp-fixture:",
-            Self::Automation => "ssh-mcp-automation-fixture:",
+            Self::Native => "estus-fixture:",
+            Self::Automation => "estus-automation-fixture:",
         }
     }
 }
@@ -48,7 +48,7 @@ struct Artifact {
 impl Artifact {
     fn read(directory: &Path, kind: ImageKind) -> Result<Self> {
         let mut names = fs::read_dir(directory)
-            .context("SSH_MCP_TEST_FIXTURE must name the built artifact directory")?
+            .context("ESTUS_TEST_FIXTURE must name the built artifact directory")?
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<std::io::Result<Vec<_>>>()?;
         names.sort();
@@ -286,8 +286,8 @@ impl Fixture {
 
     async fn start_image(kind: ImageKind, extra: &str) -> Result<Self> {
         // All malformed/missing artifact boundaries precede CLI/SDK side effects.
-        let directory = std::env::var_os("SSH_MCP_TEST_FIXTURE")
-            .context("set SSH_MCP_TEST_FIXTURE to the Nix-built three-file artifact directory")?;
+        let directory = std::env::var_os("ESTUS_TEST_FIXTURE")
+            .context("set ESTUS_TEST_FIXTURE to the Nix-built three-file artifact directory")?;
         let artifact = Artifact::read(Path::new(&directory), kind)?;
         let docker = Docker::explicit()?;
         let root = tempfile::tempdir()?;
@@ -345,7 +345,7 @@ impl Fixture {
         }
         for (index, host_key) in ["host-primary", "host-nosftp"].into_iter().enumerate() {
             let name = format!(
-                "ssh-mcp-{}-{index}",
+                "estus-{}-{index}",
                 self.root
                     .path()
                     .file_name()
@@ -379,7 +379,7 @@ impl Fixture {
                 StrictModes yes
                 PermitUserRC no
                 LogLevel DEBUG2
-                AcceptEnv SSH_MCP V03_HOST V03_MATCH V03_INCLUDE
+                AcceptEnv ESTUS V03_HOST V03_MATCH V03_INCLUDE
                 UsePAM no
                 AllowTcpForwarding yes
             "}
@@ -910,7 +910,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         ensure!(Artifact::read(root.path(), ImageKind::Native).is_err());
         fs::write(root.path().join("image.tar.gz"), b"archive")?;
-        fs::write(root.path().join("image-ref"), "ssh-mcp-fixture:abc123\n")?;
+        fs::write(root.path().join("image-ref"), "estus-fixture:abc123\n")?;
         fs::write(
             root.path().join("image-id"),
             format!("sha256:{}\n", "a".repeat(64)),
@@ -919,15 +919,15 @@ mod tests {
         ensure!(Artifact::read(root.path(), ImageKind::Automation).is_err());
         fs::write(
             root.path().join("image-ref"),
-            "ssh-mcp-automation-fixture:abc123\n",
+            "estus-automation-fixture:abc123\n",
         )?;
         Artifact::read(root.path(), ImageKind::Automation)?;
         ensure!(Artifact::read(root.path(), ImageKind::Native).is_err());
-        fs::write(root.path().join("image-ref"), "ssh-mcp-fixture:abc123\n")?;
+        fs::write(root.path().join("image-ref"), "estus-fixture:abc123\n")?;
         for reference in [
-            "ssh-mcp-fixture:latest",
+            "estus-fixture:latest",
             "other:abc123",
-            "ssh-mcp-fixture:abc\nsecond",
+            "estus-fixture:abc\nsecond",
         ] {
             fs::write(root.path().join("image-ref"), reference)?;
             ensure!(
@@ -935,7 +935,7 @@ mod tests {
                 "accepted invalid image reference"
             );
         }
-        fs::write(root.path().join("image-ref"), "ssh-mcp-fixture:abc123")?;
+        fs::write(root.path().join("image-ref"), "estus-fixture:abc123")?;
         for digest in [
             "a".repeat(64),
             format!("sha256:{}", "A".repeat(64)),

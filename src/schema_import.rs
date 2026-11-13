@@ -276,7 +276,7 @@ pub(crate) fn write_document(path: &Path, document: &impl Serialize) -> Result<(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut file = tempfile::Builder::new()
-        .prefix(".ssh-mcp-schema-")
+        .prefix(".estus-schema-")
         .permissions(Permissions::from_mode(0o600))
         .tempfile_in(parent)
         .map_err(|_| "schema_output_failed")?;

@@ -463,14 +463,14 @@ pub(crate) fn runner_runtime(
     runtime: Option<PathBuf>,
     workspace_root: Arc<Path>,
 ) -> Result<RunnerRuntime, &'static str> {
-    let loaded = load_selected(runtime, || std::env::var_os("SSH_MCP_PYTHON_RUNTIME"))?;
+    let loaded = load_selected(runtime, || std::env::var_os("ESTUS_PYTHON_RUNTIME"))?;
     let payload =
         serde_json::from_slice(&request(&loaded)?).map_err(|_| "invalid_runtime_manifest")?;
     let literal = serde_json::to_string(HEALTH).map_err(|_| "invalid_runtime_manifest")?;
     let cli_literal = serde_json::to_string(include_str!("automation_cli.py"))
         .map_err(|_| "invalid_runtime_manifest")?;
     let source = format!(
-        "_SSH_MCP_HEALTH_SOURCE = {literal}\n_SSH_MCP_CLI_SOURCE = {cli_literal}\n{}",
+        "_ESTUS_HEALTH_SOURCE = {literal}\n_ESTUS_CLI_SOURCE = {cli_literal}\n{}",
         include_str!("automation_runner.py")
     );
     let mut environment = BTreeMap::new();
@@ -1027,7 +1027,7 @@ async fn run_selected(
     }
     // Retain started blocking I/O ownership even during cancellation.
     let loaded = tokio::task::spawn_blocking(move || {
-        load_selected(runtime, || std::env::var_os("SSH_MCP_PYTHON_RUNTIME"))
+        load_selected(runtime, || std::env::var_os("ESTUS_PYTHON_RUNTIME"))
     })
     .await;
     if let Some(code) = interrupted(ctx) {
@@ -1040,7 +1040,7 @@ async fn run_selected(
     };
     let root = match tokio::task::spawn_blocking(|| {
         tempfile::Builder::new()
-            .prefix("ssh-mcp-runtime-")
+            .prefix("estus-runtime-")
             .permissions(Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
     })
@@ -1487,7 +1487,7 @@ mod tests {
         );
         let environment = Source::PythonEnvironment {
             prefix: "/private/venv".to_owned(),
-            package_root: "/private/venv/lib/python3.14/site-packages/ssh_mcp".to_owned(),
+            package_root: "/private/venv/lib/python3.14/site-packages/estus".to_owned(),
             scripts: "/private/venv/bin".to_owned(),
         };
         let mut observed_identity = bundle_identity.clone();
@@ -1588,7 +1588,7 @@ mod module_import_tests {
     fn source() -> Source {
         Source::PythonEnvironment {
             prefix: "/private/selected".to_owned(),
-            package_root: "/private/selected/site/ssh_mcp".to_owned(),
+            package_root: "/private/selected/site/estus".to_owned(),
             scripts: "/private/selected/bin".to_owned(),
         }
     }

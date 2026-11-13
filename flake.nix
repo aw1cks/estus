@@ -59,55 +59,55 @@
         inherit (defaultBuild) package acceptance;
         automationRuntime = import ./nix/automation-runtime.nix { inherit pkgs; };
         wheel = import ./nix/wheel.nix { inherit pkgs; craneLib = msrvLib; };
-        wheelAcceptance = pkgs.runCommand "ssh-mcp-wheel-acceptance" {
+        wheelAcceptance = pkgs.runCommand "estus-wheel-acceptance" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
         } ''
           mkdir -p "$out/bin"
           makeWrapper ${msrvBuild.acceptance}/libexec/wheel "$out/bin/wheel-acceptance" \
-            --set SSH_MCP_TEST_WHEEL ${wheel}/${wheel.wheelName} \
-            --set SSH_MCP_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
-            --set SSH_MCP_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
-            --set SSH_MCP_TEST_AUTOMATION_SUITE ${msrvBuild.acceptance}/libexec/automation \
-            --set SSH_MCP_TEST_BINARY ${msrvBuild.package}/bin/ssh-mcp \
-            --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+            --set ESTUS_TEST_WHEEL ${wheel}/${wheel.wheelName} \
+            --set ESTUS_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
+            --set ESTUS_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
+            --set ESTUS_TEST_AUTOMATION_SUITE ${msrvBuild.acceptance}/libexec/automation \
+            --set ESTUS_TEST_BINARY ${msrvBuild.package}/bin/estus \
+            --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
             --prefix PATH : ${pkgs.lib.makeBinPath (
               [ pkgs.uv pkgs.openssh pkgs.coreutils pkgs.bash pkgs.unzip pkgs.llvmPackages.llvm ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
             )} \
             --add-flags '--ignored --nocapture --test-threads=1'
         '';
-        withAutomation = native: pkgs.runCommand "ssh-mcp-automation-${native.version}" {
+        withAutomation = native: pkgs.runCommand "estus-automation-${native.version}" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
-          meta.mainProgram = "ssh-mcp";
+          meta.mainProgram = "estus";
         } ''
           mkdir -p "$out/bin"
-          makeWrapper ${native}/bin/ssh-mcp "$out/bin/ssh-mcp" \
-            --set SSH_MCP_ANSIBLE_RUNTIME ${automationRuntime}
+          makeWrapper ${native}/bin/estus "$out/bin/estus" \
+            --set ESTUS_ANSIBLE_RUNTIME ${automationRuntime}
         '';
         automation = withAutomation package;
         automationMsrv = withAutomation msrvBuild.package;
         automationAcceptance = native: harness: optional:
-          pkgs.runCommand "ssh-mcp-automation-acceptance" {
+          pkgs.runCommand "estus-automation-acceptance" {
             nativeBuildInputs = [ pkgs.makeWrapper ];
           } ''
             mkdir -p "$out/bin"
             # Wheel cases require separately provisioned installer environments.
             makeWrapper ${harness}/libexec/automation "$out/bin/automation-acceptance" \
-              --set SSH_MCP_TEST_BINARY ${native}/bin/ssh-mcp \
-              --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
-              --set SSH_MCP_TEST_AUTOMATION_BINARY ${optional}/bin/ssh-mcp \
+              --set ESTUS_TEST_BINARY ${native}/bin/estus \
+              --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+              --set ESTUS_TEST_AUTOMATION_BINARY ${optional}/bin/estus \
               --add-flags '--include-ignored --nocapture --test-threads=2 --skip wheel::'
           '';
         runnerAcceptance = native: harness:
-          pkgs.runCommand "ssh-mcp-runner-acceptance" {
+          pkgs.runCommand "estus-runner-acceptance" {
             nativeBuildInputs = [ pkgs.makeWrapper ];
           } ''
             mkdir -p "$out/bin"
             ${pkgs.lib.concatMapStrings (entry: ''
             makeWrapper ${harness}/libexec/automation_exec "$out/bin/${entry.name}" \
-              --set SSH_MCP_TEST_BINARY ${native}/bin/ssh-mcp \
-              --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
-              --set SSH_MCP_TEST_TARGET_PYTHON ${pkgs.python314}/bin/python3 \
+              --set ESTUS_TEST_BINARY ${native}/bin/estus \
+              --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+              --set ESTUS_TEST_TARGET_PYTHON ${pkgs.python314}/bin/python3 \
               --prefix PATH : ${pkgs.lib.makeBinPath (
                 [ pkgs.openssh pkgs.coreutils pkgs.bash ]
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
@@ -144,15 +144,15 @@
         };
         apps.default = {
           type = "app";
-          program = "${package}/bin/ssh-mcp";
+          program = "${package}/bin/estus";
         };
         apps.automation = {
           type = "app";
-          program = "${automation}/bin/ssh-mcp";
+          program = "${automation}/bin/estus";
         };
         apps.automation-msrv = {
           type = "app";
-          program = "${automationMsrv}/bin/ssh-mcp";
+          program = "${automationMsrv}/bin/estus";
         };
         apps.automation-acceptance = {
           type = "app";

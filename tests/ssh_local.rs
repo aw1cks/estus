@@ -395,9 +395,9 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         "bare PATH executable failed"
     );
     for program in [
-        "SSH_MCP_MISSING_EXECUTABLE_8f19=value",
+        "ESTUS_MISSING_EXECUTABLE_8f19=value",
         "if",
-        "-SSH_MCP_MISSING_EXECUTABLE_8f19",
+        "-ESTUS_MISSING_EXECUTABLE_8f19",
     ] {
         let reply = client
             .call("ssh_run", json!({"host":"plain","argv":[program]}))
@@ -1607,17 +1607,17 @@ async fn ssh_setenv_isolation() -> Result<()> {
     // would reach the inner exec literally. This validated Nix path needs none.
     let guard = format!(
         concat!(
-            "[ \"$SSH_MCP\" = 1 ] && ",
-            "[ \"${{SSH_MCP_H04_HOST+x}}\" != x ] && ",
-            "[ \"${{SSH_MCP_H04_MATCH+x}}\" != x ] && ",
-            "[ \"${{SSH_MCP_H04_INCLUDE+x}}\" != x ] || exit 93; exec {}"
+            "[ \"$ESTUS\" = 1 ] && ",
+            "[ \"${{ESTUS_H04_HOST+x}}\" != x ] && ",
+            "[ \"${{ESTUS_H04_MATCH+x}}\" != x ] && ",
+            "[ \"${{ESTUS_H04_INCLUDE+x}}\" != x ] || exit 93; exec {}"
         ),
         server.display(),
     );
     let subsystem = format!("/bin/sh -c {}", quote(&guard));
     let fixture = Fixture::start_with_sftp_subsystem(
         indoc! {"
-        AcceptEnv SSH_MCP SSH_MCP_H04_HOST SSH_MCP_H04_MATCH SSH_MCP_H04_INCLUDE
+        AcceptEnv ESTUS ESTUS_H04_HOST ESTUS_H04_MATCH ESTUS_H04_INCLUDE
     "},
         &subsystem,
     )
@@ -1626,19 +1626,19 @@ async fn ssh_setenv_isolation() -> Result<()> {
         let controls = [
             (
                 "plain",
-                "SSH_MCP_H04_HOST",
+                "ESTUS_H04_HOST",
                 "h04-host-secret",
                 "operator-host",
             ),
             (
                 "viajump",
-                "SSH_MCP_H04_MATCH",
+                "ESTUS_H04_MATCH",
                 "h04-match-secret",
                 "operator-match",
             ),
             (
                 "nosftp",
-                "SSH_MCP_H04_INCLUDE",
+                "ESTUS_H04_INCLUDE",
                 "h04-include-secret",
                 "operator-include",
             ),
@@ -1648,7 +1648,7 @@ async fn ssh_setenv_isolation() -> Result<()> {
             &inherited,
             indoc! {"
             Host nosftp
-                SetEnv SSH_MCP_H04_INCLUDE=h04-include-secret SSH_MCP=operator-include
+                SetEnv ESTUS_H04_INCLUDE=h04-include-secret ESTUS=operator-include
             Host *
         "},
         )?;
@@ -1657,9 +1657,9 @@ async fn ssh_setenv_isolation() -> Result<()> {
             &fixture.ssh_config,
             formatdoc! {"
             Host plain
-                SetEnv SSH_MCP_H04_HOST=h04-host-secret SSH_MCP=operator-host
+                SetEnv ESTUS_H04_HOST=h04-host-secret ESTUS=operator-host
             Match originalhost viajump
-                SetEnv SSH_MCP_H04_MATCH=h04-match-secret SSH_MCP=operator-match
+                SetEnv ESTUS_H04_MATCH=h04-match-secret ESTUS=operator-match
             Host nosftp
                 Port {sftp_port}
             Host *
@@ -1674,7 +1674,7 @@ async fn ssh_setenv_isolation() -> Result<()> {
         // Positive controls prove each configured source reaches real sessions
         // when used by ordinary OpenSSH, rather than relying on ssh -G.
         for &(host, variable, secret, marker) in &controls {
-            let command = format!("printf '%s:%s' \"${variable}\" \"$SSH_MCP\"");
+            let command = format!("printf '%s:%s' \"${variable}\" \"$ESTUS\"");
             let output = fixture.direct(host, &command).await?;
             let expected = format!("{secret}:{marker}");
             ensure!(
@@ -1689,10 +1689,10 @@ async fn ssh_setenv_isolation() -> Result<()> {
 
         let client = Client::start(&fixture.config).await?;
         let probe = indoc! {r#"
-            printf '%s:%s:%s:%s' "$SSH_MCP" \
-                "${SSH_MCP_H04_HOST+x}" \
-                "${SSH_MCP_H04_MATCH+x}" \
-                "${SSH_MCP_H04_INCLUDE+x}"
+            printf '%s:%s:%s:%s' "$ESTUS" \
+                "${ESTUS_H04_HOST+x}" \
+                "${ESTUS_H04_MATCH+x}" \
+                "${ESTUS_H04_INCLUDE+x}"
         "#};
         let commands = async {
             for &(host, _, _, _) in &controls {

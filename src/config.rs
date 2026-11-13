@@ -115,16 +115,16 @@ impl ToolCatalog {
 }
 
 #[derive(Parser)]
-#[command(version, about = "Stdio SSH MCP server")]
+#[command(version, about = "Estus: operator-controlled SSH over MCP")]
 pub(crate) struct Cli {
     /// Operator TOML configuration; no file is discovered automatically.
-    #[arg(long, global = true, env = "SSH_MCP_CONFIG", hide_env_values = true)]
+    #[arg(long, global = true, env = "ESTUS_CONFIG", hide_env_values = true)]
     config: Option<PathBuf>,
     /// Replacement OpenSSH configuration (not an overlay).
     #[arg(
         long,
         global = true,
-        env = "SSH_MCP_SSH_CONFIG",
+        env = "ESTUS_SSH_CONFIG",
         hide_env_values = true
     )]
     ssh_config: Option<PathBuf>,
@@ -533,7 +533,7 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         let config_path = cli
             .config
-            .or_else(|| env("SSH_MCP_CONFIG").map(PathBuf::from));
+            .or_else(|| env("ESTUS_CONFIG").map(PathBuf::from));
         let (mut document, base) = if let Some(path) = config_path {
             let path = resolve_path(path, cwd, "config")?;
             let text = std::fs::read_to_string(&path)
@@ -552,7 +552,7 @@ impl Config {
 
         let ssh_override = cli
             .ssh_config
-            .or_else(|| env("SSH_MCP_SSH_CONFIG").map(PathBuf::from));
+            .or_else(|| env("ESTUS_SSH_CONFIG").map(PathBuf::from));
         let ssh_config = match ssh_override {
             Some(path) => Some(resolve_path(path, cwd, "ssh.config_file")?),
             None => document
@@ -587,27 +587,27 @@ impl Config {
         for (field, variable, limit) in [
             (
                 "limits.connect_timeout_secs",
-                "SSH_MCP_CONNECT_TIMEOUT_SECS",
+                "ESTUS_CONNECT_TIMEOUT_SECS",
                 &mut limits.connect_timeout_secs,
             ),
             (
                 "limits.operation_timeout_secs",
-                "SSH_MCP_OPERATION_TIMEOUT_SECS",
+                "ESTUS_OPERATION_TIMEOUT_SECS",
                 &mut limits.operation_timeout_secs,
             ),
             (
                 "limits.max_timeout_secs",
-                "SSH_MCP_MAX_TIMEOUT_SECS",
+                "ESTUS_MAX_TIMEOUT_SECS",
                 &mut limits.max_timeout_secs,
             ),
             (
                 "limits.max_output_bytes",
-                "SSH_MCP_MAX_OUTPUT_BYTES",
+                "ESTUS_MAX_OUTPUT_BYTES",
                 &mut limits.max_output_bytes,
             ),
             (
                 "limits.max_file_bytes",
-                "SSH_MCP_MAX_FILE_BYTES",
+                "ESTUS_MAX_FILE_BYTES",
                 &mut limits.max_file_bytes,
             ),
         ] {
@@ -751,7 +751,7 @@ impl Config {
         if let Some(path) = &self.automation.runtime {
             return Ok(Some(path.clone()));
         }
-        env("SSH_MCP_ANSIBLE_RUNTIME")
+        env("ESTUS_ANSIBLE_RUNTIME")
             .map(|value| {
                 let value = value.to_str().ok_or_else(|| {
                     invalid("automation.runtime", "must be a bounded absolute path")
@@ -779,7 +779,7 @@ impl Config {
             .automation
             .ssh_executable
             .clone()
-            .or_else(|| std::env::var_os("SSH_MCP_AUTOMATION_SSH").map(PathBuf::from))
+            .or_else(|| std::env::var_os("ESTUS_AUTOMATION_SSH").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/usr/bin/ssh"));
         let text = ssh.to_str().ok_or_else(|| {
             invalid(
@@ -1539,9 +1539,9 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
 
     #[test]
     fn doctor_is_optional_and_accepts_repeated_explicit_targets() {
-        assert!(Cli::try_parse_from(["ssh-mcp"]).unwrap().command.is_none());
+        assert!(Cli::try_parse_from(["estus"]).unwrap().command.is_none());
         let parsed = Cli::try_parse_from([
-            "ssh-mcp",
+            "estus",
             "doctor",
             "--target",
             "two",
@@ -1558,7 +1558,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
         assert_eq!(args.timeout_secs, Some(7));
         assert_eq!(args.runtime, None);
 
-        let parsed = Cli::try_parse_from(["ssh-mcp", "doctor", "--target", "one"]).unwrap();
+        let parsed = Cli::try_parse_from(["estus", "doctor", "--target", "one"]).unwrap();
         let Some(CliCommand::Doctor(args)) = parsed.command else {
             panic!("doctor subcommand expected");
         };
@@ -1568,9 +1568,9 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
     #[test]
     fn doctor_runtime_selection_allows_no_targets_or_combined_targets() {
         for argv in [
-            vec!["ssh-mcp", "doctor", "--runtime", "ansible"],
+            vec!["estus", "doctor", "--runtime", "ansible"],
             vec![
-                "ssh-mcp",
+                "estus",
                 "doctor",
                 "--runtime",
                 "ansible",
@@ -1585,11 +1585,11 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
             assert_eq!(args.runtime, Some(RuntimeKind::Ansible));
         }
         for argv in [
-            vec!["ssh-mcp", "doctor", "--runtime"],
-            vec!["ssh-mcp", "doctor", "--runtime", "unknown"],
-            vec!["ssh-mcp", "--runtime", "ansible"],
+            vec!["estus", "doctor", "--runtime"],
+            vec!["estus", "doctor", "--runtime", "unknown"],
+            vec!["estus", "--runtime", "ansible"],
             vec![
-                "ssh-mcp",
+                "estus",
                 "doctor",
                 "--runtime",
                 "ansible",
@@ -1608,17 +1608,17 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
     #[test]
     fn doctor_requires_named_selection_and_exposes_no_execution_controls() {
         for args in [
-            vec!["ssh-mcp", "doctor"],
-            vec!["ssh-mcp", "doctor", "one"],
-            vec!["ssh-mcp", "doctor", "--target"],
-            vec!["ssh-mcp", "doctor", "--target", "one", "two"],
-            vec!["ssh-mcp", "doctor", "--all"],
-            vec!["ssh-mcp", "doctor", "--target", "one", "--sudo"],
-            vec!["ssh-mcp", "doctor", "--target", "one", "--host", "private"],
-            vec!["ssh-mcp", "doctor", "--target", "one", "--command", "id"],
-            vec!["ssh-mcp", "doctor", "--target", "one", "--identity", "key"],
+            vec!["estus", "doctor"],
+            vec!["estus", "doctor", "one"],
+            vec!["estus", "doctor", "--target"],
+            vec!["estus", "doctor", "--target", "one", "two"],
+            vec!["estus", "doctor", "--all"],
+            vec!["estus", "doctor", "--target", "one", "--sudo"],
+            vec!["estus", "doctor", "--target", "one", "--host", "private"],
+            vec!["estus", "doctor", "--target", "one", "--command", "id"],
+            vec!["estus", "doctor", "--target", "one", "--identity", "key"],
             vec![
-                "ssh-mcp",
+                "estus",
                 "doctor",
                 "--target",
                 "one",
@@ -1642,7 +1642,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
         std::fs::write(dir.path().join("selected-ssh"), "").unwrap();
         for argv in [
             vec![
-                "ssh-mcp",
+                "estus",
                 "--config",
                 "nested/operator.toml",
                 "--ssh-config",
@@ -1652,7 +1652,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
                 "one",
             ],
             vec![
-                "ssh-mcp",
+                "estus",
                 "doctor",
                 "--target",
                 "one",
@@ -1665,7 +1665,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
             let parsed = Cli::try_parse_from(argv).unwrap();
             assert!(matches!(parsed.command, Some(CliCommand::Doctor(_))));
             let config = Config::load_with(parsed, dir.path(), |key| match key {
-                "SSH_MCP_CONFIG" | "SSH_MCP_SSH_CONFIG" => Some("missing-env-private".into()),
+                "ESTUS_CONFIG" | "ESTUS_SSH_CONFIG" => Some("missing-env-private".into()),
                 _ => None,
             })
             .unwrap();
@@ -2174,8 +2174,8 @@ result = { kind = "command" }
             "[targets.one]\nssh_host='ordinary'\n{}\n[tools.observe.limits]\nmax_output_bytes=100",
             binding_definition(),
         );
-        assert!(load_text(&text, &[("SSH_MCP_MAX_OUTPUT_BYTES", "99")]).is_err());
-        assert!(load_text(&text, &[("SSH_MCP_MAX_OUTPUT_BYTES", "100")]).is_ok());
+        assert!(load_text(&text, &[("ESTUS_MAX_OUTPUT_BYTES", "99")]).is_err());
+        assert!(load_text(&text, &[("ESTUS_MAX_OUTPUT_BYTES", "100")]).is_ok());
     }
 
     #[test]
@@ -2835,11 +2835,11 @@ programs=['/private/program']
         let config = load_text(
             text,
             &[
-                ("SSH_MCP_CONNECT_TIMEOUT_SECS", "7"),
-                ("SSH_MCP_OPERATION_TIMEOUT_SECS", "8"),
-                ("SSH_MCP_MAX_TIMEOUT_SECS", "9"),
-                ("SSH_MCP_MAX_OUTPUT_BYTES", "20000000"),
-                ("SSH_MCP_MAX_FILE_BYTES", "30000000"),
+                ("ESTUS_CONNECT_TIMEOUT_SECS", "7"),
+                ("ESTUS_OPERATION_TIMEOUT_SECS", "8"),
+                ("ESTUS_MAX_TIMEOUT_SECS", "9"),
+                ("ESTUS_MAX_OUTPUT_BYTES", "20000000"),
+                ("ESTUS_MAX_FILE_BYTES", "30000000"),
             ],
         )
         .unwrap();
@@ -2906,14 +2906,14 @@ programs=['/private/program']
         std::fs::write(cwd.join("env-ssh"), "").unwrap();
         std::fs::write(cwd.join("cli-ssh"), "").unwrap();
         let env = |key: &str| match key {
-            "SSH_MCP_CONFIG" => Some(OsString::from("nested/operator.toml")),
+            "ESTUS_CONFIG" => Some(OsString::from("nested/operator.toml")),
             _ => None,
         };
         let from_toml = Config::load_with(cli(), cwd, env).unwrap();
         assert_eq!(from_toml.ssh_config.unwrap(), cwd.join("nested/./$HOME"));
         let env = |key: &str| match key {
-            "SSH_MCP_CONFIG" => Some(OsString::from("nested/operator.toml")),
-            "SSH_MCP_SSH_CONFIG" => Some(OsString::from("env-ssh")),
+            "ESTUS_CONFIG" => Some(OsString::from("nested/operator.toml")),
+            "ESTUS_SSH_CONFIG" => Some(OsString::from("env-ssh")),
             _ => None,
         };
         let from_env = Config::load_with(cli(), cwd, env).unwrap();
@@ -2926,8 +2926,8 @@ programs=['/private/program']
             },
             cwd,
             |key| match key {
-                "SSH_MCP_CONFIG" => Some("missing-secret".into()),
-                "SSH_MCP_SSH_CONFIG" => Some("missing-secret".into()),
+                "ESTUS_CONFIG" => Some("missing-secret".into()),
+                "ESTUS_SSH_CONFIG" => Some("missing-secret".into()),
                 _ => None,
             },
         )
@@ -2975,7 +2975,7 @@ programs=['/private/program']
             .is_err()
         );
         assert!(
-            Config::load_with(cli(), dir.path(), |key| (key == "SSH_MCP_CONFIG")
+            Config::load_with(cli(), dir.path(), |key| (key == "ESTUS_CONFIG")
                 .then(|| OsString::from("")))
             .is_err()
         );
@@ -2984,8 +2984,8 @@ programs=['/private/program']
     #[test]
     fn environment_wins_and_limits_are_positive_and_bounded() {
         let config = load_text("[limits]\nconnect_timeout_secs=2\noperation_timeout_secs=3\nmax_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6", &[
-            ("SSH_MCP_CONNECT_TIMEOUT_SECS", "7"), ("SSH_MCP_OPERATION_TIMEOUT_SECS", "8"),
-            ("SSH_MCP_MAX_TIMEOUT_SECS", "9"), ("SSH_MCP_MAX_OUTPUT_BYTES", "10"), ("SSH_MCP_MAX_FILE_BYTES", "11"),
+            ("ESTUS_CONNECT_TIMEOUT_SECS", "7"), ("ESTUS_OPERATION_TIMEOUT_SECS", "8"),
+            ("ESTUS_MAX_TIMEOUT_SECS", "9"), ("ESTUS_MAX_OUTPUT_BYTES", "10"), ("ESTUS_MAX_FILE_BYTES", "11"),
         ]).unwrap();
         assert_eq!(
             (
@@ -3009,7 +3009,7 @@ programs=['/private/program']
             "18446744073709551616",
         ] {
             assert!(
-                load_text("", &[("SSH_MCP_MAX_FILE_BYTES", value)]).is_err(),
+                load_text("", &[("ESTUS_MAX_FILE_BYTES", value)]).is_err(),
                 "{value:?}"
             );
         }
@@ -3027,7 +3027,7 @@ programs=['/private/program']
                 );
             }
         }
-        assert!(load_text("", &[("SSH_MCP_MAX_TIMEOUT_SECS", "59")]).is_err());
+        assert!(load_text("", &[("ESTUS_MAX_TIMEOUT_SECS", "59")]).is_err());
         assert!(load_text("[limits]\nconnect_timeout_secs=601", &[]).is_err());
         assert!(
             load_text(
@@ -3042,7 +3042,7 @@ programs=['/private/program']
     fn automation_loading_never_reads_the_runtime_environment() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load_with(cli(), dir.path(), |key| {
-            assert_ne!(key, "SSH_MCP_ANSIBLE_RUNTIME");
+            assert_ne!(key, "ESTUS_ANSIBLE_RUNTIME");
             None
         })
         .unwrap();
@@ -3074,7 +3074,7 @@ programs=['/private/program']
         assert_eq!(
             config
                 .automation_runtime_with(|key| {
-                    assert_eq!(key, "SSH_MCP_ANSIBLE_RUNTIME");
+                    assert_eq!(key, "ESTUS_ANSIBLE_RUNTIME");
                     Some("/nonexistent-private-runtime".into())
                 })
                 .unwrap(),
@@ -3238,7 +3238,7 @@ programs=['/private/program']
     fn absence_of_config_does_not_discover_local_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("ssh-mcp.toml"),
+            dir.path().join("estus.toml"),
             "invalid syntax secret_payload",
         )
         .unwrap();
@@ -3252,7 +3252,7 @@ programs=['/private/program']
         use std::os::unix::ffi::OsStringExt;
         let dir = tempfile::tempdir().unwrap();
         let error = Config::load_with(cli(), dir.path(), |key| {
-            (key == "SSH_MCP_MAX_FILE_BYTES").then(|| OsString::from_vec(vec![0xff]))
+            (key == "ESTUS_MAX_FILE_BYTES").then(|| OsString::from_vec(vec![0xff]))
         })
         .err()
         .expect("non-Unicode limit must fail");

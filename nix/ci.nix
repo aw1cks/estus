@@ -84,7 +84,7 @@
               {
                 name = "Run packaged MSRV native SSH acceptance";
                 run = ''
-                  runtime=$(mktemp -d "$HOME/.ssh-mcp-native.XXXXXXXX")
+                  runtime=$(mktemp -d "$HOME/.estus-native.XXXXXXXX")
                   trap 'rm -rf -- "$runtime"' EXIT
                   XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native-msrv
                 '';
@@ -160,7 +160,7 @@
         inherit name;
         text = ''
           : "''${DOCKER_HOST:?set DOCKER_HOST to the Docker-compatible Unix socket}"
-          export SSH_MCP_TEST_FIXTURE=${config.packages.ssh-fixture-image}
+          export ESTUS_TEST_FIXTURE=${config.packages.ssh-fixture-image}
           ${acceptance}/bin/ssh-stdio
           exec ${acceptance}/bin/ssh-baseline
         '';

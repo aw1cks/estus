@@ -43,7 +43,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct SshMcp {
+pub(crate) struct Estus {
     tool_router: ToolRouter<Self>,
     state: Arc<State>,
 }
@@ -70,8 +70,8 @@ struct Empty {}
 // reflects malformed input values or field names in diagnostics.
 struct Arguments<T>(T);
 
-impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, SshMcp>> for Arguments<T> {
-    fn from_context_part(context: &mut ToolCallContext<'_, SshMcp>) -> Result<Self, ErrorData> {
+impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, Estus>> for Arguments<T> {
+    fn from_context_part(context: &mut ToolCallContext<'_, Estus>) -> Result<Self, ErrorData> {
         serde_json::from_value(serde_json::Value::Object(
             context.arguments.take().unwrap_or_default(),
         ))
@@ -191,7 +191,7 @@ fn automation_output_schema(plan: Option<&crate::projection::Plan>) -> Arc<JsonO
     )
 }
 
-impl SshMcp {
+impl Estus {
     pub(crate) fn new(config: Config) -> Result<Self, ConfigError> {
         if config.bindings().entries().any(|(id, binding)| {
             binding.is_automation() && config.binding_enabled(id) && !binding.automation_activated()
@@ -863,7 +863,7 @@ impl SshMcp {
     }
 }
 
-impl SshMcp {
+impl Estus {
     #[tool(
         name = "ssh_targets",
         description = "Discover configured logical targets, public advisory descriptions/labels, startup-permitted operations and resolved policy limits without connecting or probing. Permitted operations do not imply remote support or authorization; observed capabilities remain unknown. Limits are ceilings, further constrained by per-request escaping, request IDs and the response-wire budget. Open mode returns no target inventory and never enumerates SSH configuration. Backend aliases, credential/config paths and authentication state are not returned.",
@@ -1581,7 +1581,7 @@ impl State {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for SshMcp {
+impl ServerHandler for Estus {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
             rmcp::model::Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),

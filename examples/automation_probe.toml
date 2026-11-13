@@ -9,7 +9,7 @@ enabled_tools = ["automation_probe"]
 ssh_host = "server-ordinary"
 
 [automation]
-workspace_root = "/var/lib/ssh-mcp/runner"
+workspace_root = "/var/lib/estus/runner"
 max_concurrent = 2
 max_scratch_bytes = 16777216
 max_scratch_files = 512
@@ -24,7 +24,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["probe"]
-execution = { kind = "ansible_module", snapshot = "/etc/ssh-mcp/ping.schema.json", no_log = false }
+execution = { kind = "ansible_module", snapshot = "/etc/estus/ping.schema.json", no_log = false }
 input_schema = { type = "object", properties = {}, additionalProperties = false }
 fixed_args = { data = "pong" }
 input_map = {}

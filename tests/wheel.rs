@@ -39,7 +39,7 @@ impl Installed {
     fn new() -> Result<Self> {
         // Keep cached launcher shebangs and native Unix socket paths short on Darwin.
         let root = tempfile::Builder::new()
-            .prefix("ssh-mcp-wheel-")
+            .prefix("estus-wheel-")
             .tempdir_in("/tmp")?;
         for directory in [
             "home",
@@ -108,12 +108,12 @@ impl Installed {
         self.root
             .path()
             .join(if extra { "tools-extra" } else { "tools-base" })
-            .join("ssh-mcp/bin/ssh-mcp")
+            .join("estus/bin/estus")
     }
 
     async fn python(&self) -> Result<PathBuf> {
-        let python = if std::env::var_os("SSH_MCP_TEST_PYTHON").is_some() {
-            input("SSH_MCP_TEST_PYTHON")?
+        let python = if std::env::var_os("ESTUS_TEST_PYTHON").is_some() {
+            input("ESTUS_TEST_PYTHON")?
         } else {
             checked(self.uv().args(["python", "install", "--no-bin", "3.14"])).await?;
             // Query output is data; uv's global quiet mode suppresses it.
@@ -322,20 +322,20 @@ async fn ordinary_ssh(installed: &Installed) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "downloads managed Python/Ansible; requires portable wheel, installed suites, Nix OpenSSH/coreutils, trusted temporary ancestry and non-root account"]
 async fn installed_wheel_channels() -> Result<()> {
-    let wheel = input("SSH_MCP_TEST_WHEEL")?;
+    let wheel = input("ESTUS_TEST_WHEEL")?;
     ensure!(
         wheel
             .extension()
             .is_some_and(|extension| extension == "whl"),
         "expected an actual wheel file"
     );
-    let stdio = executable(&input("SSH_MCP_TEST_STDIO_SUITE")?)?;
-    let controller = executable(&input("SSH_MCP_TEST_CONTROLLER_SUITE")?)?;
-    let automation = executable(&input("SSH_MCP_TEST_AUTOMATION_SUITE")?)?;
-    let native = executable(&input("SSH_MCP_TEST_BINARY")?)?;
+    let stdio = executable(&input("ESTUS_TEST_STDIO_SUITE")?)?;
+    let controller = executable(&input("ESTUS_TEST_CONTROLLER_SUITE")?)?;
+    let automation = executable(&input("ESTUS_TEST_AUTOMATION_SUITE")?)?;
+    let native = executable(&input("ESTUS_TEST_BINARY")?)?;
     let runtime = PathBuf::from(
-        std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME")
-            .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME")?,
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME")?,
     );
     ensure!(
         runtime.is_absolute() && runtime.join("runtime.json").is_file(),
@@ -394,7 +394,7 @@ async fn installed_wheel_channels() -> Result<()> {
                         .arg(&python)
                         .args(["--no-python-downloads", "--from"])
                         .arg(requirement)
-                        .arg("ssh-mcp");
+                        .arg("estus");
                     command
                 }
                 Channel::Run => {
@@ -404,7 +404,7 @@ async fn installed_wheel_channels() -> Result<()> {
                         .arg(&python)
                         .args(["--no-python-downloads", "--with"])
                         .arg(requirement)
-                        .arg("ssh-mcp");
+                        .arg("estus");
                     command
                 }
             }
@@ -484,7 +484,7 @@ async fn installed_wheel_channels() -> Result<()> {
         installed
             .command(&stdio)
             .args(["--nocapture", "--test-threads=1"])
-            .env("SSH_MCP_TEST_BINARY", installed.launcher(false)),
+            .env("ESTUS_TEST_BINARY", installed.launcher(false)),
     )
     .await?;
     for case in [
@@ -495,7 +495,7 @@ async fn installed_wheel_channels() -> Result<()> {
             installed
                 .command(&controller)
                 .args(["--include-ignored", "--exact", case, "--nocapture"])
-                .env("SSH_MCP_TEST_BINARY", installed.launcher(true)),
+                .env("ESTUS_TEST_BINARY", installed.launcher(true)),
         )
         .await?;
     }
@@ -526,12 +526,12 @@ async fn installed_wheel_channels() -> Result<()> {
         installed
             .command(&automation)
             .args(["--ignored", "wheel::", "--nocapture", "--test-threads=1"])
-            .env("SSH_MCP_TEST_BINARY", &native)
-            .env("SSH_MCP_TEST_ANSIBLE_RUNTIME", &runtime)
-            .env("SSH_MCP_TEST_BASE_WHEEL_BINARY", installed.launcher(false))
-            .env("SSH_MCP_TEST_WHEEL_BINARY", installed.launcher(true))
-            .env("SSH_MCP_TEST_MUTABLE_PREFIX", &mutable)
-            .env("SSH_MCP_TEST_MUTABLE_PYTHON", mutable.join("bin/python")),
+            .env("ESTUS_TEST_BINARY", &native)
+            .env("ESTUS_TEST_ANSIBLE_RUNTIME", &runtime)
+            .env("ESTUS_TEST_BASE_WHEEL_BINARY", installed.launcher(false))
+            .env("ESTUS_TEST_WHEEL_BINARY", installed.launcher(true))
+            .env("ESTUS_TEST_MUTABLE_PREFIX", &mutable)
+            .env("ESTUS_TEST_MUTABLE_PYTHON", mutable.join("bin/python")),
     )
     .await?;
     ordinary_ssh(&installed).await?;
@@ -556,11 +556,11 @@ fn baseline_version(value: &str) -> Result<[u32; 3]> {
 }
 
 #[tokio::test]
-#[ignore = "requires SSH_MCP_TEST_WHEEL, unzip and pinned llvm-otool (Darwin) or llvm-readelf (Linux); no network"]
+#[ignore = "requires ESTUS_TEST_WHEEL, unzip and pinned llvm-otool (Darwin) or llvm-readelf (Linux); no network"]
 async fn wheel_payload_matches_declared_baseline() -> Result<()> {
-    let wheel = input("SSH_MCP_TEST_WHEEL")?;
+    let wheel = input("ESTUS_TEST_WHEEL")?;
     let root = tempfile::Builder::new()
-        .prefix("ssh-mcp-audit-")
+        .prefix("estus-audit-")
         .tempdir_in("/tmp")?;
     let path = std::env::var_os("PATH").context("PATH prerequisite")?;
     let command = |program: &Path| {
@@ -578,7 +578,7 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     let unzip = find_program("unzip")?;
     let listing = checked(command(&unzip).arg("-Z1").arg(&wheel)).await?;
     let listing = std::str::from_utf8(&listing.stdout)?;
-    let payload_member = "ssh_mcp/_bin/ssh-mcp";
+    let payload_member = "estus/_bin/estus";
     ensure!(
         listing
             .lines()
@@ -589,7 +589,7 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     );
     let mut metadata_members = listing.lines().filter(|line| {
         line.strip_suffix("/WHEEL").is_some_and(|parent| {
-            parent.starts_with("ssh_mcp-")
+            parent.starts_with("estus-")
                 && parent.ends_with(".dist-info")
                 && !parent.contains('/')
                 && !parent.contains('\\')
@@ -597,7 +597,7 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     });
     let metadata_member = metadata_members
         .next()
-        .context("missing ssh_mcp dist-info/WHEEL")?;
+        .context("missing estus dist-info/WHEEL")?;
     ensure!(
         metadata_members.next().is_none(),
         "ambiguous wheel metadata"

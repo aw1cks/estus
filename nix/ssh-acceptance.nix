@@ -7,7 +7,7 @@ craneLib.mkCargoDerivation (commonArgs // {
   nativeBuildInputs = [ pkgs.jq pkgs.makeWrapper ];
   # Compile the installed test executables against the actual wrapped package,
   # not a build-directory Cargo executable that disappears after installation.
-  SSH_MCP_TEST_BINARY = "${package}/bin/ssh-mcp";
+  ESTUS_TEST_BINARY = "${package}/bin/estus";
   buildPhaseCargoCommand = ''
     cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local --test controller --test doctor --test automation --test automation_exec --test wheel \
       --message-format=json-render-diagnostics > test-artifacts.json
@@ -24,22 +24,22 @@ craneLib.mkCargoDerivation (commonArgs // {
       install -m755 "$executable" "$out/libexec/$name"
     done
     makeWrapper "$out/libexec/stdio" "$out/bin/ssh-stdio" \
-      --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --add-flags '--nocapture'
     makeWrapper "$out/libexec/ssh_local" "$out/bin/ssh-native" \
-      --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
       --add-flags '--ignored --nocapture --test-threads=2'
     makeWrapper "$out/libexec/ssh_e2e" "$out/bin/ssh-baseline" \
-      --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils ]} \
       --add-flags '--ignored --nocapture --test-threads=2'
     makeWrapper "$out/libexec/controller" "$out/bin/controller-scripts" \
-      --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath controllerTestPrograms} \
       --add-flags '--include-ignored --nocapture --test-threads=2'
     makeWrapper "$out/libexec/doctor" "$out/bin/doctor-acceptance" \
-      --set SSH_MCP_TEST_BINARY ${package}/bin/ssh-mcp \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils pkgs.bash ]} \
       --add-flags '--include-ignored --nocapture --test-threads=2'
   '';

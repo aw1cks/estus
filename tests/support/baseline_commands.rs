@@ -164,7 +164,7 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
             let environment = client.call("ssh_exec", json!({"host":"plain","command":"/bin/env"})).await?;
             ensure!(environment["error"].is_null() && environment["data"]["exit_code"] == 0);
             let env = environment["data"]["stdout"].as_str().context("environment stdout")?;
-            ensure!(env.lines().any(|line| line == "SSH_MCP=1"));
+            ensure!(env.lines().any(|line| line == "ESTUS=1"));
             private_boundary(&environment.to_string(), &markers)?;
             for host in ["same", "split"] {
                 let reply = client.call("ssh_sudo", json!({"host":host,"argv":["/usr/bin/id","-u"]})).await?;
@@ -183,12 +183,12 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
                     private_boundary(&window, &["V03_HOST_SECRET".into(), "V03_MATCH_SECRET".into(), "V03_INCLUDE_SECRET".into()])?;
                     // OpenSSH V_10_6_P1 session.c session_env_req logs accepted
                     // requests at DEBUG2 before exec/sudo/subsystem dispatch.
-                    let accepted = window.lines().filter(|line| line.contains("Setting env ") && line.contains(": SSH_MCP=1")).count();
+                    let accepted = window.lines().filter(|line| line.contains("Setting env ") && line.contains(": ESTUS=1")).count();
                     ensure!(accepted <= 4, "extra MCP SSH sessions in isolated env window");
                     if accepted == 4 { return Ok::<_, anyhow::Error>(()); }
                     sleep(Duration::from_millis(20)).await;
                 }
-            }).await.context("each MCP exec/sudo/SFTP session must accept SSH_MCP=1")??;
+            }).await.context("each MCP exec/sudo/SFTP session must accept ESTUS=1")??;
             let jump = client.call("ssh_exec", json!({"host":"viajump","command":"/usr/bin/id -u"})).await?;
             command_succeeded(&jump, "1000\n")?;
             private_boundary(&jump.to_string(), &markers)?;

@@ -1,5 +1,5 @@
 //! Explicit packaged SSH, SFTP and sudo acceptance against the exact Nix-built image.
-//! Runs require SSH_MCP_TEST_FIXTURE, explicit DOCKER_HOST and the Nix-provided Docker CLI.
+//! Runs require ESTUS_TEST_FIXTURE, explicit DOCKER_HOST and the Nix-provided Docker CLI.
 //! Containers select the artifact's exact config digest; execution is not network-isolated.
 #[path = "support/baseline_commands.rs"]
 mod baseline_commands;

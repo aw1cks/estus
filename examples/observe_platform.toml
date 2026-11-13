@@ -1,5 +1,5 @@
 # Import ansible.builtin.setup from the selected runtime before enabling:
-#   ssh-mcp schema import ansible.builtin.setup --output /etc/ssh-mcp/setup.schema.json
+#   estus schema import ansible.builtin.setup --output /etc/estus/setup.schema.json
 # Provision the workspace mode 0700, owned by the MCP account.
 # MCP input: {"host":"server","inputs":{}}
 profile = "actions-only"
@@ -9,7 +9,7 @@ enabled_tools = ["observe_platform"]
 ssh_host = "server-ordinary"
 
 [automation]
-workspace_root = "/var/lib/ssh-mcp/runner"
+workspace_root = "/var/lib/estus/runner"
 
 [automation.targets.server]
 destination = "server-ordinary"
@@ -21,7 +21,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_module", snapshot = "/etc/ssh-mcp/setup.schema.json", no_log = false }
+execution = { kind = "ansible_module", snapshot = "/etc/estus/setup.schema.json", no_log = false }
 input_schema = { type = "object", properties = {}, required = [], additionalProperties = false }
 fixed_args = { gather_subset = ["!all", "!min", "platform", "python_version"], filter = ["ansible_system", "ansible_python_version"], gather_timeout = 5 }
 input_map = {}

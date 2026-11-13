@@ -1,7 +1,18 @@
-# ssh-mcp
+# Estus
 
 A stdio MCP server for operator-configured SSH authority. The Rust application owns
 MCP, SSH connections, limits and cleanup. Only MCP JSON is written to server stdout.
+
+## Migrating from ssh-mcp
+
+The command, Cargo package/binary and Python distribution/import package are now
+`estus`. Update product environment variables to `ESTUS_*` and deployment paths
+such as `/etc/estus`, `/var/lib/estus` and `/opt/estus`. There are no compatibility
+aliases. Ansible internal variables use the `estus_` prefix.
+
+Reimport and review existing automation snapshots before enabling them: helper
+identity and content-hash namespaces have changed, so previous approval digests
+are not reusable. Deploy the reviewed content and update configuration accordingly.
 
 ## Base wheel
 
@@ -14,12 +25,12 @@ uv build --python 3.14
 Install the resulting wheel as an isolated tool, without activating a virtualenv:
 
 ```sh
-uv tool install --python 3.14 ./dist/ssh_mcp-*.whl
-ssh-mcp --help
-ssh-mcp --config /absolute/path/to/operator.toml
+uv tool install --python 3.14 ./dist/estus-*.whl
+estus --help
+estus --config /absolute/path/to/operator.toml
 ```
 
-Alternatively, run the local wheel with `uvx --from ./dist/ssh_mcp-*.whl ssh-mcp`.
+Alternatively, run the local wheel with `uvx --from ./dist/estus-*.whl estus`.
 These instructions use locally built artifacts; no public-index release is implied.
 Current wheel acceptance targets CPython 3.14 on arm64 macOS/Linux; older-OS runtime
 compatibility and x86_64 execution are not implied by the artifact tags.
@@ -41,9 +52,9 @@ Python/build-backend inputs. It does not copy the native Nix wrapper into the wh
 
 ```sh
 nix build .#wheel
-uv tool install --python 3.14 ./result/ssh_mcp-*.whl
-uvx --from ./result/ssh_mcp-*.whl ssh-mcp
-uv run --no-project --with ./result/ssh_mcp-*.whl ssh-mcp
+uv tool install --python 3.14 ./result/estus-*.whl
+uvx --from ./result/estus-*.whl estus
+uv run --no-project --with ./result/estus-*.whl estus
 ```
 
 The producer declares macOS 11.0 for the arm64 Mach-O payload and manylinux glibc
@@ -61,7 +72,7 @@ This downloads managed, outside-Nix Python 3.14 and optional dependencies into o
 temporary caches. It exercises the actual uvx, tool-install and uv-run entry points,
 base/extra health, stdio/RPC and signals, owned controller-child cleanup and ordinary
 SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
-`SSH_MCP_TEST_PYTHON` may select an existing absolute outside-Nix Python 3.14.
+`ESTUS_TEST_PYTHON` may select an existing absolute outside-Nix Python 3.14.
 
 ## Optional Ansible environment
 
@@ -69,9 +80,9 @@ Instead of the base installation, install the wheel's `ansible` extra. Set `whee
 to the artifact built for your platform; for the currently exercised macOS build:
 
 ```sh
-wheel=./dist/ssh_mcp-0.1.0-cp314-cp314-macosx_11_0_arm64.whl
+wheel=./dist/estus-0.1.0-cp314-cp314-macosx_11_0_arm64.whl
 uv tool install --python 3.14 "${wheel}[ansible]"
-ssh-mcp doctor --runtime ansible
+estus doctor --runtime ansible
 ```
 
 The extra pins Ansible 14.4.0, Core 2.21.5 and Runner 2.4.3. The Ansible distribution
@@ -83,7 +94,7 @@ The launcher supplies its own interpreter, installed package and script location
 to Rust without requiring virtualenv activation or searching PATH for Python.
 Explicit roots also support uv-run overlays without importing arbitrary ambient
 Python paths. Explicit `[automation].runtime` configuration wins over
-`SSH_MCP_ANSIBLE_RUNTIME`; either wins over the launcher's environment.
+`ESTUS_ANSIBLE_RUNTIME`; either wins over the launcher's environment.
 A broken explicit selection fails without falling back elsewhere.
 Without an explicit health request or `[automation] required = true`, Rust does not
 consult the optional runtime. Installing the extra never enables tools.
@@ -110,7 +121,7 @@ nix run .#automation-msrv -- schema verify ./stat.schema.json \
   --input ./stat.request.json
 ```
 
-The same `schema` commands work through the wheel's public `ssh-mcp` launcher.
+The same `schema` commands work through the wheel's public `estus` launcher.
 No target connection, module execution, dependency installation, online catalog or
 tool registration occurs. `--output` must be new: imports never overwrite a reviewed
 snapshot. `--timeout-secs` bounds the selected worker's lifetime.
@@ -160,9 +171,9 @@ again before dispatch; this is drift detection, not immutable attestation.
 Role authoring uses the same selected runtime and closed binding validator:
 
 ```sh
-ssh-mcp schema import-role site.operations.observe --entry-point main \
+estus schema import-role site.operations.observe --entry-point main \
   --output observe.role.json --overlay observe.binding.json
-ssh-mcp schema verify-role observe.role.json --input observe.request.json
+estus schema verify-role observe.role.json --input observe.request.json
 ```
 
 Collection roles resolve only inside that runtime's selected collections. A
@@ -170,10 +181,10 @@ standalone role requires its exact directory on both commands; its basename must
 match the role name:
 
 ```sh
-ssh-mcp schema import-role observe --role-path /etc/ssh-mcp/roles/observe \
+estus schema import-role observe --role-path /etc/estus/roles/observe \
   --output observe.role.json --schema observe.inputs.json
-ssh-mcp schema verify-role observe.role.json \
-  --role-path /etc/ssh-mcp/roles/observe
+estus schema verify-role observe.role.json \
+  --role-path /etc/estus/roles/observe
 ```
 
 `--schema` supplies a reviewed closed JSON Schema when public role metadata
@@ -218,12 +229,12 @@ the snapshot from the same selected runtime before startup:
 
 ```sh
 nix run .#automation-msrv -- schema import ansible.builtin.ping \
-  --output /etc/ssh-mcp/ping.schema.json
+  --output /etc/estus/ping.schema.json
 nix run .#automation-msrv -- --config examples/automation_probe.toml
 ```
 
 The example's conventional absolute paths must be provisioned for the MCP account.
-The wheel's `ssh-mcp` command accepts the same configuration with its installed
+The wheel's `estus` command accepts the same configuration with its installed
 `ansible` extra. Installing dependencies still does not enable a tool.
 
 Module calls use `{"host":"server","inputs":{}}`; optional `timeout_secs` is a
@@ -245,7 +256,7 @@ Python interpreter independently of native sudo authority. No become support is
 added. OpenSSH still resolves operator aliases and the configured replacement SSH
 file. Runner connections do not use the Rust pool: sharing, forwarding, host-key
 updates, password prompts and remote TTY allocation are disabled. OpenSSH is
-selected by `automation.ssh_executable`, then `SSH_MCP_AUTOMATION_SSH`, then
+selected by `automation.ssh_executable`, then `ESTUS_AUTOMATION_SSH`, then
 `/usr/bin/ssh`; the Nix package supplies its pinned default.
 An existing bounded absolute `SSH_AUTH_SOCK` reference is preserved for an
 out-of-band agent. The product does not load keys, create an agent, prompt for
@@ -286,10 +297,10 @@ Deploy the reviewed role independently, provision the configured private
 workspace and import its snapshot before enabling the binding:
 
 ```sh
-ssh-mcp schema import-role app_config \
-  --role-path /etc/ssh-mcp/roles/app_config \
-  --output /etc/ssh-mcp/app_config.schema.json
-ssh-mcp --config examples/app_config.toml
+estus schema import-role app_config \
+  --role-path /etc/estus/roles/app_config \
+  --output /etc/estus/app_config.schema.json
+estus --config examples/app_config.toml
 ```
 
 Use the wheel's installed `ansible` extra or the selected Nix automation package.
@@ -336,12 +347,12 @@ the same private-directory/non-root prerequisites as native acceptance.
 Review a deployed project without parsing or executing its YAML:
 
 ```sh
-ssh-mcp schema import-playbook site.yml \
-  --project-root /etc/ssh-mcp/project \
+estus schema import-playbook site.yml \
+  --project-root /etc/estus/project \
   --input-schema backend.schema.json --overlay binding.json \
-  --output /etc/ssh-mcp/site.schema.json
-ssh-mcp schema verify-playbook /etc/ssh-mcp/site.schema.json \
-  --project-root /etc/ssh-mcp/project --input request-inputs.json
+  --output /etc/estus/site.schema.json
+estus schema verify-playbook /etc/estus/site.schema.json \
+  --project-root /etc/estus/project --input request-inputs.json
 ```
 
 `backend.schema.json` is an explicit closed schema for the complete constructed
@@ -359,16 +370,16 @@ Its fixed execution selector is:
 ```toml
 [tools.site.execution]
 kind = "ansible_playbook"
-snapshot = "/etc/ssh-mcp/site.schema.json"
-project_root = "/etc/ssh-mcp/project"
+snapshot = "/etc/estus/site.schema.json"
+project_root = "/etc/estus/project"
 ```
 
 Calls retain `{"host":"server","inputs":{...}}`. The playbook reads only the
-constructed dictionary as `ssh_mcp_arguments`, for example
-`"{{ ssh_mcp_arguments.configuration }}"`. Recursive caller strings are literal
+constructed dictionary as `estus_arguments`, for example
+`"{{ estus_arguments.configuration }}"`. Recursive caller strings are literal
 data, not arbitrary top-level extra-vars. Inventory, host patterns, tags, selected
 playbook/project, connection/interpreter and become controls are not caller inputs.
-The generated initial inventory contains only `ssh_mcp_target`; the CLI fixes its
+The generated initial inventory contains only `estus_target`; the CLI fixes its
 limit, transport/interpreter settings and `ansible_become=false`. Existing target
 authorization, admission, timeouts, cancellation and cleanup remain in force.
 
@@ -444,7 +455,7 @@ The same application remains available without a Python launcher:
 
 ```sh
 cargo build --release --locked
-./target/release/ssh-mcp --help
+./target/release/estus --help
 nix run .#msrv -- --help
 ```
 

@@ -1,13 +1,13 @@
 # Explicit local opt-in: this capability runs as the server's controller OS account.
 # Deploy observe_controller.py separately at the reviewed path below, and create
-# /tmp/ssh-mcp-controller as an owned directory with mode 0700 before enabling.
+# /tmp/estus-controller as an owned directory with mode 0700 before enabling.
 # Declare your site's absolute Python 3 interpreter; the server installs nothing.
 # The source snapshot is verified at startup. Review source/digest and restart to update.
 profile = "actions-only"
 enabled_tools = ["observe_controller"]
 
 [controller]
-workspace_root = "/tmp/ssh-mcp-controller"
+workspace_root = "/tmp/estus-controller"
 
 [tools.observe_controller]
 description = "Observe controller identity and private scratch-filesystem capacity. This runs locally, never on an SSH target. Inputs use a private JSON file. Controller-account code is trusted, not sandboxed; interruption cannot roll back earlier effects."
@@ -23,7 +23,7 @@ kind = "controller_script"
 environment = { PATH = "/usr/bin:/bin", LANG = "C", LC_ALL = "C", TZ = "UTC" }
 
 [tools.observe_controller.execution.source]
-path = "/opt/ssh-mcp/observe_controller.py"
+path = "/opt/estus/observe_controller.py"
 content_sha256 = "6da5265a4772486f8939864ea49884398fc26734cf4e5f08b8c4d9ac889caf8a"
 max_bytes = 4096
 

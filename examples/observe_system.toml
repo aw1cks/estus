@@ -24,7 +24,7 @@ kind = "remote_script"
 argv = [{ input = "label" }]
 
 [tools.observe_system.execution.source]
-path = "/opt/ssh-mcp/observe_system.sh"
+path = "/opt/estus/observe_system.sh"
 content_sha256 = "588948b88691496356a9ada173f42f78e4f2b5268b372cafd98721cfd8629a29"
 max_bytes = 4096
 

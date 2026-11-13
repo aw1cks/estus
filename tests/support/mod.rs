@@ -146,15 +146,15 @@ pub fn find_program(name: &str) -> Result<PathBuf> {
 }
 
 pub fn server_command(config: &Path) -> Result<Command> {
-    let binary = match std::env::var_os("SSH_MCP_TEST_BINARY") {
+    let binary = match std::env::var_os("ESTUS_TEST_BINARY") {
         Some(path) => executable(Path::new(&path))?,
         None => executable(Path::new(
-            option_env!("SSH_MCP_TEST_BINARY").unwrap_or(env!("CARGO_BIN_EXE_ssh-mcp")),
+            option_env!("ESTUS_TEST_BINARY").unwrap_or(env!("CARGO_BIN_EXE_estus")),
         ))?,
     };
     let mut command = Command::new(binary);
     for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("SSH_MCP_") {
+        if name.to_string_lossy().starts_with("ESTUS_") {
             command.env_remove(name);
         }
     }
@@ -366,7 +366,7 @@ impl Fixture {
             );
         }
         let root = tempfile::Builder::new()
-            .prefix("ssh-mcp-native-")
+            .prefix("estus-native-")
             .tempdir_in(temporary_parent)?;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
         let mut fixture = Self {

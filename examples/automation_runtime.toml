@@ -2,8 +2,8 @@
 #   nix run .#automation-msrv -- --config examples/automation_runtime.toml doctor --runtime ansible
 #   nix run .#automation-msrv -- --config examples/automation_runtime.toml
 # Or install a wheel with its ansible extra and use the same explicit prerequisite:
-#   ssh-mcp --config examples/automation_runtime.toml doctor --runtime ansible
-#   ssh-mcp --config examples/automation_runtime.toml
+#   estus --config examples/automation_runtime.toml doctor --runtime ansible
+#   estus --config examples/automation_runtime.toml
 # This validates dependencies only; it does not publish or execute Ansible tools.
 # The native package stays independent unless this prerequisite is explicitly required.
 profile = "actions-only"
@@ -12,4 +12,4 @@ enabled_tools = []
 [automation]
 required = true
 # A site may instead declare an absolute runtime bundle path here. The file
-# reference wins over SSH_MCP_ANSIBLE_RUNTIME and the wheel's selected environment.
+# reference wins over ESTUS_ANSIBLE_RUNTIME and the wheel's selected environment.

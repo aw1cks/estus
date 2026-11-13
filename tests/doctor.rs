@@ -661,7 +661,7 @@ async fn doctor_explicit_ssh_config_errors_never_fall_back_to_environment() -> R
         command
             .arg("--ssh-config")
             .arg(&path)
-            .env("SSH_MCP_SSH_CONFIG", &fixture.ssh);
+            .env("ESTUS_SSH_CONFIG", &fixture.ssh);
         let output = Doctor::start(command)?.finish().await?;
         config_error(&output)?;
         private(

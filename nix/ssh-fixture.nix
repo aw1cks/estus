@@ -94,7 +94,7 @@ let
     ${sudo}/sbin/visudo -cf "$out/etc/sudoers"
   '';
   image = pkgs.dockerTools.buildLayeredImage {
-    name = if automation then "ssh-mcp-automation-fixture" else "ssh-mcp-fixture";
+    name = if automation then "estus-automation-fixture" else "estus-fixture";
     # Omitting tag selects dockerTools' derivation-derived tag, never latest.
     created = "1970-01-01T00:00:01Z";
     mtime = "1970-01-01T00:00:01Z";

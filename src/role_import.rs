@@ -187,7 +187,7 @@ pub(crate) async fn verify_reviewed(
 }
 
 fn role_variable(name: &str) -> bool {
-    !name.starts_with("ssh_mcp_")
+    !name.starts_with("estus_")
         && !name.starts_with("ansible_")
         && !name.starts_with("become")
         && !name.starts_with("inventory_")
@@ -557,7 +557,7 @@ mod tests {
                 "required":[], "properties":{}},
             "fixed_args": {"configuration":{
                 "connection":"{{ lookup('env', 'PRIVATE') }}",
-                "mcp_result":{"ssh_mcp_arguments":"ordinary nested data"}
+                "mcp_result":{"estus_arguments":"ordinary nested data"}
             }},
             "input_map": {}
         });

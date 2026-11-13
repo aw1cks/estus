@@ -2168,7 +2168,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ssh-mcp"
+name = "estus"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -1,9 +1,9 @@
 # Ordinary persistent configuration, not privilege, deployment, or service restart.
-# Copy roles/app_config to /etc/ssh-mcp/roles/app_config and review every task.
+# Copy roles/app_config to /etc/estus/roles/app_config and review every task.
 # Export this tool's input_schema/fixed_args/input_map as overlay.json, then run:
-# ssh-mcp --config app_config.toml schema import-role app_config --role-path /etc/ssh-mcp/roles/app_config --overlay overlay.json --output /etc/ssh-mcp/app_config.schema.json
+# estus --config app_config.toml schema import-role app_config --role-path /etc/estus/roles/app_config --overlay overlay.json --output /etc/estus/app_config.schema.json
 # Import is offline and never runs tasks. Enable only after reviewing the snapshot.
-# Provision /var/lib/ssh-mcp/runner mode 0700 owned by the MCP account.
+# Provision /var/lib/estus/runner mode 0700 owned by the MCP account.
 # The SSH account must own /srv/example-app; no become or service operation occurs.
 # MCP: {"host":"server","inputs":{"instance":"frontend","config":{"banner":"Hello 雪","enabled":true,"port":8080}}}
 profile = "actions-only"
@@ -13,7 +13,7 @@ enabled_tools = ["app_config"]
 ssh_host = "server-ordinary"
 
 [automation]
-workspace_root = "/var/lib/ssh-mcp/runner"
+workspace_root = "/var/lib/estus/runner"
 max_concurrent = 2
 max_scratch_bytes = 16777216
 max_scratch_files = 512
@@ -28,7 +28,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["persistent_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/ssh-mcp/app_config.schema.json", role_path = "/etc/ssh-mcp/roles/app_config", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/app_config.schema.json", role_path = "/etc/estus/roles/app_config", no_log = false }
 fixed_args = { config_root = "/srv/example-app" }
 input_map = { instance = "instance", config = "config" }
 limits = { timeout_secs = 30 }

@@ -14,14 +14,14 @@ use tokio::{
 };
 
 fn command(args: &[&str]) -> Command {
-    let binary = std::env::var_os("SSH_MCP_TEST_BINARY").unwrap_or_else(|| {
-        option_env!("SSH_MCP_TEST_BINARY")
-            .unwrap_or(env!("CARGO_BIN_EXE_ssh-mcp"))
+    let binary = std::env::var_os("ESTUS_TEST_BINARY").unwrap_or_else(|| {
+        option_env!("ESTUS_TEST_BINARY")
+            .unwrap_or(env!("CARGO_BIN_EXE_estus"))
             .into()
     });
     let mut command = Command::new(binary);
     for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("SSH_MCP_") {
+        if name.to_string_lossy().starts_with("ESTUS_") {
             command.env_remove(name);
         }
     }
@@ -377,11 +377,11 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
         let mut child = command(&["--config", path.to_str().context("config path")?]);
         if override_limits {
             child.envs([
-                ("SSH_MCP_CONNECT_TIMEOUT_SECS", "11"),
-                ("SSH_MCP_OPERATION_TIMEOUT_SECS", "13"),
-                ("SSH_MCP_MAX_TIMEOUT_SECS", "17"),
-                ("SSH_MCP_MAX_OUTPUT_BYTES", "33554432"),
-                ("SSH_MCP_MAX_FILE_BYTES", "33554433"),
+                ("ESTUS_CONNECT_TIMEOUT_SECS", "11"),
+                ("ESTUS_OPERATION_TIMEOUT_SECS", "13"),
+                ("ESTUS_MAX_TIMEOUT_SECS", "17"),
+                ("ESTUS_MAX_OUTPUT_BYTES", "33554432"),
+                ("ESTUS_MAX_FILE_BYTES", "33554433"),
             ]);
         }
         let mut server = Server::from_command(child)?;

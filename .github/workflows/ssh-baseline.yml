@@ -35,7 +35,7 @@ jobs:
       run: nix flake check -L --no-update-lock-file --keep-going
     - name: Run packaged MSRV native SSH acceptance
       run: |
-        runtime=$(mktemp -d "$HOME/.ssh-mcp-native.XXXXXXXX")
+        runtime=$(mktemp -d "$HOME/.estus-native.XXXXXXXX")
         trap 'rm -rf -- "$runtime"' EXIT
         XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native-msrv
     - env:
