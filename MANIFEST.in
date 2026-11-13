@@ -1,0 +1,3 @@
+include Cargo.toml Cargo.lock
+recursive-include src *.rs *.py
+recursive-include vendor/openssh-sftp-protocol *

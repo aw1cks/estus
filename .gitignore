@@ -5,3 +5,7 @@
 /fuzz/artifacts/
 /fuzz/coverage/
 /fuzz/generated-corpus/
+/build/
+/dist/
+/python/*.egg-info/
+__pycache__/
