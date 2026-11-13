@@ -160,7 +160,7 @@ impl Report {
     }
 }
 
-fn bounded_json(value: &Value, depth: usize, remaining: &mut usize) -> bool {
+pub(crate) fn bounded_json(value: &Value, depth: usize, remaining: &mut usize) -> bool {
     if depth > 32 || *remaining == 0 {
         return false;
     }
@@ -174,7 +174,7 @@ fn bounded_json(value: &Value, depth: usize, remaining: &mut usize) -> bool {
     }
 }
 
-fn read_json(path: &Path, limit: usize) -> Result<Value, &'static str> {
+pub(crate) fn read_json(path: &Path, limit: usize) -> Result<Value, &'static str> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)
@@ -245,7 +245,11 @@ fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<(), &'static str> 
     {
         return Err("schema_file_limit");
     }
-    let mut bytes = serde_json::to_vec_pretty(snapshot).map_err(|_| "invalid_schema_snapshot")?;
+    write_document(path, snapshot)
+}
+
+pub(crate) fn write_document(path: &Path, document: &impl Serialize) -> Result<(), &'static str> {
+    let mut bytes = serde_json::to_vec_pretty(document).map_err(|_| "invalid_schema_snapshot")?;
     bytes.push(b'\n');
     if bytes.len() > SNAPSHOT_LIMIT {
         return Err("schema_file_limit");
@@ -268,7 +272,7 @@ fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<(), &'static str> 
     Ok(())
 }
 
-fn stopped(
+pub(crate) fn stopped(
     shutdown: &CancellationToken,
     deadline: tokio::time::Instant,
 ) -> Result<(), &'static str> {
