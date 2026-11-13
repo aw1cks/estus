@@ -1,0 +1,1 @@
+{"mode":"raw_document","document":{"doc":{"options":{"optional":{"type":"bool","default":true}}}},"overlay":{"input_schema":{"type":"object","properties":{},"additionalProperties":false},"fixed_args":{},"input_map":{}},"input":{}}

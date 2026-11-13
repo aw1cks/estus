@@ -187,6 +187,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "estus-fuzz"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "hex",
+ "libfuzzer-sys",
+ "openssh-sftp-client",
+ "openssh-sftp-protocol",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shell-escape",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -787,24 +805,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys",
-]
-
-[[package]]
-name = "estus-fuzz"
-version = "0.0.0"
-dependencies = [
- "base64",
- "bytes",
- "hex",
- "libfuzzer-sys",
- "openssh-sftp-client",
- "openssh-sftp-protocol",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "shell-escape",
 ]
 
 [[package]]

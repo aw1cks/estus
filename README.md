@@ -769,3 +769,40 @@ Native Nix packaging supplies OpenSSH and has no Python/Ansible runtime dependen
 The separate `.#automation-msrv` output supplies the optional pinned Ansible runtime;
 see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
 That health check verifies imports and identity, not Ansible workload execution.
+
+## Fuzzing
+
+Six cargo-fuzz targets exercise real production modules — command
+encoding/limits, the complete 16 MiB reply budget, file codecs, raw filename
+metadata, binding-schema compilation and the bounded Runner frame reducer —
+never copied parsers or mocked executors. Harnesses and seed corpora live in
+`fuzz/`; the root build excludes them, so fuzzing never changes production
+dependencies. The optional shell pins nightly Rust and cargo-fuzz:
+
+```sh
+nix develop .#fuzz -c cargo fuzz run binding_schema fuzz/corpus/binding_schema -- -runs=0 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+nix develop .#fuzz -c cargo fuzz run adapter_protocol fuzz/corpus/adapter_protocol -- -runs=0 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+```
+
+`binding_schema` drives reviewed-module contract import, recursive alias
+mapping, caller-input rejection of authority/transport fields and numeric
+bounds through the actual compiler; generated fixtures stay inside the
+production depth/node/byte budget or are rejected by it. `adapter_protocol`
+replays newlined private frames (ready/task/terminal, role and projection
+variants) through the real evidence reducer across module/role/playbook modes,
+checking literal outcomes, censorship, completion, chunk-fragmentation
+invariance and interruption/stop ordering against local completion evidence.
+
+Time-bounded mutation campaigns write only to ignored
+`fuzz/generated-corpus/` directories, keeping committed seeds deterministic:
+
+```sh
+mkdir -p fuzz/generated-corpus/binding_schema fuzz/generated-corpus/adapter_protocol
+nix develop .#fuzz -c cargo fuzz run binding_schema fuzz/generated-corpus/binding_schema fuzz/corpus/binding_schema -- -max_total_time=30 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+nix develop .#fuzz -c cargo fuzz run adapter_protocol fuzz/generated-corpus/adapter_protocol fuzz/corpus/adapter_protocol -- -max_total_time=30 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+```
+
+Fuzzing never connects to SSH or Docker, does not execute Ansible workloads,
+and does not replace the real integration suites. Crash artifacts belong in
+`fuzz/artifacts/<target>/` for minimization and a consumer-visible regression
+before any fix.

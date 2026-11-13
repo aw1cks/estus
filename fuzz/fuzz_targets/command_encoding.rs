@@ -174,6 +174,7 @@ fn exercise(fixture: Fixture) -> Option<()> {
                 cwd: expand_optional(cwd, &mut remaining)?,
                 stdin: expand_optional(stdin, &mut remaining)?,
                 timeout_secs,
+                retain_output: false,
             };
             // Independently render the cwd wrapper, then use the actual pinned
             // encoder rather than reproducing production escaped-size arithmetic.
@@ -224,6 +225,7 @@ fn exercise(fixture: Fixture) -> Option<()> {
                 cwd: expand_optional(cwd, &mut remaining)?,
                 stdin: expand_optional(stdin, &mut remaining)?,
                 timeout_secs,
+                retain_output: false,
             };
             // The raw join is fixed syntax, not an escaped argument. All caller
             // values use the real encoder, independently of production counting.
@@ -289,6 +291,7 @@ fn exercise(fixture: Fixture) -> Option<()> {
                 user,
                 stdin: expand_optional(stdin, &mut remaining)?,
                 timeout_secs,
+                retain_output: false,
             };
             let expected_bytes = encoded(
                 ["sudo", "-n", "-k", "-u", request.user.as_str(), "--"]

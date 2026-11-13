@@ -147,6 +147,7 @@ impl Fixture {
                 },
                 duration_ms: self.duration_ms,
                 remote_may_still_be_running: self.remote_may_still_be_running,
+                output: None,
             }),
             error: match self.error % 3 {
                 0 => None,
@@ -242,7 +243,7 @@ fn exercise(fixture: Fixture) {
     if let Ok(remaining) = empty_remaining.as_ref() {
         assert_eq!(*remaining, MAX_RESPONSE_BYTES - empty_size);
     }
-    let capture = budget.command_capture_limit();
+    let capture = budget.command_capture_limit(false);
     if let Ok(limit) = capture {
         assert!(limit <= (MAX_RESPONSE_BYTES / 2) as u64);
         // The production conservative reservation must not promise more raw

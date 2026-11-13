@@ -49,6 +49,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "binding_schema"
+path = "fuzz_targets/binding_schema.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adapter_protocol"
+path = "fuzz_targets/adapter_protocol.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
 

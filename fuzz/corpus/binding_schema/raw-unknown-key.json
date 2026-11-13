@@ -1,0 +1,1 @@
+{"mode":"raw_schema","schema":{"type":"object","properties":{},"additionalProperties":false,"pattern":"not supported"},"overlay":{"input_schema":{"type":"object","properties":{},"additionalProperties":false},"fixed_args":{},"input_map":{}},"input":{}}

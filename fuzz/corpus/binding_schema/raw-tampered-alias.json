@@ -1,0 +1,1 @@
+{"mode":"raw_contract","contract":{"schema":{"type":"object","properties":{},"additionalProperties":false},"aliases":{"aliases":{"dest":"missing"},"properties":{}},"defaults":{},"review_required":[]},"overlay":{"input_schema":{"type":"object","properties":{},"additionalProperties":false},"fixed_args":{},"input_map":{}},"input":{}}
