@@ -74,6 +74,39 @@ base/extra health, stdio/RPC and signals, owned controller-child cleanup and ord
 SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
 `ESTUS_TEST_PYTHON` may select an existing absolute outside-Nix Python 3.14.
 
+## Ordinary SFTP directory creation
+
+`ssh_mkdir` creates one literal directory on the ordinary SSH identity:
+
+```json
+{"host":"server","path":"/srv/example/new-directory","timeout_secs":10}
+```
+
+Success returns `{"created":true}` inside the standard tool envelope, only after
+MKDIR acknowledgement and bounded channel cleanup. Parents must already exist.
+Any observed existing entry, including a file or final symlink, is rejected as
+`already_exists`; no `exist_ok`, recursion, permission-mode override, sudo or
+shell/SCP fallback is supported. Server umask and filesystem rules apply.
+
+Paths are literal UTF-8: no tilde, variable or wildcard expansion and no path
+sandbox. The existing-entry check is diagnostic, not a race-free no-follow
+guarantee; intermediate components retain server symlink semantics. MKDIR itself
+does not replace an existing entry.
+
+Baseline/files-only startup profiles can publish the tool; read-only-files and
+actions-only profiles omit it. Target restrictions, argument/deadline validation
+and the complete response budget apply before connecting. Calls use the existing
+global admission, ordinary master and independently owned SFTP cleanup path.
+
+Handshake/preflight failure cannot have sent MKDIR. After dispatch, any failure
+retains `remote_state_unknown=true`, including server refusal, timeout or cleanup
+failure. The server does not replay, undo creation or infer rollback from channel
+closure. A missing parent remains a backend error, never recursive creation.
+
+`nix run .#mkdir-acceptance-msrv` exercises real creation, entry preservation,
+nonrecursive failure and uncertainty boundaries outside the Nix sandbox with the
+usual non-root/private-runtime-directory prerequisites.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

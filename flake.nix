@@ -224,6 +224,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/ssh-native";
         };
+        apps.mkdir-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/mkdir-acceptance";
+        };
+        apps.mkdir-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/mkdir-acceptance";
+        };
         apps.controller-scripts = {
           type = "app";
           program = "${acceptance}/bin/controller-scripts";

@@ -3060,6 +3060,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     names
                         == [
                             "ssh_list_directory",
+                            "ssh_mkdir",
                             "ssh_read_file",
                             "ssh_stat",
                             "ssh_targets",
@@ -3101,6 +3102,21 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 ensure!(
                     fs::read(&file)? == b"abc",
                     "read-only target changed existing bytes"
+                );
+                let denied_directory = directory.join("mkdir-policy-denied");
+                let reply = client
+                    .call(
+                        "ssh_mkdir",
+                        json!({
+                            "host":"locked","path":denied_directory,
+                        }),
+                    )
+                    .await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(
+                    !denied_directory.exists(),
+                    "read-only target created a directory"
                 );
                 ensure!(
                     masters(&client.log)?.is_empty(),
@@ -3145,6 +3161,24 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             })
                     );
                 }
+                let created_directory = directory.join("mkdir-allowed");
+                let reply = client
+                    .call(
+                        "ssh_mkdir",
+                        json!({
+                            "host":"allowed","path":created_directory,
+                        }),
+                    )
+                    .await?;
+                succeeded(&reply)?;
+                ensure!(
+                    fs::symlink_metadata(&created_directory)?
+                        .file_type()
+                        .is_dir(),
+                    "files-only profile did not create the actual allowed directory"
+                );
+                ensure!(fs::read_dir(&created_directory)?.next().is_none());
+                ensure!(fs::read(&file)? == b"abc", "mkdir changed its sibling file");
                 let payload = "PROFILE_WRITE_é雪\0END";
                 let reply = client
                     .call(
@@ -3416,6 +3450,378 @@ async fn ssh_write_close_and_write_failures() -> Result<()> {
         scenario?;
         cleanup?;
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_mkdir() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let mut config = fs::read_to_string(&fixture.config)?;
+        config.push_str(
+            "\n[targets.mkdir-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+        );
+        fs::write(&fixture.config, config)?;
+        let directory = fixture.root.path().join("mkdir-private");
+        fs::create_dir(&directory)?;
+        let sibling = directory.join("preserved-file");
+        fs::write(&sibling, b"MKDIR_KEEP_SIBLING")?;
+        let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let initial_auth = fixture.authentications();
+            for args in [
+                json!({"host":"plain","path":""}),
+                json!({"host":"plain","path":"mkdir\0invalid"}),
+                json!({"host":"plain","path":directory.join("zero"),"timeout_secs":0}),
+                json!({"host":"plain","path":directory.join("over-limit"),"timeout_secs":16}),
+            ] {
+                let reply = client.call("ssh_mkdir", args).await?;
+                failed(&reply, "invalid_argument")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            }
+            let denied = directory.join("policy-denied");
+            let reply = client
+                .call(
+                    "ssh_mkdir",
+                    json!({
+                        "host":"mkdir-locked","path":denied
+                    }),
+                )
+                .await?;
+            failed(&reply, "policy_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(
+                masters(&client.log)?.is_empty(),
+                "invalid or denied mkdir acquired SSH"
+            );
+            ensure!(
+                fixture.authentications() == initial_auth,
+                "invalid or denied mkdir authenticated"
+            );
+            ensure!(
+                fs::read_dir(&directory)?.count() == 1,
+                "rejected mkdir changed directory entries"
+            );
+
+            succeeded(&exec(&client, "printf MKDIR_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let names = [
+                "ordinary",
+                "  é雪 directory  ",
+                "'\";~$*\n$(printf EVALUATED)",
+            ];
+            for name in names {
+                let path = directory.join(name);
+                let reply = client
+                    .call("ssh_mkdir", json!({"host":"plain","path":path}))
+                    .await?;
+                succeeded(&reply)?;
+                ensure!(
+                    fs::symlink_metadata(&path)?.file_type().is_dir(),
+                    "{name:?}: no actual directory"
+                );
+                ensure!(
+                    fs::read_dir(&path)?.next().is_none(),
+                    "{name:?}: directory not empty"
+                );
+                let reply = client
+                    .call("ssh_stat", json!({"host":"plain","path":path}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &native_stat_data(&path, false)?);
+            }
+            let existing = directory.join("ordinary");
+            let child = existing.join("keep-child");
+            fs::write(&child, b"KEEP_DIRECTORY_CHILD")?;
+            let live = directory.join("live-link");
+            symlink(&existing, &live)?;
+            let dangling = directory.join("dangling-link");
+            let absent = directory.join("absent-target");
+            symlink(&absent, &dangling)?;
+            for path in [&existing, &sibling, &live, &dangling] {
+                let before = fs::symlink_metadata(path)?;
+                let reply = client
+                    .call("ssh_mkdir", json!({"host":"plain","path":path}))
+                    .await?;
+                failed(&reply, "already_exists")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                let after = fs::symlink_metadata(path)?;
+                ensure!(
+                    after.ino() == before.ino() && after.file_type() == before.file_type(),
+                    "{}: existing entry replaced",
+                    path.display()
+                );
+                ensure!(fs::read(&child)? == b"KEEP_DIRECTORY_CHILD");
+                ensure!(fs::read(&sibling)? == b"MKDIR_KEEP_SIBLING");
+                ensure!(fs::read_link(&live)? == existing);
+                ensure!(fs::read_link(&dangling)? == absent && !absent.exists());
+            }
+            let missing = directory.join("missing-parent");
+            let reply = client
+                .call(
+                    "ssh_mkdir",
+                    json!({
+                        "host":"plain","path":missing.join("child")
+                    }),
+                )
+                .await?;
+            ensure!(
+                matches!(
+                    reply["error"]["code"].as_str(),
+                    Some("not_found" | "permission_denied" | "io_error")
+                ),
+                "{reply}"
+            );
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(
+                !missing.exists(),
+                "mkdir recursively created a missing parent"
+            );
+            let mut entries = fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort();
+            let mut expected = names
+                .iter()
+                .map(|name| std::ffi::OsString::from(*name))
+                .collect::<Vec<_>>();
+            expected.extend(
+                ["preserved-file", "live-link", "dangling-link"].map(std::ffi::OsString::from),
+            );
+            expected.sort();
+            ensure!(
+                entries == expected,
+                "mkdir changed sibling entries or expanded a literal path"
+            );
+            ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+            ensure!(fs::read(&sibling)? == b"MKDIR_KEEP_SIBLING");
+            let reply = client
+                .call("ssh_read_file", json!({"host":"plain","path":sibling}))
+                .await?;
+            ensure!(succeeded(&reply)?["content"] == "MKDIR_KEEP_SIBLING");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "mkdir discarded the shared healthy master"
+            );
+
+            let unsupported = directory.join("no-subsystem");
+            let reply = client
+                .call("ssh_mkdir", json!({"host":"nosftp","path":unsupported}))
+                .await?;
+            ensure!(
+                matches!(
+                    reply["error"]["code"].as_str(),
+                    Some("unsupported" | "io_error" | "connection_lost")
+                ),
+                "{reply}"
+            );
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(
+                !unsupported.exists(),
+                "unavailable SFTP ran a mkdir fallback"
+            );
+            let before = observed_masters(&client.log, 2).await?;
+            let reply = client
+                .call(
+                    "ssh_exec",
+                    json!({
+                        "host":"nosftp","command":"printf MKDIR_NO_SUBSYSTEM_HEALTHY"
+                    }),
+                )
+                .await?;
+            ensure!(succeeded(&reply)?["stdout"] == "MKDIR_NO_SUBSYSTEM_HEALTHY");
+            ensure!(
+                masters(&client.log)? == before,
+                "unavailable SFTP replaced a healthy master"
+            );
+            fixture.await_authentications(4).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        ensure!(
+            !log.text().contains("mkdir-private"),
+            "mkdir audit disclosed a private path"
+        );
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_mkdir_dispatch_failure() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let requests = work.path().join("sftp-requests");
+    let launches = work.path().join("sftp-launches");
+    let server = Fixture::sftp_server()?;
+    // This is the real SFTP server's policy denial, not a simulated reply.
+    // Its own refusal log counts requests, including retries within one channel.
+    let script = format!(
+        "echo launch >> {}; exec {} -P mkdir -e -l VERBOSE 2>> {}",
+        launches.display(),
+        server.display(),
+        requests.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf MKDIR_FAULT_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("mkdir-fault");
+            fs::create_dir(&directory)?;
+            let sibling = directory.join("sibling");
+            fs::write(&sibling, b"KEEP_FAULT_SIBLING")?;
+            let path = directory.join("denied");
+            let reply = client
+                .call("ssh_mkdir", json!({"host":"plain","path":path}))
+                .await?;
+            failed(&reply, "permission_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(!path.exists(), "SFTP denial caused a shell fallback");
+            ensure!(fs::read(&sibling)? == b"KEEP_FAULT_SIBLING");
+            ensure!(
+                fs::read_dir(&directory)?.count() == 1,
+                "SFTP denial changed sibling entries"
+            );
+            let audit = await_audit(&client.log, "finish", "permission_denied").await?;
+            ensure!(audit["remote_state_unknown"] == true && audit["identity_role"] == "ordinary");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "SFTP mkdir denial discarded a healthy master"
+            );
+            ensure!(
+                fs::read_to_string(&launches)?.lines().count() == 1,
+                "mkdir denial replayed the SFTP session"
+            );
+            let log = fs::read_to_string(&requests)?;
+            ensure!(
+                log.lines()
+                    .filter(|line| line.contains("Refusing") && line.contains("mkdir request"))
+                    .count()
+                    == 1,
+                "expected exactly one actual MKDIR refusal, without replay: {log}"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        stopped?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_mkdir_prehandshake_timeout() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let started = work.path().join("sftp-started");
+    let done = work.path().join("sftp-delay-done");
+    let server = Fixture::sftp_server()?;
+    // Delay only the handshake; the finite guard is awaited even on assertion
+    // failure, before its private filesystem is removed.
+    let script = format!(
+        "trap \"\" HUP; echo launch >> {}; sleep 3; printf done > {}; exec {}",
+        started.display(),
+        done.display(),
+        server.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf MKDIR_DELAY_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("mkdir-delay");
+            fs::create_dir(&directory)?;
+            let sibling = directory.join("sibling");
+            fs::write(&sibling, b"KEEP_DELAY_SIBLING")?;
+            let path = directory.join("never-dispatched");
+            let reply = client
+                .call(
+                    "ssh_mkdir",
+                    json!({
+                        "host":"plain","path":path,"timeout_secs":1
+                    }),
+                )
+                .await?;
+            Fixture::await_file(&started).await?;
+            failed(&reply, "timeout")?;
+            ensure!(
+                reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false,
+                "handshake timeout acquired mutation uncertainty: {reply}"
+            );
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "handshake interruption discarded a healthy sibling transport"
+            );
+            Fixture::await_file(&done).await?;
+            ensure!(
+                fs::read_to_string(&started)?.lines().count() == 1,
+                "handshake timeout replayed SFTP"
+            );
+            ensure!(!path.exists(), "handshake timeout ran a mkdir fallback");
+            ensure!(fs::read(&sibling)? == b"KEEP_DELAY_SIBLING");
+            ensure!(
+                fs::read_dir(&directory)?.count() == 1,
+                "handshake timeout changed sibling entries"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        // Await the finite remote guard even when the request assertion failed.
+        let completed = if started.exists() {
+            Fixture::await_file(&done).await
+        } else {
+            Ok(())
+        };
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        stopped?;
+        completed?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
     Ok(())
 }
 

@@ -28,8 +28,8 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
     filedata::{
-        ListData, ListSpec, RawRead, ReadData, ReadSpec, StatSpec, WriteData, WriteSpec, encode,
-        verify_script,
+        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, StatSpec, WriteData,
+        WriteSpec, encode, verify_script,
     },
     filemeta::{ListEntry, StatData, metadata_data},
     reply::{ToolError, ToolReply},
@@ -384,6 +384,42 @@ async fn write_sftp(
     combine_close(result, close)
 }
 
+async fn mkdir_sftp(
+    sftp: Sftp,
+    spec: MkdirSpec<'_>,
+    mutation_started: &mut bool,
+) -> Result<MkdirData, Failure> {
+    let result = async {
+        let mut fs = sftp.fs();
+        // Observe existing entries, including final symlinks, without claiming
+        // a race-free no-follow check. MKDIR itself cannot replace an entry.
+        match fs.symlink_metadata(spec.path).await {
+            Ok(_) => {
+                return Err(Failure {
+                    error: ToolError::new(
+                        "already_exists",
+                        "Remote destination already exists",
+                        false,
+                    ),
+                    check_master: false,
+                });
+            }
+            Err(SftpError::SftpError(SftpErrorKind::NoSuchFile, _)) => {}
+            Err(error) => return Err(sftp_failure(error)),
+        }
+        // Set before polling: cancellation may lose the MKDIR acknowledgement.
+        *mutation_started = true;
+        fs.create_dir(spec.path).await.map_err(sftp_failure)?;
+        Ok(MkdirData { created: true })
+    }
+    .await;
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> {
     let result = {
         // Fs retains library resources: drop it before waiting for Sftp::close.
@@ -543,6 +579,22 @@ pub(crate) async fn write(
     if let Some(error) = &mut outcome.reply.error {
         // Unlike reads, write uncertainty is specifically about file effects.
         // Handshake/preflight failures cannot have dispatched a mutating OPEN.
+        error.remote_state_unknown = mutation_started;
+    }
+    outcome
+}
+
+pub(crate) async fn mkdir(
+    session: &Session,
+    spec: MkdirSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<MkdirData> {
+    let mut mutation_started = false;
+    let mut outcome = run_sftp(session, context, |sftp| {
+        mkdir_sftp(sftp, spec, &mut mutation_started)
+    })
+    .await;
+    if let Some(error) = &mut outcome.reply.error {
         error.remote_state_unknown = mutation_started;
     }
     outcome

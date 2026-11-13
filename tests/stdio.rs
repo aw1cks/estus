@@ -256,7 +256,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .collect::<Result<_>>()?;
         names.sort_unstable();
         ensure!(names == [
-            "ssh_exec", "ssh_list_directory", "ssh_read_file", "ssh_run",
+            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_run",
             "ssh_stat", "ssh_targets", "ssh_write_file",
         ], "omitting a profile changed the baseline inventory");
         let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
@@ -420,6 +420,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                     json!([
                         "ssh_exec",
                         "ssh_list_directory",
+                        "ssh_mkdir",
                         "ssh_read_file",
                         "ssh_run",
                         "ssh_stat",
@@ -430,6 +431,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                     json!([
                         "ssh_exec",
                         "ssh_list_directory",
+                        "ssh_mkdir",
                         "ssh_read_file",
                         "ssh_run",
                         "ssh_stat",
@@ -911,6 +913,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
                 == json!([
                     "ssh_exec",
                     "ssh_list_directory",
+                    "ssh_mkdir",
                     "ssh_read_file",
                     "ssh_run",
                     "ssh_stat",
@@ -957,38 +960,44 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
     let mut server = Server::start(&[])?;
     let scenario = timeout(Duration::from_secs(20), async {
         server.initialize().await?;
-        let id = Value::String("i".repeat(MESSAGE_LIMIT - 256));
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/call",
-            "params": {
-                "name": "ssh_exec",
-                "arguments": {"host": "127.0.0.1", "command": "printf budget"}
-            }
-        });
-        let request_bytes = serde_json::to_vec(&request)?.len() + 1;
-        ensure!(
-            request_bytes < MESSAGE_LIMIT,
-            "request must fit incoming limit: {request_bytes} bytes"
-        );
-        server.send(request).await?;
-        let (response, response_bytes) = server.response_with_id(&id).await?;
-        ensure!(response["id"] == id, "response did not preserve request ID");
-        ensure!(
-            response["error"]["code"] == -32602,
-            "insufficient reply budget must be a protocol invalid-params error"
-        );
-        ensure!(
-            response.get("result").is_none(),
-            "rejected request returned a tool result"
-        );
-        ensure!(
-            response_bytes <= MESSAGE_LIMIT,
-            "response exceeds limit including newline: {response_bytes} bytes"
-        );
-        drop(response);
-        drop(id);
+        for (name, arguments) in [
+            (
+                "ssh_exec",
+                json!({"host":"127.0.0.1","command":"printf budget"}),
+            ),
+            (
+                "ssh_mkdir",
+                json!({"host":"127.0.0.1","path":"budget-private-path"}),
+            ),
+        ] {
+            let id = Value::String("i".repeat(MESSAGE_LIMIT - 256));
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name":name,"arguments":arguments}
+            });
+            let request_bytes = serde_json::to_vec(&request)?.len() + 1;
+            ensure!(
+                request_bytes < MESSAGE_LIMIT,
+                "{name}: request must fit incoming limit: {request_bytes} bytes"
+            );
+            server.send(request).await?;
+            let (response, response_bytes) = server.response_with_id(&id).await?;
+            ensure!(response["id"] == id, "response did not preserve request ID");
+            ensure!(
+                response["error"]["code"] == -32602,
+                "{name}: insufficient reply budget must be a protocol invalid-params error"
+            );
+            ensure!(
+                response.get("result").is_none(),
+                "{name}: rejected request returned a tool result"
+            );
+            ensure!(
+                response_bytes <= MESSAGE_LIMIT,
+                "response exceeds limit including newline: {response_bytes} bytes"
+            );
+        }
         server
             .send(json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -1120,7 +1129,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_write_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -1675,6 +1684,160 @@ async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("operator.toml");
+    let probe = directory.path().join("mkdir-must-not-probe");
+    std::fs::write(
+        directory.path().join("replacement.conf"),
+        format!(
+            "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+            probe.display()
+        ),
+    )?;
+    std::fs::write(
+        &path,
+        indoc::indoc! {"
+            [ssh]
+            config_file = 'replacement.conf'
+            [limits]
+            connect_timeout_secs = 1
+            operation_timeout_secs = 2
+            max_timeout_secs = 3
+            [targets.allowed]
+            ssh_host = 'mkdir-private-backend.invalid'
+        "},
+    )?;
+    let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+    let scenario = async {
+        server.initialize().await?;
+        for (index, (label, arguments, code)) in [
+            (
+                "empty path",
+                json!({"host":"allowed","path":""}),
+                "invalid_argument",
+            ),
+            (
+                "NUL path",
+                json!({"host":"allowed","path":"MKDIR_PRIVATE_PATH\0tail"}),
+                "invalid_argument",
+            ),
+            (
+                "zero timeout",
+                json!({"host":"allowed","path":"MKDIR_PRIVATE_PATH","timeout_secs":0}),
+                "invalid_argument",
+            ),
+            (
+                "configured timeout ceiling",
+                json!({"host":"allowed","path":"MKDIR_PRIVATE_PATH","timeout_secs":4}),
+                "invalid_argument",
+            ),
+            (
+                "literal path reaches policy",
+                json!({"host":"denied","path":"MKDIR_PRIVATE_PATH 雪 ~/$*'\"\n"}),
+                "policy_denied",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 100 + index as u64;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_mkdir","arguments":arguments}}))
+                .await?;
+            let called = server.response(id).await?;
+            ensure!(
+                called.get("error").is_none(),
+                "{label}: route rejected valid shape"
+            );
+            let result = &called["result"];
+            let reply = &result["structuredContent"];
+            ensure!(result["isError"] == true, "{label}: expected tool error");
+            ensure!(
+                reply["data"].is_null() && reply["error"]["code"] == code,
+                "{label}: wrong rejection"
+            );
+            ensure!(
+                reply["error"]["remote_state_unknown"] == false,
+                "{label}: mutation uncertainty"
+            );
+            let text: Value = serde_json::from_str(
+                result["content"][0]["text"]
+                    .as_str()
+                    .context("mkdir error text")?,
+            )?;
+            ensure!(text == *reply, "{label}: text/structured mismatch");
+            let encoded = serde_json::to_string(&called)?;
+            ensure!(
+                !encoded.contains("MKDIR_PRIVATE_PATH")
+                    && !encoded.contains("mkdir-private-backend"),
+                "{label}: rejection disclosed private input"
+            );
+        }
+        for (index, (control, value)) in [
+            ("recursive", json!(true)),
+            ("mode", json!(448)),
+            ("permissions", json!(448)),
+            ("sudo", json!(true)),
+            ("exist_ok", json!(true)),
+            ("timeout_secs", json!(-1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 200 + index as u64;
+            let mut arguments = json!({"host":"allowed","path":"MKDIR_PRIVATE_PATH"});
+            arguments[control] = value;
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_mkdir","arguments":arguments}}))
+                .await?;
+            let rejected = server.response(id).await?;
+            ensure!(
+                rejected["error"]["code"] == -32602 && rejected.get("result").is_none(),
+                "{control}: malformed mkdir control reached handler"
+            );
+        }
+        server
+            .send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
+            "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let healthy = server.response(300).await?;
+        ensure!(
+            discovery_data(&healthy["result"], "configured")?["targets"][0]["name"] == "allowed"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    ensure!(
+        !probe.exists(),
+        "mkdir rejection evaluated SSH configuration"
+    );
+    let audit = std::str::from_utf8(&stderr)?;
+    ensure!(
+        !audit.contains("MKDIR_PRIVATE_PATH") && !audit.contains("mkdir-private-backend"),
+        "mkdir rejection audit disclosed private input"
+    );
+    for line in audit.lines() {
+        let record: Value = serde_json::from_str(line)?;
+        ensure!(
+            record["tool"] != "ssh_mkdir" || record["event"] == "reject",
+            "mkdir admitted before prevalidation"
+        );
+        for field in ["path", "content", "payload"] {
+            ensure!(record.get(field).is_none(), "mkdir audit disclosed {field}");
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -1753,7 +1916,7 @@ fn profile_call_arguments(tool: &str, host: &str) -> Value {
         "ssh_write_file" => {
             json!({"host":host,"path":"/private/profile-payload","content":"PROFILE_PAYLOAD"})
         }
-        "ssh_read_file" | "ssh_stat" | "ssh_list_directory" => {
+        "ssh_read_file" | "ssh_stat" | "ssh_list_directory" | "ssh_mkdir" => {
             json!({"host":host,"path":"/private/profile-payload"})
         }
         _ => panic!("unexpected profile test tool"),
@@ -1800,6 +1963,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
     let ordinary = [
         "ssh_exec",
         "ssh_list_directory",
+        "ssh_mkdir",
         "ssh_read_file",
         "ssh_run",
         "ssh_stat",
@@ -1816,6 +1980,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
             "files-only",
             &[
                 "ssh_list_directory",
+                "ssh_mkdir",
                 "ssh_read_file",
                 "ssh_stat",
                 "ssh_write_file",
@@ -1996,7 +2161,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
             .await?;
         let listed = server.response(2).await?;
-        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 8);
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 9);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}}))
@@ -2012,6 +2177,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                 json!([
                     "ssh_exec",
                     "ssh_list_directory",
+                    "ssh_mkdir",
                     "ssh_read_file",
                     "ssh_run",
                     "ssh_stat",
@@ -2023,6 +2189,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                 json!([
                     "ssh_exec",
                     "ssh_list_directory",
+                    "ssh_mkdir",
                     "ssh_read_file",
                     "ssh_run",
                     "ssh_stat",
@@ -2033,6 +2200,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                 "files",
                 json!([
                     "ssh_list_directory",
+                    "ssh_mkdir",
                     "ssh_read_file",
                     "ssh_stat",
                     "ssh_write_file"
@@ -2053,7 +2221,13 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
         for (host, forbidden) in [
             (
                 "read",
-                &["ssh_exec", "ssh_run", "ssh_write_file", "ssh_sudo"][..],
+                &[
+                    "ssh_exec",
+                    "ssh_run",
+                    "ssh_write_file",
+                    "ssh_mkdir",
+                    "ssh_sudo",
+                ][..],
             ),
             ("files", &["ssh_exec", "ssh_run", "ssh_sudo"][..]),
             (
@@ -2066,6 +2240,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_read_file",
                     "ssh_stat",
                     "ssh_list_directory",
+                    "ssh_mkdir",
                 ][..],
             ),
             ("base", &["ssh_sudo"][..]),
@@ -2148,6 +2323,7 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
             "ssh_stat",
             "ssh_list_directory",
             "ssh_write_file",
+            "ssh_mkdir",
         ]
         .into_iter()
         .enumerate()
