@@ -6,7 +6,8 @@ use serde::Deserialize;
 use crate::bindings::PreparedController;
 use crate::controller::{self, ControllerContext, PendingCleanup};
 use crate::reply::{
-    AutomationData, AutomationStatus, AutomationTasks, GroupCleanup, ToolError, ToolReply,
+    AutomationData, AutomationStatus, AutomationTasks, GroupCleanup, ModuleProjection, ToolError,
+    ToolReply,
 };
 
 const FRAME_LIMIT: usize = 8192;
@@ -25,6 +26,7 @@ pub(crate) fn invocation_id() -> String {
 pub(crate) struct PreparedAutomation {
     pub controller: PreparedController,
     pub host: String,
+    pub projection: Option<std::sync::Arc<crate::projection::Plan>>,
 }
 
 pub(crate) struct AutomationRun {
@@ -77,6 +79,12 @@ enum Frame {
         changed: Option<bool>,
         censored: bool,
     },
+    Projection {
+        schema: u32,
+        id: String,
+        #[serde(deserialize_with = "crate::strict_json::value")]
+        projection: serde_json::Value,
+    },
     Terminal {
         schema: u32,
         id: String,
@@ -89,6 +97,19 @@ enum Frame {
         censored: bool,
         complete: bool,
     },
+}
+
+#[derive(Deserialize)]
+struct ProjectionEnvelope {
+    schema: u32,
+    id: String,
+    kind: ProjectionKind,
+}
+
+#[derive(Deserialize)]
+enum ProjectionKind {
+    #[serde(rename = "projection")]
+    Projection,
 }
 
 struct Task {
@@ -114,6 +135,9 @@ pub(crate) struct Evidence {
     invalid: bool,
     resource: bool,
     completed_before_stop: bool,
+    projection: Option<ModuleProjection>,
+    projection_seen: bool,
+    projection_bad: bool,
 }
 
 impl Evidence {
@@ -128,6 +152,9 @@ impl Evidence {
             invalid: false,
             resource: false,
             completed_before_stop: false,
+            projection: None,
+            projection_seen: false,
+            projection_bad: false,
         }
     }
 
@@ -162,15 +189,28 @@ impl Evidence {
                 self.invalid = true;
                 return;
             }
-            if self.line.len() >= FRAME_LIMIT - 1 {
+            if self.line.len() >= FRAME_LIMIT - 1 && byte != b'\n' {
                 self.resource = true;
                 return;
             }
             if byte == b'\n' {
                 let frame = serde_json::from_slice::<Frame>(&self.line);
+                let projection_error = frame.is_err()
+                    && serde_json::from_slice::<ProjectionEnvelope>(&self.line).is_ok_and(
+                        |envelope| {
+                            envelope.schema == 2
+                                && envelope.id == self.id
+                                && matches!(envelope.kind, ProjectionKind::Projection)
+                        },
+                    );
                 self.line.clear();
                 match frame {
                     Ok(frame) => self.frame(frame),
+                    Err(_) if projection_error => {
+                        self.projection_seen = true;
+                        self.projection_bad = true;
+                        self.projection = Some(ModuleProjection::Invalid);
+                    }
                     Err(_) => self.invalid = true,
                 }
                 if self.failed() {
@@ -186,9 +226,10 @@ impl Evidence {
         let (schema, id) = match &frame {
             Frame::Ready { schema, id }
             | Frame::Task { schema, id, .. }
+            | Frame::Projection { schema, id, .. }
             | Frame::Terminal { schema, id, .. } => (*schema, id),
         };
-        if schema != 1 || id != &self.id {
+        if schema != 2 || id != &self.id {
             self.invalid = true;
             return;
         }
@@ -218,6 +259,35 @@ impl Evidence {
                     changed,
                     censored,
                 });
+            }
+            Frame::Projection { projection, .. } => {
+                if !self.ready || self.task.is_none() || self.projection_seen {
+                    self.projection_bad = true;
+                    self.projection = Some(ModuleProjection::Invalid);
+                } else {
+                    let valid_shape = projection.as_object().is_some_and(|object| {
+                        let valued = matches!(
+                            object.get("status").and_then(serde_json::Value::as_str),
+                            Some("complete" | "truncated")
+                        );
+                        object.len() == (if valued { 2 } else { 1 })
+                            && object.contains_key("status")
+                            && (!valued || object.contains_key("value"))
+                    });
+                    self.projection = if valid_shape {
+                        match serde_json::from_value(projection) {
+                            Ok(value) => Some(value),
+                            Err(_) => {
+                                self.projection_bad = true;
+                                Some(ModuleProjection::Invalid)
+                            }
+                        }
+                    } else {
+                        self.projection_bad = true;
+                        Some(ModuleProjection::Invalid)
+                    };
+                }
+                self.projection_seen = true;
             }
             Frame::Terminal {
                 status,
@@ -278,13 +348,43 @@ impl Evidence {
     }
 }
 
+fn finish_projection(
+    plan: &crate::projection::Plan,
+    received: Option<ModuleProjection>,
+    bad: bool,
+    censored: bool,
+) -> (ModuleProjection, bool) {
+    if censored {
+        let valid = matches!(received, Some(ModuleProjection::Censored)) && !bad;
+        return (ModuleProjection::Censored, !valid);
+    }
+    let value = received.unwrap_or(ModuleProjection::Unavailable);
+    if bad {
+        return (ModuleProjection::Invalid, true);
+    }
+    match &value {
+        ModuleProjection::Complete { value } | ModuleProjection::Truncated { value } => {
+            if plan.validate_value(value).is_err() {
+                return (ModuleProjection::Invalid, true);
+            }
+        }
+        ModuleProjection::Invalid | ModuleProjection::Unavailable => return (value, true),
+        ModuleProjection::Censored => {}
+    }
+    (value, false)
+}
+
 pub(crate) async fn run(
     prepared: PreparedAutomation,
     context: ControllerContext<'_>,
 ) -> AutomationRun {
     let started = context.started;
     let run = controller::run(prepared.controller, context).await;
-    let evidence = run.automation;
+    let mut evidence = run.automation;
+    let projected = evidence.as_mut().and_then(|e| e.projection.take());
+    let projection_bad = evidence.as_ref().is_some_and(|e| e.projection_bad);
+    let unexpected_projection =
+        prepared.projection.is_none() && evidence.as_ref().is_some_and(|e| e.projection_seen);
     let complete = evidence
         .as_ref()
         .and_then(|e| e.terminal.as_ref())
@@ -301,10 +401,10 @@ pub(crate) async fn run(
     let observed = terminal
         .map(|t| &t.task)
         .or_else(|| evidence.as_ref().and_then(|e| e.task.as_ref()));
-    let invalid = evidence.as_ref().is_none_or(|e| e.invalid);
+    let invalid = evidence.as_ref().is_none_or(|e| e.invalid) || unexpected_projection;
     let resource = evidence.as_ref().is_some_and(|e| e.resource);
     let preserve = evidence.as_ref().is_some_and(|e| e.completed_before_stop);
-    let (status, error) = if resource || local_error == Some("resource_limit") {
+    let (status, mut error) = if resource || local_error == Some("resource_limit") {
         (
             AutomationStatus::ResourceLimit,
             Some(ToolError::new(
@@ -399,13 +499,33 @@ pub(crate) async fn run(
             )),
         )
     };
+    let (projection, projection_issue) = match prepared.projection.as_deref() {
+        Some(plan) => {
+            let (value, issue) = finish_projection(
+                plan,
+                projected,
+                projection_bad,
+                observed.is_some_and(|task| task.censored),
+            );
+            (Some(value), issue)
+        }
+        None => (None, false),
+    };
+    if projection_issue && error.is_none() {
+        error = Some(ToolError::new(
+            "invalid_result",
+            "Selected module output is unavailable or violates its reviewed projection contract",
+            unknown,
+        ));
+    }
+    let projected_censored = matches!(projection, Some(ModuleProjection::Censored));
     let data = AutomationData {
         host: prepared.host,
         status,
         runner_rc: terminal.and_then(|t| t.rc),
         changed: observed.and_then(|t| t.changed),
         tasks: observed.map(|t| t.tasks).unwrap_or_default(),
-        censored: observed.is_some_and(|t| t.censored),
+        censored: observed.is_some_and(|t| t.censored) || projected_censored,
         complete,
         duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         owned_group_cleanup: run
@@ -413,6 +533,7 @@ pub(crate) async fn run(
             .data
             .map(|d| d.owned_group_cleanup)
             .unwrap_or(GroupCleanup::NotStarted),
+        projection,
     };
     AutomationRun {
         reply: ToolReply {
@@ -429,7 +550,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn frame(kind: &str) -> Value {
-        json!({"schema":1,"id":"test","kind":kind})
+        json!({"schema":2,"id":"test","kind":kind})
     }
     fn send(e: &mut Evidence, value: Value) {
         let mut bytes = serde_json::to_vec(&value).unwrap();
@@ -522,8 +643,8 @@ mod tests {
     #[test]
     fn framing_identity_bounds_and_post_terminal_corruption_fail_closed() {
         for bytes in [
-            b"{\"kind\":\"ready\",\"schema\":2,\"id\":\"test\"}\n".as_slice(),
-            b"{\"kind\":\"ready\",\"schema\":1,\"id\":\"other\"}\n",
+            b"{\"kind\":\"ready\",\"schema\":1,\"id\":\"test\"}\n".as_slice(),
+            b"{\"kind\":\"ready\",\"schema\":2,\"id\":\"other\"}\n",
             b"not-json\n",
         ] {
             let mut e = Evidence::new("test".into());
@@ -585,6 +706,7 @@ mod spawn_failures {
         let missing = root.path().join("missing-interpreter");
         let prepared = PreparedAutomation {
             host: "logical".into(),
+            projection: None,
             controller: PreparedController {
                 plan: Arc::new(crate::bindings::ControllerPlan {
                     source: Cow::Borrowed(""),
@@ -634,11 +756,143 @@ mod required_protocol_fields {
     #[test]
     fn nullable_evidence_is_not_an_optional_protocol_field() {
         let mut evidence = Evidence::new("test".into());
-        evidence.feed(b"{\"schema\":1,\"id\":\"test\",\"kind\":\"ready\"}\n");
-        evidence.feed(b"{\"schema\":1,\"id\":\"test\",\"kind\":\"task\",\"outcome\":\"ok\",\"censored\":false}\n");
+        evidence.feed(b"{\"schema\":2,\"id\":\"test\",\"kind\":\"ready\"}\n");
+        evidence.feed(b"{\"schema\":2,\"id\":\"test\",\"kind\":\"task\",\"outcome\":\"ok\",\"censored\":false}\n");
         assert!(
             evidence.failed(),
             "missing changed is not explicit unknown evidence"
         );
+    }
+}
+
+#[cfg(test)]
+mod projection_evidence {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn plan() -> crate::projection::Plan {
+        crate::projection::compile(json!({
+            "fields":{"text":["stdout"]},
+            "schema":{"type":"object","properties":{"text":{"type":"string","maxLength":16}},
+                "required":["text"],"additionalProperties":false},
+            "max_bytes":128,"max_items":8,"max_depth":2
+        }))
+        .unwrap()
+    }
+
+    fn send(evidence: &mut Evidence, value: Value) {
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        evidence.feed(&bytes);
+    }
+
+    fn observed(projection: Value) -> Evidence {
+        let mut raw = serde_json::to_vec(&json!({
+            "schema":2,"id":"test","kind":"projection","projection":projection
+        }))
+        .unwrap();
+        raw.push(b'\n');
+        observed_raw(&raw)
+    }
+
+    fn observed_raw(raw: &[u8]) -> Evidence {
+        let mut evidence = Evidence::new("test".into());
+        send(
+            &mut evidence,
+            json!({"schema":2,"id":"test","kind":"ready"}),
+        );
+        send(
+            &mut evidence,
+            json!({"schema":2,"id":"test","kind":"task",
+            "outcome":"ok","changed":true,"censored":false}),
+        );
+        evidence.feed(raw);
+        send(
+            &mut evidence,
+            json!({"schema":2,"id":"test","kind":"terminal",
+            "status":"successful","rc":0,"changed":true,
+            "tasks":{"ok":1,"failed":0,"unreachable":0,"skipped":0},
+            "censored":false,"complete":true}),
+        );
+        evidence
+    }
+
+    #[test]
+    fn invalid_projected_values_do_not_poison_authoritative_completion() {
+        let mut evidence = observed(json!({"status":"complete","value":{"text":7}}));
+        assert!(!evidence.failed());
+        let terminal = evidence.terminal.as_ref().unwrap();
+        assert!(terminal.complete);
+        assert_eq!(terminal.task.changed, Some(true));
+        let (value, error) = finish_projection(
+            &plan(),
+            evidence.projection.take(),
+            evidence.projection_bad,
+            false,
+        );
+        assert!(matches!(value, ModuleProjection::Invalid));
+        assert!(error);
+    }
+
+    #[test]
+    fn malformed_projection_shape_still_allows_later_terminal_evidence() {
+        let evidence = observed(json!({"status":"censored","value":"PRIVATE_PROJECTION_MARKER"}));
+        assert!(!evidence.failed());
+        assert!(evidence.projection_bad);
+        assert!(evidence.terminal.unwrap().complete);
+        assert!(matches!(
+            evidence.projection,
+            Some(ModuleProjection::Invalid)
+        ));
+    }
+
+    #[test]
+    fn identified_projection_envelope_failures_cannot_hide_later_completion() {
+        for raw in [
+            br#"{"schema":2,"id":"test","kind":"projection"}"#.as_slice(),
+            br#"{"schema":2,"id":"test","kind":"projection","projection":{"status":"censored","status":"complete","value":{"text":"PRIVATE_PROJECTION_MARKER"}}}"#,
+            br#"{"schema":2,"id":"test","kind":"projection","projection":{"status":"complete","value":{"text":"first","text":"second"}}}"#,
+            br#"{"schema":2,"id":"test","kind":"projection","extra":true,"projection":{"status":"complete","value":{"text":"value"}}}"#,
+            br#"{"schema":2,"id":"test","kind":"projection","projection":{"status":"complete","value":{"text":1e999}}}"#,
+        ] {
+            let mut bytes = raw.to_vec();
+            bytes.push(b'\n');
+            let evidence = observed_raw(&bytes);
+            assert!(!evidence.failed());
+            assert!(evidence.projection_bad);
+            let terminal = evidence.terminal.unwrap();
+            assert!(terminal.complete);
+            assert_eq!(terminal.task.changed, Some(true));
+            assert!(matches!(evidence.projection, Some(ModuleProjection::Invalid)));
+        }
+    }
+
+    #[test]
+    fn malformed_projection_envelope_still_requires_matching_version_and_identity() {
+        for raw in [
+            br#"{"schema":1,"id":"test","kind":"projection"}"#.as_slice(),
+            br#"{"schema":2,"id":"other","kind":"projection"}"#,
+            br#"{"schema":2,"id":"test","id":"other","kind":"projection"}"#,
+        ] {
+            let mut bytes = raw.to_vec();
+            bytes.push(b'\n');
+            let evidence = observed_raw(&bytes);
+            assert!(evidence.failed());
+            assert!(evidence.terminal.is_none());
+        }
+    }
+
+    #[test]
+    fn censorship_discards_values_even_when_a_producer_violates_its_contract() {
+        let (value, error) = finish_projection(
+            &plan(),
+            Some(ModuleProjection::Complete {
+                value: json!({"text":"PRIVATE_PROJECTION_MARKER"}),
+            }),
+            false,
+            true,
+        );
+        assert!(matches!(value, ModuleProjection::Censored));
+        assert!(error);
     }
 }

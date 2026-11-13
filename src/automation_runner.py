@@ -1,4 +1,4 @@
-"""Private foreground Runner bridge. Only bounded, payload-free frames leave fd 1."""
+"""Private foreground Runner bridge with bounded summaries and declared projections."""
 
 import hashlib
 import json
@@ -79,7 +79,7 @@ class Frames:
 
     def emit(self, kind, **values):
         require(self.id is not None and not self.terminal)
-        raw = (json.dumps(dict(schema=1, id=self.id, kind=kind, **values),
+        raw = (json.dumps(dict(schema=2, id=self.id, kind=kind, **values),
                           ensure_ascii=True, allow_nan=False, separators=(",", ":")) + "\n").encode("ascii")
         require(len(raw) <= 8192 and self.bytes + len(raw) <= 65536)
         self.bytes += len(raw)
@@ -90,8 +90,228 @@ class Frames:
         self.terminal = kind == "terminal"
 
 
+class ProjectionLimit(Exception):
+    pass
+
+
+class ProjectionCensored(Exception):
+    pass
+
+
+def projection_key(key):
+    return (type(key) is str and not key.startswith("_")
+            and key not in ("invocation", "module_args", "args", "argv", "cmd",
+                            "env", "environment", "ansible_env", "diff"))
+
+
+def projection_censorship(value):
+    if type(value) is dict and (value.get("_ansible_no_log") or "censored" in value):
+        raise ProjectionCensored()
+
+
+def projection_equal(left, right):
+    # JSON equality distinguishes booleans from numbers, unlike Python equality.
+    if type(left) in (int, float) and type(right) in (int, float):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return (left.keys() == right.keys()
+                and all(projection_equal(value, right[key]) for key, value in left.items()))
+    if type(left) is list:
+        return len(left) == len(right) and all(map(projection_equal, left, right))
+    return left == right
+
+
+class Projection:
+    """Copy only reviewed schema members; budgets account for ASCII JSON on the wire.
+
+    No event/result is retained. Rust validates the resulting bounded candidate
+    against the full schema, including conditional assertions.
+    """
+
+    def __init__(self, plan):
+        self.plan = plan
+        self.bytes = 0
+        self.nodes = 0
+        self.truncated = False
+
+    def charge(self, size):
+        if self.bytes + size > self.plan["max_bytes"]:
+            raise ProjectionLimit()
+        self.bytes += size
+
+    def constraints(self, schema, value):
+        if "const" in schema:
+            require(projection_equal(value, schema["const"]))
+        if "enum" in schema:
+            require(any(projection_equal(value, choice) for choice in schema["enum"]))
+        if type(value) in (str, list, dict):
+            names = {str: ("minLength", "maxLength"), list: ("minItems", "maxItems"),
+                     dict: ("minProperties", "maxProperties")}[type(value)]
+            require(len(value) >= schema.get(names[0], 0))
+            require(names[1] not in schema or len(value) <= schema[names[1]])
+        if type(value) in (int, float):
+            for key, valid in (("minimum", lambda limit: value >= limit),
+                               ("maximum", lambda limit: value <= limit),
+                               ("exclusiveMinimum", lambda limit: value > limit),
+                               ("exclusiveMaximum", lambda limit: value < limit)):
+                require(key not in schema or valid(schema[key]))
+        if type(value) is list and schema.get("uniqueItems"):
+            require(not any(projection_equal(value[i], prior)
+                            for i in range(len(value)) for prior in value[:i]))
+
+    def source_type(self, source, schema, selected_root=False):
+        require(type(schema) is dict)
+        kind = schema.get("type")
+        valid = {
+            "object": type(source) is dict,
+            "array": type(source) is list,
+            "string": type(source) is str,
+            "integer": (type(source) is int or type(source) is float
+                        and math.isfinite(source) and source.is_integer()),
+            "number": type(source) in (int, float),
+            "boolean": type(source) is bool,
+            "null": source is None,
+        }
+        require(kind in valid and valid[kind])
+        if type(source) in (int, float):
+            require(math.isfinite(source) and abs(source) <= 9007199254740991)
+        projection_censorship(source)
+        if kind == "object" and not selected_root:
+            properties = schema.get("properties")
+            required = schema.get("required", [])
+            require(type(properties) is dict and type(required) is list)
+            require(all(type(key) is str and key in properties and key in source
+                        for key in required))
+        return kind
+
+    def member(self, target, key, source, schema, depth, required):
+        require(type(key) is str)
+        # Check type/censorship even if an optional member cannot fit.
+        self.source_type(source, schema)
+        before = (self.bytes, self.nodes)
+        try:
+            self.charge(len(json.dumps(key, ensure_ascii=True)) + 1 + bool(target))
+            value = self.copy(source, schema, depth)
+        except ProjectionLimit:
+            self.bytes, self.nodes = before
+            if required:
+                raise
+            self.truncated = True
+        else:
+            target[key] = value
+
+    def copy(self, source, schema, depth, fields=None):
+        kind = self.source_type(source, schema, selected_root=fields is not None)
+        if depth > self.plan["max_depth"] or self.nodes >= self.plan["max_items"]:
+            raise ProjectionLimit()
+        self.nodes += 1
+        if kind == "object":
+            self.charge(2)
+            value = {}
+            properties = schema["properties"]
+            require(type(properties) is dict and schema.get("additionalProperties") is False)
+            required = schema.get("required", [])
+            require(type(required) is list and all(key in properties for key in required))
+            for key in sorted(properties, key=lambda key: (key not in required, key)):
+                child_schema = properties[key]
+                if fields is None:
+                    require(projection_key(key))
+                    child = source.get(key)
+                    present = key in source
+                else:
+                    child = source
+                    present = True
+                    path = fields[key]
+                    require(type(path) is list and 1 <= len(path) <= 8)
+                    for segment in path:
+                        require(projection_key(segment))
+                        require(type(child) is dict)
+                        projection_censorship(child)
+                        if segment not in child:
+                            present = False
+                            break
+                        child = child[segment]
+                if not present:
+                    require(key not in required)
+                    continue
+                self.member(value, key, child, child_schema, depth + 1, key in required)
+        elif kind == "array":
+            self.charge(2)
+            value = []
+            maximum = schema["maxItems"]
+            require(type(maximum) is int and maximum >= 0)
+            for index in range(min(len(source), maximum)):
+                before = (self.bytes, self.nodes)
+                try:
+                    self.charge(bool(value))
+                    child = self.copy(source[index], schema["items"], depth + 1)
+                except ProjectionLimit:
+                    self.bytes, self.nodes = before
+                    break
+                value.append(child)
+            if len(value) < len(source):
+                self.truncated = True
+        elif kind == "string":
+            self.charge(2)
+            characters = []
+            maximum = schema["maxLength"]
+            require(type(maximum) is int and maximum >= 0)
+            for char in source:
+                require(not 0xD800 <= ord(char) <= 0xDFFF)
+                if len(characters) >= maximum:
+                    break
+                size = len(json.dumps(char, ensure_ascii=True)) - 2
+                if self.bytes + size > self.plan["max_bytes"]:
+                    break
+                self.charge(size)
+                characters.append(char)
+            value = "".join(characters)
+            if len(value) < len(source):
+                self.truncated = True
+        else:
+            # Only a bounded scalar, never an unbounded result/container, is serialized.
+            size = len(json.dumps(source, ensure_ascii=True, allow_nan=False,
+                                  separators=(",", ":")))
+            # Both encoders use shortest binary64 decimals. Pinned zmij 1.0.23
+            # uses fixed exponents -5..15, while Python uses -4..15:
+            # 1e-05 can therefore grow by two bytes to 0.00001 in Rust.
+            # Reserve this allowance for floats only; Rust checks actual bytes.
+            self.charge(size + (2 if type(source) is float else 0))
+            value = source
+        self.constraints(schema, value)
+        return value
+
+    def reduce(self, result, censored):
+        try:
+            if censored:
+                raise ProjectionCensored()
+            projection_censorship(result)
+            if result == {}:
+                return dict(status="unavailable")
+            keys(self.plan, ("fields", "schema", "max_bytes", "max_items", "max_depth"))
+            for name, minimum, maximum in (("max_bytes", 64, 4096), ("max_items", 1, 256),
+                                            ("max_depth", 1, 8)):
+                require(type(self.plan[name]) is int and minimum <= self.plan[name] <= maximum)
+            fields = self.plan["fields"]
+            require(type(fields) is dict and 1 <= len(fields) <= 16)
+            require(all(type(key) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", key)
+                        for key in fields))
+            require(type(self.plan["schema"]) is dict
+                    and self.plan["schema"].get("type") == "object"
+                    and set(fields) == set(self.plan["schema"]["properties"]))
+            value = self.copy(result, self.plan["schema"], 0, fields)
+            return dict(status="truncated" if self.truncated else "complete", value=value)
+        except ProjectionCensored:
+            return dict(status="censored")
+        except Exception:
+            # Projection policy/copy failures never invalidate execution evidence.
+            return dict(status="invalid")
+
+
 class Evidence:
-    def __init__(self, frames, module, no_log):
+    def __init__(self, frames, module, no_log, projection=None):
         self.frames = frames
         self.module = module
         self.censored = no_log
@@ -103,6 +323,7 @@ class Evidence:
         self.stats = None
         self.statuses = []
         self.tasks = dict(ok=0, failed=0, unreachable=0, skipped=0)
+        self.projection = projection
 
     def status(self, data, runner_config):
         # Starting data contains argv/env: never retain it or serialize it.
@@ -149,6 +370,9 @@ class Evidence:
             self.outcome = kind.removeprefix("runner_on_")
             self.tasks[self.outcome] = 1
             self.frames.emit("task", outcome=self.outcome, changed=self.changed, censored=self.censored)
+            if self.projection is not None:
+                selected = Projection(self.projection).reduce(result, self.censored)
+                self.frames.emit("projection", projection=selected)
         elif kind == "playbook_on_stats":
             require(self.stats is None and self.outcome is not None)
             observed = {}
@@ -272,8 +496,9 @@ class Cancellation:
 
 def validate(spec):
     keys(spec, ("schema", "invocation_id", "runtime", "expected", "destination", "target_python",
-                "ssh_config", "ssh_executable", "arguments", "no_log", "timeout_secs", "scratch_bytes", "scratch_files"))
-    require(type(spec["schema"]) is int and spec["schema"] == 1)
+                "ssh_config", "ssh_executable", "arguments", "no_log", "timeout_secs", "scratch_bytes", "scratch_files",
+                "projection"))
+    require(type(spec["schema"]) is int and spec["schema"] == 2)
     require(type(spec["invocation_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", spec["invocation_id"]))
     keys(spec["expected"], ("identity", "collection", "content_sha256", "source", "module"))
     expected = spec["expected"]
@@ -456,7 +681,7 @@ def main():
         require(selected_path and all(part and Path(part).is_absolute() for part in selected_path.split(os.pathsep)))
         layout(workspace, spec, roots, selected_path)
         from ansible_runner import run
-        evidence = Evidence(frames, spec["expected"]["module"], spec["no_log"])
+        evidence = Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"])
         if cancellation.requested():
             status = cancellation.reason
         else:

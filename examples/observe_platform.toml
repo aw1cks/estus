@@ -1,0 +1,36 @@
+# Import ansible.builtin.setup from the selected runtime before enabling:
+#   ssh-mcp schema import ansible.builtin.setup --output /etc/ssh-mcp/setup.schema.json
+# Provision the workspace mode 0700, owned by the MCP account.
+# MCP input: {"host":"server","inputs":{}}
+profile = "actions-only"
+enabled_tools = ["observe_platform"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/ssh-mcp/runner"
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+[tools.observe_platform]
+description = "Read selected platform and Python facts on an approved ordinary target. No raw environment, arguments or event history is returned. Interrupted work is not replayed."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_module", snapshot = "/etc/ssh-mcp/setup.schema.json", no_log = false }
+input_schema = { type = "object", properties = {}, required = [], additionalProperties = false }
+fixed_args = { gather_subset = ["!all", "!min", "platform", "python_version"], filter = ["ansible_system", "ansible_python_version"], gather_timeout = 5 }
+input_map = {}
+limits = { timeout_secs = 15 }
+
+[tools.observe_platform.result]
+kind = "ansible_projection"
+fields = { platform = ["ansible_facts", "ansible_system"], python = ["ansible_facts", "ansible_python_version"] }
+schema = { type = "object", properties = { platform = { type = "string", maxLength = 64 }, python = { type = "string", maxLength = 64 } }, required = ["platform", "python"], additionalProperties = false }
+max_bytes = 1024
+max_items = 32
+max_depth = 4

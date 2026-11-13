@@ -196,11 +196,12 @@ An existing bounded absolute `SSH_AUTH_SOCK` reference is preserved for an
 out-of-band agent. The product does not load keys, create an agent, prompt for
 credentials or accept key/password contents as tool inputs.
 
-Results contain only logical host, status, Runner return code, bounded task
-counts, observed change/censorship/completion, duration and local cleanup evidence.
-No raw module output, arguments, facts, events or diagnostics are forwarded.
-`no_log` remains censored. Strings in nested module data are serialized with
-documented `!unsafe` tags, not evaluated as caller-supplied Jinja.
+Summary-only results contain logical host, status, Runner return code, bounded task
+counts, change/censorship/completion, duration and local cleanup evidence. They
+still exclude module values. Typed bindings may expose only explicitly selected
+fields as described below; whole raw events/arguments/environment are not returned.
+`no_log` remains censored. Nested module input strings use documented `!unsafe`
+tags rather than caller-supplied Jinja evaluation.
 
 `automation.max_concurrent` defaults to 2; each logical target admits one module
 invocation at a time. The existing global operation cap also applies. Admission
@@ -214,8 +215,50 @@ Scratch defaults to 16 MiB/512 entries. Byte/file polling cancels on an observed
 watermark, not a hard filesystem or memory quota. Runner's unavoidable private
 metadata/transient files can contain secrets; supported duplicate output/event
 capture is suppressed and invocation files are removed after ownership ends.
-Crash recovery does not promise secure erasure. Roles, privilege escalation,
-retained raw events and result-field projections are not enabled by this slice.
+Crash recovery does not promise secure erasure. Roles, privilege escalation and
+retained raw events remain outside this implementation.
+
+## Typed module result fields
+
+[`examples/observe_platform.toml`](examples/observe_platform.toml) selects platform
+and Python facts from the real setup module. Import its reviewed snapshot first;
+the result declaration fixes paths and schema, never a caller expression:
+
+```toml
+[tools.observe_platform.result]
+kind = "ansible_projection"
+fields = { platform = ["ansible_facts", "ansible_system"] }
+schema = { type = "object", properties = { platform = { type = "string", maxLength = 64 } }, required = ["platform"], additionalProperties = false }
+max_bytes = 1024
+max_items = 32
+max_depth = 4
+```
+
+The response adds `data.projection`: `complete` or `truncated` contains a
+schema-validated `value`; `censored`, `invalid` and `unavailable` contain no value.
+Execution `status`, `complete`, `changed`, counts and uncertainty retain their
+independent meanings. Invalid/unavailable projection after successful execution
+is an `invalid_result` tool error, not empty success or evidence of rollback.
+Summary-only bindings keep their original shape without `projection`.
+
+Object properties are selected recursively by the closed schema, arrays keep a
+bounded prefix, and strings keep a bounded Unicode prefix. `max_bytes` is 64–4096,
+`max_items` counts 1–256 values/containers, and `max_depth` is 1–8 from root depth 0.
+Finite per-node limits and smaller aggregate caps are joint upper bounds, not
+guarantees every schema-required minimum can fit. Truncation is returned only if
+the bounded candidate still satisfies the schema; no defaults/coercions are added.
+The final MCP budget includes escaping and both result representations before
+dispatch.
+
+Known private/event/argument/environment/diff containers are not selectable.
+Declared stdout strings and fact fields can still contain secrets: selection is
+not general redaction. Task or selected nested censorship suppresses values.
+Pinned Runner can omit oversized result data while retaining task/statistics;
+that yields `unavailable` without discarding known execution completion.
+
+`nix run .#projection-acceptance-msrv` runs the focused real Runner suite with the
+same non-root/private-runtime-directory prerequisites as native SSH acceptance.
+It does not activate hosted CI or install request-time dependencies.
 
 ## Native / Nix
 

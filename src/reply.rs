@@ -149,7 +149,7 @@ pub(crate) struct ControllerData {
     pub owned_group_cleanup: GroupCleanup,
 }
 
-/// Bounded evidence only; backend values and event payloads are never public.
+/// Bounded execution evidence and optional explicitly selected module data.
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct AutomationData {
     pub host: String,
@@ -161,6 +161,8 @@ pub(crate) struct AutomationData {
     pub complete: bool,
     pub duration_ms: u64,
     pub owned_group_cleanup: GroupCleanup,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ModuleProjection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, JsonSchema)]
@@ -184,4 +186,15 @@ pub(crate) struct AutomationTasks {
     pub failed: u32,
     pub unreachable: u32,
     pub skipped: u32,
+}
+
+/// Projection availability is independent of authoritative workflow completion.
+#[derive(Debug, Serialize, serde::Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ModuleProjection {
+    Complete { value: serde_json::Value },
+    Truncated { value: serde_json::Value },
+    Censored,
+    Invalid,
+    Unavailable,
 }

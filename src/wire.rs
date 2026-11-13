@@ -126,9 +126,14 @@ impl ReplyBudget {
         })
     }
 
-    pub(crate) fn automation_reserve(&self, host: &str) -> Result<(), ErrorData> {
-        // Fixed-width evidence only: reserve every field and the widest error envelope.
-        let reservation = serde_json::json!({
+    pub(crate) fn automation_reserve(
+        &self,
+        host: &str,
+        max_projection_bytes: Option<usize>,
+    ) -> Result<(), ErrorData> {
+        // Reserve fixed evidence first, then the selected JSON's worst-case
+        // structured form plus its escaped JSON-in-text duplicate (at most 3N).
+        let mut reservation = serde_json::json!({
             "data":{
                 "host":"","status":"resource_limit","runner_rc":i32::MIN,
                 "changed":false,"tasks":{"ok":u32::MAX,"failed":u32::MAX,"unreachable":u32::MAX,"skipped":u32::MAX},
@@ -137,8 +142,19 @@ impl ReplyBudget {
             },
             "error":{"code":"invalid_argument","message":"x".repeat(256),"remote_state_unknown":false}
         });
+        let projection_bytes = if let Some(limit) = max_projection_bytes {
+            if !(64..=4096).contains(&limit) {
+                return Err(exceeded());
+            }
+            reservation["data"]["projection"] =
+                serde_json::json!({"status":"truncated","value":null});
+            limit.checked_mul(3).ok_or_else(exceeded)?
+        } else {
+            0
+        };
         let size = self.value_size(&reservation, true)?;
         size.checked_add(duplicated_size(&host)?)
+            .and_then(|size| size.checked_add(projection_bytes))
             .filter(|size| *size <= MAX_RESPONSE_BYTES)
             .map(|_| ())
             .ok_or_else(exceeded)
@@ -362,12 +378,42 @@ mod tests {
     #[test]
     fn fixed_automation_summary_reserves_normal_wire_budget() {
         let budget = ReplyBudget::new(&RequestId::Number(1)).unwrap();
-        budget.automation_reserve("logical").unwrap();
+        budget.automation_reserve("logical", None).unwrap();
         let oversized = RequestId::String("x".repeat(MAX_RESPONSE_BYTES).into());
         assert!(
             ReplyBudget::new(&oversized)
-                .and_then(|budget| budget.automation_reserve("logical"))
+                .and_then(|budget| budget.automation_reserve("logical", None))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn projected_escape_growth_is_reserved_before_a_large_id_can_dispatch() {
+        use crate::reply::{AutomationData, AutomationStatus, AutomationTasks, ModuleProjection};
+        let value = json!({"text":"\0\\\"".repeat(400)});
+        assert!(serde_json::to_vec(&value).unwrap().len() <= 4096);
+        let id = RequestId::String("x".repeat(MAX_RESPONSE_BYTES - 7000).into());
+        let budget = ReplyBudget::new(&id).unwrap();
+        assert!(budget.automation_reserve("logical", None).is_ok());
+        assert!(budget.automation_reserve("logical", Some(4096)).is_err());
+        let reply = ToolReply::success(AutomationData {
+            host: "logical".into(),
+            status: AutomationStatus::Successful,
+            runner_rc: Some(0),
+            changed: Some(false),
+            tasks: AutomationTasks {
+                ok: 1,
+                ..Default::default()
+            },
+            censored: false,
+            complete: true,
+            duration_ms: 1,
+            owned_group_cleanup: GroupCleanup::SignalledAndReaped,
+            projection: Some(ModuleProjection::Complete { value }),
+        });
+        assert!(
+            budget.result(reply).is_err(),
+            "both result representations exceed the remaining frame"
         );
     }
 

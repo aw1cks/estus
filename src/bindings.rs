@@ -250,9 +250,19 @@ struct InputSlot {
     input: String,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawResult {
-    kind: String,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawResult {
+    // Empty struct variants keep unknown-option rejection for tagged records.
+    Command {},
+    ControllerCommand {},
+    AnsibleSummary {},
+    AnsibleProjection {
+        fields: BTreeMap<String, Vec<String>>,
+        schema: toml::Value,
+        max_bytes: usize,
+        max_items: usize,
+        max_depth: usize,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -386,6 +396,7 @@ enum Execution {
         snapshot: PathBuf,
         overlay: Value,
         no_log: bool,
+        projection: Option<Arc<crate::projection::Plan>>,
         // One startup allocation keeps native bindings from reserving the large plan.
         plan: Option<Box<ModulePlan>>,
     },
@@ -492,6 +503,7 @@ struct ModuleSpec<'a> {
     ssh_executable: &'a Path,
     arguments: &'a Value,
     no_log: bool,
+    projection: Option<&'a crate::projection::Plan>,
     timeout_secs: f64,
     scratch_bytes: u64,
     scratch_files: usize,
@@ -689,7 +701,10 @@ impl CompiledBinding {
         };
         let targets = raw.targets.unwrap_or_default();
         if raw.authority.as_str() != Some("automation")
-            || raw.result.kind != "ansible_summary"
+            || !matches!(
+                &raw.result,
+                RawResult::AnsibleSummary {} | RawResult::AnsibleProjection { .. }
+            )
             || raw.description.is_empty()
             || raw.description.len() > 1024
             || !identifier(&raw.revision)
@@ -703,6 +718,27 @@ impl CompiledBinding {
         {
             return Err(invalid("Invalid module binding authority or definition"));
         }
+        let projection = match raw.result {
+            RawResult::AnsibleSummary {} => None,
+            RawResult::AnsibleProjection {
+                fields,
+                schema,
+                max_bytes,
+                max_items,
+                max_depth,
+            } => {
+                let schema = serde_json::to_value(schema)
+                    .map_err(|_| invalid("Invalid projection schema"))?;
+                Some(Arc::new(
+                    crate::projection::compile(json!({
+                        "fields": fields, "schema": schema, "max_bytes": max_bytes,
+                        "max_items": max_items, "max_depth": max_depth
+                    }))
+                    .map_err(invalid)?,
+                ))
+            }
+            _ => unreachable!("module result checked"),
+        };
         let schema =
             serde_json::to_value(raw.input_schema).map_err(|_| invalid("Invalid module schema"))?;
         let fixed = raw
@@ -751,6 +787,7 @@ impl CompiledBinding {
                 snapshot: PathBuf::from(snapshot),
                 overlay,
                 no_log,
+                projection,
                 plan: None,
             },
             argv: Vec::new(),
@@ -776,6 +813,7 @@ impl CompiledBinding {
         let Execution::AnsibleModule {
             plan: Some(plan),
             no_log,
+            projection,
             ..
         } = &self.execution
         else {
@@ -800,7 +838,7 @@ impl CompiledBinding {
             .map_err(|_| bound("Module inputs violate the reviewed binding"))?;
         let invocation_id = crate::automation_exec::invocation_id();
         let spec = ModuleSpec {
-            schema: 1,
+            schema: 2,
             invocation_id: &invocation_id,
             runtime: &plan.runtime,
             expected: ModuleContent {
@@ -816,6 +854,7 @@ impl CompiledBinding {
             ssh_executable,
             arguments: &arguments,
             no_log: *no_log,
+            projection: projection.as_deref(),
             timeout_secs: Duration::from_secs(timeout)
                 .saturating_sub(started.elapsed())
                 .as_secs_f64(),
@@ -842,6 +881,7 @@ impl CompiledBinding {
                 },
             },
             host: request.host.clone(),
+            projection: projection.clone(),
         })
     }
 
@@ -878,12 +918,10 @@ impl CompiledBinding {
         };
         let controller = matches!(&raw.execution, RawExecution::ControllerScript { .. });
         if controller != matches!(authority, Authority::Controller)
-            || raw.result.kind
-                != if controller {
-                    "controller_command"
-                } else {
-                    RESULT_KIND
-                }
+            || !matches!(
+                (&raw.result, controller),
+                (RawResult::ControllerCommand {}, true) | (RawResult::Command {}, false)
+            )
         {
             return Err(invalid("Execution, authority and result kinds must agree"));
         }
@@ -1255,8 +1293,17 @@ impl CompiledBinding {
         )
     }
 
+    pub(crate) fn projection(&self) -> Option<&Arc<crate::projection::Plan>> {
+        match &self.execution {
+            Execution::AnsibleModule { projection, .. } => projection.as_ref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn result_kind(&self) -> &'static str {
-        if self.is_automation() {
+        if self.projection().is_some() {
+            "ansible_projection"
+        } else if self.is_automation() {
             "ansible_summary"
         } else if self.is_controller() {
             "controller_command"
@@ -1516,6 +1563,95 @@ impl CompiledBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn projection_result() -> toml::Value {
+        toml::Value::try_from(json!({
+            "kind":"ansible_projection","fields":{"platform":["ansible_facts","ansible_system"]},
+            "schema":{"type":"object","additionalProperties":false,"required":["platform"],
+                "properties":{"platform":{"type":"string","maxLength":64}}},
+            "max_bytes":1024,"max_items":32,"max_depth":4
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn projected_binding_has_fixed_policy_and_rejects_request_selectors() {
+        let mut raw = module_definition();
+        raw["result"] = projection_result();
+        let bindings = compile(raw).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        assert_eq!(binding.result_kind(), "ansible_projection");
+        assert_eq!(
+            binding.projection().unwrap().fields["platform"],
+            ["ansible_facts", "ansible_system"]
+        );
+        assert!(
+            binding
+                .parse_request(
+                    json!({"host":"server","inputs":{"nested":{"items":[]}},
+            "fields":{"platform":["env"]}})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                )
+                .is_err()
+        );
+        let mut native = definition();
+        native["result"] = projection_result();
+        assert!(compile(native).is_err());
+    }
+
+    #[test]
+    fn native_and_summary_result_kinds_reject_unknown_options() {
+        for kind in ["command", "controller_command", "ansible_summary"] {
+            let value = toml::Value::try_from(json!({"kind":kind,"unexpected":true})).unwrap();
+            let result: Result<RawResult, _> = value.try_into();
+            assert!(
+                result.is_err(),
+                "result kind {kind} accepted an unknown option"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_projection_rejects_unknown_fields_and_unbounded_schema() {
+        for invalid_result in [
+            {
+                let mut v = projection_result();
+                v.as_table_mut()
+                    .unwrap()
+                    .insert("unexpected".into(), true.into());
+                v
+            },
+            {
+                let mut v = projection_result();
+                v["schema"]["properties"]["platform"]
+                    .as_table_mut()
+                    .unwrap()
+                    .remove("maxLength");
+                v
+            },
+            {
+                let mut v = projection_result();
+                v["fields"]["platform"] = toml::Value::try_from(json!(["env"])).unwrap();
+                v
+            },
+        ] {
+            let mut raw = module_definition();
+            raw["result"] = invalid_result;
+            assert!(
+                Bindings::compile(
+                    BTreeMap::from([("observe".into(), raw)]),
+                    &[],
+                    &Limits::default(),
+                    |_| true,
+                    None,
+                    true
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn module_domain_assertions_remain_nested_and_unmodified() {
