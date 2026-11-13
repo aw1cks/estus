@@ -1,0 +1,26 @@
+---
+argument_specs:
+  main:
+    short_description: Converge and verify one ordinary application JSON configuration
+    options:
+      config_root:
+        type: path
+        required: true
+        description: Operator-owned absolute application directory; never caller-selected.
+      instance:
+        type: str
+        required: true
+        description: Literal application instance label, not a path or template.
+      config:
+        type: dict
+        required: true
+        options:
+          banner:
+            type: str
+            required: true
+          enabled:
+            type: bool
+            required: true
+          port:
+            type: int
+            description: Required when enabled; binding enforces this before dependencies run.

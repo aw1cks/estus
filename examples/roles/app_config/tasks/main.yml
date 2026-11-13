@@ -1,0 +1,51 @@
+---
+- name: Validate the application contract without interpreting caller strings
+  ansible.builtin.assert:
+    that:
+      - config_root is string and config_root.startswith('/')
+      - instance is string and instance | length > 0 and instance | length <= 512
+      - config.banner is string and config.banner | length <= 2048
+      - config.enabled is boolean
+      - not config.enabled or (config.port is defined and config.port is integer and config.port >= 1024 and config.port <= 65535)
+    quiet: true
+
+- name: Create the fixed ordinary application directory
+  ansible.builtin.file:
+    path: "{{ config_root }}"
+    state: directory
+    mode: '0700'
+
+- name: Converge application JSON through a trusted template
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ config_root }}/config.json"
+    mode: '0600'
+
+- name: Read the actual managed bytes
+  ansible.builtin.slurp:
+    src: "{{ config_root }}/config.json"
+  register: app_config_bytes
+
+- name: Observe the actual managed file checksum
+  ansible.builtin.stat:
+    path: "{{ config_root }}/config.json"
+    checksum_algorithm: sha256
+  register: app_config_stat
+
+- name: Verify the explicit application postcondition
+  ansible.builtin.assert:
+    that:
+      - app_config_stat.stat.isreg
+      - app_config_stat.stat.mode == '0600'
+      - >-
+        (app_config_bytes.content | b64decode | from_json) == {'instance': instance, 'config': config}
+      - app_config_stat.stat.checksum == (app_config_bytes.content | b64decode | hash('sha256'))
+    quiet: true
+
+- name: Publish only the typed application receipt
+  ansible.builtin.set_fact:
+    mcp_result:
+      instance: "{{ instance }}"
+      path: "{{ config_root }}/config.json"
+      checksum: "{{ app_config_stat.stat.checksum }}"
+      verified: true
