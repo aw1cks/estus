@@ -17,10 +17,8 @@ const NODES: usize = 8192;
 const RESERVED: &[&str] = &[
     "host",
     "timeout_secs",
-    "argv",
     "program",
     "cwd",
-    "stdin",
     "user",
     "role",
     "authority",
@@ -59,8 +57,11 @@ fn parameter(value: &str) -> bool {
             c == b'_' || c.is_ascii_alphabetic() || (i > 0 && (c.is_ascii_digit() || c == b'-'))
         })
         && !value.starts_with('_')
-        && !RESERVED.contains(&value)
         && !value.starts_with("ansible_")
+}
+
+fn public_parameter(value: &str) -> bool {
+    parameter(value) && !RESERVED.contains(&value)
 }
 
 pub(crate) fn valid_fqcn(value: &str) -> bool {
@@ -147,7 +148,27 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
         .and_then(Value::as_object)
         .ok_or(INVALID)?;
     let mut defaults = BTreeMap::new();
-    let (mut schema, aliases) = import_options(options, "", &mut defaults)?;
+    // Ansible documents free-form task syntax as a pseudo-option, not a named
+    // module argument. This executor accepts named argument objects only.
+    let free_form = doc
+        .get("attributes")
+        .and_then(|v| v.get("raw"))
+        .and_then(|v| v.get("support"))
+        .and_then(Value::as_str)
+        == Some("full")
+        && options
+            .get("free_form")
+            .and_then(Value::as_object)
+            .is_some_and(|option| {
+                option.contains_key("description")
+                    && option.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "description" | "version_added" | "version_added_collection"
+                        )
+                    })
+            });
+    let (mut schema, aliases) = import_options(options, "", &mut defaults, free_form)?;
     let mut prose = Vec::new();
     for key in ["description", "notes"] {
         if let Some(value) = doc.get(key) {
@@ -161,10 +182,15 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
             .insert("description".to_owned(), Value::String(prose.join("\n\n")));
     }
     check_schema(&schema, true)?;
-    let result = serde_json::to_value(Contract {
+    let mut result = serde_json::to_value(Contract {
         schema, aliases, defaults,
         review_required: vec!["Public documentation is not the runtime argument specification and does not reliably expose required_if, mutual exclusions, coercions, or module-body constraints. Binding authors must review the preserved descriptions and supply conditional input_schema constraints or a narrower fixed/mapped surface; no prose rules are inferred or certified. Defaults are metadata only and are never injected.".to_owned()],
     }).map_err(|_| INVALID)?;
+    if free_form {
+        result["review_required"].as_array_mut().ok_or(INVALID)?.push(Value::String(
+            "Free-form task syntax is not a named module argument and cannot be bound; review and expose only the documented typed named arguments.".to_owned()
+        ));
+    }
     if !bounded(&result) {
         return Err(INVALID);
     }
@@ -190,11 +216,15 @@ fn import_options(
     options: &Map<String, Value>,
     path: &str,
     defaults: &mut BTreeMap<String, Value>,
+    skip_free_form: bool,
 ) -> Result<(Value, Aliases), &'static str> {
     let mut properties = Map::new();
     let mut required = Vec::new();
     let mut aliases = Aliases::default();
     for (key, option) in options {
+        if skip_free_form && key == "free_form" {
+            continue;
+        }
         if !parameter(key) {
             return Err(INVALID);
         }
@@ -308,7 +338,7 @@ fn import_type(
                 .get("suboptions")
                 .and_then(Value::as_object)
                 .ok_or(INVALID)?;
-            import_options(sub, path, defaults)
+            import_options(sub, path, defaults, false)
         }
         "list" => {
             let elements = option
@@ -750,10 +780,13 @@ pub(crate) fn compile_binding(
         .get("properties")
         .and_then(Value::as_object)
         .ok_or(SCHEMA)?;
+    if public.keys().any(|key| !public_parameter(key)) {
+        return Err(SCHEMA);
+    }
     let mut input_map = BTreeMap::new();
     let mut mapped = BTreeSet::new();
     for (target, input) in overlay.input_map {
-        if !parameter(&target) || !parameter(&input) {
+        if !parameter(&target) || !public_parameter(&input) {
             return Err(SCHEMA);
         }
         let target = contract
@@ -1046,9 +1079,28 @@ mod tests {
 
     #[test]
     fn reserved_keys_and_fqcn_boundaries() {
-        for key in ["host", "execution", "ansible_connection", "_raw_params"] {
+        for key in ["ansible_connection", "_raw_params"] {
             assert!(import_document(&json!({"doc":{"options":{(key):{"type":"str"}}}})).is_err());
         }
+        let contract =
+            import_document(&json!({"doc":{"options":{"host":{"type":"str"}}}})).unwrap();
+        for key in ["host", "execution", "ansible_connection", "_raw_params"] {
+            let overlay = json!({
+                "input_schema":{"type":"object","properties":{(key):{"type":"string"}},"additionalProperties":false},
+                "fixed_args":{},"input_map":{"host":key}
+            });
+            assert!(compile_binding(&contract, &overlay).is_err());
+        }
+        let binding = compile_binding(&contract, &json!({
+            "input_schema":{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false},
+            "fixed_args":{},"input_map":{"host":"value"}
+        })).unwrap();
+        assert_eq!(
+            binding
+                .prepare(&json!({"value":"application-data"}))
+                .unwrap(),
+            json!({"host":"application-data"})
+        );
         assert!(valid_fqcn("ansible.builtin.ping"));
         for name in ["ping", "a.b", "a.b.-option", "a.b.c;id", "a..c", "a.b.3bad"] {
             assert!(!valid_fqcn(name));
@@ -1124,5 +1176,42 @@ mod tests {
             deep = json!([deep]);
         }
         assert!(!bounded(&deep));
+    }
+}
+
+#[cfg(test)]
+mod named_arguments {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn documented_free_form_syntax_cannot_be_forwarded_as_a_named_argument() {
+        let contract = import_document(&json!({"doc":{
+            "attributes":{"raw":{"support":"full"}},
+            "options":{"free_form":{"description":"Not an actual named parameter."},
+                "argv":{"type":"list","elements":"str"},"stdin":{"type":"str"}}
+        }}))
+        .unwrap();
+        let overlay = json!({
+            "input_schema":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}}},
+                "required":["argv"],"additionalProperties":false},
+            "fixed_args":{"stdin":"literal"},"input_map":{"argv":"argv"}
+        });
+        let binding = compile_binding(&contract, &overlay).unwrap();
+        assert_eq!(
+            binding
+                .prepare(&json!({"argv":["/bin/echo","{{ literal }}"]}))
+                .unwrap(),
+            json!({"argv":["/bin/echo","{{ literal }}"],"stdin":"literal"})
+        );
+        let mut rejected = overlay;
+        rejected["input_map"] = json!({"free_form":"argv"});
+        assert!(compile_binding(&contract, &rejected).is_err());
+        assert!(
+            import_document(&json!({"doc":{"options":{
+                "unknown":{"description":"Missing type does not silently disappear."}
+            }}}))
+            .is_err()
+        );
     }
 }

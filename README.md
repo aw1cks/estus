@@ -143,6 +143,12 @@ metadata, not supplied arguments. Unsupported types/constraints fail explicitly;
 this is not complete Ansible argument-spec emulation. Effects, target authority and
 execution policy are not inferred from documentation.
 
+Backend argument names belong to the module's closed argument object, not the
+transport envelope. Documented `argv`/`stdin` are data; public `host`, timeout and
+execution controls remain reserved. The documented `free_form` pseudo-option is
+not a named argument: imports mark it unbindable and retain a review note. Use
+typed named parameters such as `argv`; unspecified types elsewhere still fail.
+
 Content digests detect changes to the selected Ansible/module collection source
 trees; they are not a sandbox, an immutable-environment attestation, or protection
 against a same-user attacker replacing trusted files. Mutable content can still
