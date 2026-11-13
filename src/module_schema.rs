@@ -369,14 +369,21 @@ fn check_schema(schema: &Value, root: bool) -> Result<(), &'static str> {
     if !bounded(schema) {
         return Err(SCHEMA);
     }
-    check_schema_node(schema)?;
+    check_schema_node(schema, false)?;
     if root && schema.get("type").and_then(Value::as_str) != Some("object") {
         return Err(SCHEMA);
     }
     Ok(())
 }
 
-fn check_schema_node(schema: &Value) -> Result<(), &'static str> {
+pub(crate) fn check_projection_schema(schema: &Value) -> Result<(), &'static str> {
+    if !bounded(schema) || schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(SCHEMA);
+    }
+    check_schema_node(schema, true)
+}
+
+fn check_schema_node(schema: &Value, projection: bool) -> Result<(), &'static str> {
     let object = schema.as_object().ok_or(SCHEMA)?;
     for (key, value) in object {
         match key.as_str() {
@@ -390,16 +397,23 @@ fn check_schema_node(schema: &Value) -> Result<(), &'static str> {
             }
             "properties" => {
                 for (key, value) in value.as_object().ok_or(SCHEMA)? {
-                    if !parameter(key) {
+                    if !(if projection {
+                        name(key)
+                    } else {
+                        parameter(key)
+                    }) {
                         return Err(SCHEMA);
                     }
-                    check_schema_node(value)?;
+                    check_schema_node(value, projection)?;
                 }
             }
             "required" => {
                 let mut seen = BTreeSet::new();
                 for key in value.as_array().ok_or(SCHEMA)? {
-                    let key = key.as_str().filter(|v| parameter(v)).ok_or(SCHEMA)?;
+                    let key = key
+                        .as_str()
+                        .filter(|v| if projection { name(v) } else { parameter(v) })
+                        .ok_or(SCHEMA)?;
                     if !seen.insert(key) {
                         return Err(SCHEMA);
                     }
@@ -410,11 +424,11 @@ fn check_schema_node(schema: &Value) -> Result<(), &'static str> {
                     return Err(SCHEMA);
                 }
             }
-            "items" | "not" | "if" | "then" | "else" => check_schema_node(value)?,
+            "items" | "not" | "if" | "then" | "else" => check_schema_node(value, projection)?,
             "allOf" | "anyOf" | "oneOf" => {
                 let values = value.as_array().filter(|v| !v.is_empty()).ok_or(SCHEMA)?;
                 for value in values {
-                    check_schema_node(value)?;
+                    check_schema_node(value, projection)?;
                 }
             }
             "enum" => {
@@ -551,7 +565,7 @@ pub(crate) fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), 
     Ok(())
 }
 
-fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
+pub(crate) fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
     let object = schema.as_object().ok_or(INPUT)?;
     if let Some(kind) = object.get("type").and_then(Value::as_str) {
         let valid = match kind {

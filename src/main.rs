@@ -13,6 +13,7 @@ mod filemeta;
 mod files;
 mod module_schema;
 mod process;
+mod projection;
 mod reply;
 mod schema_import;
 mod server;
