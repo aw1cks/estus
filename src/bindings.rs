@@ -28,6 +28,7 @@ const MAX_SCHEMA_BYTES: usize = 16 * 1024;
 const RESERVED: &[&str] = &[
     "host",
     "timeout_secs",
+    "retain_output",
     "argv",
     "program",
     "cwd",
@@ -488,6 +489,7 @@ pub(crate) struct CompiledBinding {
 pub(crate) struct BindingRequest {
     pub(crate) host: String,
     pub(crate) timeout_secs: Option<u64>,
+    pub retain_output: bool,
     values: Vec<Value>,
 }
 pub(crate) struct PreparedBinding<'a> {
@@ -685,6 +687,7 @@ struct AutomationSpec<'a> {
 
 pub(crate) struct ControllerRequest {
     timeout_secs: Option<u64>,
+    pub retain_output: bool,
     values: Vec<Value>,
 }
 
@@ -1519,6 +1522,10 @@ impl CompiledBinding {
             "timeout_secs".into(),
             json!({"type":"integer", "minimum":1, "maximum":ceiling}),
         );
+        properties.insert(
+            "retain_output".into(),
+            json!({"type":"boolean", "default":false}),
+        );
         let mut required = schema.required;
         if !controller {
             required.push("host".into());
@@ -1712,6 +1719,11 @@ impl CompiledBinding {
                 inputs,
             }));
         }
+        let retain_output = arguments
+            .remove("retain_output")
+            .map(|value| value.as_bool().ok_or_else(shape))
+            .transpose()?
+            .unwrap_or(false);
         let values = self
             .inputs
             .iter()
@@ -1734,10 +1746,12 @@ impl CompiledBinding {
             Some(host) => BindingCall::Remote(BindingRequest {
                 host,
                 timeout_secs,
+                retain_output,
                 values,
             }),
             None => BindingCall::Controller(ControllerRequest {
                 timeout_secs,
+                retain_output,
                 values,
             }),
         })
@@ -2033,6 +2047,50 @@ mod tests {
                     )
                     .is_ok()
             );
+        }
+    }
+
+    #[test]
+    fn automation_envelopes_reject_output_retention_even_when_false() {
+        for mut raw in [
+            module_definition(),
+            role_definition(),
+            playbook_definition(),
+        ] {
+            raw["input_schema"]["properties"]["nested"]["properties"]
+                .as_table_mut()
+                .unwrap()
+                .insert(
+                    "retain_output".into(),
+                    toml::Value::try_from(json!({"type":"boolean"})).unwrap(),
+                );
+            let bindings = compile(raw).unwrap();
+            let binding = bindings.get(BindingId(0)).unwrap();
+            assert!(
+                !binding.input_schema["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("retain_output")
+            );
+            let arguments = json!({
+                "host":"server","inputs":{"nested":{"items":[],"retain_output":true}}
+            });
+            let BindingCall::Automation(request) = binding
+                .parse_request(arguments.as_object().unwrap().clone())
+                .unwrap()
+            else {
+                panic!("expected automation request")
+            };
+            assert_eq!(request.inputs, arguments["inputs"]);
+            for value in [json!(true), json!(false), Value::Null, json!("true")] {
+                let mut arguments = arguments.clone();
+                arguments["retain_output"] = value;
+                assert!(
+                    binding
+                        .parse_request(arguments.as_object().unwrap().clone())
+                        .is_err()
+                );
+            }
         }
     }
 
@@ -2486,6 +2544,8 @@ mod tests {
         for arguments in [
             json!({"value":"ok","host":"server"}),
             json!({"value":"ok","cwd":"/"}),
+            json!({"value":"ok","retain_output":null}),
+            json!({"value":"ok","retain_output":"true"}),
         ] {
             assert!(
                 binding
@@ -2495,7 +2555,7 @@ mod tests {
         }
         let BindingCall::Controller(request) = binding
             .parse_request(
-                json!({"value":"$(not shell) ☃\n","timeout_secs":1})
+                json!({"value":"$(not shell) ☃\n","timeout_secs":1,"retain_output":true})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -2504,6 +2564,7 @@ mod tests {
         else {
             panic!("expected controller request")
         };
+        assert!(request.retain_output);
         let prepared = binding
             .prepare_controller(&request, &Limits::default())
             .unwrap();
@@ -2624,6 +2685,69 @@ result = { kind = "command" }
     }
     fn put(table: &mut toml::Value, key: &str, value: toml::Value) {
         table.as_table_mut().unwrap().insert(key.into(), value);
+    }
+
+    #[test]
+    fn native_retention_stays_outside_fixed_command_inputs() {
+        let ordinary = definition();
+        let mut sudo = definition();
+        sudo["authority"] = toml::from_str("sudo = 'root'").unwrap();
+        let mut script = definition();
+        script["execution"] = toml::Value::try_from(json!({
+            "kind":"remote_script",
+            "source":{"path":"/fixed/script","content_sha256":"00".repeat(32)},
+            "interpreter":{"program":"/bin/sh","argv":[]},
+            "argv":["--",{"input":"value"}]
+        }))
+        .unwrap();
+        for raw in [ordinary, sudo, script] {
+            let bindings = compile(raw).unwrap();
+            let binding = bindings.get(BindingId(0)).unwrap();
+            assert_eq!(
+                binding.input_schema["properties"]["retain_output"],
+                json!({"type":"boolean","default":false})
+            );
+            assert!(
+                !binding.input_schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("retain_output"))
+            );
+            assert!(!request(binding, json!("literal")).retain_output);
+            for retain_output in [false, true] {
+                let BindingCall::Remote(request) = binding
+                    .parse_request(
+                        json!({"host":"server","value":"literal","retain_output":retain_output})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    )
+                    .unwrap()
+                else {
+                    panic!("expected remote request")
+                };
+                assert_eq!(request.retain_output, retain_output);
+                let prepared = binding.prepare(&request, &Limits::default()).unwrap();
+                let arguments = match prepared.invocation {
+                    Invocation::BoundArgv { arguments, .. }
+                    | Invocation::BoundSudo { arguments, .. } => arguments,
+                    _ => panic!("expected fixed invocation"),
+                };
+                assert_eq!(arguments, [Cow::Borrowed("--"), Cow::Borrowed("literal")]);
+            }
+            for value in [Value::Null, json!(1), json!("true"), json!([]), json!({})] {
+                assert!(
+                    binding
+                        .parse_request(
+                            json!({"host":"server","value":"literal","retain_output":value})
+                                .as_object()
+                                .unwrap()
+                                .clone()
+                        )
+                        .is_err()
+                );
+            }
+        }
     }
 
     #[test]

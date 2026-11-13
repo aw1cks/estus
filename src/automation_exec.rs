@@ -979,6 +979,7 @@ mod spawn_failures {
                 shutdown: &cancellation,
                 started: Instant::now(),
                 capture_limit: 1024,
+                retention: None,
             },
         )
         .await;

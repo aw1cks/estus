@@ -3064,6 +3064,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             "ssh_list_directory",
                             "ssh_mkdir",
                             "ssh_read_file",
+                            "ssh_read_output",
                             "ssh_remove_directory",
                             "ssh_remove_file",
                             "ssh_rename",
@@ -4019,7 +4020,7 @@ async fn ssh_named_bindings() -> Result<()> {
             names.sort_unstable();
             ensure!(names == [
                 "bounded_pause", "literal_values", "missing_account",
-                "ordinary_identity", "ssh_targets",
+                "ordinary_identity", "ssh_read_output", "ssh_targets",
             ], "actions-only exposed an unexpected tool: {names:?}");
             let initial_auth = fixture.authentications();
             let valid = json!({"host":"plain","text":"VALID","number":1,"flag":true});

@@ -256,7 +256,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .collect::<Result<_>>()?;
         names.sort_unstable();
         ensure!(names == [
-            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_run",
+            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_read_output", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_run",
             "ssh_stat", "ssh_targets", "ssh_write_file",
         ], "omitting a profile changed the baseline inventory");
         let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
@@ -756,6 +756,10 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
         let listed = server.response(2).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
         ensure!(tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
+        for name in ["ssh_exec", "ssh_run", "ssh_sudo"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).context("command tool")?;
+            output_control_schema(&tool["inputSchema"])?;
+        }
         for (index, (tool, args)) in [
             ("ssh_exec", json!({"host":"allowed","command":["DO_NOT_LOG_PAYLOAD"]})),
             ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","shell":"interactive"})),
@@ -763,6 +767,9 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
             ("ssh_run", json!({"host":"allowed","argv":"DO_NOT_LOG_PAYLOAD"})),
             ("ssh_run", json!({"host":"allowed","argv":["true",17]})),
             ("ssh_run", json!({"host":"allowed","argv":["true"],"env":{"SECRET":"DO_NOT_LOG_PAYLOAD"}})),
+            ("ssh_exec", json!({"host":"allowed","command":"true","retain_output":"DO_NOT_LOG_PAYLOAD"})),
+            ("ssh_run", json!({"host":"allowed","argv":["true"],"retain_output":1})),
+            ("ssh_sudo", json!({"host":"allowed","argv":["/usr/bin/id"],"retain_output":null})),
         ].into_iter().enumerate() {
             let id = 10 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}})).await?;
@@ -970,12 +977,20 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
 async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable() -> Result<()> {
     const MESSAGE_LIMIT: usize = 16_777_216;
     let mut server = Server::start(&[])?;
-    let scenario = timeout(Duration::from_secs(20), async {
+    let scenario = async {
         server.initialize().await?;
         for (name, arguments) in [
             (
                 "ssh_exec",
                 json!({"host":"127.0.0.1","command":"printf budget"}),
+            ),
+            (
+                "ssh_exec",
+                json!({"host":"127.0.0.1","command":"printf budget","retain_output":true}),
+            ),
+            (
+                "ssh_run",
+                json!({"host":"127.0.0.1","argv":["/usr/bin/true"],"retain_output":true}),
             ),
             (
                 "ssh_mkdir",
@@ -998,6 +1013,9 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
         ] {
+            // Each full-size wire boundary has its own bounded deadline; adding
+            // independent cases must not turn this into a suite-speed assertion.
+            timeout(Duration::from_secs(20), async {
             let id = Value::String("i".repeat(MESSAGE_LIMIT - 256));
             let request = json!({
                 "jsonrpc": "2.0",
@@ -1029,6 +1047,8 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
                 !serde_json::to_string(&response)?.contains("budget-private-"),
                 "{name}: reply-budget rejection disclosed private paths"
             );
+                Ok::<_, anyhow::Error>(())
+            }).await.with_context(|| format!("{name}: reply-budget case timed out"))??;
         }
         server
             .send(json!({
@@ -1043,10 +1063,7 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
             "normal discovery failed after budget rejection"
         );
         Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .context("reply-budget scenario timed out")
-    .and_then(|result| result);
+    }.await;
     let finished = server.finish().await;
     scenario?;
     let (status, stderr) = finished?;
@@ -1161,7 +1178,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_write_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_read_output", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -2334,6 +2351,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                     expected_operations.sort_unstable();
                     let mut expected_routes = expected_operations.clone();
                     expected_routes.push("ssh_targets");
+                    expected_routes.push("ssh_read_output");
                     expected_routes.sort_unstable();
                     let params = json!({});
                     let request = if modern {
@@ -2373,6 +2391,16 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                         );
                         ensure!(data["targets"][0]["observed_capabilities"] == "unknown");
                     }
+                    let params = json!({"name":"ssh_read_output","arguments":{"handle":"0123456789abcdef0123456789abcdef","stream":"stdout","max_bytes":1}});
+                    let request = if modern {
+                        modern_request(json!(4), "tools/call", params, MODERN_VERSION)
+                    } else {
+                        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":params})
+                    };
+                    server.send(request).await?;
+                    let read = server.response(4).await?;
+                    ensure!(read["result"]["structuredContent"]["error"]["code"] == "not_found", "{profile}: {read}");
+                    ensure!(read["result"]["structuredContent"]["error"]["remote_state_unknown"] == false);
                     for (index, tool) in ordinary.iter().enumerate() {
                         if expected_routes.contains(tool) {
                             continue;
@@ -2464,7 +2492,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
             .await?;
         let listed = server.response(2).await?;
-        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 13);
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 14);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}}))
@@ -2637,7 +2665,10 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
         let tools = listed["result"]["tools"]
             .as_array()
             .context("immutable tool list")?;
-        ensure!(tools.len() == 1 && tools[0]["name"] == "ssh_targets");
+        ensure!(tools.len() == 2);
+        for name in ["ssh_read_output", "ssh_targets"] {
+            ensure!(tools.iter().any(|tool| tool["name"] == name));
+        }
         for (index, tool) in [
             "ssh_exec",
             "ssh_run",
@@ -2825,7 +2856,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         let tools = listed["result"]["tools"].as_array().context("named tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["change_account", "observe_account", "ssh_targets"]);
+        ensure!(names == ["change_account", "observe_account", "ssh_read_output", "ssh_targets"]);
         for (name, revision, effects, read_only, destructive) in [
             ("observe_account", "review-1", json!(["read", "sensitive_read"]), true, false),
             ("change_account", "change-2", json!(["persistent_write"]), false, true),
@@ -2844,6 +2875,10 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
             ensure!(tool["outputSchema"]["type"] == "object");
             ensure!(tool["outputSchema"]["properties"]["data"].is_object());
             ensure!(tool["outputSchema"]["properties"]["error"].is_object());
+        }
+        for name in ["observe_account", "change_account"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).context("native binding")?;
+            output_control_schema(&tool["inputSchema"])?;
         }
         let observe = tools.iter().find(|tool| tool["name"] == "observe_account").context("observe tool")?;
         let schema = &observe["inputSchema"];
@@ -2917,6 +2952,8 @@ async fn named_tool_validation_and_target_policy_precede_ssh() -> Result<()> {
             ("verbose", json!("BINDING_INPUT_SECRET")),
             ("host", json!(false)),
             ("timeout_secs", json!("BINDING_INPUT_SECRET")),
+            ("retain_output", json!("BINDING_INPUT_SECRET")),
+            ("retain_output", Value::Null),
         ] {
             let mut arguments = valid.clone();
             arguments[field] = value;
@@ -3250,7 +3287,7 @@ async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Re
         let tools = listed["result"]["tools"].as_array().context("fixed sudo tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["fixed_id", "fixed_printf", "ssh_targets"]);
+        ensure!(names == ["fixed_id", "fixed_printf", "ssh_read_output", "ssh_targets"]);
         for (name, revision, effects, read_only, destructive) in [
             ("fixed_id", "id-1", json!(["read"]), true, false),
             ("fixed_printf", "printf-1", json!(["persistent_write"]), false, true),
@@ -3269,10 +3306,11 @@ async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Re
             let schema = &tool["inputSchema"];
             ensure!(schema["type"] == "object" && schema["additionalProperties"] == false);
             let properties = schema["properties"].as_object().context("fixed sudo properties")?;
-            let expected_fields = if name == "fixed_id" { 2 } else { 3 };
+            let expected_fields = if name == "fixed_id" { 3 } else { 4 };
             ensure!(properties.len() == expected_fields);
             ensure!(properties.contains_key("host") && properties.contains_key("timeout_secs"));
             ensure!(schema["properties"]["timeout_secs"]["maximum"] == 5);
+            output_control_schema(schema)?;
             let hosts = schema["properties"]["host"]["enum"].as_array().context("fixed sudo hosts")?;
             ensure!(hosts.len() == 4);
             for host in ["base", "same", "read", "files"] {
@@ -3337,6 +3375,7 @@ async fn fixed_sudo_controls_and_target_policy_reject_before_ssh() -> Result<()>
                 ("argv", json!(["BINDING_INPUT_SECRET"])),
                 ("cwd", json!("/private/binding-cwd")),
                 ("role", json!("elevated")),
+                ("retain_output", json!("BINDING_INPUT_SECRET")),
             ] {
                 let mut arguments = json!({"host":host});
                 arguments[field] = value;
@@ -3631,12 +3670,13 @@ async fn remote_scripts_publish_private_ordinary_command_contracts() -> Result<(
             let schema = &tool["inputSchema"];
             ensure!(schema["additionalProperties"] == false);
             let properties = schema["properties"].as_object().context("script input properties")?;
-            ensure!(properties.len() == 3);
+            ensure!(properties.len() == 4);
             ensure!(properties.contains_key("host") && properties.contains_key("value"));
             let required = schema["required"].as_array().context("script required inputs")?;
             ensure!(required.len() == 2);
             ensure!(required.contains(&json!("host")) && required.contains(&json!("value")));
             ensure!(schema["properties"]["timeout_secs"]["maximum"] == 2);
+            output_control_schema(schema)?;
             let command = tools.iter().find(|tool| tool["name"] == "ssh_run").context("native command route")?;
             ensure!(tool["outputSchema"].is_object());
             ensure!(tool["outputSchema"] == command["outputSchema"]);
@@ -3685,6 +3725,7 @@ async fn remote_script_source_execution_and_control_overrides_reject_before_ssh(
             ("profile", json!("baseline")),
             ("enabled_tools", json!(["observe_script"])),
             ("timeout_secs", json!("BINDING_INPUT_SECRET")),
+            ("retain_output", json!("BINDING_INPUT_SECRET")),
             ("value", json!({"input":"BINDING_INPUT_SECRET"})),
             ("extra", json!("BINDING_INPUT_SECRET")),
         ] {
@@ -4151,6 +4192,18 @@ limits = {{ timeout_secs = 2, max_output_bytes = 1024 }}
     }
 }
 
+fn output_control_schema(schema: &Value) -> Result<()> {
+    ensure!(schema["properties"]["retain_output"]["type"] == "boolean");
+    ensure!(schema["properties"]["retain_output"]["default"] == false);
+    ensure!(
+        !schema["required"]
+            .as_array()
+            .is_some_and(|fields| fields.contains(&json!("retain_output"))),
+        "output retention became required"
+    );
+    Ok(())
+}
+
 fn schema_has_property(value: &Value, property: &str) -> bool {
     match value {
         Value::Object(object) => {
@@ -4215,8 +4268,9 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
             let input = &tool["inputSchema"];
             ensure!(input["additionalProperties"] == false);
             let properties = input["properties"].as_object().context("controller properties")?;
-            ensure!(properties.len() == 4);
-            for field in ["label", "count", "verbose", "timeout_secs"] {
+            ensure!(properties.len() == 5);
+            output_control_schema(input)?;
+            for field in ["label", "count", "verbose", "timeout_secs", "retain_output"] {
                 ensure!(properties.contains_key(field), "missing {field}");
             }
             let required = input["required"].as_array().context("controller required inputs")?;
@@ -4255,6 +4309,7 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
             controller_no_remote_fields(structured)?;
             ensure!(structured["error"].is_null());
             let data = &structured["data"];
+            ensure!(data.get("output").is_none(), "default call retained output");
             ensure!(data["exit_code"] == 0 && data["termination"] == "exited");
             ensure!(data["owned_group_cleanup"] == "signalled_and_reaped");
             let echoed: Value = serde_json::from_str(data["stdout"].as_str().context("controller stdout")?)?;
@@ -4315,6 +4370,8 @@ async fn controller_inputs_reject_host_and_execution_controls_without_dispatch()
             ("profile", json!("baseline")), ("enabled_tools", json!(["observe_controller"])),
             ("label", json!({"input":"CONTROLLER_INPUT_SECRET"})), ("count", json!("1")),
             ("verbose", json!(1)), ("timeout_secs", json!("1")),
+            ("retain_output", json!("CONTROLLER_INPUT_SECRET")),
+            ("retain_output", Value::Null),
         ] {
             let mut arguments = valid.clone();
             arguments[field] = value;
@@ -5480,5 +5537,374 @@ async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result
     ensure!(status.success());
     no_remote_dispatch(&stderr)?;
     ensure!(!std::str::from_utf8(&stderr)?.contains("REPLACE_PRIVATE_"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_output_read_contract_validation_and_privacy_need_no_ssh() -> Result<()> {
+    for modern in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let probe = directory.path().join("must-not-probe-output");
+        std::fs::write(
+            directory.path().join("replacement.conf"),
+            format!(
+                "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+                probe.display()
+            ),
+        )?;
+        let path = directory.path().join("operator.toml");
+        std::fs::write(
+            &path,
+            "profile='actions-only'\n[ssh]\nconfig_file='replacement.conf'\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
+        )?;
+        let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+        let scenario = async {
+            if !modern {
+                server.initialize().await?;
+            }
+            let request = if modern {
+                modern_request(json!(2), "tools/list", json!({}), MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+            };
+            server.send(request).await?;
+            let listed = server.response(2).await?;
+            let tools = listed["result"]["tools"].as_array().context("output catalog")?;
+            let tool = tools.iter().find(|tool| tool["name"] == "ssh_read_output").context("read output route")?;
+            ensure!(tool["annotations"]["readOnlyHint"] == true);
+            ensure!(tool["annotations"]["destructiveHint"] == false);
+            let schema = &tool["inputSchema"];
+            ensure!(schema["type"] == "object" && schema["additionalProperties"] == false);
+            let mut fields: Vec<_> = schema["properties"].as_object().context("output inputs")?.keys().map(String::as_str).collect();
+            fields.sort_unstable();
+            ensure!(fields == ["encoding", "handle", "max_bytes", "offset", "stream"]);
+            let mut required: Vec<_> = schema["required"].as_array().context("output required inputs")?.iter().map(|field| field.as_str().context("required field")).collect::<Result<_>>()?;
+            required.sort_unstable();
+            ensure!(required == ["handle", "stream"]);
+            for field in ["content", "bytes_read", "next_offset", "eof", "content_sha256"] {
+                ensure!(schema_has_property(&tool["outputSchema"], field), "missing read result {field}");
+            }
+            let handle = "0123456789abcdef0123456789abcdef";
+            let valid = json!({"handle":handle,"stream":"stdout","max_bytes":1});
+            let mut cases = vec![
+                (valid.clone(), Some("not_found")),
+                (json!({"handle":handle,"stream":"stderr","offset":u64::MAX,"max_bytes":1}), Some("not_found")),
+                (json!({"handle":"","stream":"stdout","max_bytes":1}), Some("invalid_argument")),
+                (json!({"handle":"/private/OUTPUT_PATH_SECRET","stream":"stdout","max_bytes":1}), Some("invalid_argument")),
+                (json!({"handle":"F".repeat(32),"stream":"stdout","max_bytes":1}), Some("invalid_argument")),
+                (json!({"handle":handle,"stream":"stdout","max_bytes":0}), Some("invalid_argument")),
+                (json!({"handle":handle,"stream":"stdout","max_bytes":33_554_433u64}), Some("invalid_argument")),
+                (json!({"handle":handle,"stream":"stdout","max_bytes":3_000_000}), Some("invalid_argument")),
+                (json!({"handle":handle,"stream":"stdout","max_bytes":8_000_000,"encoding":"base64"}), Some("invalid_argument")),
+                (json!({"handle":handle,"stream":"combined","max_bytes":1}), None),
+                (json!({"handle":handle,"stream":"stdout","max_bytes":1,"encoding":"hex"}), None),
+                (json!({"handle":true,"stream":"stdout","max_bytes":1}), None),
+                (json!({"handle":handle,"stream":"stdout","offset":-1,"max_bytes":1}), None),
+                (json!({"handle":handle,"stream":"stdout","max_bytes":"1"}), None),
+            ];
+            for field in ["host", "path", "directory", "sudo", "retain_output", "expected_content_sha256"] {
+                let mut arguments = valid.clone();
+                arguments[field] = json!("OUTPUT_PATH_SECRET");
+                cases.push((arguments, None));
+            }
+            for missing in ["handle", "stream"] {
+                let mut arguments = valid.clone();
+                arguments.as_object_mut().context("output arguments")?.remove(missing);
+                cases.push((arguments, None));
+            }
+            for (index, (arguments, code)) in cases.into_iter().enumerate() {
+                let id = 10 + index as u64;
+                let params = json!({"name":"ssh_read_output","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let response = server.response(id).await?;
+                if let Some(code) = code {
+                    ensure!(response["result"]["isError"] == true, "case {index}: {response}");
+                    let structured = &response["result"]["structuredContent"];
+                    ensure!(structured["data"].is_null());
+                    ensure!(structured["error"]["code"] == code, "case {index}: {response}");
+                    ensure!(structured["error"]["remote_state_unknown"] == false);
+                    let text: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().context("output error text")?)?;
+                    ensure!(text == *structured);
+                } else {
+                    ensure!(response["error"]["code"] == -32602, "case {index}: {response}");
+                }
+                let encoded = serde_json::to_string(&response)?;
+                ensure!(!encoded.contains(handle) && !encoded.contains("OUTPUT_PATH_SECRET"));
+                ensure!(!probe.exists(), "local output read probed SSH");
+            }
+            // The range fits operator limits and an ordinary request ID, but not
+            // this request's remaining response budget. Lookup must not mask it.
+            let id = json!("r".repeat(16_777_216 - 2048));
+            let params = json!({"name":"ssh_read_output","arguments":{"handle":handle,"stream":"stdout","max_bytes":1024,"encoding":"base64"}});
+            let request = if modern {
+                modern_request(id.clone(), "tools/call", params, MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+            };
+            ensure!(serde_json::to_vec(&request)?.len() + 1 < 16_777_216);
+            server.send(request).await?;
+            let (response, bytes) = server.response_with_id(&id).await?;
+            ensure!(bytes <= 16_777_216);
+            ensure!(response["result"]["structuredContent"]["error"]["code"] == "invalid_argument", "{response}");
+            ensure!(response["result"]["structuredContent"]["error"]["remote_state_unknown"] == false);
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        let audit = std::str::from_utf8(&stderr)?;
+        ensure!(
+            !audit.contains("OUTPUT_PATH_SECRET")
+                && !audit.contains("0123456789abcdef0123456789abcdef")
+        );
+        ensure!(!audit.contains(directory.path().to_str().context("private directory")?));
+        ensure!(!probe.exists());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn controller_output_optional_receipt_is_local_readable_and_private() -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let fixture = ControllerProtocolFixture::new()?;
+    let probe = fixture.directory.path().join("output-must-not-probe");
+    std::fs::write(
+        fixture.directory.path().join("replacement.conf"),
+        format!(
+            "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+            probe.display()
+        ),
+    )?;
+    let mut server = fixture.start(&fixture.config)?;
+    let mut private_receipts = Vec::new();
+    let scenario = async {
+        server.initialize().await?;
+        for (index, retain) in [None, Some(false), Some(true)].into_iter().enumerate() {
+            let mut arguments = json!({"label":"CONTROLLER_INPUT_SECRET","count":1,"verbose":false});
+            if let Some(retain) = retain {
+                arguments["retain_output"] = json!(retain);
+            }
+            let id = 10 + index as u64;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_controller","arguments":arguments}})).await?;
+            let response = server.response(id).await?;
+            ensure!(response["result"]["isError"] != true, "{response}");
+            let data = &response["result"]["structuredContent"]["data"];
+            ensure!(data["exit_code"] == 0 && data["termination"] == "exited");
+            let stdout = data["stdout"].as_str().context("controller stdout")?;
+            let echoed: Value = serde_json::from_str(stdout)?;
+            ensure!(echoed == json!({"label":"CONTROLLER_INPUT_SECRET","count":1,"verbose":false}), "retention control reached domain input");
+            if retain != Some(true) {
+                ensure!(data.get("output").is_none(), "unrequested output field was serialized");
+                continue;
+            }
+            let receipt = &data["output"];
+            ensure!(receipt["status"] == "ready", "{receipt}");
+            let handle = receipt["handle"].as_str().context("output handle")?;
+            ensure!(handle.len() == 32 && handle.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+            ensure!(receipt["expires_in_secs"].as_u64().is_some_and(|ttl| ttl > 0));
+            ensure!(receipt["stdout"] == json!({"bytes_retained":stdout.len(),"total_bytes":stdout.len(),"truncated":false}));
+            ensure!(receipt["stderr"] == json!({"bytes_retained":0,"total_bytes":0,"truncated":false}));
+            private_receipts.push(handle.to_owned());
+            server.send(json!({"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"ssh_read_output","arguments":{"handle":handle,"stream":"stdout","max_bytes":1024}}})).await?;
+            let read = server.response(30).await?;
+            ensure!(read["result"]["isError"] != true, "{read}");
+            let read_data = &read["result"]["structuredContent"]["data"];
+            ensure!(read_data["content"] == stdout);
+            ensure!(read_data["bytes_read"] == stdout.len());
+            ensure!(read_data["next_offset"] == stdout.len() && read_data["eof"] == true);
+            ensure!(read_data["content_sha256"] == hex::encode(Sha256::digest(stdout.as_bytes())));
+            server.send(json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"ssh_read_output","arguments":{"handle":handle,"stream":"stderr","max_bytes":1,"encoding":"base64"}}})).await?;
+            let empty = server.response(31).await?;
+            ensure!(empty["result"]["isError"] != true);
+            let empty_data = &empty["result"]["structuredContent"]["data"];
+            ensure!(empty_data["content"] == "" && empty_data["bytes_read"] == 0);
+            ensure!(empty_data["next_offset"] == 0 && empty_data["eof"] == true);
+            ensure!(!probe.exists(), "retention or local read probed SSH");
+        }
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    fixture.public_only(&stderr)?;
+    no_remote_dispatch(&stderr)?;
+    let audit = std::str::from_utf8(&stderr)?;
+    for handle in private_receipts {
+        ensure!(!audit.contains(&handle), "audit disclosed capability");
+    }
+    for line in audit.lines() {
+        let record: Value = serde_json::from_str(line)?;
+        if record["tool"] == "ssh_read_output" {
+            for field in ["host", "path", "handle", "stdout", "stderr", "content"] {
+                ensure!(
+                    record.get(field).is_none_or(Value::is_null),
+                    "read audit disclosed {field}"
+                );
+            }
+        }
+    }
+    ensure!(!probe.exists());
+    ensure!(std::fs::read_dir(&fixture.root)?.next().is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn controller_output_actual_id_receipt_budget_precedes_dispatch() -> Result<()> {
+    let fixture = ControllerProtocolFixture::new()?;
+    let marker = fixture
+        .directory
+        .path()
+        .join("controller-output-dispatched");
+    let interpreter = std::fs::read_to_string(&fixture.interpreter)?;
+    let marker_path = marker
+        .to_str()
+        .context("marker path")?
+        .replace('\'', "'\\''");
+    std::fs::write(
+        &fixture.interpreter,
+        interpreter.replace("\nexec ", &format!("\nprintf x > '{marker_path}'\nexec ")),
+    )?;
+    let mut server = fixture.start(&fixture.config)?;
+    let scenario = async {
+        server.initialize().await?;
+        for retain in [false, true] {
+            let id = json!("b".repeat(16_777_216 - 1536));
+            let request = modern_request(id.clone(), "tools/call", json!({
+                "name":"observe_controller",
+                "arguments":{"label":"CONTROLLER_INPUT_SECRET","count":1,"verbose":false,"retain_output":retain}
+            }), MODERN_VERSION);
+            ensure!(serde_json::to_vec(&request)?.len() + 1 < 16_777_216);
+            server.send(request).await?;
+            let (response, bytes) = server.response_with_id(&id).await?;
+            ensure!(bytes <= 16_777_216);
+            if retain {
+                ensure!(response["error"]["code"] == -32602 && response.get("result").is_none());
+                ensure!(!marker.exists(), "metadata-budget rejection executed controller");
+            } else {
+                ensure!(response["result"]["isError"] != true, "default budget changed");
+                ensure!(response["result"]["structuredContent"]["data"].get("output").is_none());
+                ensure!(marker.is_file(), "default call did not dispatch");
+                std::fs::remove_file(&marker)?;
+            }
+        }
+        server.send(modern_request(json!("usable"), "tools/call", json!({
+            "name":"ssh_read_output","arguments":{"handle":"0123456789abcdef0123456789abcdef","stream":"stdout","max_bytes":1}
+        }), MODERN_VERSION)).await?;
+        ensure!(server.response_with_id(&json!("usable")).await?.0["result"]["structuredContent"]["error"]["code"] == "not_found");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    fixture.public_only(&stderr)?;
+    no_remote_dispatch(&stderr)?;
+    ensure!(std::fs::read_dir(&fixture.root)?.next().is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() -> Result<()> {
+    let builtin = "profile='baseline'\n[ssh]\nconfig_file='replacement.conf'\n[targets.base]\nssh_host='private-binding-backend.invalid'\n[targets.base.sudo]\nmode='same-account'\n";
+    for (config, calls) in [
+        (
+            builtin,
+            vec![
+                ("ssh_exec", json!({"host":"base","command":"true"})),
+                ("ssh_run", json!({"host":"base","argv":["/usr/bin/true"]})),
+                ("ssh_sudo", json!({"host":"base","argv":["/usr/bin/true"]})),
+            ],
+        ),
+        (
+            NAMED_TOOL_CONFIG,
+            vec![
+                (
+                    "observe_account",
+                    json!({"host":"base","account":"root","count":0,"verbose":false}),
+                ),
+                ("change_account", json!({"host":"base"})),
+            ],
+        ),
+        (
+            FIXED_SUDO_TOOL_CONFIG,
+            vec![
+                ("fixed_id", json!({"host":"base"})),
+                (
+                    "fixed_printf",
+                    json!({"host":"base","value":"BINDING_INPUT_SECRET"}),
+                ),
+            ],
+        ),
+        (
+            REMOTE_SCRIPT_TOOL_CONFIG,
+            vec![(
+                "observe_script",
+                json!({"host":"base","value":"BINDING_INPUT_SECRET"}),
+            )],
+        ),
+    ] {
+        let (mut server, directory) = named_tools_server(config)?;
+        let scenario = async {
+            server.initialize().await?;
+            let mut id = 10;
+            for (name, valid) in calls {
+                for retain in [false, true] {
+                    let mut arguments = valid.clone();
+                    arguments["host"] = json!("unconfigured.invalid");
+                    arguments["retain_output"] = json!(retain);
+                    server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await?;
+                    profile_policy_denied(&server.response(id).await?)?;
+                    id += 1;
+                }
+                for retain in [Value::Null, json!(0), json!("true"), json!({}), json!([])] {
+                    let mut arguments = valid.clone();
+                    arguments["retain_output"] = retain;
+                    server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await?;
+                    let response = server.response(id).await?;
+                    ensure!(response["error"]["code"] == -32602, "{name}: nonboolean retention accepted");
+                    id += 1;
+                }
+                // All authority and domain inputs are valid. Only the actual
+                // response ID leaves too little room for the requested receipt.
+                let budget_id = json!("n".repeat(16_777_216 - 512));
+                let mut arguments = valid;
+                arguments["retain_output"] = json!(true);
+                let request = modern_request(budget_id.clone(), "tools/call", json!({
+                    "name":name,"arguments":arguments
+                }), MODERN_VERSION);
+                ensure!(serde_json::to_vec(&request)?.len() + 1 < 16_777_216, "{name}: incoming request exceeds limit");
+                server.send(request).await?;
+                let (response, bytes) = server.response_with_id(&budget_id).await?;
+                ensure!(response["error"]["code"] == -32602 && response.get("result").is_none(), "{name}: receipt budget reached execution");
+                ensure!(bytes <= 16_777_216);
+                ensure!(!directory.path().join("binding-must-not-probe").exists(), "{name}: rejected output request probed SSH");
+            }
+            server.send(json!({"jsonrpc":"2.0","id":500,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            ensure!(server.response(500).await?["result"]["isError"] != true);
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+            let record: Value = serde_json::from_slice(line)?;
+            ensure!(
+                record["event"] != "master_start",
+                "rejected output control launched SSH"
+            );
+        }
+        binding_public_only(&stderr)?;
+        ensure!(!directory.path().join("binding-must-not-probe").exists());
+    }
     Ok(())
 }

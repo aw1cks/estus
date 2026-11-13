@@ -70,6 +70,8 @@ pub(crate) struct CommandData {
     pub termination: Termination,
     pub duration_ms: u64,
     pub remote_may_still_be_running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::output::OutputReceipt>,
 }
 
 /// Sanitized local failure; controller errors never describe remote state.
@@ -147,6 +149,8 @@ pub(crate) struct ControllerData {
     pub termination: ControllerTermination,
     pub duration_ms: u64,
     pub owned_group_cleanup: GroupCleanup,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::output::OutputReceipt>,
 }
 
 /// Bounded execution evidence and optional explicitly selected module data.

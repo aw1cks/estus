@@ -1134,6 +1134,7 @@ async fn run_loaded(
             shutdown: ctx.shutdown,
             started: Instant::now(),
             capture_limit: limit,
+            retention: None,
         },
     )
     .await;

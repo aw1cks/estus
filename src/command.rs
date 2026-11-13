@@ -37,6 +37,8 @@ pub(crate) struct ExecRequest {
     pub cwd: Option<String>,
     pub stdin: Option<String>,
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub retain_output: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -47,6 +49,8 @@ pub(crate) struct RunRequest {
     pub cwd: Option<String>,
     pub stdin: Option<String>,
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub retain_output: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -58,6 +62,8 @@ pub(crate) struct SudoRequest {
     pub user: String,
     pub stdin: Option<String>,
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub retain_output: bool,
 }
 
 fn root_user() -> String {
@@ -457,6 +463,46 @@ mod bound_argv_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn output_retention_is_an_optional_strict_boolean_control() {
+        for control in [None, Some(false), Some(true)] {
+            let mut arguments = serde_json::json!({
+                "host":"target", "command":"printf literal", "stdin":"unchanged"
+            });
+            if let Some(value) = control {
+                arguments["retain_output"] = value.into();
+            }
+            let request: ExecRequest = serde_json::from_value(arguments.clone()).unwrap();
+            assert_eq!(request.retain_output, control.unwrap_or(false));
+            assert_eq!(request.command, "printf literal");
+            assert_eq!(request.stdin.as_deref(), Some("unchanged"));
+            arguments.as_object_mut().unwrap().remove("command");
+            arguments["argv"] = serde_json::json!(["/bin/printf", "literal"]);
+            let run: RunRequest = serde_json::from_value(arguments.clone()).unwrap();
+            let sudo: SudoRequest = serde_json::from_value(arguments).unwrap();
+            assert_eq!(run.retain_output, control.unwrap_or(false));
+            assert_eq!(sudo.retain_output, control.unwrap_or(false));
+            assert_eq!(run.argv, ["/bin/printf", "literal"]);
+            assert_eq!(sudo.argv, run.argv);
+        }
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("true"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let mut arguments = serde_json::json!({
+                "host":"target", "command":"true", "retain_output":value
+            });
+            assert!(serde_json::from_value::<ExecRequest>(arguments.clone()).is_err());
+            arguments.as_object_mut().unwrap().remove("command");
+            arguments["argv"] = serde_json::json!(["/bin/true"]);
+            assert!(serde_json::from_value::<RunRequest>(arguments.clone()).is_err());
+            assert!(serde_json::from_value::<SudoRequest>(arguments).is_err());
+        }
+    }
+
     fn exec(command: String) -> ExecRequest {
         ExecRequest {
             host: "target".into(),
@@ -465,6 +511,7 @@ mod tests {
             cwd: None,
             stdin: None,
             timeout_secs: None,
+            retain_output: false,
         }
     }
 
@@ -475,6 +522,7 @@ mod tests {
             user: "root".into(),
             stdin: None,
             timeout_secs: None,
+            retain_output: false,
         }
     }
 
@@ -674,6 +722,7 @@ mod tests {
             cwd: None,
             stdin: None,
             timeout_secs: None,
+            retain_output: false,
         }
     }
 

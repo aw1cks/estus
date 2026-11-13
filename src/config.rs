@@ -24,6 +24,7 @@ const MAX_METADATA_BYTES: usize = 65_536;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolId {
     Targets,
+    ReadOutput,
     Exec,
     Run,
     ReadFile,
@@ -61,7 +62,7 @@ impl Profile {
     fn permits(self, tool: ToolId) -> bool {
         // Keep every ID classified explicitly so a new binding requires a policy decision.
         match tool {
-            ToolId::Targets => true,
+            ToolId::Targets | ToolId::ReadOutput => true,
             ToolId::ReadFile | ToolId::Stat | ToolId::ListDirectory => {
                 matches!(self, Self::Baseline | Self::ReadOnlyFiles | Self::FilesOnly)
             }
@@ -193,6 +194,7 @@ pub(crate) struct Config {
     profile: Profile,
     ssh_config: Option<PathBuf>,
     limits: Limits,
+    output: crate::output::Limits,
     targets: Option<BTreeMap<String, Target>>,
     bindings: Bindings,
     automation: Automation,
@@ -204,6 +206,7 @@ struct Document {
     profile: Profile,
     ssh: Ssh,
     limits: Limits,
+    output: crate::output::Limits,
     targets: Option<BTreeMap<String, Target>>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
@@ -418,7 +421,7 @@ impl Serialize for PermittedOperations<'_> {
                         self.global_profile.permits(id)
                             && self.target_profile.permits(id)
                             && match id {
-                                ToolId::Targets => false,
+                                ToolId::Targets | ToolId::ReadOutput => false,
                                 ToolId::Sudo => self.sudo.permits_programs(),
                                 ToolId::Exec
                                 | ToolId::Run
@@ -682,6 +685,10 @@ impl Config {
                 return Err(invalid(field, "must not exceed limits.max_timeout_secs"));
             }
         }
+        document
+            .output
+            .validate()
+            .map_err(|reason| invalid("output", reason))?;
         if let Some(targets) = &document.targets {
             validate_targets(targets)?;
         }
@@ -791,10 +798,15 @@ impl Config {
             profile: document.profile,
             ssh_config,
             limits: document.limits,
+            output: document.output,
             targets: document.targets,
             bindings,
             automation: document.automation,
         })
+    }
+
+    pub(crate) fn output_limits(&self) -> crate::output::Limits {
+        self.output
     }
 
     /// A startup prerequisite only; this does not enable automation tools.
@@ -1121,7 +1133,7 @@ impl Config {
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
         match tool {
-            ToolId::Targets | ToolId::Sudo => return Err(denied()),
+            ToolId::Targets | ToolId::ReadOutput | ToolId::Sudo => return Err(denied()),
             ToolId::Exec
             | ToolId::Run
             | ToolId::ReadFile
@@ -1608,6 +1620,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "enabled_tools",
             "controller",
             "automation",
+            "output",
         ],
     )?;
     if let Some(value) = root.get("tools")
@@ -1625,6 +1638,35 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     }
     if let Some(value) = root.get("profile") {
         validate_profile(value, "profile")?;
+    }
+    if let Some(value) = root.get("output") {
+        let output = table(
+            value,
+            "output",
+            &[
+                "enabled",
+                "per_stream_bytes",
+                "total_bytes",
+                "max_handles",
+                "ttl_secs",
+            ],
+        )?;
+        if output.get("enabled").is_some_and(|value| !value.is_bool()) {
+            return Err(invalid("output.enabled", "must be a boolean"));
+        }
+        for (key, field) in [
+            ("per_stream_bytes", "output.per_stream_bytes"),
+            ("total_bytes", "output.total_bytes"),
+            ("max_handles", "output.max_handles"),
+            ("ttl_secs", "output.ttl_secs"),
+        ] {
+            if output
+                .get(key)
+                .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
+            {
+                return Err(invalid(field, "must be a strictly positive integer"));
+            }
+        }
     }
     if let Some(value) = root.get("automation") {
         let automation = table(

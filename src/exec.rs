@@ -15,6 +15,7 @@ pub(crate) struct RunContext<'a> {
     pub ct: &'a CancellationToken,
     pub shutdown: &'a CancellationToken,
     pub started: Instant,
+    pub retention: Option<crate::output::Session>,
 }
 
 async fn send_stdin(stream: Option<openssh::ChildStdin>, input: Option<&str>) -> io::Result<()> {
@@ -76,8 +77,16 @@ pub(crate) async fn run(
     stdin: Option<&str>,
     context: RunContext<'_>,
 ) -> ToolReply<CommandData> {
-    let mut stdout = Capture::new(context.max_output_bytes);
-    let mut stderr = Capture::new(context.max_output_bytes);
+    let capture = || match context.retention.as_ref() {
+        Some(retention) => {
+            Capture::with_retention(context.max_output_bytes, retention.capture_limit())
+        }
+        None => Capture::new(context.max_output_bytes),
+    };
+    let mut stdout = capture();
+    let mut stderr = capture();
+    let mut stdout_complete = false;
+    let mut stderr_complete = false;
     let outcome = {
         let operation = async {
             let mut command = match invocation {
@@ -142,8 +151,16 @@ pub(crate) async fn run(
             // Drain before polling wait so buffered tail bytes cannot be lost. The outer
             // select bounds this entire join, including descendants retaining pipe FDs.
             let (out, err, input) = tokio::join!(
-                drain(output, &mut stdout),
-                drain(errors, &mut stderr),
+                async {
+                    let result = drain(output, &mut stdout).await;
+                    stdout_complete = result.is_ok();
+                    result
+                },
+                async {
+                    let result = drain(errors, &mut stderr).await;
+                    stderr_complete = result.is_ok();
+                    result
+                },
                 send_stdin(input, stdin),
             );
             let io_failed = out.is_err() || err.is_err() || input.is_err();
@@ -239,8 +256,26 @@ pub(crate) async fn run(
             (None, Termination::ConnectionLost, Some(error), true)
         }
     };
-    let (stdout, stdout_truncated, stdout_lossy) = stdout.decode();
-    let (stderr, stderr_truncated, stderr_lossy) = stderr.decode();
+    if !stdout_complete {
+        stdout.retention_incomplete();
+    }
+    if !stderr_complete {
+        stderr.retention_incomplete();
+    }
+    let (stdout, stdout_truncated, stdout_lossy, retained_stdout) = stdout.finish();
+    let (stderr, stderr_truncated, stderr_lossy, retained_stderr) = stderr.finish();
+    let duration_ms = u64::try_from(context.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let output = match context.retention {
+        Some(retention) => Some(
+            retention
+                .finish(
+                    retained_stdout.unwrap_or_default(),
+                    retained_stderr.unwrap_or_default(),
+                )
+                .await,
+        ),
+        None => None,
+    };
     let data = CommandData {
         stdout,
         stderr,
@@ -250,8 +285,9 @@ pub(crate) async fn run(
         stderr_lossy,
         exit_code,
         termination,
-        duration_ms: u64::try_from(context.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        duration_ms,
         remote_may_still_be_running: unknown,
+        output,
     };
     ToolReply {
         data: Some(data),

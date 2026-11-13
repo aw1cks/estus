@@ -47,6 +47,7 @@ pub(crate) struct ControllerContext<'a> {
     pub shutdown: &'a CancellationToken,
     pub started: Instant,
     pub capture_limit: u64,
+    pub retention: Option<crate::output::Session>,
 }
 
 pub(crate) struct ControllerRun {
@@ -580,6 +581,11 @@ pub(crate) async fn run(
     let plan = prepared.plan;
     let setup_plan = Arc::clone(&plan);
     let automation = monitoring.automation.is_some();
+    // Automation stdout is a private protocol, not caller-owned command output.
+    // Discard even an accidentally supplied reservation before capturing anything.
+    if automation {
+        context.retention.take();
+    }
     owner.setup = Some(tokio::task::spawn_blocking(move || {
         prepare_workspace(setup_plan, prepared.input_json, automation)
     }));
@@ -588,8 +594,12 @@ pub(crate) async fn run(
     } else {
         context.capture_limit.min(prepared.max_output_bytes)
     };
-    let mut output = Capture::new(limit);
-    let mut errors = Capture::new(limit);
+    let capture = || match context.retention.as_ref() {
+        Some(retention) => Capture::with_retention(limit, retention.capture_limit()),
+        None => Capture::new(limit),
+    };
+    let mut output = capture();
+    let mut errors = capture();
     let mut stdout = None;
     let mut stderr = None;
 
@@ -795,8 +805,20 @@ pub(crate) async fn run(
             "Controller cleanup is incomplete",
         ));
     }
-    let (stdout, stdout_truncated, stdout_lossy) = output.decode();
-    let (stderr, stderr_truncated, stderr_lossy) = errors.decode();
+    let (stdout, stdout_truncated, stdout_lossy, retained_stdout) = output.finish();
+    let (stderr, stderr_truncated, stderr_lossy, retained_stderr) = errors.finish();
+    let duration_ms = u64::try_from(context.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let output = match context.retention {
+        Some(retention) => Some(
+            retention
+                .finish(
+                    retained_stdout.unwrap_or_default(),
+                    retained_stderr.unwrap_or_default(),
+                )
+                .await,
+        ),
+        None => None,
+    };
     let data = ControllerData {
         stdout,
         stderr,
@@ -807,8 +829,9 @@ pub(crate) async fn run(
         exit_code,
         signal,
         termination,
-        duration_ms: u64::try_from(context.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        duration_ms,
         owned_group_cleanup: group_cleanup,
+        output,
     };
     let pending = if owner.setup.is_some()
         || !reaped

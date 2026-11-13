@@ -15,6 +15,26 @@ use crate::reply::{
     GroupCleanup, Termination, ToolError, ToolReply,
 };
 
+// A requested receipt must fit before execution; the default envelope is unchanged.
+fn retention_overhead(requested: bool) -> Result<usize, ErrorData> {
+    static COST: LazyLock<usize> = LazyLock::new(|| {
+        let info = || crate::output::StreamInfo {
+            bytes_retained: u64::MAX,
+            total_bytes: u64::MAX,
+            truncated: false,
+        };
+        let value = serde_json::json!({"output": crate::output::OutputReceipt::Ready {
+            handle: "f".repeat(32),
+            expires_in_secs: u64::MAX,
+            stdout: info(),
+            stderr: info(),
+        }});
+        // Replace the enclosing {} (four duplicated bytes) with one comma (two).
+        duplicated_size(&value).expect("fixed output receipt fits response budget") - 2
+    });
+    Ok(if requested { *COST } else { 0 })
+}
+
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16_777_216;
 
 fn exceeded() -> ErrorData {
@@ -203,7 +223,7 @@ impl ReplyBudget {
         })
     }
 
-    pub(crate) fn command_capture_limit(&self) -> Result<u64, ErrorData> {
+    pub(crate) fn command_capture_limit(&self, retain_output: bool) -> Result<u64, ErrorData> {
         // Reserve the longest current error code/message and conservative scalar
         // widths before dispatch. A health failure without command data is smaller.
         // false is wider than true; i32::MIN/u64::MAX reserve every numeric width.
@@ -219,13 +239,18 @@ impl ReplyBudget {
                 termination: Termination::ConnectionLost,
                 duration_ms: u64::MAX,
                 remote_may_still_be_running: false,
+                output: None,
             }),
             error: Some(ToolError::SSH_CONNECT_FAILED),
         };
         // Even unescaped UTF-8 appears twice. No stream can contribute more raw
         // bytes than this, regardless of the operator's capture cap. Lossy
         // replacement and escaping are budgeted after decoding, before copying.
-        Ok((self.remaining(&reservation)? / 2) as u64)
+        Ok((self
+            .remaining(&reservation)?
+            .checked_sub(retention_overhead(retain_output)?)
+            .ok_or_else(exceeded)?
+            / 2) as u64)
     }
 
     pub(crate) fn command_result(
@@ -251,7 +276,7 @@ impl ReplyBudget {
         self.result(reply)
     }
 
-    pub(crate) fn controller_capture_limit(&self) -> Result<u64, ErrorData> {
+    pub(crate) fn controller_capture_limit(&self, retain_output: bool) -> Result<u64, ErrorData> {
         let reservation = ControllerReply {
             data: Some(ControllerData {
                 stdout: String::new(),
@@ -265,6 +290,7 @@ impl ReplyBudget {
                 termination: ControllerTermination::Signalled,
                 duration_ms: u64::MAX,
                 owned_group_cleanup: GroupCleanup::SignalledAndReaped,
+                output: None,
             }),
             error: Some(ControllerError::new(
                 "controller_resource_limit",
@@ -273,7 +299,10 @@ impl ReplyBudget {
         };
         // Raw capture is bounded before decoding. Exact escaping and actual
         // error metadata are accounted for again before duplicated allocation.
-        Ok(((MAX_RESPONSE_BYTES - self.value_size(&reservation, true)?) / 2) as u64)
+        Ok(((MAX_RESPONSE_BYTES - self.value_size(&reservation, true)?)
+            .checked_sub(retention_overhead(retain_output)?)
+            .ok_or_else(exceeded)?
+            / 2) as u64)
     }
 
     pub(crate) fn controller_result(
@@ -429,6 +458,7 @@ mod tests {
             termination: Termination::Exited,
             duration_ms: 42,
             remote_may_still_be_running: false,
+            output: None,
         })
     }
 
@@ -564,9 +594,9 @@ mod tests {
         let budget = ReplyBudget {
             id_bytes: MAX_RESPONSE_BYTES - 256,
         };
-        assert!(budget.command_capture_limit().is_err());
+        assert!(budget.command_capture_limit(false).is_err());
         let budget = ReplyBudget::new(&RequestId::Number(1)).unwrap();
-        assert!(budget.command_capture_limit().unwrap() < (MAX_RESPONSE_BYTES / 2) as u64);
+        assert!(budget.command_capture_limit(false).unwrap() < (MAX_RESPONSE_BYTES / 2) as u64);
         assert!(
             budget
                 .result(ToolReply::success(
@@ -607,6 +637,7 @@ mod tests {
                 termination: ControllerTermination::Timeout,
                 duration_ms: 42,
                 owned_group_cleanup: GroupCleanup::Incomplete,
+                output: None,
             }),
             error: Some(ControllerError::new(
                 "controller_timeout",
@@ -664,12 +695,12 @@ mod tests {
         assert_eq!(predicted, actual_frame_size(id, &result));
         let text: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
         assert_eq!(Some(text), result.structured_content);
-        assert!(budget.controller_capture_limit().unwrap() < (MAX_RESPONSE_BYTES / 2) as u64);
+        assert!(budget.controller_capture_limit(false).unwrap() < (MAX_RESPONSE_BYTES / 2) as u64);
         assert!(
             ReplyBudget {
                 id_bytes: MAX_RESPONSE_BYTES - 256,
             }
-            .controller_capture_limit()
+            .controller_capture_limit(false)
             .is_err()
         );
     }

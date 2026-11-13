@@ -39,6 +39,7 @@ use crate::{
     },
     filemeta::StatData,
     files::{self, FileContext},
+    output::{ReadOutputRequest, Store as OutputStore},
     reply::{CommandData, ControllerError, ControllerReply, Termination, ToolError, ToolReply},
     ssh::{MasterHealth, Pool},
     wire::ReplyBudget,
@@ -59,6 +60,7 @@ struct State {
     operations: Arc<Semaphore>,
     tasks: TaskTracker,
     local_tasks: TaskTracker,
+    outputs: OutputStore,
     automation: Arc<Semaphore>,
     automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
 }
@@ -205,10 +207,14 @@ impl Estus {
         }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
-        let routes: [(ToolId, ToolRoute<Self>); 13] = [
+        let routes: [(ToolId, ToolRoute<Self>); 14] = [
             (
                 ToolId::Targets,
                 (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
+            ),
+            (
+                ToolId::ReadOutput,
+                (Self::ssh_read_output_tool_attr(), Self::ssh_read_output).into_tool_route(),
             ),
             (
                 ToolId::Exec,
@@ -374,6 +380,7 @@ impl Estus {
             Duration::from_secs(config.limits().connect_timeout_secs),
             shutdown.clone(),
         );
+        let outputs = OutputStore::new(config.output_limits(), shutdown.clone());
         Ok(Self {
             tool_router,
             state: Arc::new(State {
@@ -390,6 +397,7 @@ impl Estus {
                 operations: Arc::new(Semaphore::new(16)),
                 tasks: TaskTracker::new(),
                 local_tasks: TaskTracker::new(),
+                outputs,
             }),
         })
     }
@@ -408,6 +416,7 @@ impl Estus {
             let _ = tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()).await;
             self.state.pool.shutdown().await;
         },);
+        self.state.outputs.shutdown().await;
     }
 
     async fn command(
@@ -418,7 +427,7 @@ impl Estus {
         let started = Instant::now();
         let metadata = request.metadata(&self.state, &context.id);
         let budget = ReplyBudget::new(&context.id)?;
-        let capture_limit = match budget.command_capture_limit() {
+        let capture_limit = match budget.command_capture_limit(request.retain_output()) {
             Ok(limit) => limit,
             Err(error) => {
                 metadata.reject(
@@ -651,6 +660,7 @@ impl Estus {
                     shutdown: &state.shutdown,
                     started,
                     capture_limit: 65_536,
+                    retention: None,
                 },
             )
             .await;
@@ -679,7 +689,7 @@ impl Estus {
         let started = Instant::now();
         let metadata = self.state.controller_metadata(id, &context.id);
         let budget = ReplyBudget::new(&context.id)?;
-        let capture_limit = match budget.controller_capture_limit() {
+        let capture_limit = match budget.controller_capture_limit(request.retain_output) {
             Ok(limit) => limit,
             Err(error) => {
                 metadata.reject_controller(
@@ -738,6 +748,7 @@ impl Estus {
                 }
             };
             let audit = Audit::start(metadata, started);
+            let retention = request.retain_output.then(|| state.outputs.reserve());
             let run = crate::controller::run(
                 prepared,
                 crate::controller::ControllerContext {
@@ -746,6 +757,7 @@ impl Estus {
                     shutdown: &state.shutdown,
                     started,
                     capture_limit,
+                    retention,
                 },
             )
             .await;
@@ -1062,6 +1074,57 @@ impl Estus {
     }
 
     #[tool(
+        name = "ssh_read_output",
+        description = "Read a bounded exact raw-byte range from stdout/stderr retained by an explicitly opted-in synchronous native/controller command in this server session. Opaque handles select only private server-owned artifacts, never caller file paths or another process/session's output. No SSH or remote execution occurs. UTF-8 is strict; base64 is padded and lossless; SHA-256 covers returned raw bytes. eof means end of the retained prefix, not complete command output; the command's output receipt reports stream truncation and observed byte count. Expired/foreign/unknown handles return not_found without reflecting secrets. File/read limits and the complete reply budget apply. Retention, local storage failure and reads never change command exit/termination/uncertainty evidence. Automation private Runner frames are never eligible.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        input_schema = schema_for_type::<ReadOutputRequest>(),
+        output_schema = schema_for_type::<ToolReply<ReadData>>()
+    )]
+    async fn ssh_read_output(
+        &self,
+        Arguments(request): Arguments<ReadOutputRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = self.state.output_metadata(&context.id);
+        if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
+            let error = ToolError::new("cancelled", "Output read cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<ReadData>::failure(error));
+        }
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<ReadData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let task = self.state.tasks.spawn(async move {
+            let _permit = permit;
+            let audit = Audit::start(state.output_metadata(&context.id), started);
+            let reply = tokio::select! {
+                biased;
+                () = context.ct.cancelled() => ToolReply::failure(ToolError::new("cancelled", "Output read cancelled", false)),
+                () = state.shutdown.cancelled() => ToolReply::failure(ToolError::new("cancelled", "Output read cancelled", false)),
+                reply = state.outputs.read(request, state.config.limits().max_file_bytes, budget) => reply,
+            };
+            audit.finish(None, reply.error.as_ref());
+            reply
+        });
+        match task.await {
+            Ok(reply) => budget.result(reply),
+            Err(_) => budget.result(ToolReply::<ReadData>::failure(ToolError::new(
+                "io_error",
+                "Output read could not complete",
+                false,
+            ))),
+        }
+    }
+
+    #[tool(
         name = "ssh_exec",
         description = "Execute a stateless noninteractive remote shell script (/bin/sh by default; Bash is opt-in). Potentially destructive; not idempotent. Timeout/cancellation closes only this channel: remote work may continue, and operations are never replayed. Ordinary shell authority can bypass same-account sudo approval separation. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
@@ -1262,6 +1325,15 @@ struct PreparedCommand<'a> {
 }
 
 impl Operation {
+    fn retain_output(&self) -> bool {
+        match self {
+            Self::Exec(request) => request.retain_output,
+            Self::Run(request) => request.retain_output,
+            Self::Sudo(request) => request.retain_output,
+            Self::Binding { request, .. } => request.retain_output,
+        }
+    }
+
     fn metadata<'a>(&'a self, state: &'a State, request_id: &'a RequestId) -> Metadata<'a> {
         let (tool, host, user, program, revision, executor) = match self {
             Self::Exec(request) => (
@@ -1431,6 +1503,20 @@ fn request_deadline(
 }
 
 impl State {
+    fn output_metadata<'a>(&'a self, request_id: &'a RequestId) -> Metadata<'a> {
+        Metadata {
+            request_id,
+            tool: self.tool_name(ToolId::ReadOutput),
+            host: None,
+            identity_role: IdentityRole::Controller,
+            sudo_mode: None,
+            user: None,
+            program: None,
+            binding_revision: None,
+            executor: None,
+        }
+    }
+
     fn tool_name(&self, id: ToolId) -> &str {
         self.tools
             .name(ToolKey::Builtin(id))
@@ -1497,6 +1583,7 @@ impl State {
             }
         };
         let audit = Audit::start(metadata, started);
+        let retention = request.retain_output().then(|| self.outputs.reserve());
         let reply = match self
             .pool
             .acquire(target.name, target.destination, target.role, deadline, &ct)
@@ -1563,6 +1650,7 @@ impl State {
                             ct: &ct,
                             shutdown: &self.shutdown,
                             started,
+                            retention,
                         },
                     )
                     .await
