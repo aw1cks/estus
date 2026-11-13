@@ -51,6 +51,15 @@ The producer declares macOS 11.0 for the arm64 Mach-O payload and manylinux glib
 that every optional dependency supports the same minimum OS. The wheel needs no
 Nix runtime; compatible Python and host OpenSSH remain external prerequisites.
 
+Run the explicit payload compatibility audit with pinned inspection tools:
+
+```sh
+nix run .#wheel-acceptance
+```
+
+This checks actual load metadata against the wheel tags, without downloading a
+Python runtime or running network fixtures.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

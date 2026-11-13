@@ -56,6 +56,15 @@
         inherit (defaultBuild) package acceptance;
         automationRuntime = import ./nix/automation-runtime.nix { inherit pkgs; };
         wheel = import ./nix/wheel.nix { inherit pkgs; craneLib = msrvLib; };
+        wheelAcceptance = pkgs.runCommand "ssh-mcp-wheel-acceptance" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p "$out/bin"
+          makeWrapper ${msrvBuild.acceptance}/libexec/wheel "$out/bin/wheel-acceptance" \
+            --set SSH_MCP_TEST_WHEEL ${wheel}/${wheel.wheelName} \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.unzip pkgs.llvmPackages.llvm ]} \
+            --add-flags '--ignored --nocapture --test-threads=1'
+        '';
         withAutomation = native: pkgs.runCommand "ssh-mcp-automation-${native.version}" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
           meta.mainProgram = "ssh-mcp";
@@ -113,6 +122,10 @@
         apps.automation-acceptance-msrv = {
           type = "app";
           program = "${automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv}/bin/automation-acceptance";
+        };
+        apps.wheel-acceptance = {
+          type = "app";
+          program = "${wheelAcceptance}/bin/wheel-acceptance";
         };
         apps.ssh-baseline = {
           type = "app";
