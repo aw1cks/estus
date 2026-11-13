@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, automation ? false }:
 let
   inherit (pkgs) lib;
   commandPath = "/usr/bin:/bin:${pkgs.coreutils}/bin:${pkgs.dash}/bin";
@@ -49,7 +49,7 @@ let
     done
     ln -s ${pkgs.coreutils}/bin/id "$out/usr/bin/id"
     ln -s ${pkgs.coreutils}/bin/printf "$out/usr/bin/printf"
-    cp ${sudo}/bin/sudo "$out/usr/bin/sudo"
+    ${lib.optionalString automation "ln -s ${pkgs.python314}/bin/python3 \"$out/usr/bin/python3\"\n    "}cp ${sudo}/bin/sudo "$out/usr/bin/sudo"
     cat > "$out/etc/passwd" <<'EOF'
     root:x:0:0:root:/root:/bin/sh
     sshd:x:74:74:OpenSSH privilege separation:/var/empty:/bin/false
@@ -94,7 +94,7 @@ let
     ${sudo}/sbin/visudo -cf "$out/etc/sudoers"
   '';
   image = pkgs.dockerTools.buildLayeredImage {
-    name = "ssh-mcp-fixture";
+    name = if automation then "ssh-mcp-automation-fixture" else "ssh-mcp-fixture";
     # Omitting tag selects dockerTools' derivation-derived tag, never latest.
     created = "1970-01-01T00:00:01Z";
     mtime = "1970-01-01T00:00:01Z";

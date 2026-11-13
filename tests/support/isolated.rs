@@ -24,6 +24,21 @@ const STARTUP: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(10);
 const ACCOUNTS: [&str; 5] = ["mcp", "mcp-sudo", "mcp-admin", "mcp-password", "mcp-tty"];
 
+#[derive(Clone, Copy)]
+pub enum ImageKind {
+    Native,
+    Automation,
+}
+
+impl ImageKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Native => "ssh-mcp-fixture:",
+            Self::Automation => "ssh-mcp-automation-fixture:",
+        }
+    }
+}
+
 struct Artifact {
     archive: PathBuf,
     reference: String,
@@ -31,7 +46,7 @@ struct Artifact {
 }
 
 impl Artifact {
-    fn read(directory: &Path) -> Result<Self> {
+    fn read(directory: &Path, kind: ImageKind) -> Result<Self> {
         let mut names = fs::read_dir(directory)
             .context("SSH_MCP_TEST_FIXTURE must name the built artifact directory")?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -49,8 +64,8 @@ impl Artifact {
         let reference = metadata_line(&directory.join("image-ref"))?;
         let digest = metadata_line(&directory.join("image-id"))?;
         let tag = reference
-            .strip_prefix("ssh-mcp-fixture:")
-            .context("image-ref must use ssh-mcp-fixture:<derivation-derived-tag>")?;
+            .strip_prefix(kind.prefix())
+            .context("image-ref must match the explicitly selected fixture image kind")?;
         ensure!(
             !tag.is_empty()
                 && tag.len() <= 128
@@ -261,15 +276,19 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    pub async fn start() -> Result<Self> {
-        Self::start_with_sshd_config("").await
+    pub async fn start(kind: ImageKind) -> Result<Self> {
+        Self::start_image(kind, "").await
     }
 
     pub async fn start_with_sshd_config(extra: &str) -> Result<Self> {
+        Self::start_image(ImageKind::Native, extra).await
+    }
+
+    async fn start_image(kind: ImageKind, extra: &str) -> Result<Self> {
         // All malformed/missing artifact boundaries precede CLI/SDK side effects.
         let directory = std::env::var_os("SSH_MCP_TEST_FIXTURE")
             .context("set SSH_MCP_TEST_FIXTURE to the Nix-built three-file artifact directory")?;
-        let artifact = Artifact::read(Path::new(&directory))?;
+        let artifact = Artifact::read(Path::new(&directory), kind)?;
         let docker = Docker::explicit()?;
         let root = tempfile::tempdir()?;
         let mut fixture = Self {
@@ -889,14 +908,22 @@ mod tests {
     #[test]
     fn refuses_missing_and_malformed_artifacts() -> Result<()> {
         let root = tempfile::tempdir()?;
-        ensure!(Artifact::read(root.path()).is_err());
+        ensure!(Artifact::read(root.path(), ImageKind::Native).is_err());
         fs::write(root.path().join("image.tar.gz"), b"archive")?;
         fs::write(root.path().join("image-ref"), "ssh-mcp-fixture:abc123\n")?;
         fs::write(
             root.path().join("image-id"),
             format!("sha256:{}\n", "a".repeat(64)),
         )?;
-        Artifact::read(root.path())?;
+        Artifact::read(root.path(), ImageKind::Native)?;
+        ensure!(Artifact::read(root.path(), ImageKind::Automation).is_err());
+        fs::write(
+            root.path().join("image-ref"),
+            "ssh-mcp-automation-fixture:abc123\n",
+        )?;
+        Artifact::read(root.path(), ImageKind::Automation)?;
+        ensure!(Artifact::read(root.path(), ImageKind::Native).is_err());
+        fs::write(root.path().join("image-ref"), "ssh-mcp-fixture:abc123\n")?;
         for reference in [
             "ssh-mcp-fixture:latest",
             "other:abc123",
@@ -904,7 +931,7 @@ mod tests {
         ] {
             fs::write(root.path().join("image-ref"), reference)?;
             ensure!(
-                Artifact::read(root.path()).is_err(),
+                Artifact::read(root.path(), ImageKind::Native).is_err(),
                 "accepted invalid image reference"
             );
         }
@@ -916,7 +943,7 @@ mod tests {
         ] {
             fs::write(root.path().join("image-id"), digest)?;
             ensure!(
-                Artifact::read(root.path()).is_err(),
+                Artifact::read(root.path(), ImageKind::Native).is_err(),
                 "accepted invalid config digest"
             );
         }

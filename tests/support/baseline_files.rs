@@ -119,7 +119,7 @@ async fn check_master(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit Docker-compatible daemon"]
 async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let mut wire = match support::WireServer::start(&fixture.config) {
         Ok(wire) => wire,
         Err(error) => {

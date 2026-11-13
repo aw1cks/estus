@@ -111,6 +111,10 @@
           automation-acceptance-msrv = automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
+          ssh-automation-fixture-image = import ./nix/ssh-fixture.nix {
+            inherit pkgs;
+            automation = true;
+          };
         };
         apps.default = {
           type = "app";

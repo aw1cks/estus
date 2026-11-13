@@ -131,7 +131,7 @@ async fn check_master(fixture: &isolated::Fixture, owned: &(u32, PathBuf)) -> Re
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
 async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let scenario = async {
         let mut markers = fixture.credential_markers()?;
         markers.extend(["V03_BACKEND_DIAGNOSTIC_SECRET", "V03_HOST_SECRET", "V03_MATCH_SECRET",
@@ -242,7 +242,7 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
 async fn ssh_packaged_command_fidelity() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let scenario = async {
         // This is an owned fixture TOML override, not a production default change.
         fs::OpenOptions::new()
@@ -455,7 +455,7 @@ async fn await_finish(log: &Log, id: &Value, code: &str) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
 async fn ssh_packaged_command_timeout_and_cancellation() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let scenario = async {
         let markers = fixture.credential_markers()?;
         let client = Client::start(&fixture.config).await?;
@@ -586,7 +586,7 @@ async fn shutdown_once(fixture: &isolated::Fixture, sigterm: bool, index: usize)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
 async fn ssh_packaged_eof_sigterm_and_external_master() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let scenario = async {
         let directory = tempfile::Builder::new()
             .prefix("v03-other-")
@@ -696,7 +696,7 @@ async fn ssh_packaged_eof_sigterm_and_external_master() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit Docker-compatible daemon"]
 async fn ssh_packaged_complete_wire_budget() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let scenario = async {
         fs::OpenOptions::new()
             .append(true)

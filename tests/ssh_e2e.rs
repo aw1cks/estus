@@ -160,7 +160,7 @@ async fn ordinary(client: &Client, command: &str) -> Result<Value> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires exact Nix fixture artifact and explicit dedicated Docker-compatible daemon"]
 async fn ssh_end_to_end() -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let client = match Client::start(&fixture.config).await {
         Ok(client) => client,
         Err(error) => {
@@ -244,7 +244,7 @@ enum WriteFault {
 }
 
 async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let relay = match async { WriteRelay::start(fixture.primary_endpoint().await?).await }.await {
         Ok(relay) => relay,
         Err(error) => {
@@ -576,7 +576,7 @@ async fn observed_master_count(
 async fn ssh_sudo_authority() -> Result<()> {
     use std::io::Write as _;
 
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     // A second logical target for the same sudo-capable UID is deliberately NOT
     // isolation: disabling its structured tool cannot constrain arbitrary exec.
     let setup = (|| -> Result<_> {
@@ -886,7 +886,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
     const REJECTED_SECRET: &str = "V02_REJECTED_ARG_NOT_FOR_REPLY";
     const ARGV_SECRET: &str = "V02_ARG_AUDIT_SECRET";
 
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let setup = fixture.credential_markers();
     let mut markers = match setup {
         Ok(markers) => markers,
@@ -1101,7 +1101,7 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
     const PAYLOAD_SECRET: &str = "T05_BOUND_ARG_AUDIT_SECRET";
     const OVERRIDE_SECRET: &str = "T05_BOUND_AUTHORITY_OVERRIDE_SECRET";
 
-    let fixture = isolated::Fixture::start().await?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Native).await?;
     let setup = (|| -> Result<_> {
         // Copy the exact fixture's existing identity/program policy, not a wider
         // test-only sudo policy. The fixture owns this additional config's path.
