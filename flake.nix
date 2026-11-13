@@ -39,7 +39,8 @@
             filter = path: type:
               path != "${toString ./.}/fuzz"
               && (craneLib.filterCargoSources path type
-                || path == "${toString ./.}/src/automation_health.py");
+                || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
+                  && pkgs.lib.hasSuffix ".py" path));
           };
           strictDeps = true;
           doCheck = true;

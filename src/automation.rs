@@ -318,6 +318,47 @@ fn parse_descriptor(raw: &OsStr) -> Result<PythonDescriptor, &'static str> {
     Ok(descriptor)
 }
 
+pub(crate) struct RunnerRuntime {
+    pub plan: Arc<ControllerPlan>,
+    pub payload: serde_json::Value,
+}
+
+/// Select only deployment-provided paths; Python performs isolated health checks.
+pub(crate) fn runner_runtime(
+    runtime: Option<PathBuf>,
+    workspace_root: Arc<Path>,
+) -> Result<RunnerRuntime, &'static str> {
+    let loaded = load_selected(runtime, || std::env::var_os("SSH_MCP_PYTHON_RUNTIME"))?;
+    let payload =
+        serde_json::from_slice(&request(&loaded)?).map_err(|_| "invalid_runtime_manifest")?;
+    let literal = serde_json::to_string(HEALTH).map_err(|_| "invalid_runtime_manifest")?;
+    let cli_literal = serde_json::to_string(include_str!("automation_cli.py"))
+        .map_err(|_| "invalid_runtime_manifest")?;
+    let source = format!(
+        "_SSH_MCP_HEALTH_SOURCE = {literal}\n_SSH_MCP_CLI_SOURCE = {cli_literal}\n{}",
+        include_str!("automation_runner.py")
+    );
+    let mut environment = BTreeMap::new();
+    if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK") {
+        let socket = socket
+            .to_str()
+            .filter(|value| valid_private_path(value))
+            .ok_or("invalid_credential_reference")?;
+        environment.insert("SSH_AUTH_SOCK".to_owned(), socket.to_owned());
+    }
+    Ok(RunnerRuntime {
+        plan: Arc::new(ControllerPlan {
+            source: Cow::Owned(source),
+            interpreter: loaded.interpreter,
+            interpreter_argv: vec!["-I".to_owned(), "-B".to_owned()],
+            cwd: None,
+            environment,
+            workspace_root,
+        }),
+        payload,
+    })
+}
+
 fn load_selected(
     runtime: Option<PathBuf>,
     descriptor: impl FnOnce() -> Option<OsString>,

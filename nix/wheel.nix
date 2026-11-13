@@ -39,7 +39,7 @@ craneLib.mkCargoDerivation {
         craneLib.filterCargoSources path type
         || builtins.elem relative [ "pyproject.toml" "MANIFEST.in" "README.md" ]
         || (lib.hasPrefix "python/" relative && lib.hasSuffix ".py" relative)
-        || relative == "src/automation_health.py"
+        || (lib.hasPrefix "src/" relative && lib.hasSuffix ".py" relative)
       );
   };
   strictDeps = true;
