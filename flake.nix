@@ -66,6 +66,17 @@
         '';
         automation = withAutomation package;
         automationMsrv = withAutomation msrvBuild.package;
+        automationAcceptance = native: harness: optional:
+          pkgs.runCommand "ssh-mcp-automation-acceptance" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p "$out/bin"
+            makeWrapper ${harness}/libexec/automation "$out/bin/automation-acceptance" \
+              --set SSH_MCP_TEST_BINARY ${native}/bin/ssh-mcp \
+              --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+              --set SSH_MCP_TEST_AUTOMATION_BINARY ${optional}/bin/ssh-mcp \
+              --add-flags '--include-ignored --nocapture --test-threads=2'
+          '';
       in
       {
         packages = {
@@ -76,6 +87,8 @@
           automation-runtime = automationRuntime;
           inherit automation;
           automation-msrv = automationMsrv;
+          automation-acceptance = automationAcceptance package acceptance automation;
+          automation-acceptance-msrv = automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
         };
@@ -90,6 +103,14 @@
         apps.automation-msrv = {
           type = "app";
           program = "${automationMsrv}/bin/ssh-mcp";
+        };
+        apps.automation-acceptance = {
+          type = "app";
+          program = "${automationAcceptance package acceptance automation}/bin/automation-acceptance";
+        };
+        apps.automation-acceptance-msrv = {
+          type = "app";
+          program = "${automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv}/bin/automation-acceptance";
         };
         apps.ssh-baseline = {
           type = "app";

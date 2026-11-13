@@ -4,7 +4,8 @@ mod support;
 
 use std::{
     fs,
-    path::PathBuf,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
 };
@@ -369,5 +370,335 @@ async fn automation_config_and_cli_rejections_do_not_disclose_private_values() -
         ensure!(rejected.status.code() == Some(2) && rejected.stdout.is_empty());
         fixture.private(&rejected)?;
     }
+    Ok(())
+}
+
+fn real_runtime() -> Result<PathBuf> {
+    // Explicit acceptance never silently substitutes a Cargo binary or ambient Python.
+    let binary = std::env::var_os("SSH_MCP_TEST_BINARY")
+        .context("set SSH_MCP_TEST_BINARY to the installed native executable")?;
+    ensure!(Path::new(&binary).is_absolute() && Path::new(&binary).is_file());
+    let root = PathBuf::from(
+        std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME")
+            .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME to the shipped runtime")?,
+    );
+    ensure!(root.is_absolute() && root.join("runtime.json").is_file());
+    Ok(root)
+}
+
+fn configured_runtime(root: &Path, required: bool) -> Result<Local> {
+    Local::new(&format!(
+        "[automation]\nrequired = {required}\nruntime = {}\n",
+        serde_json::to_string(&root.to_string_lossy())?
+    ))
+}
+
+// Snapshot links without traversing the Python closure; include the actual immutable metadata.
+fn runtime_metadata(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>, u32)>> {
+    let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
+    let mut paths = vec![root.join("runtime.json"), root.join("ansible.cfg")];
+    for collection in manifest["identity"]["collections"]
+        .as_array()
+        .context("collections")?
+    {
+        let name = collection["name"].as_str().context("collection name")?;
+        paths.push(
+            root.join("collections/ansible_collections")
+                .join(name.replace('.', "/"))
+                .join("MANIFEST.json"),
+        );
+    }
+    for path in [root.join("python"), root.join("bin/python3")] {
+        paths.push(path);
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::symlink_metadata(&path)?;
+            let bytes = if metadata.file_type().is_symlink() {
+                fs::read_link(&path)?
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec()
+            } else {
+                fs::read(&path)?
+            };
+            Ok((path, bytes, metadata.permissions().mode()))
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_runtime_imports_are_pinned_isolated_repeatable_and_do_not_register_tools()
+-> Result<()> {
+    let root = real_runtime()?;
+    let before = runtime_metadata(&root)?;
+    let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
+    let expected = &manifest["identity"];
+    let collections = expected["collections"].as_array().context("collections")?;
+    for collection in collections {
+        let path = root
+            .join("collections/ansible_collections")
+            .join(
+                collection["name"]
+                    .as_str()
+                    .context("name")?
+                    .replace('.', "/"),
+            )
+            .join("MANIFEST.json");
+        let bytes = fs::read(path)?;
+        let observed: Value = serde_json::from_slice(&bytes)?;
+        ensure!(collection["version"] == observed["collection_info"]["version"]);
+        use sha2::Digest;
+        ensure!(collection["manifest_sha256"] == hex::encode(sha2::Sha256::digest(&bytes)));
+    }
+    let fixture = configured_runtime(&root, false)?;
+    let injected = fixture.root.path().join("python-injection-ran");
+    let poison = format!(
+        "from pathlib import Path\nPath({:?}).write_text('forbidden')\nraise RuntimeError('PYTHON_INJECTION_RAN')\n",
+        injected.to_str().context("injection path")?
+    );
+    for name in [
+        "sitecustomize.py",
+        "usercustomize.py",
+        "ansible.py",
+        "ansible_runner.py",
+    ] {
+        fs::write(fixture.root.path().join(name), &poison)?;
+    }
+    let ambient_cfg = fixture.root.path().join("ansible.cfg");
+    fs::write(
+        &ambient_cfg,
+        format!("[defaults]\ncollections_path = /{SECRET}\nlocal_tmp = /{SECRET}\n"),
+    )?;
+    for _ in 0..2 {
+        let mut command = fixture.doctor()?;
+        command
+            .env("PYTHONPATH", fixture.root.path())
+            .env("PYTHONHOME", fixture.root.path())
+            .env(
+                "PYTHONSTARTUP",
+                fixture.root.path().join("sitecustomize.py"),
+            )
+            .env("ANSIBLE_CONFIG", &ambient_cfg)
+            .env("ANSIBLE_COLLECTIONS_PATH", fixture.root.path())
+            .env(
+                "ANSIBLE_LOCAL_TEMP",
+                fixture.root.path().join("forbidden-local-temp"),
+            )
+            .env(
+                "SSH_MCP_ANSIBLE_RUNTIME",
+                "/AUTOMATION_PRIVATE_SENTINEL/ignored-env",
+            );
+        let checked = output(command).await?;
+        let value = report(&checked, 0)?;
+        ensure!(
+            value["runtime"] == json!({"kind":"ansible", "status":"passed", "identity":expected})
+        );
+        fixture.private(&checked)?;
+    }
+    ensure!(!injected.exists() && !fixture.root.path().join("forbidden-local-temp").exists());
+    let names: Vec<_> = fs::read_dir(fixture.root.path())?
+        .map(|entry| entry.map(|e| e.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    ensure!(
+        names.len() == 7,
+        "health installed or cached files in the operator directory"
+    );
+    let native = Local::new("")?;
+    let mut baseline = Server::start(native.command()?)?;
+    let catalog = baseline.catalog().await?;
+    baseline.stop().await?;
+    let required = configured_runtime(&root, true)?;
+    let mut server = Server::start(required.command()?)?;
+    ensure!(
+        server.catalog().await? == catalog,
+        "required runtime altered native metadata"
+    );
+    let stderr = server.stop().await?;
+    required.private(&Output {
+        status: std::process::ExitStatus::default(),
+        stdout: Vec::new(),
+        stderr,
+    })?;
+    ensure!(
+        runtime_metadata(&root)? == before,
+        "runtime metadata mutated"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_AUTOMATION_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime() -> Result<()> {
+    let root = real_runtime()?;
+    let binary = PathBuf::from(
+        std::env::var_os("SSH_MCP_TEST_AUTOMATION_BINARY")
+            .context("set SSH_MCP_TEST_AUTOMATION_BINARY to the installed automation wrapper")?,
+    );
+    ensure!(binary.is_absolute() && binary.is_file());
+    let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
+    let before = runtime_metadata(&root)?;
+    let fixture = Local::new("[automation]\nrequired = true\n")?;
+    let wrapper_command = || {
+        let mut command = Command::new(&binary);
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("SSH_MCP_") {
+                command.env_remove(name);
+            }
+        }
+        command
+            .arg("--config")
+            .arg(&fixture.config)
+            .current_dir(fixture.root.path())
+            .env("HOME", fixture.root.path())
+            .env(
+                "SSH_MCP_ANSIBLE_RUNTIME",
+                "/AUTOMATION_PRIVATE_SENTINEL/must-be-overridden",
+            )
+            .kill_on_drop(true);
+        command
+    };
+    let mut doctor = wrapper_command();
+    doctor.args(["doctor", "--runtime", "ansible"]);
+    let checked = output(doctor).await?;
+    ensure!(
+        report(&checked, 0)?["runtime"]
+            == json!({
+                "kind":"ansible", "status":"passed", "identity":manifest["identity"]
+            })
+    );
+    fixture.private(&checked)?;
+    let native = Local::new("")?;
+    let mut baseline = Server::start(native.command()?)?;
+    let catalog = baseline.catalog().await?;
+    baseline.stop().await?;
+    let mut server = Server::start(wrapper_command())?;
+    ensure!(server.catalog().await? == catalog);
+    let stderr = server.stop().await?;
+    for secret in [SECRET, root.to_str().context("runtime path")?] {
+        ensure!(!String::from_utf8_lossy(&stderr).contains(secret));
+    }
+    ensure!(!fixture.marker.exists());
+    ensure!(runtime_metadata(&root)? == before);
+    Ok(())
+}
+
+fn linked_runtime(actual: &Path, parent: &Path) -> Result<PathBuf> {
+    let root = parent.join("mutable-runtime");
+    fs::create_dir(&root)?;
+    for name in ["bin", "python", "ansible.cfg", "collections"] {
+        symlink(actual.join(name), root.join(name))?;
+    }
+    fs::copy(actual.join("runtime.json"), root.join("runtime.json"))?;
+    // Nix source permissions must not make this temp-owned manifest immutable.
+    fs::set_permissions(root.join("runtime.json"), fs::Permissions::from_mode(0o600))?;
+    Ok(root)
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift() -> Result<()> {
+    let actual = real_runtime()?;
+    let before = runtime_metadata(&actual)?;
+    for case in [
+        "malformed",
+        "unknown",
+        "oversized",
+        "health_hash",
+        "site_packages",
+        "version",
+        "collection",
+    ] {
+        let owned = tempfile::tempdir()?;
+        let root = linked_runtime(&actual, owned.path())?;
+        let path = root.join("runtime.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        let code = match case {
+            "malformed" => {
+                fs::write(&path, b"{")?;
+                "invalid_runtime_manifest"
+            }
+            "oversized" => {
+                fs::write(&path, vec![b' '; 16_385])?;
+                "invalid_runtime_manifest"
+            }
+            "unknown" => {
+                manifest[SECRET] = json!(true);
+                "invalid_runtime_manifest"
+            }
+            "health_hash" => {
+                manifest["health_sha256"] = json!("0".repeat(64));
+                "invalid_runtime_manifest"
+            }
+            "site_packages" => {
+                manifest["site_packages"] = json!(format!("../{SECRET}"));
+                "invalid_runtime_manifest"
+            }
+            "version" => {
+                manifest["identity"]["python"] = json!("0.0.0");
+                "runtime_version_mismatch"
+            }
+            "collection" => {
+                // Only the changed collection is copied; executable/import assets remain real links.
+                fs::remove_file(root.join("collections"))?;
+                let base = root.join("collections/ansible_collections");
+                fs::create_dir_all(&base)?;
+                let selected = manifest["identity"]["collections"]
+                    .as_array()
+                    .context("collections")?;
+                for (index, collection) in selected.iter().enumerate() {
+                    let name = collection["name"]
+                        .as_str()
+                        .context("collection")?
+                        .replace('.', "/");
+                    let source = actual.join("collections/ansible_collections").join(&name);
+                    let destination = base.join(&name);
+                    fs::create_dir_all(destination.parent().context("namespace")?)?;
+                    if index == 0 {
+                        fs::create_dir(&destination)?;
+                        for entry in fs::read_dir(&source)? {
+                            let entry = entry?;
+                            if entry.file_name() == "MANIFEST.json" {
+                                let mut bytes = fs::read(entry.path())?;
+                                bytes.push(b' ');
+                                fs::write(destination.join(entry.file_name()), bytes)?;
+                            } else {
+                                symlink(entry.path(), destination.join(entry.file_name()))?;
+                            }
+                        }
+                    } else {
+                        symlink(source, destination)?;
+                    }
+                }
+                "runtime_collection_mismatch"
+            }
+            _ => unreachable!(),
+        };
+        if !matches!(case, "malformed" | "oversized") {
+            fs::write(&path, serde_json::to_vec(&manifest)?)?;
+        }
+        let fixture = configured_runtime(&root, false)?;
+        let checked = output(fixture.doctor()?).await?;
+        runtime_failed(&report(&checked, 1)?, code)
+            .with_context(|| format!("drift case {case}"))?;
+        fixture.private(&checked)?;
+        for bytes in [&checked.stdout, &checked.stderr] {
+            ensure!(
+                !String::from_utf8_lossy(bytes).contains(root.to_str().context("runtime path")?)
+            );
+        }
+        let required = configured_runtime(&root, true)?;
+        let startup = output(required.command()?).await?;
+        ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&startup.stderr)?;
+        ensure!(error["code"] == "automation_runtime_unavailable");
+        required.private(&startup)?;
+    }
+    ensure!(
+        runtime_metadata(&actual)? == before,
+        "drift acceptance changed shipped assets"
+    );
     Ok(())
 }
