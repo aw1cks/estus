@@ -113,9 +113,9 @@ The wheel public command accepts the same `schema` commands. Output must be new:
 imports never overwrite review. Snapshots retain recursive structure, aliases,
 documentation-only defaults and runtime/selected-collection/source/schema digests.
 Verification reimports actual content and refuses drift, never silently refreshes.
-The snapshot records public ansible-doc metadata, not an executable binding or
-complete runtime argument specification. Preserved prose needs operator review.
-This is not immutable-environment attestation. Hashing the
+Unsupported source types/constraints fail explicitly. Public documentation omits
+some runtime rules: preserved prose needs operator review. This is not complete
+Ansible argument-spec emulation or immutable-environment attestation. Hashing the
 selected Ansible/collection source trees does not sandbox trusted code, attest all
 transitive dependencies, or prevent same-user replacement after verification.
 `--timeout-secs` bounds the selected worker; no installer or online catalog runs.

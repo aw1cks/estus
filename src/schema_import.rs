@@ -328,7 +328,7 @@ async fn perform(
     )
     .await?;
     stopped(&shutdown, deadline)?;
-    let contract = observed.document;
+    let contract = module_schema::import_document(&observed.document)?;
     if let Some(previous) = &previous
         && (previous.runtime != observed.identity
             || previous.collection != observed.collection
