@@ -2176,6 +2176,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "getrandom 0.4.3",
  "hex",
  "indoc",
  "nix 0.30.1",

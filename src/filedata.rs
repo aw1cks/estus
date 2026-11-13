@@ -248,6 +248,64 @@ impl RemoveDirectoryRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ReplaceRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    pub(crate) content: String,
+    #[serde(default)]
+    pub(crate) encoding: Encoding,
+    pub(crate) overwrite: bool,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReplaceSpec<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) content: Cow<'a, [u8]>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ReplaceData {
+    pub(crate) bytes_written: u64,
+}
+
+impl ReplaceRequest {
+    pub(crate) fn validate(
+        &self,
+        max_file_bytes: u64,
+        budget: ReplyBudget,
+    ) -> Result<ReplaceSpec<'_>, ToolError> {
+        if !self.overwrite {
+            return Err(invalid(
+                "Atomic replacement requires explicit overwrite=true",
+            ));
+        }
+        let leaf = self.path.rsplit('/').next().unwrap_or("");
+        if self.path.contains('\0') || matches!(leaf, "" | "." | "..") {
+            return Err(invalid(
+                "path must name a nonempty NUL-free final file entry",
+            ));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        budget
+            .remaining(&ToolReply {
+                data: Some(ReplaceData {
+                    bytes_written: u64::MAX,
+                }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            })
+            .map_err(|_| invalid("Request leaves insufficient response budget for replacement"))?;
+        Ok(ReplaceSpec {
+            path: &self.path,
+            content: decode_content(&self.content, self.encoding, max_file_bytes)?,
+        })
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StatRequest {
     pub(crate) host: String,
     pub(crate) path: String,

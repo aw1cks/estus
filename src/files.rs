@@ -6,7 +6,14 @@
 //!
 //! SHA-256 covers only the returned raw byte range, not the lookahead or encoded
 //! content. Separate reads are not a snapshot of a concurrently changing file.
+//!
+//! Atomic replacement uses a new mode-0600 inode, not destination metadata, and
+//! promises atomic visibility rather than durability or concurrent-writer safety.
+//! The empty sibling stage briefly has server-default permissions before chmod.
+//! Cancellation or uncertain acknowledgements can leave `.estus-replace-*`
+//! orphans: never replay replacement or remove an unproven staging pathname.
 use std::{
+    fmt::Write as _,
     future::Future,
     io::{self, SeekFrom},
     os::unix::ffi::OsStrExt,
@@ -18,7 +25,7 @@ use std::{
 use bytes::BytesMut;
 use futures_util::StreamExt;
 use openssh::{Session, Stdio};
-use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
+use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions, metadata::Permissions};
 use openssh_sftp_error::SftpErrorKind;
 use tokio::{
     io::{AsyncRead, AsyncSeekExt, AsyncWrite, ReadBuf},
@@ -29,8 +36,8 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use crate::{
     filedata::{
         ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RemoveDirectoryData,
-        RemoveDirectorySpec, RemoveFileData, RemoveFileSpec, RenameData, RenameSpec, StatSpec,
-        WriteData, WriteSpec, encode, verify_script,
+        RemoveDirectorySpec, RemoveFileData, RemoveFileSpec, RenameData, RenameSpec, ReplaceData,
+        ReplaceSpec, StatSpec, WriteData, WriteSpec, encode, verify_script,
     },
     filemeta::{ListEntry, StatData, metadata_data},
     reply::{ToolError, ToolReply},
@@ -385,6 +392,108 @@ async fn write_sftp(
     combine_close(result, close)
 }
 
+enum ReplacePhase {
+    NotStarted,
+    Opening,
+    Staging,
+    Renaming,
+    Renamed,
+}
+
+fn replacement_stage_path(destination: &str) -> Result<String, Failure> {
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| Failure::io())?;
+    let prefix = destination
+        .rfind('/')
+        .map_or("", |index| &destination[..=index]);
+    // Reserve the entire raw sibling path once; the basename never grows with
+    // the destination basename, and formatting does not allocate an intermediate.
+    let mut path = String::with_capacity(prefix.len() + ".estus-replace-".len() + 32);
+    write!(
+        path,
+        "{prefix}.estus-replace-{:032x}",
+        u128::from_be_bytes(random)
+    )
+    .map_err(|_| Failure::io())?;
+    Ok(path)
+}
+
+async fn replace_sftp(
+    sftp: Sftp,
+    spec: &ReplaceSpec<'_>,
+    phase: &mut ReplacePhase,
+) -> Result<ReplaceData, Failure> {
+    let result = async {
+        // Fs::rename otherwise falls back to standard RENAME. Refuse before
+        // OPEN, chmod, WRITE or any other filesystem mutation.
+        if !sftp.support_posix_rename() {
+            return Err(Failure {
+                error: ToolError::new(
+                    "unsupported",
+                    "Atomic overwrite rename requires the SFTP POSIX-rename extension",
+                    false,
+                ),
+                check_master: false,
+            });
+        }
+        let path = replacement_stage_path(spec.path)?;
+        // A nonce collision with the requested name must never stage in-place.
+        if path == spec.path {
+            return Err(Failure::io());
+        }
+        let mut options = sftp.options();
+        options.write(true).create_new(true);
+        // Only an acknowledged EXCL OPEN establishes ownership. An uncertain
+        // OPEN or collision must never cause pathname cleanup.
+        *phase = ReplacePhase::Opening;
+        let mut file = options.open(&path).await.map_err(sftp_failure)?;
+        *phase = ReplacePhase::Staging;
+        let written = async {
+            // OpenOptions cannot supply creation attributes. The empty stage
+            // may be visible with server defaults, but no content is written
+            // until this handle-based chmod has been acknowledged.
+            file.set_permissions(Permissions::from(0o600))
+                .await
+                .map_err(sftp_failure)?;
+            file.write_all(&spec.content).await.map_err(sftp_failure)
+        }
+        .await;
+        let close = tokio::time::timeout(CLEANUP_TIMEOUT, file.close())
+            .await
+            .map_err(|_| Failure::cleanup())
+            .and_then(|result| result.map_err(sftp_failure));
+        let staged = combine_close(written, close);
+        if let Err(error) = staged {
+            // This is the only pathname cleanup: known exclusive ownership,
+            // after bounded handle close, before any rename has been polled.
+            // Cancellation can drop us before cleanup; leave a possible orphan
+            // rather than reconnecting or guessing whether OPEN succeeded.
+            let remove = async { sftp.fs().remove_file(&path).await.map_err(sftp_failure) };
+            let cleanup = tokio::time::timeout(CLEANUP_TIMEOUT, remove)
+                .await
+                .unwrap_or_else(|_| Err(Failure::cleanup()));
+            return combine_close(Err(error), cleanup);
+        }
+        // Even a rejected or lost rename response ends staging ownership.
+        // Never remove either pathname after polling this request.
+        *phase = ReplacePhase::Renaming;
+        sftp.fs()
+            .rename(&path, spec.path)
+            .await
+            .map_err(sftp_failure)?;
+        *phase = ReplacePhase::Renamed;
+        Ok(ReplaceData {
+            bytes_written: spec.content.len() as u64,
+        })
+    }
+    .await;
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 async fn mkdir_sftp(
     sftp: Sftp,
     spec: MkdirSpec<'_>,
@@ -670,6 +779,24 @@ pub(crate) async fn write(
         // Unlike reads, write uncertainty is specifically about file effects.
         // Handshake/preflight failures cannot have dispatched a mutating OPEN.
         error.remote_state_unknown = mutation_started;
+    }
+    outcome
+}
+
+pub(crate) async fn replace_file(
+    session: &Session,
+    spec: ReplaceSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<ReplaceData> {
+    let mut phase = ReplacePhase::NotStarted;
+    let mut outcome = run_sftp(session, context, |sftp| {
+        replace_sftp(sftp, &spec, &mut phase)
+    })
+    .await;
+    if let Some(error) = &mut outcome.reply.error {
+        // All failures after polling mutating OPEN remain uncertain, including
+        // acknowledged pre-rename cleanup or a later local channel-close error.
+        error.remote_state_unknown = !matches!(phase, ReplacePhase::NotStarted);
     }
     outcome
 }

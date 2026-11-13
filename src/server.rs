@@ -35,7 +35,7 @@ use crate::{
     filedata::{
         ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RemoveDirectoryData,
         RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest, RenameData, RenameRequest,
-        StatRequest, WriteData, WriteRequest,
+        ReplaceData, ReplaceRequest, StatRequest, WriteData, WriteRequest,
     },
     filemeta::StatData,
     files::{self, FileContext},
@@ -205,7 +205,7 @@ impl Estus {
         }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
-        let routes: [(ToolId, ToolRoute<Self>); 12] = [
+        let routes: [(ToolId, ToolRoute<Self>); 13] = [
             (
                 ToolId::Targets,
                 (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
@@ -245,6 +245,10 @@ impl Estus {
                     Self::ssh_remove_directory,
                 )
                     .into_tool_route(),
+            ),
+            (
+                ToolId::ReplaceFile,
+                (Self::ssh_replace_file_tool_attr(), Self::ssh_replace_file).into_tool_route(),
             ),
             (
                 ToolId::Stat,
@@ -970,6 +974,31 @@ impl Estus {
         .await
     }
 
+    async fn replace_file(
+        &self,
+        request: ReplaceRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(&request.host, ToolId::ReplaceFile, &self.state, &context.id);
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<ReplaceData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .replace_file(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -1180,6 +1209,21 @@ impl Estus {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.remove_directory(request, context).await
+    }
+
+    #[tool(
+        name = "ssh_replace_file",
+        description = "Explicit atomic-visibility file replacement over ordinary SFTP; requires overwrite=true and advertised POSIX rename before any mutation. Stages one random EXCL-created sibling, sets mode0600 before content writes, completes write_all and file CLOSE before atomic rename. UTF-8/base64 content obeys the configured file byte limit. Literal UTF-8 paths; final segment must be a file name, not root, trailing slash, . or ... A final destination symlink entry is replaced, not its target; parent components retain server semantics. New inode/owner/server group rules, no old mode/ownership/ACL/xattr preservation, path sandbox, adversarial pathname/CAS or crash-durability guarantee. Empty stage briefly has server-default creation mode before chmod0600. Success returns bytes_written after rename acknowledgement and bounded cleanup. Failures after mutating OPEN polling retain uncertainty. Normal pre-rename errors may remove only an acknowledged exclusively created staging entry; uncertain OPEN/cancel/loss/rename may leave .estus-replace-* siblings. Never cleans destination or any staging path after rename polling, retries/replays, uses weaker rename, truncate/unlink fallback, sudo or shell/SCP.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<ReplaceRequest>(),
+        output_schema = schema_for_type::<ToolReply<ReplaceData>>()
+    )]
+    async fn ssh_replace_file(
+        &self,
+        Arguments(request): Arguments<ReplaceRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.replace_file(request, context).await
     }
 
     #[tool(
@@ -1969,6 +2013,64 @@ impl State {
         {
             Ok(lease) => {
                 let outcome = files::remove_directory(
+                    lease.session(),
+                    spec,
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn replace_file(
+        &self,
+        request: ReplaceRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<ReplaceData> {
+        let metadata = file_metadata(&request.host, ToolId::ReplaceFile, self, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request
+            .validate(self.config.limits().max_file_bytes, budget)
+            .and_then(|spec| {
+                let target = self.config.resolve(&request.host, ToolId::ReplaceFile)?;
+                let deadline =
+                    request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+                Ok((spec, target, deadline))
+            });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::replace_file(
                     lease.session(),
                     spec,
                     FileContext {

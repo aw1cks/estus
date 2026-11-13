@@ -256,7 +256,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .collect::<Result<_>>()?;
         names.sort_unstable();
         ensure!(names == [
-            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_run",
+            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_run",
             "ssh_stat", "ssh_targets", "ssh_write_file",
         ], "omitting a profile changed the baseline inventory");
         let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
@@ -425,6 +425,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                         "ssh_remove_directory",
                         "ssh_remove_file",
                         "ssh_rename",
+                        "ssh_replace_file",
                         "ssh_run",
                         "ssh_stat",
                         "ssh_sudo",
@@ -439,6 +440,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                         "ssh_remove_directory",
                         "ssh_remove_file",
                         "ssh_rename",
+                        "ssh_replace_file",
                         "ssh_run",
                         "ssh_stat",
                         "ssh_write_file"
@@ -924,6 +926,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
                     "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
+                    "ssh_replace_file",
                     "ssh_run",
                     "ssh_stat",
                     "ssh_sudo",
@@ -981,6 +984,10 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
             (
                 "ssh_rename",
                 json!({"host":"127.0.0.1","source":"budget-private-source","destination":"budget-private-destination","overwrite":true}),
+            ),
+            (
+                "ssh_replace_file",
+                json!({"host":"127.0.0.1","path":"budget-private-path","content":"x","overwrite":true}),
             ),
             (
                 "ssh_remove_file",
@@ -1154,7 +1161,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_write_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -2193,6 +2200,9 @@ fn profile_call_arguments(tool: &str, host: &str) -> Value {
         "ssh_rename" => {
             json!({"host":host,"source":"/private/profile-payload-source","destination":"/private/profile-payload-destination","overwrite":true})
         }
+        "ssh_replace_file" => {
+            json!({"host":host,"path":"/private/profile-payload","content":"x","overwrite":true})
+        }
         "ssh_write_file" => {
             json!({"host":host,"path":"/private/profile-payload","content":"PROFILE_PAYLOAD"})
         }
@@ -2253,6 +2263,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
         "ssh_remove_directory",
         "ssh_remove_file",
         "ssh_rename",
+        "ssh_replace_file",
         "ssh_run",
         "ssh_stat",
         "ssh_sudo",
@@ -2273,6 +2284,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                 "ssh_remove_directory",
                 "ssh_remove_file",
                 "ssh_rename",
+                "ssh_replace_file",
                 "ssh_stat",
                 "ssh_write_file",
             ][..],
@@ -2452,7 +2464,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
             .await?;
         let listed = server.response(2).await?;
-        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 12);
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 13);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}}))
@@ -2473,6 +2485,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
+                    "ssh_replace_file",
                     "ssh_run",
                     "ssh_stat",
                     "ssh_write_file"
@@ -2488,6 +2501,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
+                    "ssh_replace_file",
                     "ssh_run",
                     "ssh_stat",
                     "ssh_write_file"
@@ -2502,6 +2516,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
+                    "ssh_replace_file",
                     "ssh_stat",
                     "ssh_write_file"
                 ]),
@@ -2529,6 +2544,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
+                    "ssh_replace_file",
                     "ssh_sudo",
                 ][..],
             ),
@@ -2547,6 +2563,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_remove_directory",
                     "ssh_remove_file",
                     "ssh_rename",
+                    "ssh_replace_file",
                 ][..],
             ),
             ("base", &["ssh_sudo"][..]),
@@ -2633,6 +2650,7 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
             "ssh_remove_directory",
             "ssh_remove_file",
             "ssh_rename",
+            "ssh_replace_file",
         ]
         .into_iter()
         .enumerate()
@@ -4989,5 +5007,478 @@ async fn remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
             }
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<()> {
+    for modern in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let config = directory.path().join("operator.toml");
+        let probe = directory.path().join("replace-must-not-probe");
+        std::fs::write(
+            directory.path().join("replacement.conf"),
+            format!(
+                "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+                probe.display()
+            ),
+        )?;
+        std::fs::write(
+            &config,
+            indoc::indoc! {"
+                [ssh]
+                config_file = 'replacement.conf'
+                [limits]
+                max_file_bytes = 4
+                connect_timeout_secs = 1
+                operation_timeout_secs = 2
+                max_timeout_secs = 3
+                [targets.allowed]
+                ssh_host = 'replace-private-backend.invalid'
+            "},
+        )?;
+        let mut server = Server::start(&["--config", config.to_str().context("config path")?])?;
+        let scenario = async {
+            if !modern {
+                server.initialize().await?;
+            }
+            let request = if modern {
+                modern_request(json!(2), "tools/list", json!({}), MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+            };
+            server.send(request).await?;
+            let listed = server.response(2).await?;
+            let replace = listed["result"]["tools"]
+                .as_array()
+                .context("tool catalog")?
+                .iter()
+                .find(|tool| tool["name"] == "ssh_replace_file")
+                .context("replace route")?;
+            ensure!(replace["annotations"]["readOnlyHint"] == false);
+            ensure!(replace["annotations"]["destructiveHint"] == true);
+            ensure!(replace["annotations"]["idempotentHint"] == false);
+            let input = &replace["inputSchema"];
+            ensure!(input["type"] == "object" && input["additionalProperties"] == false);
+            let mut fields: Vec<&str> = input["properties"]
+                .as_object()
+                .context("replace input fields")?
+                .keys()
+                .map(String::as_str)
+                .collect();
+            fields.sort_unstable();
+            ensure!(
+                fields
+                    == [
+                        "content",
+                        "encoding",
+                        "host",
+                        "overwrite",
+                        "path",
+                        "timeout_secs"
+                    ]
+            );
+            let mut required: Vec<&str> = input["required"]
+                .as_array()
+                .context("replace required fields")?
+                .iter()
+                .map(|field| field.as_str().context("required field"))
+                .collect::<Result<_>>()?;
+            required.sort_unstable();
+            ensure!(required == ["content", "host", "overwrite", "path"]);
+            ensure!(input["properties"]["overwrite"]["type"] == "boolean");
+            for field in ["host", "path", "content"] {
+                ensure!(input["properties"][field]["type"] == "string");
+            }
+            ensure!(schema_has_property(
+                &replace["outputSchema"],
+                "bytes_written"
+            ));
+            ensure!(schema_has_property(
+                &replace["outputSchema"],
+                "remote_state_unknown"
+            ));
+            for field in [
+                "path",
+                "content",
+                "payload",
+                "source",
+                "destination",
+                "staging_path",
+            ] {
+                ensure!(
+                    !schema_has_property(&replace["outputSchema"], field),
+                    "replace output schema disclosed {field}"
+                );
+            }
+            let valid = json!({
+                "host":"allowed", "path":"REPLACE_PRIVATE_PATH 雪 ~/$*'\"\n{{literal}}",
+                "content":"x", "overwrite":true
+            });
+            for (index, (label, field, value, code)) in [
+                (
+                    "explicit refusal",
+                    "overwrite",
+                    json!(false),
+                    "invalid_argument",
+                ),
+                ("empty path", "path", json!(""), "invalid_argument"),
+                (
+                    "NUL path",
+                    "path",
+                    json!("REPLACE_PRIVATE_PATH\0tail"),
+                    "invalid_argument",
+                ),
+                ("root", "path", json!("/"), "invalid_argument"),
+                ("repeated root", "path", json!("///"), "invalid_argument"),
+                (
+                    "trailing slash",
+                    "path",
+                    json!("REPLACE_PRIVATE_PATH/"),
+                    "invalid_argument",
+                ),
+                (
+                    "repeated trailing slash",
+                    "path",
+                    json!("a//"),
+                    "invalid_argument",
+                ),
+                ("dot", "path", json!("."), "invalid_argument"),
+                ("dotdot", "path", json!(".."), "invalid_argument"),
+                ("final dot", "path", json!("a//."), "invalid_argument"),
+                ("final dotdot", "path", json!("/a/.."), "invalid_argument"),
+                ("zero timeout", "timeout_secs", json!(0), "invalid_argument"),
+                (
+                    "timeout ceiling",
+                    "timeout_secs",
+                    json!(4),
+                    "invalid_argument",
+                ),
+                ("ASCII cap", "content", json!("12345"), "invalid_argument"),
+                ("UTF8 byte cap", "content", json!("雪é"), "invalid_argument"),
+                (
+                    "private payload cap",
+                    "content",
+                    json!("REPLACE_PRIVATE_CONTENT"),
+                    "invalid_argument",
+                ),
+                ("literal path", "host", json!("denied"), "policy_denied"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = 100 + index as u64;
+                let mut arguments = valid.clone();
+                arguments[field] = value;
+                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let called = server.response(id).await?;
+                let result = &called["result"];
+                let reply = &result["structuredContent"];
+                ensure!(called.get("error").is_none(), "{label}: shape rejected");
+                ensure!(
+                    result["isError"] == true && reply["data"].is_null(),
+                    "{label}"
+                );
+                ensure!(reply["error"]["code"] == code, "{label}: {called}");
+                ensure!(reply["error"]["remote_state_unknown"] == false, "{label}");
+                let text: Value = serde_json::from_str(
+                    result["content"][0]["text"]
+                        .as_str()
+                        .context("replace error text")?,
+                )?;
+                ensure!(text == *reply, "{label}: text/structured mismatch");
+                ensure!(!serde_json::to_string(&called)?.contains("REPLACE_PRIVATE_"));
+            }
+            // Valid boundary payloads must reach policy, while malformed or
+            // oversized encodings must fail even for an allowed target.
+            for (index, (host, path, content, encoding, requested_timeout, code)) in [
+                (
+                    "allowed",
+                    "file",
+                    "AAECAwQ=",
+                    "base64",
+                    json!(1),
+                    "invalid_argument",
+                ),
+                (
+                    "allowed",
+                    "file",
+                    "_w==",
+                    "base64",
+                    json!(1),
+                    "invalid_encoding",
+                ),
+                (
+                    "allowed",
+                    "file",
+                    "YQ",
+                    "base64",
+                    json!(1),
+                    "invalid_encoding",
+                ),
+                (
+                    "allowed",
+                    "file",
+                    "YQ===",
+                    "base64",
+                    json!(1),
+                    "invalid_encoding",
+                ),
+                (
+                    "allowed",
+                    "file",
+                    "YQ==\n",
+                    "base64",
+                    json!(1),
+                    "invalid_encoding",
+                ),
+                (
+                    "allowed",
+                    "file",
+                    "YR==",
+                    "base64",
+                    json!(1),
+                    "invalid_encoding",
+                ),
+                ("denied", "file", "", "utf8", Value::Null, "policy_denied"),
+                ("denied", "file", "é\0x", "utf8", json!(1), "policy_denied"),
+                ("denied", "file", "1234", "utf8", json!(3), "policy_denied"),
+                (
+                    "denied",
+                    "file",
+                    "AP+AQQ==",
+                    "base64",
+                    json!(3),
+                    "policy_denied",
+                ),
+                ("denied", "file", "", "base64", Value::Null, "policy_denied"),
+                (
+                    "denied",
+                    "/a//.././REPLACE_PRIVATE_PATH",
+                    "x",
+                    "utf8",
+                    json!(1),
+                    "policy_denied",
+                ),
+                (
+                    "denied",
+                    "a/..hidden",
+                    "x",
+                    "utf8",
+                    json!(1),
+                    "policy_denied",
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = 150 + index as u64;
+                let arguments = json!({
+                    "host":host,"path":path,"content":content,"encoding":encoding,
+                    "overwrite":true,"timeout_secs":requested_timeout
+                });
+                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let called = server.response(id).await?;
+                let result = &called["result"];
+                let reply = &result["structuredContent"];
+                ensure!(called.get("error").is_none(), "encoding case {index}");
+                ensure!(result["isError"] == true && reply["data"].is_null());
+                ensure!(
+                    reply["error"]["code"] == code,
+                    "encoding case {index}: {called}"
+                );
+                ensure!(reply["error"]["remote_state_unknown"] == false);
+                let text: Value = serde_json::from_str(
+                    result["content"][0]["text"]
+                        .as_str()
+                        .context("replace error text")?,
+                )?;
+                ensure!(text == *reply);
+                ensure!(!serde_json::to_string(&called)?.contains("REPLACE_PRIVATE_"));
+            }
+            for (index, (field, value)) in [
+                ("overwrite", Value::Null),
+                ("overwrite", json!("true")),
+                ("overwrite", json!(1)),
+                ("host", json!(42)),
+                ("path", Value::Null),
+                ("content", Value::Null),
+                ("content", json!(["x"])),
+                ("encoding", json!("hex")),
+                ("timeout_secs", json!(-1)),
+                ("timeout_secs", json!(1.5)),
+                ("timeout_secs", json!("1")),
+                ("sudo", json!(true)),
+                ("append", json!(true)),
+                ("mode", json!(384)),
+                ("permissions", json!(384)),
+                ("recursive", json!(true)),
+                ("follow_symlinks", json!(false)),
+                ("parents", json!(true)),
+                ("retry_on_connection_loss", json!(true)),
+                ("fsync", json!(true)),
+                ("command", json!("REPLACE_PRIVATE_COMMAND")),
+                ("argv", json!(["REPLACE_PRIVATE_ARGV"])),
+                ("ssh_host", json!("REPLACE_PRIVATE_HOST")),
+                ("config_file", json!("REPLACE_PRIVATE_CONFIG")),
+                ("source", json!("REPLACE_PRIVATE_SOURCE")),
+                ("destination", json!("REPLACE_PRIVATE_DESTINATION")),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = 200 + index as u64;
+                let mut arguments = valid.clone();
+                arguments[field] = value;
+                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let rejected = server.response(id).await?;
+                ensure!(
+                    rejected["error"]["code"] == -32602 && rejected.get("result").is_none(),
+                    "{field}: malformed replace reached handler"
+                );
+                ensure!(!serde_json::to_string(&rejected)?.contains("REPLACE_PRIVATE_"));
+            }
+            for (index, field) in ["host", "path", "content", "overwrite"]
+                .into_iter()
+                .enumerate()
+            {
+                let id = 250 + index as u64;
+                let mut arguments = valid.clone();
+                arguments
+                    .as_object_mut()
+                    .context("replace arguments")?
+                    .remove(field);
+                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let rejected = server.response(id).await?;
+                ensure!(
+                    rejected["error"]["code"] == -32602 && rejected.get("result").is_none(),
+                    "missing {field}: replace reached handler"
+                );
+                ensure!(!serde_json::to_string(&rejected)?.contains("REPLACE_PRIVATE_"));
+            }
+            let params = json!({"name":"ssh_targets","arguments":{}});
+            let request = if modern {
+                modern_request(json!(300), "tools/call", params, MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":300,"method":"tools/call","params":params})
+            };
+            server.send(request).await?;
+            let healthy = server.response(300).await?;
+            ensure!(
+                discovery_data(&healthy["result"], "configured")?["targets"][0]["name"]
+                    == "allowed"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        ensure!(
+            !probe.exists(),
+            "replace rejection evaluated SSH configuration"
+        );
+        let audit = std::str::from_utf8(&stderr)?;
+        for secret in ["REPLACE_PRIVATE_", "replace-private-backend"] {
+            ensure!(
+                !audit.contains(secret),
+                "replace audit disclosed private input"
+            );
+        }
+        for line in audit.lines() {
+            let record: Value = serde_json::from_str(line)?;
+            ensure!(record["tool"] != "ssh_replace_file" || record["event"] == "reject");
+            for field in [
+                "path",
+                "content",
+                "payload",
+                "source",
+                "destination",
+                "staging_path",
+            ] {
+                ensure!(
+                    record.get(field).is_none(),
+                    "replace audit disclosed {field}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result<()> {
+    const MESSAGE_LIMIT: usize = 16_777_216;
+    let mut server = Server::start(&[])?;
+    let scenario = timeout(Duration::from_secs(20), async {
+        let mut request = modern_request(
+            json!(""),
+            "tools/call",
+            json!({"name":"ssh_replace_file","arguments":{
+                "host":"127.0.0.1","path":"REPLACE_PRIVATE_PATH",
+                "content":"REPLACE_PRIVATE_CONTENT","overwrite":true
+            }}),
+            MODERN_VERSION,
+        );
+        let overhead = serde_json::to_vec(&request)?.len() + 1;
+        let id = json!("i".repeat(MESSAGE_LIMIT - overhead - 1));
+        request["id"] = id.clone();
+        ensure!(serde_json::to_vec(&request)?.len() + 1 < MESSAGE_LIMIT);
+        server.send(request).await?;
+        let (rejected, bytes) = server.response_with_id(&id).await?;
+        ensure!(rejected["id"] == id);
+        ensure!(rejected["error"]["code"] == -32602 && rejected.get("result").is_none());
+        ensure!(
+            bytes <= MESSAGE_LIMIT,
+            "actual-ID budget exceeded wire limit"
+        );
+        ensure!(!serde_json::to_string(&rejected)?.contains("REPLACE_PRIVATE_"));
+        server
+            .send(modern_request(
+                json!(2),
+                "tools/call",
+                json!({"name":"ssh_targets","arguments":{}}),
+                MODERN_VERSION,
+            ))
+            .await?;
+        let healthy = server.response(2).await?;
+        ensure!(discovery_data(&healthy["result"], "open")?["targets"] == json!([]));
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("replace actual-ID budget scenario timed out")
+    .and_then(|result| result);
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    no_remote_dispatch(&stderr)?;
+    ensure!(!std::str::from_utf8(&stderr)?.contains("REPLACE_PRIVATE_"));
     Ok(())
 }

@@ -3065,6 +3065,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             "ssh_remove_directory",
                             "ssh_remove_file",
                             "ssh_rename",
+                            "ssh_replace_file",
                             "ssh_stat",
                             "ssh_targets",
                             "ssh_write_file",
@@ -3106,6 +3107,12 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     fs::read(&file)? == b"abc",
                     "read-only target changed existing bytes"
                 );
+                let reply = client.call("ssh_replace_file", json!({
+                    "host":"locked","path":file,"content":"MUST_NOT_REPLACE","overwrite":true,
+                })).await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(fs::read(&file)? == b"abc");
                 let denied_directory = directory.join("mkdir-policy-denied");
                 let reply = client
                     .call(
@@ -3241,6 +3248,16 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     succeeded(&reply)?["content"] == payload,
                     "read-only target did not see the real allowed SFTP write"
                 );
+                let previous_inode = fs::metadata(&file)?.ino();
+                let reply = client.call("ssh_replace_file", json!({
+                    "host":"allowed","path":file,"content":payload,"overwrite":true,
+                })).await?;
+                ensure!(succeeded(&reply)? == &json!({"bytes_written":payload.len()}));
+                ensure!(fs::read(&file)? == payload.as_bytes());
+                ensure!(fs::metadata(&file)?.ino() != previous_inode);
+                ensure!(fs::metadata(&file)?.mode() & 0o7777 == 0o600);
+                let reply = client.call("ssh_read_file", json!({"host":"locked","path":file})).await?;
+                ensure!(succeeded(&reply)?["content"] == payload);
                 let renamed = directory.join("renamed");
                 let before = fs::symlink_metadata(&file)?.ino();
                 let reply = client
