@@ -392,6 +392,11 @@ fn load(runtime: PathBuf) -> Result<Loaded, &'static str> {
     })
 }
 
+enum RuntimeFailure {
+    NotTested(&'static str),
+    Failed(&'static str),
+}
+
 fn interrupted(ctx: &RuntimeContext<'_>) -> Option<&'static str> {
     if ctx.ct.is_cancelled() || ctx.shutdown.is_cancelled() {
         Some("runtime_cancelled")
@@ -399,6 +404,18 @@ fn interrupted(ctx: &RuntimeContext<'_>) -> Option<&'static str> {
         Some("runtime_timeout")
     } else {
         None
+    }
+}
+
+fn matches_source(identity: &RuntimeIdentity, source: &Source) -> bool {
+    match source {
+        Source::Bundle {
+            identity: expected, ..
+        } => identity == expected,
+        Source::PythonEnvironment { .. } => {
+            identity.provenance == RuntimeProvenance::PythonEnvironment {}
+                && identity.platform == current_platform()
+        }
     }
 }
 
@@ -413,16 +430,7 @@ fn report(stdout: &str, source: &Source) -> RuntimeCheck {
             schema: 2,
             identity,
         }) if valid_identity(&identity) => {
-            let matches_source = match source {
-                Source::Bundle {
-                    identity: expected, ..
-                } => &identity == expected,
-                Source::PythonEnvironment { .. } => {
-                    identity.provenance == RuntimeProvenance::PythonEnvironment {}
-                        && identity.platform == current_platform()
-                }
-            };
-            if matches_source {
+            if matches_source(&identity, source) {
                 RuntimeCheck {
                     kind: RuntimeKind::Ansible,
                     status: RuntimeStatus::Passed,
@@ -441,13 +449,13 @@ fn report(stdout: &str, source: &Source) -> RuntimeCheck {
     }
 }
 
-fn observed(reply: ControllerReply, source: &Source) -> RuntimeCheck {
+fn observed_stdout(reply: ControllerReply) -> Result<String, &'static str> {
     let Some(data) = reply.data else {
-        return RuntimeCheck::failed("runtime_check_failed");
+        return Err("runtime_check_failed");
     };
     match data.termination {
-        ControllerTermination::Cancelled => return RuntimeCheck::failed("runtime_cancelled"),
-        ControllerTermination::Timeout => return RuntimeCheck::failed("runtime_timeout"),
+        ControllerTermination::Cancelled => return Err("runtime_cancelled"),
+        ControllerTermination::Timeout => return Err("runtime_timeout"),
         _ => {}
     }
     if data.owned_group_cleanup == GroupCleanup::Incomplete
@@ -456,41 +464,58 @@ fn observed(reply: ControllerReply, source: &Source) -> RuntimeCheck {
             .as_ref()
             .is_some_and(|error| error.code == "cleanup_incomplete")
     {
-        return RuntimeCheck::failed("runtime_cleanup_failed");
+        return Err("runtime_cleanup_failed");
     }
     if reply.error.is_some()
         || data.termination != ControllerTermination::Exited
         || data.exit_code != Some(0)
         || data.signal.is_some()
     {
-        return RuntimeCheck::failed("runtime_check_failed");
+        return Err("runtime_check_failed");
     }
     if data.owned_group_cleanup != GroupCleanup::SignalledAndReaped {
-        return RuntimeCheck::failed("runtime_cleanup_failed");
+        return Err("runtime_cleanup_failed");
     }
     if data.stdout_truncated || data.stdout_lossy || data.stderr_truncated || data.stderr_lossy {
-        return RuntimeCheck::failed("runtime_protocol_error");
+        return Err("runtime_protocol_error");
     }
-    report(&data.stdout, source)
+    Ok(data.stdout)
+}
+
+fn observed(reply: ControllerReply, source: &Source) -> RuntimeCheck {
+    match observed_stdout(reply) {
+        Ok(stdout) => report(&stdout, source),
+        Err(code) => RuntimeCheck::failed(code),
+    }
 }
 
 pub(crate) async fn check(runtime: Option<PathBuf>, ctx: RuntimeContext<'_>) -> RuntimeCheck {
-    if let Some(code) = interrupted(&ctx) {
-        return RuntimeCheck::not_tested(code);
+    match run_selected(runtime, &ctx).await {
+        Ok((reply, source)) => observed(reply, &source),
+        Err(RuntimeFailure::NotTested(code)) => RuntimeCheck::not_tested(code),
+        Err(RuntimeFailure::Failed(code)) => RuntimeCheck::failed(code),
     }
-    // Never select away from started blocking I/O: join it before observing
-    // cancellation. As with the controller owner, a broken OS may delay return.
+}
+
+async fn run_selected(
+    runtime: Option<PathBuf>,
+    ctx: &RuntimeContext<'_>,
+) -> Result<(ControllerReply, Source), RuntimeFailure> {
+    if let Some(code) = interrupted(ctx) {
+        return Err(RuntimeFailure::NotTested(code));
+    }
+    // Retain started blocking I/O ownership even during cancellation.
     let loaded = tokio::task::spawn_blocking(move || {
         load_selected(runtime, || std::env::var_os("SSH_MCP_PYTHON_RUNTIME"))
     })
     .await;
-    if let Some(code) = interrupted(&ctx) {
-        return RuntimeCheck::not_tested(code);
+    if let Some(code) = interrupted(ctx) {
+        return Err(RuntimeFailure::NotTested(code));
     }
     let loaded = match loaded {
         Ok(Ok(loaded)) => loaded,
-        Ok(Err(code)) => return RuntimeCheck::failed(code),
-        Err(_) => return RuntimeCheck::failed("runtime_check_failed"),
+        Ok(Err(code)) => return Err(RuntimeFailure::Failed(code)),
+        Err(_) => return Err(RuntimeFailure::Failed("runtime_check_failed")),
     };
     let root = match tokio::task::spawn_blocking(|| {
         tempfile::Builder::new()
@@ -501,29 +526,30 @@ pub(crate) async fn check(runtime: Option<PathBuf>, ctx: RuntimeContext<'_>) -> 
     .await
     {
         Ok(Ok(root)) => root,
-        _ => return RuntimeCheck::failed("runtime_check_failed"),
+        _ => return Err(RuntimeFailure::Failed("runtime_check_failed")),
     };
-    let result = if let Some(code) = interrupted(&ctx) {
-        RuntimeCheck::not_tested(code)
+    let result = if let Some(code) = interrupted(ctx) {
+        Err(RuntimeFailure::NotTested(code))
     } else {
-        check_loaded(loaded, root.path(), &ctx).await
+        run_loaded(loaded, root.path(), ctx).await
     };
-    // Retain the private root until the controller's pending owner has finished;
-    // explicit close makes removal failure observable rather than Drop-only.
+    // The private root outlives the controller's pending process-group owner.
     if !matches!(
         tokio::task::spawn_blocking(move || root.close()).await,
         Ok(Ok(()))
     ) {
-        return RuntimeCheck::failed("runtime_cleanup_failed");
+        return Err(RuntimeFailure::Failed("runtime_cleanup_failed"));
     }
     result
 }
 
-async fn check_loaded(loaded: Loaded, workspace: &Path, ctx: &RuntimeContext<'_>) -> RuntimeCheck {
-    let input_json = match request(&loaded) {
-        Ok(input) => input,
-        Err(code) => return RuntimeCheck::failed(code),
-    };
+async fn run_loaded(
+    loaded: Loaded,
+    workspace: &Path,
+    ctx: &RuntimeContext<'_>,
+) -> Result<(ControllerReply, Source), RuntimeFailure> {
+    let input_json = request(&loaded).map_err(RuntimeFailure::Failed)?;
+    let limit = REPORT_LIMIT;
     let prepared = PreparedController {
         plan: Arc::new(ControllerPlan {
             source: Cow::Borrowed(HEALTH),
@@ -537,7 +563,7 @@ async fn check_loaded(loaded: Loaded, workspace: &Path, ctx: &RuntimeContext<'_>
         duration: ctx
             .deadline
             .saturating_duration_since(tokio::time::Instant::now()),
-        max_output_bytes: REPORT_LIMIT,
+        max_output_bytes: limit,
     };
     let run = controller::run(
         prepared,
@@ -546,14 +572,14 @@ async fn check_loaded(loaded: Loaded, workspace: &Path, ctx: &RuntimeContext<'_>
             ct: ctx.ct,
             shutdown: ctx.shutdown,
             started: Instant::now(),
-            capture_limit: REPORT_LIMIT,
+            capture_limit: limit,
         },
     )
     .await;
     if let Some(pending) = run.pending {
         pending.finish().await;
     }
-    observed(run.reply, &loaded.source)
+    Ok((run.reply, loaded.source))
 }
 
 fn request(loaded: &Loaded) -> Result<Vec<u8>, &'static str> {
