@@ -385,9 +385,14 @@ class Evidence:
             for source, target in (("ok", "ok"), ("failures", "failed"), ("dark", "unreachable"), ("skipped", "skipped")):
                 require(observed[source] == self.tasks[target])
             if self.changed is not None:
-                require(observed["changed"] == int(self.changed))
+                # Core's changed stats can omit a failed task's observed mutation.
+                require(observed["changed"] <= int(self.changed))
+                require(self.outcome == "failed" or observed["changed"] == int(self.changed))
             require(not observed["changed"] or self.outcome in ("ok", "failed"))
-            self.changed = None if self.censored else bool(observed["changed"])
+            if self.censored:
+                self.changed = None
+            elif self.changed is None and self.outcome == "ok":
+                self.changed = bool(observed["changed"])
             self.stats = observed
         elif kind.startswith("runner_on_") and kind != "runner_on_start":
             raise Invalid()

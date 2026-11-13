@@ -268,6 +268,9 @@ still exclude module values. Typed bindings may expose only explicitly selected
 fields as described below; whole raw events/arguments/environment are not returned.
 `no_log` remains censored. Nested module input strings use documented `!unsafe`
 tags rather than caller-supplied Jinja evaluation.
+Failed modules may report mutation even when Core omits their changed count.
+That observation survives a known failure; it is not rewritten as unchanged or
+discarded as a protocol error.
 
 `automation.max_concurrent` defaults to 2; each logical target admits one automation
 invocation at a time. The existing global operation cap also applies. Admission
