@@ -24,6 +24,9 @@ const MANIFEST_LIMIT: usize = 16 * 1024;
 const REPORT_LIMIT: u64 = 16 * 1024;
 const PATH_LIMIT: usize = 4096;
 const DESCRIPTOR_LIMIT: usize = 65_536;
+// A selected descriptor may contain four full paths. Leave bounded room for
+// the source tag instead of applying the smaller immutable-manifest budget.
+const REQUEST_LIMIT: usize = DESCRIPTOR_LIMIT + 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +193,8 @@ enum Source {
     },
     PythonEnvironment {
         prefix: String,
+        package_root: String,
+        scripts: String,
     },
 }
 
@@ -199,6 +204,8 @@ struct PythonDescriptor {
     schema: u32,
     interpreter: String,
     prefix: String,
+    package_root: String,
+    scripts: String,
 }
 
 fn valid_private_path(value: &str) -> bool {
@@ -215,9 +222,11 @@ fn parse_descriptor(raw: &OsStr) -> Result<PythonDescriptor, &'static str> {
     }
     let descriptor: PythonDescriptor =
         serde_json::from_str(raw.to_str().ok_or(invalid)?).map_err(|_| invalid)?;
-    if descriptor.schema != 1
+    if descriptor.schema != 2
         || !valid_private_path(&descriptor.interpreter)
         || !valid_private_path(&descriptor.prefix)
+        || !valid_private_path(&descriptor.package_root)
+        || !valid_private_path(&descriptor.scripts)
     {
         return Err(invalid);
     }
@@ -243,6 +252,8 @@ fn load_selected(
         interpreter: descriptor.interpreter,
         source: Source::PythonEnvironment {
             prefix: descriptor.prefix,
+            package_root: descriptor.package_root,
+            scripts: descriptor.scripts,
         },
     })
 }
@@ -557,21 +568,29 @@ fn request(loaded: &Loaded) -> Result<Vec<u8>, &'static str> {
             schema: u32,
             interpreter: &'a str,
             prefix: &'a str,
+            package_root: &'a str,
+            scripts: &'a str,
         },
     }
     let input = match &loaded.source {
         Source::Bundle { root, .. } => Input::Bundle {
-            schema: 1,
+            schema: 2,
             runtime_root: root,
         },
-        Source::PythonEnvironment { prefix } => Input::PythonEnvironment {
-            schema: 1,
+        Source::PythonEnvironment {
+            prefix,
+            package_root,
+            scripts,
+        } => Input::PythonEnvironment {
+            schema: 2,
             interpreter: &loaded.interpreter,
             prefix,
+            package_root,
+            scripts,
         },
     };
     let bytes = serde_json::to_vec(&input).map_err(|_| "invalid_runtime_manifest")?;
-    if bytes.len() > MANIFEST_LIMIT {
+    if bytes.len() > REQUEST_LIMIT {
         return Err("invalid_runtime_manifest");
     }
     Ok(bytes)
@@ -709,41 +728,53 @@ mod tests {
     }
 
     fn descriptor(interpreter: &str, prefix: &str) -> OsString {
-        json!({"schema": 1, "interpreter": interpreter, "prefix": prefix})
-            .to_string()
-            .into()
+        json!({"schema": 2, "interpreter": interpreter, "prefix": prefix,
+            "package_root": prefix, "scripts": prefix})
+        .to_string()
+        .into()
     }
 
     #[test]
     fn descriptor_rejects_unknown_duplicate_schema_and_invalid_paths() {
-        let invalid = [
-            r#"{"schema":1,"interpreter":"/python","prefix":"/venv","extra":true}"#,
-            r#"{"schema":1,"schema":1,"interpreter":"/python","prefix":"/venv"}"#,
-            r#"{"schema":1,"interpreter":"/python","interpreter":"/other","prefix":"/venv"}"#,
-            r#"{"schema":1,"interpreter":"/python","prefix":"/venv","prefix":"/other"}"#,
-            r#"{"schema":2,"interpreter":"/python","prefix":"/venv"}"#,
-            r#"{"schema":true,"interpreter":"/python","prefix":"/venv"}"#,
-            r#"{"schema":1,"interpreter":"/python"}"#,
-            r#"{"schema":1,"interpreter":"/python","prefix":"/venv"} {}"#,
-        ];
+        let raw = descriptor("/python", "/venv").into_string().unwrap();
+        let base: Value = serde_json::from_str(&raw).unwrap();
+        let mut invalid = vec![format!("{raw} {{}}")];
+        for field in ["schema", "interpreter", "prefix", "package_root", "scripts"] {
+            invalid.push(format!(
+                "{},\"{field}\":{}}}",
+                raw.strip_suffix('}').unwrap(),
+                base[field]
+            ));
+            let mut missing = base.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            invalid.push(missing.to_string());
+        }
+        for schema in [json!(1), json!(3), json!(true), json!("2")] {
+            let mut value = base.clone();
+            value["schema"] = schema;
+            invalid.push(value.to_string());
+        }
+        let mut unknown = base.clone();
+        unknown["extra"] = json!(true);
+        invalid.push(unknown.to_string());
         for raw in invalid {
             assert!(
                 matches!(
-                    parse_descriptor(OsStr::new(raw)),
+                    parse_descriptor(OsStr::new(&raw)),
                     Err("invalid_runtime_manifest")
                 ),
                 "{raw}"
             );
         }
-        for path in ["", "relative", "/bad\0path"] {
-            assert!(
-                parse_descriptor(&descriptor(path, "/venv")).is_err(),
-                "{path:?}"
-            );
-            assert!(
-                parse_descriptor(&descriptor("/python", path)).is_err(),
-                "{path:?}"
-            );
+        for field in ["interpreter", "prefix", "package_root", "scripts"] {
+            for path in ["", "relative", "/bad\0path"] {
+                let mut value = base.clone();
+                value[field] = json!(path);
+                assert!(
+                    parse_descriptor(OsStr::new(&value.to_string())).is_err(),
+                    "{field}={path:?}"
+                );
+            }
         }
         use std::os::unix::ffi::OsStringExt;
         assert!(parse_descriptor(&OsString::from_vec(vec![0xff])).is_err());
@@ -754,10 +785,18 @@ mod tests {
         let path = format!("/{}", "x".repeat(PATH_LIMIT - 1));
         assert!(parse_descriptor(&descriptor(&path, &path)).is_ok());
         let too_long = format!("{path}x");
-        assert!(parse_descriptor(&descriptor(&too_long, "/venv")).is_err());
-        assert!(parse_descriptor(&descriptor("/python", &too_long)).is_err());
         let multibyte = format!("/{}", "é".repeat(PATH_LIMIT / 2));
-        assert!(parse_descriptor(&descriptor(&multibyte, "/venv")).is_err());
+        for field in ["interpreter", "prefix", "package_root", "scripts"] {
+            for path in [&too_long, &multibyte] {
+                let mut value: Value =
+                    serde_json::from_str(descriptor("/python", "/venv").to_str().unwrap()).unwrap();
+                value[field] = json!(path);
+                assert!(
+                    parse_descriptor(OsStr::new(&value.to_string())).is_err(),
+                    "{field} exceeded path bound"
+                );
+            }
+        }
         let mut raw = descriptor("/python", "/venv").into_string().unwrap();
         raw.extend(std::iter::repeat_n(' ', DESCRIPTOR_LIMIT - raw.len()));
         assert!(parse_descriptor(OsStr::new(&raw)).is_ok());
@@ -811,10 +850,27 @@ mod tests {
             ))),
             Err("runtime_unavailable")
         ));
+        let path = format!("/{}", "x".repeat(PATH_LIMIT - 1));
+        let full_paths = Loaded {
+            interpreter: path.clone(),
+            source: Source::PythonEnvironment {
+                prefix: path.clone(),
+                package_root: path.clone(),
+                scripts: path,
+            },
+        };
+        assert!(
+            request(&full_paths).is_ok(),
+            "four valid maximum-length paths must fit"
+        );
         let escaped = format!("/{}", "\u{1}".repeat(PATH_LIMIT - 1));
         let loaded = Loaded {
             interpreter: escaped.clone(),
-            source: Source::PythonEnvironment { prefix: escaped },
+            source: Source::PythonEnvironment {
+                prefix: escaped.clone(),
+                package_root: escaped.clone(),
+                scripts: escaped,
+            },
         };
         assert!(matches!(request(&loaded), Err("invalid_runtime_manifest")));
     }
@@ -828,8 +884,25 @@ mod tests {
             root: PathBuf::from("/private/bundle"),
             identity: bundle_identity.clone(),
         };
+        let bundle_request: Value = serde_json::from_slice(
+            &request(&Loaded {
+                interpreter: "/private/bundle/bin/python3".to_owned(),
+                source: Source::Bundle {
+                    root: PathBuf::from("/private/bundle"),
+                    identity: bundle_identity.clone(),
+                },
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            bundle_request,
+            json!({"schema":2,"source":"bundle","runtime_root":"/private/bundle"})
+        );
         let environment = Source::PythonEnvironment {
             prefix: "/private/venv".to_owned(),
+            package_root: "/private/venv/lib/python3.14/site-packages/ssh_mcp".to_owned(),
+            scripts: "/private/venv/bin".to_owned(),
         };
         let mut observed_identity = bundle_identity.clone();
         observed_identity.provenance = RuntimeProvenance::PythonEnvironment {};

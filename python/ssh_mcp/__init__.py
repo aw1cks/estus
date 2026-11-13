@@ -7,13 +7,18 @@ import sys
 
 
 def main() -> None:
-    executable = Path(__file__).parent / "_bin" / "ssh-mcp"
+    package_root = Path(__file__).resolve(strict=True).parent
+    executable = package_root / "_bin" / "ssh-mcp"
     # Preserve the interpreter pathname: resolving its symlink would lose a venv.
     os.environ["SSH_MCP_PYTHON_RUNTIME"] = json.dumps(
         {
-            "schema": 1,
+            "schema": 2,
             "interpreter": os.path.abspath(sys.executable),
             "prefix": os.path.abspath(sys.prefix),
+            # uv run may install the package outside the interpreter's prefix.
+            # Capture only this installation, never ambient sys.path/PYTHONPATH.
+            "package_root": str(package_root),
+            "scripts": str(Path(sys.argv[0]).resolve(strict=True).parent),
         },
         separators=(",", ":"),
         ensure_ascii=True,

@@ -867,6 +867,12 @@ async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift(
 mod wheel {
     use super::*;
 
+    fn environment_descriptor(interpreter: &Path, prefix: &Path) -> Value {
+        json!({"schema":2, "interpreter":interpreter, "prefix":prefix,
+            "package_root":prefix.join("lib/python3.14/site-packages/ssh_mcp"),
+            "scripts":prefix.join("bin")})
+    }
+
     #[tokio::test]
     #[ignore = "requires SSH_MCP_TEST_WHEEL_BINARY extra and SSH_MCP_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launchers; no network"]
     async fn installed_extra_is_observed_and_required_without_changing_native_catalog() -> Result<()>
@@ -1027,8 +1033,7 @@ mod wheel {
             &ambient_cfg,
             format!("[defaults]\ncollections_path = /{SECRET}\nlocal_tmp = /{SECRET}\n"),
         )?;
-        let descriptor =
-            json!({"schema":1, "interpreter":interpreter, "prefix":prefix}).to_string();
+        let descriptor = environment_descriptor(&interpreter, &prefix).to_string();
         let mut command = fixture.doctor()?;
         command
             .env("SSH_MCP_PYTHON_RUNTIME", &descriptor)
@@ -1055,9 +1060,16 @@ mod wheel {
         observed_environment_identity(&report(&checked, 0)?, &prefix)?;
         fixture.private(&checked)?;
         ensure!(!fixture.root.path().join("forbidden-local-temp").exists());
+        let mut missing_package = environment_descriptor(&interpreter, &prefix);
+        missing_package["package_root"] =
+            json!(fixture.root.path().join("missing-package/ssh_mcp"));
+        let mut missing_scripts = environment_descriptor(&interpreter, &prefix);
+        missing_scripts["scripts"] = json!(fixture.root.path().join("missing-scripts"));
         for bad_descriptor in [
-            json!({"schema":1, "interpreter":base.join("bin/python"), "prefix":prefix}),
-            json!({"schema":1, "interpreter":fixture.root.path().join("missing-python"), "prefix":prefix}),
+            environment_descriptor(&base.join("bin/python"), &prefix),
+            environment_descriptor(&fixture.root.path().join("missing-python"), &prefix),
+            missing_package,
+            missing_scripts,
         ] {
             let mut command = fixture.doctor()?;
             command
@@ -1093,8 +1105,7 @@ mod wheel {
         ] {
             ensure!(fs::canonicalize(&prefix)? != fs::canonicalize(wheel_prefix(reference)?)?);
         }
-        let descriptor =
-            json!({"schema":1, "interpreter":interpreter, "prefix":prefix}).to_string();
+        let descriptor = environment_descriptor(&interpreter, &prefix).to_string();
         let fixture = Local::new("[automation]\nrequired = true\n")?;
         let mut command = fixture.doctor()?;
         command.env("SSH_MCP_PYTHON_RUNTIME", &descriptor);

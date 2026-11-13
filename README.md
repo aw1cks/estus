@@ -50,10 +50,12 @@ supplies the baseline collections; Core and Runner alone are insufficient.
 pip/uv resolves their transitive dependencies at installation time. This is not a
 fully locked or immutable environment, and no installer runs during MCP requests.
 
-The launcher supplies its own interpreter/environment to Rust without requiring
-virtualenv activation or searching PATH for Python. Explicit `[automation].runtime`
-configuration wins over `SSH_MCP_ANSIBLE_RUNTIME`; either wins over the launcher's
-environment. A broken explicit selection fails without falling back elsewhere.
+The launcher supplies its own interpreter, installed package and script locations
+to Rust without requiring virtualenv activation or searching PATH for Python.
+Explicit roots also support uv-run overlays without importing arbitrary ambient
+Python paths. Explicit `[automation].runtime` configuration wins over
+`SSH_MCP_ANSIBLE_RUNTIME`; either wins over the launcher's environment.
+A broken explicit selection fails without falling back elsewhere.
 Without an explicit health request or `[automation] required = true`, Rust does not
 consult the optional runtime. Installing the extra never enables tools.
 

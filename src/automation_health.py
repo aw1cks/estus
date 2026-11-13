@@ -101,11 +101,18 @@ def environment_paths(payload):
     require(os.path.abspath(sys.executable) == os.path.abspath(interpreter))
     require(Path(sys.prefix).resolve(strict=True) == prefix.resolve(strict=True))
     require(interpreter.is_file() and os.access(interpreter, os.X_OK))
+    package_root = absolute_path(payload["package_root"]).resolve(strict=True)
+    scripts = absolute_path(payload["scripts"]).resolve(strict=True)
+    require(package_root.name == "ssh_mcp" and (package_root / "__init__.py").is_file()
+            and (package_root / "_bin" / "ssh-mcp").is_file())
+    require(scripts.is_dir() and (scripts / "ssh-mcp").is_file())
     paths = sysconfig.get_paths()
-    sites = list(dict.fromkeys(absolute_path(paths[key]) for key in ("purelib", "platlib")))
-    scripts = absolute_path(paths["scripts"])
-    require(all(path.resolve().is_relative_to(prefix.resolve()) for path in (*sites, scripts)))
-    # Do not retain system-site-packages or paths contributed by ambient .pth files.
+    interpreter_sites = list(dict.fromkeys(absolute_path(paths[key]) for key in ("purelib", "platlib")))
+    require(all(path.resolve().is_relative_to(prefix.resolve()) for path in interpreter_sites))
+    # uv run's requirements live outside its ephemeral interpreter prefix. Trust
+    # only the launcher's concrete installation root, not its ambient sys.path,
+    # PYTHONPATH, arbitrary .pth additions, or the caller's current directory.
+    sites = list(dict.fromkeys((package_root.parent, *interpreter_sites)))
     stdlib = list(dict.fromkeys(absolute_path(paths[key]) for key in ("stdlib", "platstdlib")))
     dynamic = absolute_path(sysconfig.get_config_var("DESTSHARED"))
     sys.path[:] = list(dict.fromkeys(str(path) for path in (*stdlib, dynamic, *sites)))
@@ -152,8 +159,8 @@ def check_collections(roots, expected):
 
 def check():
     require(len(sys.argv) == 2)
-    payload, _ = read_json(Path(sys.argv[1]), 16384)
-    require(type(payload) is dict and type(payload.get("schema")) is int and payload["schema"] == 1)
+    payload, _ = read_json(Path(sys.argv[1]), 66560)
+    require(type(payload) is dict and type(payload.get("schema")) is int and payload["schema"] == 2)
     source = payload.get("source")
     if source == "bundle":
         exact_keys(payload, ("schema", "source", "runtime_root"))
@@ -169,7 +176,7 @@ def check():
         config = root / "ansible.cfg"
         provenance = {"kind": "nix_bundle", "runtime_id": expected["runtime_id"]}
     elif source == "python_environment":
-        exact_keys(payload, ("schema", "source", "interpreter", "prefix"))
+        exact_keys(payload, ("schema", "source", "interpreter", "prefix", "package_root", "scripts"))
         collection_roots, scripts = environment_paths(payload)
         expected = None
         provenance = {"kind": "python_environment"}
