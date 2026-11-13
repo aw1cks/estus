@@ -71,11 +71,12 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
           } ''
             mkdir -p "$out/bin"
+            # Wheel cases require separately provisioned installer environments.
             makeWrapper ${harness}/libexec/automation "$out/bin/automation-acceptance" \
               --set SSH_MCP_TEST_BINARY ${native}/bin/ssh-mcp \
               --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
               --set SSH_MCP_TEST_AUTOMATION_BINARY ${optional}/bin/ssh-mcp \
-              --add-flags '--include-ignored --nocapture --test-threads=2'
+              --add-flags '--include-ignored --nocapture --test-threads=2 --skip wheel::'
           '';
       in
       {

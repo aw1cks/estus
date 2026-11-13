@@ -71,6 +71,24 @@ impl Local {
         Ok(command)
     }
 
+    fn installed_command(&self, reference: &str) -> Result<Command> {
+        let binary = installed_path(reference)?;
+        let mut command = Command::new(binary);
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("SSH_MCP_") {
+                command.env_remove(name);
+            }
+        }
+        command
+            .arg("--config")
+            .arg(&self.config)
+            .current_dir(self.root.path())
+            .env("HOME", self.root.path())
+            .env("XDG_CONFIG_HOME", self.root.path())
+            .kill_on_drop(true);
+        Ok(command)
+    }
+
     fn doctor(&self) -> Result<Command> {
         let mut command = self.command()?;
         command.args(["doctor", "--runtime", "ansible"]);
@@ -88,6 +106,25 @@ impl Local {
                 "PYTHON_INJECTION_RAN",
             ] {
                 ensure!(!text.contains(secret), "private runtime diagnostics leaked");
+            }
+        }
+        for reference in [
+            "SSH_MCP_TEST_WHEEL_BINARY",
+            "SSH_MCP_TEST_BASE_WHEEL_BINARY",
+            "SSH_MCP_TEST_MUTABLE_PYTHON",
+        ] {
+            if let Some(binary) = std::env::var_os(reference)
+                && let Some(prefix) = Path::new(&binary).parent().and_then(Path::parent)
+            {
+                let private = prefix
+                    .to_str()
+                    .context("UTF-8 installed environment prefix")?;
+                for bytes in [&output.stdout, &output.stderr] {
+                    ensure!(
+                        !String::from_utf8_lossy(bytes).contains(private),
+                        "installed environment path leaked"
+                    );
+                }
             }
         }
         ensure!(!self.marker.exists(), "runtime health dispatched SSH");
@@ -274,6 +311,13 @@ async fn native_startup_ignores_absent_bad_and_disabled_runtime_references() -> 
         ensure!(server.catalog().await? == expected);
         server.stop().await?;
     }
+    for descriptor in ["{".to_owned(), "x".repeat(65_537)] {
+        let mut command = missing.command()?;
+        command.env("SSH_MCP_PYTHON_RUNTIME", descriptor);
+        let mut server = Server::start(command)?;
+        ensure!(server.catalog().await? == expected);
+        server.stop().await?;
+    }
     let disabled = Local::new("[automation]\nrequired = false\n")?;
     // A FIFO makes accidental reads observable as a hang, not a passing missing-file shortcut.
     let unread = disabled.root.path().join("unread-runtime");
@@ -393,6 +437,129 @@ fn configured_runtime(root: &Path, required: bool) -> Result<Local> {
     ))
 }
 
+fn installed_path(reference: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(
+        std::env::var_os(reference)
+            .with_context(|| format!("set {reference} to its installed path"))?,
+    );
+    ensure!(path.is_absolute() && path.is_file(), "invalid {reference}");
+    Ok(path)
+}
+
+fn bundle_identity(manifest: &Value) -> Result<Value> {
+    let mut identity = manifest["identity"].clone();
+    let fields = identity.as_object_mut().context("bundle identity")?;
+    let runtime_id = fields.remove("runtime_id").context("bundle runtime_id")?;
+    fields.insert(
+        "provenance".to_owned(),
+        json!({"kind":"nix_bundle", "runtime_id":runtime_id}),
+    );
+    Ok(identity)
+}
+
+fn wheel_prefix(reference: &str) -> Result<PathBuf> {
+    let binary = installed_path(reference)?;
+    let scripts = binary.parent().context("wheel scripts directory")?;
+    ensure!(scripts.file_name().is_some_and(|name| name == "bin"));
+    Ok(scripts
+        .parent()
+        .context("wheel environment prefix")?
+        .to_owned())
+}
+
+fn distribution_metadata(prefix: &Path, distribution: &str) -> Result<PathBuf> {
+    let site = prefix.join("lib/python3.14/site-packages");
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(site)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .context("distribution filename")?
+            .to_string_lossy();
+        if name.starts_with(&format!("{distribution}-")) && name.ends_with(".dist-info") {
+            matches.push(path.join("METADATA"));
+        }
+    }
+    ensure!(
+        matches.len() == 1,
+        "expected one {distribution} distribution"
+    );
+    Ok(matches.remove(0))
+}
+
+fn observed_environment_identity(value: &Value, prefix: &Path) -> Result<Value> {
+    ensure!(value["runtime"]["kind"] == "ansible");
+    ensure!(value["runtime"]["status"] == "passed");
+    let identity = &value["runtime"]["identity"];
+    ensure!(identity["provenance"] == json!({"kind":"python_environment"}));
+    let fields = identity.as_object().context("environment identity")?;
+    ensure!(fields.keys().all(|key| matches!(
+        key.as_str(),
+        "provenance"
+            | "platform"
+            | "python"
+            | "ansible_core"
+            | "ansible_runner"
+            | "collection_bundle"
+            | "collections"
+    )));
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        other => anyhow::bail!("unsupported acceptance architecture {other}"),
+    };
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        other => anyhow::bail!("unsupported acceptance OS {other}"),
+    };
+    ensure!(identity["platform"] == format!("{arch}-{os}"));
+    ensure!(
+        identity["python"]
+            .as_str()
+            .context("Python version")?
+            .starts_with("3.14.")
+    );
+    for (distribution, field, expected) in [
+        ("ansible", "collection_bundle", "14.4.0"),
+        ("ansible_core", "ansible_core", "2.21.5"),
+        ("ansible_runner", "ansible_runner", "2.4.3"),
+    ] {
+        let metadata = fs::read_to_string(distribution_metadata(prefix, distribution)?)?;
+        let versions: Vec<_> = metadata
+            .lines()
+            .filter_map(|line| line.strip_prefix("Version: "))
+            .collect();
+        ensure!(
+            versions == [expected],
+            "installed {distribution} pin drifted"
+        );
+        ensure!(identity[field] == expected);
+    }
+    let collections = identity["collections"]
+        .as_array()
+        .context("observed collections")?;
+    ensure!(collections.len() == 2);
+    for (collection, name) in collections
+        .iter()
+        .zip(["ansible.posix", "community.general"])
+    {
+        ensure!(collection["name"] == name);
+        let path = prefix
+            .join("lib/python3.14/site-packages/ansible_collections")
+            .join(name.replace('.', "/"))
+            .join("MANIFEST.json");
+        let bytes = fs::read(path)?;
+        let manifest: Value = serde_json::from_slice(&bytes)?;
+        let (namespace, collection_name) = name.split_once('.').context("collection name")?;
+        ensure!(manifest["collection_info"]["namespace"] == namespace);
+        ensure!(manifest["collection_info"]["name"] == collection_name);
+        ensure!(collection["version"] == manifest["collection_info"]["version"]);
+        use sha2::Digest;
+        ensure!(collection["manifest_sha256"] == hex::encode(sha2::Sha256::digest(&bytes)));
+    }
+    Ok(identity.clone())
+}
 // Snapshot links without traversing the Python closure; include the actual immutable metadata.
 fn runtime_metadata(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>, u32)>> {
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
@@ -532,7 +699,6 @@ async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime(
     );
     ensure!(binary.is_absolute() && binary.is_file());
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
-    let expected = bundle_identity(&manifest)?;
     let before = runtime_metadata(&root)?;
     let fixture = Local::new("[automation]\nrequired = true\n")?;
     let wrapper_command = || {
@@ -560,7 +726,7 @@ async fn packaged_automation_wrapper_authoritatively_selects_its_pinned_runtime(
     ensure!(
         report(&checked, 0)?["runtime"]
             == json!({
-                "kind":"ansible", "status":"passed", "identity":expected
+                "kind":"ansible", "status":"passed", "identity":bundle_identity(&manifest)?
             })
     );
     fixture.private(&checked)?;
@@ -697,13 +863,322 @@ async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift(
     Ok(())
 }
 
-fn bundle_identity(manifest: &Value) -> Result<Value> {
-    let mut identity = manifest["identity"].clone();
-    let fields = identity.as_object_mut().context("bundle identity")?;
-    let runtime_id = fields.remove("runtime_id").context("bundle runtime_id")?;
-    fields.insert(
-        "provenance".to_owned(),
-        json!({"kind":"nix_bundle", "runtime_id":runtime_id}),
-    );
-    Ok(identity)
+// These cases require installer-managed environments, not just the immutable bundle.
+mod wheel {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires SSH_MCP_TEST_WHEEL_BINARY extra and SSH_MCP_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launchers; no network"]
+    async fn installed_extra_is_observed_and_required_without_changing_native_catalog() -> Result<()>
+    {
+        let prefix = wheel_prefix("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let base_prefix = wheel_prefix("SSH_MCP_TEST_BASE_WHEEL_BINARY")?;
+        let native = Local::new("")?;
+        let mut baseline =
+            Server::start(native.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?)?;
+        let catalog = baseline.catalog().await?;
+        baseline.stop().await?;
+        let fixture = Local::new("[automation]\nrequired = true\n")?;
+        let mut observed = None;
+        for _ in 0..2 {
+            let mut command = fixture.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+            command
+                .args(["doctor", "--runtime", "ansible"])
+                // No activation; another real interpreter is first on PATH. The launcher must also
+                // replace a caller's descriptor instead of trusting this broken selection.
+                .env("PATH", base_prefix.join("bin"))
+                .env_remove("VIRTUAL_ENV")
+                .env("SSH_MCP_PYTHON_RUNTIME", "{");
+            let checked = output(command).await?;
+            let identity = observed_environment_identity(&report(&checked, 0)?, &prefix)?;
+            if let Some(previous) = &observed {
+                ensure!(
+                    previous == &identity,
+                    "environment observation was not repeatable"
+                );
+            }
+            observed = Some(identity);
+            fixture.private(&checked)?;
+        }
+        let mut command = fixture.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+        command
+            .env("PATH", base_prefix.join("bin"))
+            .env_remove("VIRTUAL_ENV");
+        let mut server = Server::start(command)?;
+        ensure!(
+            server.catalog().await? == catalog,
+            "extra registered automation tools"
+        );
+        let stderr = server.stop().await?;
+        fixture.private(&Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr,
+        })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SSH_MCP_TEST_BASE_WHEEL_BINARY clean base Python3.14 public launcher without Ansible; no network"]
+    async fn installed_base_remains_native_only_and_requested_extra_fails_before_mcp() -> Result<()>
+    {
+        let native = Local::new("")?;
+        let mut server =
+            Server::start(native.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?)?;
+        server.catalog().await?;
+        server.stop().await?;
+        let required = Local::new("[automation]\nrequired = true\n")?;
+        let mut doctor = required.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?;
+        doctor.args(["doctor", "--runtime", "ansible"]);
+        let checked = output(doctor).await?;
+        runtime_failed(&report(&checked, 1)?, "runtime_import_failed")?;
+        required.private(&checked)?;
+        let startup = output(required.installed_command("SSH_MCP_TEST_BASE_WHEEL_BINARY")?).await?;
+        ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&startup.stderr)?;
+        ensure!(error["event"] == "error" && error["code"] == "automation_runtime_unavailable");
+        required.private(&startup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SSH_MCP_TEST_WHEEL_BINARY, SSH_MCP_TEST_BINARY raw native, and SSH_MCP_TEST_ANSIBLE_RUNTIME Nix bundle; no network"]
+    async fn explicit_bundle_config_and_environment_precede_launcher_without_fallback() -> Result<()>
+    {
+        let root = real_runtime()?;
+        let manifest: Value = serde_json::from_slice(&fs::read(root.join("runtime.json"))?)?;
+        let expected = bundle_identity(&manifest)?;
+        let configured = configured_runtime(&root, false)?;
+        let mut command = configured.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+        command.args(["doctor", "--runtime", "ansible"]).env(
+            "SSH_MCP_ANSIBLE_RUNTIME",
+            "/AUTOMATION_PRIVATE_SENTINEL/broken",
+        );
+        let checked = output(command).await?;
+        ensure!(report(&checked, 0)?["runtime"]["identity"] == expected);
+        configured.private(&checked)?;
+        let selected = Local::new("")?;
+        let mut command = selected.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+        command
+            .args(["doctor", "--runtime", "ansible"])
+            .env("SSH_MCP_ANSIBLE_RUNTIME", &root);
+        let checked = output(command).await?;
+        ensure!(report(&checked, 0)?["runtime"]["identity"] == expected);
+        selected.private(&checked)?;
+        for config_wins in [false, true] {
+            let broken = if config_wins {
+                configured_runtime(Path::new("/AUTOMATION_PRIVATE_SENTINEL/broken"), true)?
+            } else {
+                Local::new("[automation]\nrequired = true\n")?
+            };
+            let reference = if config_wins {
+                root.as_os_str()
+            } else {
+                std::ffi::OsStr::new("/AUTOMATION_PRIVATE_SENTINEL/broken")
+            };
+            let mut command = broken.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+            command
+                .args(["doctor", "--runtime", "ansible"])
+                .env("SSH_MCP_ANSIBLE_RUNTIME", reference);
+            let checked = output(command).await?;
+            runtime_failed(&report(&checked, 1)?, "runtime_unavailable")?;
+            broken.private(&checked)?;
+            let mut command = broken.installed_command("SSH_MCP_TEST_WHEEL_BINARY")?;
+            command.env("SSH_MCP_ANSIBLE_RUNTIME", reference);
+            let startup = output(command).await?;
+            ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
+            let error: Value = serde_json::from_slice(&startup.stderr)?;
+            ensure!(error["code"] == "automation_runtime_unavailable");
+            broken.private(&startup)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SSH_MCP_TEST_BINARY raw native plus SSH_MCP_TEST_WHEEL_BINARY and SSH_MCP_TEST_BASE_WHEEL_BINARY Python3.14 environments; no network"]
+    async fn selected_environment_worker_ignores_toxic_python_ansible_cwd_and_executable_path()
+    -> Result<()> {
+        installed_path("SSH_MCP_TEST_BINARY")?;
+        let prefix = wheel_prefix("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let base = wheel_prefix("SSH_MCP_TEST_BASE_WHEEL_BINARY")?;
+        let interpreter = prefix.join("bin/python");
+        ensure!(interpreter.is_file());
+        ensure!(
+            fs::symlink_metadata(&interpreter)?.file_type().is_symlink(),
+            "acceptance requires an unactivated symlink venv"
+        );
+        let fixture = Local::new("[automation]\nrequired = true\n")?;
+        let poisoned = fixture.root.path().join("poisoned-bin");
+        fs::create_dir(&poisoned)?;
+        // These are real, wrong-environment interpreters, not replacement health workers.
+        for name in ["python", "python3"] {
+            symlink(base.join("bin/python"), poisoned.join(name))?;
+        }
+        let injection = "raise RuntimeError('PYTHON_INJECTION_RAN')\n";
+        for name in [
+            "sitecustomize.py",
+            "usercustomize.py",
+            "ansible.py",
+            "ansible_runner.py",
+        ] {
+            fs::write(fixture.root.path().join(name), injection)?;
+        }
+        let ambient_cfg = fixture.root.path().join("ansible.cfg");
+        fs::write(
+            &ambient_cfg,
+            format!("[defaults]\ncollections_path = /{SECRET}\nlocal_tmp = /{SECRET}\n"),
+        )?;
+        let descriptor =
+            json!({"schema":1, "interpreter":interpreter, "prefix":prefix}).to_string();
+        let mut command = fixture.doctor()?;
+        command
+            .env("SSH_MCP_PYTHON_RUNTIME", &descriptor)
+            .env("PATH", &poisoned)
+            .env("VIRTUAL_ENV", &base)
+            .env("PYTHONPATH", fixture.root.path())
+            .env("PYTHONHOME", fixture.root.path())
+            .env("PYTHONUSERBASE", fixture.root.path())
+            .env(
+                "PYTHONSTARTUP",
+                fixture.root.path().join("sitecustomize.py"),
+            )
+            .env("PYTHONINSPECT", "1")
+            .env("PYTHONWARNINGS", "error")
+            .env("ANSIBLE_CONFIG", &ambient_cfg)
+            .env("ANSIBLE_COLLECTIONS_PATH", fixture.root.path())
+            .env("ANSIBLE_COLLECTIONS_PATHS", fixture.root.path())
+            .env(
+                "ANSIBLE_LOCAL_TEMP",
+                fixture.root.path().join("forbidden-local-temp"),
+            )
+            .env("ANSIBLE_COLLECTIONS_SCAN_SYS_PATH", "true");
+        let checked = output(command).await?;
+        observed_environment_identity(&report(&checked, 0)?, &prefix)?;
+        fixture.private(&checked)?;
+        ensure!(!fixture.root.path().join("forbidden-local-temp").exists());
+        for bad_descriptor in [
+            json!({"schema":1, "interpreter":base.join("bin/python"), "prefix":prefix}),
+            json!({"schema":1, "interpreter":fixture.root.path().join("missing-python"), "prefix":prefix}),
+        ] {
+            let mut command = fixture.doctor()?;
+            command
+                .env("SSH_MCP_PYTHON_RUNTIME", bad_descriptor.to_string())
+                .env("PATH", prefix.join("bin"));
+            let checked = output(command).await?;
+            let value = report(&checked, 1)?;
+            ensure!(
+                value["runtime"]["status"] == "failed",
+                "invalid selection fell back to PATH"
+            );
+            ensure!(value["runtime"].get("identity").is_none());
+            fixture.private(&checked)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires raw SSH_MCP_TEST_BINARY, SSH_MCP_TEST_WHEEL_BINARY, SSH_MCP_TEST_BASE_WHEEL_BINARY, owned copied SSH_MCP_TEST_MUTABLE_PYTHON and SSH_MCP_TEST_MUTABLE_PREFIX; no network"]
+    async fn owned_environment_reports_manifest_observations_and_rejects_real_asset_drift()
+    -> Result<()> {
+        installed_path("SSH_MCP_TEST_BINARY")?;
+        let interpreter = installed_path("SSH_MCP_TEST_MUTABLE_PYTHON")?;
+        let prefix = PathBuf::from(
+            std::env::var_os("SSH_MCP_TEST_MUTABLE_PREFIX").context("set owned mutable prefix")?,
+        );
+        ensure!(prefix.is_absolute() && prefix.is_dir());
+        ensure!(interpreter.parent() == Some(prefix.join("bin").as_path()));
+        // Refuse the supplied original environments even if accidentally configured as mutable.
+        for reference in [
+            "SSH_MCP_TEST_WHEEL_BINARY",
+            "SSH_MCP_TEST_BASE_WHEEL_BINARY",
+        ] {
+            ensure!(fs::canonicalize(&prefix)? != fs::canonicalize(wheel_prefix(reference)?)?);
+        }
+        let descriptor =
+            json!({"schema":1, "interpreter":interpreter, "prefix":prefix}).to_string();
+        let fixture = Local::new("[automation]\nrequired = true\n")?;
+        let mut command = fixture.doctor()?;
+        command.env("SSH_MCP_PYTHON_RUNTIME", &descriptor);
+        let checked = output(command).await?;
+        let original = observed_environment_identity(&report(&checked, 0)?, &prefix)?;
+        fixture.private(&checked)?;
+        let collection = prefix
+            .join("lib/python3.14/site-packages/ansible_collections/ansible/posix/MANIFEST.json");
+        let metadata = distribution_metadata(&prefix, "ansible_core")?;
+        for case in [
+            "observed_hash",
+            "version",
+            "namespace",
+            "malformed",
+            "missing",
+        ] {
+            let path = if case == "version" {
+                &metadata
+            } else {
+                &collection
+            };
+            ensure!(
+                !fs::symlink_metadata(path)?.file_type().is_symlink(),
+                "mutable assets must be owned copies"
+            );
+            ensure!(
+                fs::canonicalize(path)?.starts_with(fs::canonicalize(&prefix)?),
+                "mutable assets must not resolve outside their owned environment"
+            );
+            let mut command = fixture.doctor()?;
+            command.env("SSH_MCP_PYTHON_RUNTIME", &descriptor);
+            let bytes = fs::read(path)?;
+            match case {
+                "observed_hash" => {
+                    let mut changed = bytes.clone();
+                    changed.push(b'\n');
+                    fs::write(path, changed)?;
+                }
+                "version" => {
+                    let metadata = std::str::from_utf8(&bytes)?;
+                    let changed = metadata.replace("\nVersion: 2.21.5\n", "\nVersion: 0.0.0\n");
+                    ensure!(changed != metadata, "installed core metadata pin diverged");
+                    fs::write(path, changed)?;
+                }
+                "namespace" => {
+                    let mut manifest: Value = serde_json::from_slice(&bytes)?;
+                    manifest["collection_info"]["namespace"] = json!("wrong");
+                    fs::write(path, serde_json::to_vec(&manifest)?)?;
+                }
+                "malformed" => fs::write(path, b"{")?,
+                "missing" => fs::remove_file(path)?,
+                _ => unreachable!(),
+            }
+            let result = output(command).await;
+            // Restore before propagating process/report/assertion errors; original envs are never touched.
+            fs::write(path, &bytes)?;
+            let checked = result?;
+            if case == "observed_hash" {
+                let value = report(&checked, 0)?;
+                ensure!(
+                    value["runtime"]["identity"]["provenance"]
+                        == json!({"kind":"python_environment"})
+                );
+                let changed = &value["runtime"]["identity"]["collections"][0];
+                ensure!(changed["version"] == original["collections"][0]["version"]);
+                use sha2::Digest;
+                let mut observed = bytes.clone();
+                observed.push(b'\n');
+                ensure!(changed["manifest_sha256"] == hex::encode(sha2::Sha256::digest(&observed)));
+                ensure!(
+                    changed["manifest_sha256"] != original["collections"][0]["manifest_sha256"]
+                );
+            } else {
+                let value =
+                    report(&checked, 1).with_context(|| format!("owned drift case {case}"))?;
+                ensure!(value["runtime"]["status"] == "failed");
+                ensure!(value["runtime"].get("identity").is_none());
+            }
+            fixture.private(&checked)?;
+        }
+        let mut command = fixture.doctor()?;
+        command.env("SSH_MCP_PYTHON_RUNTIME", descriptor);
+        let checked = output(command).await?;
+        ensure!(observed_environment_identity(&report(&checked, 0)?, &prefix)? == original);
+        fixture.private(&checked)
+    }
 }
