@@ -10,13 +10,13 @@ use std::{
 
 use bytes::BytesMut;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tempfile::TempDir;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     filedata::{self, Encoding, RawRead, ReadData},
-    reply::{ToolError, ToolReply},
+    reply::{OutputReceipt, StreamInfo, ToolError, ToolReply},
     wire::ReplyBudget,
 };
 
@@ -61,27 +61,6 @@ impl Limits {
         }
         Ok(())
     }
-}
-
-#[derive(Serialize, JsonSchema)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum OutputReceipt {
-    Ready {
-        handle: String,
-        expires_in_secs: u64,
-        stdout: StreamInfo,
-        stderr: StreamInfo,
-    },
-    Unavailable {
-        reason: &'static str,
-    },
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct StreamInfo {
-    pub bytes_retained: u64,
-    pub total_bytes: u64,
-    pub truncated: bool,
 }
 
 #[derive(Default)]

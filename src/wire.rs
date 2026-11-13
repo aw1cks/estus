@@ -15,12 +15,12 @@ use crate::reply::{
 // A requested receipt must fit before execution; the default envelope is unchanged.
 fn retention_overhead(requested: bool) -> Result<usize, ErrorData> {
     static COST: LazyLock<usize> = LazyLock::new(|| {
-        let info = || crate::output::StreamInfo {
+        let info = || crate::reply::StreamInfo {
             bytes_retained: u64::MAX,
             total_bytes: u64::MAX,
             truncated: false,
         };
-        let value = serde_json::json!({"output": crate::output::OutputReceipt::Ready {
+        let value = serde_json::json!({"output": crate::reply::OutputReceipt::Ready {
             handle: "f".repeat(32),
             expires_in_secs: u64::MAX,
             stdout: info(),

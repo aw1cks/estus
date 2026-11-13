@@ -595,11 +595,11 @@ impl ReviewedContent {
         }
     }
 
-    fn mode(&self) -> crate::automation_exec::ExecutionMode {
+    fn mode(&self) -> crate::automation_protocol::ExecutionMode {
         match self {
-            Self::Module { .. } => crate::automation_exec::ExecutionMode::Module,
-            Self::Role { .. } => crate::automation_exec::ExecutionMode::Role,
-            Self::Playbook { .. } => crate::automation_exec::ExecutionMode::Playbook,
+            Self::Module { .. } => crate::automation_protocol::ExecutionMode::Module,
+            Self::Role { .. } => crate::automation_protocol::ExecutionMode::Role,
+            Self::Playbook { .. } => crate::automation_protocol::ExecutionMode::Playbook,
         }
     }
 }

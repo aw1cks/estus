@@ -1,6 +1,7 @@
 mod audit;
 mod automation;
 mod automation_exec;
+mod automation_protocol;
 mod bindings;
 mod capture;
 mod command;

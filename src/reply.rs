@@ -59,6 +59,27 @@ pub(crate) enum Termination {
 }
 
 #[derive(Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum OutputReceipt {
+    Ready {
+        handle: String,
+        expires_in_secs: u64,
+        stdout: StreamInfo,
+        stderr: StreamInfo,
+    },
+    Unavailable {
+        reason: &'static str,
+    },
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct StreamInfo {
+    pub bytes_retained: u64,
+    pub total_bytes: u64,
+    pub truncated: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
 pub(crate) struct CommandData {
     pub stdout: String,
     pub stderr: String,
@@ -71,7 +92,7 @@ pub(crate) struct CommandData {
     pub duration_ms: u64,
     pub remote_may_still_be_running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<crate::output::OutputReceipt>,
+    pub output: Option<OutputReceipt>,
 }
 
 /// Sanitized local failure; controller errors never describe remote state.
@@ -150,7 +171,7 @@ pub(crate) struct ControllerData {
     pub duration_ms: u64,
     pub owned_group_cleanup: GroupCleanup,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<crate::output::OutputReceipt>,
+    pub output: Option<OutputReceipt>,
 }
 
 /// Bounded execution evidence and optional explicitly selected module data.
