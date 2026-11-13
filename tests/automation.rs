@@ -863,6 +863,201 @@ async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift(
     Ok(())
 }
 
+fn schema_report(fixture: &Local, output: &Output, ok: bool) -> Result<Value> {
+    fixture.private(output)?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        output.status.code() == Some(i32::from(!ok)),
+        "schema report: {value}"
+    );
+    ensure!(output.stderr.is_empty());
+    ensure!(value["ok"] == ok, "schema report: {value}");
+    Ok(value)
+}
+
+#[tokio::test]
+async fn schema_authoring_rejects_invalid_names_and_duplicate_json_without_runtime() -> Result<()> {
+    let fixture = Local::new("")?;
+    let destination = fixture.root.path().join("review.json");
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.builtin.ping;private"])
+        .arg("--output")
+        .arg(&destination);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_module_name");
+    ensure!(!destination.exists());
+    let overlay = fixture.root.path().join("overlay.json");
+    fs::write(
+        &overlay,
+        r#"{"fixed_args":{},"fixed_args":{"state":"absent"}}"#,
+    )?;
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.builtin.ping"])
+        .arg("--output")
+        .arg(&destination)
+        .arg("--overlay")
+        .arg(&overlay);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_schema_json");
+    ensure!(!destination.exists());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_schema_import_review_and_fixed_binding_validation_never_execute() -> Result<()> {
+    let root = real_runtime()?;
+    let fixture = configured_runtime(&root, false)?;
+    let snapshot = fixture.root.path().join("stat.json");
+    let overlay = fixture.root.path().join("binding.json");
+    let input = fixture.root.path().join("request.json");
+    fs::write(
+        &overlay,
+        serde_json::to_vec(&json!({
+            "input_schema":{"type":"object","properties":{"follow":{"type":"boolean"}},
+                "required":["follow"],"additionalProperties":false},
+            "fixed_args":{"path":"/not-an-approved-execution-target"},
+            "input_map":{"follow":"follow"}
+        }))?,
+    )?;
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.builtin.stat"])
+        .arg("--output")
+        .arg(&snapshot)
+        .arg("--overlay")
+        .arg(&overlay);
+    let imported = output(command).await?;
+    ensure!(schema_report(&fixture, &imported, true)?["binding_validated"] == true);
+    let reviewed = fs::read(&snapshot)?;
+    let value: Value = serde_json::from_slice(&reviewed)?;
+    ensure!(value["module"] == "ansible.builtin.stat");
+    ensure!(value["runtime"]["provenance"]["kind"] == "nix_bundle");
+    ensure!(value["contract"]["schema"]["properties"]["path"]["type"] == "string");
+    ensure!(value["contract"]["schema"]["properties"]["follow"]["type"] == "boolean");
+    ensure!(!String::from_utf8_lossy(&reviewed).contains("/nix/store/"));
+
+    for (request, valid) in [
+        (json!({"follow":false}), true),
+        (json!({"follow":true,"path":"/fixed-override"}), false),
+        (json!({"follow":"false"}), false),
+    ] {
+        fs::write(&input, serde_json::to_vec(&request)?)?;
+        let mut command = fixture.command()?;
+        command
+            .args(["schema", "verify"])
+            .arg(&snapshot)
+            .arg("--input")
+            .arg(&input);
+        let checked = output(command).await?;
+        let report = schema_report(&fixture, &checked, valid)?;
+        if valid {
+            ensure!(report["input_validated"] == true);
+        }
+    }
+    // An import never replaces a previously reviewed file.
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.builtin.ping"])
+        .arg("--output")
+        .arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(
+        schema_report(&fixture, &rejected, false)?["error_code"]
+            == "schema_output_exists_or_failed"
+    );
+    ensure!(fs::read(&snapshot)? == reviewed);
+    // Altering a reviewed contract without its digest is not a refresh operation.
+    let mut tampered = value;
+    tampered["contract"]["schema"]["properties"]["path"]["type"] = json!("boolean");
+    fs::write(&snapshot, serde_json::to_vec(&tampered)?)?;
+    let mut command = fixture.command()?;
+    command.args(["schema", "verify"]).arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_schema_snapshot");
+    // Selected collection provenance is separate from the baseline runtime inventory.
+    let collection_snapshot = fixture.root.path().join("mount.json");
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.posix.mount"])
+        .arg("--output")
+        .arg(&collection_snapshot);
+    let imported = output(command).await?;
+    schema_report(&fixture, &imported, true)?;
+    let collection: Value = serde_json::from_slice(&fs::read(&collection_snapshot)?)?;
+    let manifest: Value = serde_json::from_slice(&fs::read(
+        root.join("collections/ansible_collections/ansible/posix/MANIFEST.json"),
+    )?)?;
+    ensure!(collection["collection"]["name"] == "ansible.posix");
+    ensure!(collection["collection"]["version"] == manifest["collection_info"]["version"]);
+    let mut command = fixture.command()?;
+    command.args(["schema", "verify"]).arg(&collection_snapshot);
+    let verified = output(command).await?;
+    schema_report(&fixture, &verified, true)?;
+    Ok(())
+}
+
+fn copy_runtime_tree(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_name() == "__pycache__" {
+            continue;
+        }
+        let path = entry.path();
+        let target = destination.join(entry.file_name());
+        if path.is_dir() {
+            copy_runtime_tree(&path, &target)?;
+        } else {
+            fs::copy(&path, &target)?;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_schema_verify_detects_implementation_drift_without_documentation_changes()
+-> Result<()> {
+    let actual = real_runtime()?;
+    let owner = tempfile::tempdir()?;
+    let runtime = linked_runtime(&actual, owner.path())?;
+    fs::remove_file(runtime.join("python"))?;
+    let manifest: Value = serde_json::from_slice(&fs::read(runtime.join("runtime.json"))?)?;
+    let site = runtime.join(manifest["site_packages"].as_str().context("site")?);
+    let source_site = actual.join(manifest["site_packages"].as_str().context("site")?);
+    fs::create_dir_all(&site)?;
+    for entry in fs::read_dir(&source_site)? {
+        let entry = entry?;
+        if entry.file_name() == "ansible" {
+            copy_runtime_tree(&entry.path(), &site.join("ansible"))?;
+        } else {
+            symlink(entry.path(), site.join(entry.file_name()))?;
+        }
+    }
+    let fixture = configured_runtime(&runtime, false)?;
+    let snapshot = fixture.root.path().join("ping.json");
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.builtin.ping"])
+        .arg("--output")
+        .arg(&snapshot);
+    let imported = output(command).await?;
+    schema_report(&fixture, &imported, true)?;
+    let source = site.join("ansible/module_utils/basic.py");
+    let mut bytes = fs::read(&source)?;
+    bytes.extend_from_slice(b"\n# owned acceptance drift, no documentation or version change\n");
+    fs::write(source, bytes)?;
+    let mut command = fixture.command()?;
+    command.args(["schema", "verify"]).arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
+    Ok(())
+}
+
 // These cases require installer-managed environments, not just the immutable bundle.
 mod wheel {
     use super::*;
@@ -1192,4 +1387,75 @@ mod wheel {
         ensure!(observed_environment_identity(&report(&checked, 0)?, &prefix)? == original);
         fixture.private(&checked)
     }
+
+    #[tokio::test]
+    #[ignore = "requires raw SSH_MCP_TEST_BINARY and an installed SSH_MCP_TEST_WHEEL_BINARY extra; no network"]
+    async fn schema_import_uses_selected_environment_without_ambient_python_or_execution()
+    -> Result<()> {
+        let prefix = wheel_prefix("SSH_MCP_TEST_WHEEL_BINARY")?;
+        let fixture = Local::new("")?;
+        let snapshot = fixture.root.path().join("ping.json");
+        let descriptor = environment_descriptor(&prefix.join("bin/python"), &prefix).to_string();
+        for name in ["ansible.py", "ansible_runner.py", "sitecustomize.py"] {
+            fs::write(
+                fixture.root.path().join(name),
+                "raise RuntimeError('PYTHON_INJECTION_RAN')\n",
+            )?;
+        }
+        let mut command = fixture.command()?;
+        command
+            .args(["schema", "import", "ansible.builtin.ping"])
+            .arg("--output")
+            .arg(&snapshot)
+            .env("SSH_MCP_PYTHON_RUNTIME", &descriptor)
+            .env("PYTHONPATH", fixture.root.path())
+            .env("PATH", "/nonexistent");
+        let imported = output(command).await?;
+        schema_report(&fixture, &imported, true)?;
+        let value: Value = serde_json::from_slice(&fs::read(&snapshot)?)?;
+        ensure!(value["runtime"]["provenance"] == json!({"kind":"python_environment"}));
+        ensure!(value["contract"]["schema"]["properties"]["data"]["type"] == "string");
+        let mut command = fixture.command()?;
+        command
+            .args(["schema", "verify"])
+            .arg(&snapshot)
+            .env("SSH_MCP_PYTHON_RUNTIME", descriptor)
+            .env("PATH", "/nonexistent");
+        let verified = output(command).await?;
+        schema_report(&fixture, &verified, true)?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_schema_import_refuses_unreadable_snapshot_envelope() -> Result<()> {
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let overlay = fixture.root.path().join("boundary.json");
+    let destination = fixture.root.path().join("review.json");
+    let mut condition = json!({"required":[]});
+    for _ in 0..29 {
+        condition = json!({"not":condition});
+    }
+    fs::write(
+        &overlay,
+        serde_json::to_vec(&json!({
+            "input_schema":{"type":"object","properties":{},"additionalProperties":false,"not":condition},
+            "fixed_args":{},"input_map":{}
+        }))?,
+    )?;
+    let mut command = fixture.command()?;
+    command
+        .args(["schema", "import", "ansible.builtin.ping"])
+        .arg("--overlay")
+        .arg(&overlay)
+        .arg("--output")
+        .arg(&destination);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_file_limit");
+    ensure!(
+        !destination.exists(),
+        "import persisted an unreadable snapshot"
+    );
+    Ok(())
 }
