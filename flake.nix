@@ -232,6 +232,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/mkdir-acceptance";
         };
+        apps.rename-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/rename-acceptance";
+        };
+        apps.rename-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/rename-acceptance";
+        };
         apps.controller-scripts = {
           type = "app";
           program = "${acceptance}/bin/controller-scripts";

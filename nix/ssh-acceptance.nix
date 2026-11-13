@@ -34,6 +34,10 @@ craneLib.mkCargoDerivation (commonArgs // {
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
       --add-flags '--ignored --nocapture --test-threads=2 ssh_mkdir'
+    makeWrapper "$out/libexec/ssh_local" "$out/bin/rename-acceptance" \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
+      --add-flags '--ignored --nocapture --test-threads=2 ssh_rename'
     makeWrapper "$out/libexec/ssh_e2e" "$out/bin/ssh-baseline" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils ]} \

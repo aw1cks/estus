@@ -3062,6 +3062,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             "ssh_list_directory",
                             "ssh_mkdir",
                             "ssh_read_file",
+                            "ssh_rename",
                             "ssh_stat",
                             "ssh_targets",
                             "ssh_write_file",
@@ -3118,6 +3119,13 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     !denied_directory.exists(),
                     "read-only target created a directory"
                 );
+                let denied_rename = directory.join("rename-policy-denied");
+                let reply = client.call("ssh_rename", json!({
+                    "host":"locked","source":file,"destination":denied_rename,"overwrite":true
+                })).await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(fs::read(&file)? == b"abc" && !denied_rename.exists());
                 ensure!(
                     masters(&client.log)?.is_empty(),
                     "profile denial started an SSH master"
@@ -3200,6 +3208,23 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     succeeded(&reply)?["content"] == payload,
                     "read-only target did not see the real allowed SFTP write"
                 );
+                let renamed = directory.join("renamed");
+                let before = fs::symlink_metadata(&file)?.ino();
+                let reply = client
+                    .call(
+                        "ssh_rename",
+                        json!({
+                            "host":"allowed","source":file,"destination":renamed,"overwrite":true
+                        }),
+                    )
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"renamed":true}));
+                ensure!(!file.exists() && fs::symlink_metadata(&renamed)?.ino() == before);
+                ensure!(fs::read(&renamed)? == payload.as_bytes());
+                let reply = client
+                    .call("ssh_read_file", json!({"host":"locked","path":renamed}))
+                    .await?;
+                ensure!(succeeded(&reply)?["content"] == payload);
                 ensure!(
                     !masters(&client.log)?.is_empty(),
                     "successful file calls started no master"
@@ -4599,4 +4624,494 @@ async fn script_wire_call(
     ensure!(text == *reply, "script text and structured result disagree");
     ensure!(result["isError"].as_bool().unwrap_or(false) == !reply["error"].is_null());
     Ok(frame["result"]["structuredContent"].take())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_rename_moves_and_validation() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let mut config = fs::read_to_string(&fixture.config)?;
+        config.push_str(
+            "\n[targets.rename-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+        );
+        fs::write(&fixture.config, config)?;
+        let directory = fixture.root.path().join("rename-private");
+        fs::create_dir(&directory)?;
+        let source = directory.join("source");
+        let destination = directory.join("destination");
+        fs::write(&source, b"RENAME_SOURCE_BYTES")?;
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let initial_auth = fixture.authentications();
+            for args in [
+                json!({"host":"plain","source":"","destination":destination,"overwrite":true}),
+                json!({"host":"plain","source":source,"destination":"","overwrite":true}),
+                json!({"host":"plain","source":"source\0invalid","destination":destination,"overwrite":true}),
+                json!({"host":"plain","source":source,"destination":"destination\0invalid","overwrite":true}),
+                json!({"host":"plain","source":source,"destination":destination,"overwrite":true,"timeout_secs":0}),
+                json!({"host":"plain","source":source,"destination":destination,"overwrite":true,"timeout_secs":16}),
+            ] {
+                let reply = client.call("ssh_rename", args).await?;
+                failed(&reply, "invalid_argument")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            }
+            let reply = client
+                .call(
+                    "ssh_rename",
+                    json!({"host":"rename-locked","source":source,"destination":destination,"overwrite":true}),
+                )
+                .await?;
+            failed(&reply, "policy_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(masters(&client.log)?.is_empty(), "rejected rename acquired SSH");
+            ensure!(fixture.authentications() == initial_auth, "rejected rename authenticated");
+            ensure!(fs::read(&source)? == b"RENAME_SOURCE_BYTES");
+            ensure!(!destination.exists() && fs::read_dir(&directory)?.count() == 1);
+
+            succeeded(&exec(&client, "printf RENAME_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let inode = fs::symlink_metadata(&source)?.ino();
+            let reply = client
+                .call(
+                    "ssh_rename",
+                    json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
+                )
+                .await?;
+            ensure!(succeeded(&reply)? == &json!({"renamed":true}));
+            ensure!(fs::symlink_metadata(&source).is_err(), "source survived successful rename");
+            ensure!(fs::symlink_metadata(&destination)?.ino() == inode);
+            ensure!(fs::read(&destination)? == b"RENAME_SOURCE_BYTES");
+
+            let replacement = directory.join("replacement");
+            let retained = directory.join("old-destination-hardlink");
+            fs::hard_link(&destination, &retained)?;
+            fs::write(&replacement, b"EXPLICIT_OVERWRITE_BYTES")?;
+            let replacement_inode = fs::symlink_metadata(&replacement)?.ino();
+            let reply = client
+                .call(
+                    "ssh_rename",
+                    json!({"host":"plain","source":replacement,"destination":destination,"overwrite":true}),
+                )
+                .await?;
+            ensure!(succeeded(&reply)? == &json!({"renamed":true}));
+            ensure!(fs::symlink_metadata(&replacement).is_err());
+            ensure!(fs::symlink_metadata(&destination)?.ino() == replacement_inode);
+            ensure!(fs::read(&destination)? == b"EXPLICIT_OVERWRITE_BYTES");
+            ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
+            ensure!(fs::read(&retained)? == b"RENAME_SOURCE_BYTES");
+
+            let tree = directory.join("tree");
+            let moved_tree = directory.join("moved-tree");
+            fs::create_dir(&tree)?;
+            fs::write(tree.join("child"), b"TREE_CHILD")?;
+            let tree_inode = fs::symlink_metadata(&tree)?.ino();
+            let child_inode = fs::symlink_metadata(tree.join("child"))?.ino();
+            let reply = client
+                .call(
+                    "ssh_rename",
+                    json!({"host":"plain","source":tree,"destination":moved_tree,"overwrite":true}),
+                )
+                .await?;
+            ensure!(succeeded(&reply)? == &json!({"renamed":true}));
+            ensure!(fs::symlink_metadata(&tree).is_err());
+            ensure!(fs::symlink_metadata(&moved_tree)?.ino() == tree_inode);
+            ensure!(fs::symlink_metadata(moved_tree.join("child"))?.ino() == child_inode);
+            ensure!(fs::read(moved_tree.join("child"))? == b"TREE_CHILD");
+
+            let missing_link_target = directory.join("missing-link-target");
+            for (index, target) in [&destination, &missing_link_target]
+                .into_iter()
+                .enumerate()
+            {
+                let link = directory.join(format!("link-{index}"));
+                let moved_link = directory.join(format!("moved-link-{index}"));
+                symlink(target, &link)?;
+                let link_inode = fs::symlink_metadata(&link)?.ino();
+                let reply = client
+                    .call(
+                        "ssh_rename",
+                        json!({"host":"plain","source":link,"destination":moved_link,"overwrite":true}),
+                    )
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"renamed":true}));
+                ensure!(fs::symlink_metadata(&link).is_err());
+                let metadata = fs::symlink_metadata(&moved_link)?;
+                ensure!(metadata.file_type().is_symlink() && metadata.ino() == link_inode);
+                ensure!(fs::read_link(&moved_link)? == *target);
+            }
+            ensure!(fs::read(&destination)? == b"EXPLICIT_OVERWRITE_BYTES");
+            ensure!(fs::symlink_metadata(&missing_link_target).is_err());
+
+            let literal_names = [
+                ("  é雪 source  ", "  雪é destination  "),
+                ("'\";~$*\n$(printf EVALUATED)", "${HOME} {{rename}}\n'\";*"),
+            ];
+            for (from, to) in literal_names {
+                let source = directory.join(from);
+                let destination = directory.join(to);
+                fs::write(&source, b"LITERAL_RENAME_BYTES")?;
+                let inode = fs::symlink_metadata(&source)?.ino();
+                let reply = client
+                    .call(
+                        "ssh_rename",
+                        json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
+                    )
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"renamed":true}));
+                ensure!(fs::symlink_metadata(&source).is_err(), "{from:?}: source survived");
+                ensure!(fs::symlink_metadata(&destination)?.ino() == inode, "{to:?}: inode changed");
+                ensure!(fs::read(&destination)? == b"LITERAL_RENAME_BYTES");
+            }
+            let mut entries = fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort();
+            let mut expected = [
+                "destination", "old-destination-hardlink", "moved-tree",
+                "moved-link-0", "moved-link-1", "  雪é destination  ",
+                "${HOME} {{rename}}\n'\";*",
+            ]
+            .map(std::ffi::OsString::from);
+            expected.sort();
+            ensure!(entries == expected, "rename expanded a literal name or changed siblings");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "rename replaced the shared healthy master"
+            );
+            let reply = client
+                .call("ssh_read_file", json!({"host":"plain","path":retained}))
+                .await?;
+            ensure!(succeeded(&reply)?["content"] == "RENAME_SOURCE_BYTES");
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        ensure!(!log.text().contains("rename-private"), "rename audit disclosed private paths");
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_rename_no_overwrite_preserves_entries() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let requests = work.path().join("sftp-requests");
+    let server = Fixture::sftp_server()?;
+    let script = format!(
+        "exec {} -e -l VERBOSE 2>> {}",
+        server.display(),
+        requests.display()
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let directory = fixture.root.path().join("protected-private");
+        fs::create_dir(&directory)?;
+        let source = directory.join("source");
+        let existing = directory.join("existing");
+        let tree = directory.join("tree");
+        let live = directory.join("live");
+        let dangling = directory.join("dangling");
+        let absent = directory.join("absent");
+        let missing_target = directory.join("missing-target");
+        fs::write(&source, b"KEEP_SOURCE")?;
+        fs::write(&existing, b"KEEP_DESTINATION")?;
+        fs::create_dir(&tree)?;
+        fs::write(tree.join("child"), b"KEEP_CHILD")?;
+        symlink(&existing, &live)?;
+        symlink(&missing_target, &dangling)?;
+        let entries = [&source, &existing, &tree, &live, &dangling];
+        let inodes = entries
+            .iter()
+            .map(|path| fs::symlink_metadata(path).map(|metadata| metadata.ino()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf PROTECTED_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            // Existing files, directories, live/dangling links and absent names
+            // all require the same conservative pre-dispatch rejection.
+            for (source, destination) in [
+                (&source, &existing),
+                (&source, &tree),
+                (&source, &live),
+                (&source, &dangling),
+                (&source, &absent),
+                (&tree, &absent),
+                (&live, &absent),
+                (&dangling, &absent),
+            ] {
+                for explicit_false in [false, true] {
+                    let mut args =
+                        json!({"host":"plain","source":source,"destination":destination});
+                    if explicit_false {
+                        args["overwrite"] = json!(false);
+                    }
+                    let reply = client.call("ssh_rename", args).await?;
+                    failed(&reply, "unsupported")?;
+                    ensure!(
+                        reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false
+                    );
+                    for (path, inode) in entries.iter().zip(&inodes) {
+                        ensure!(
+                            fs::symlink_metadata(path)?.ino() == *inode,
+                            "{} changed",
+                            path.display()
+                        );
+                    }
+                    ensure!(fs::read(directory.join("source"))? == b"KEEP_SOURCE");
+                    ensure!(fs::read(&existing)? == b"KEEP_DESTINATION");
+                    ensure!(fs::read(tree.join("child"))? == b"KEEP_CHILD");
+                    ensure!(fs::read_link(&live)? == existing);
+                    ensure!(fs::read_link(&dangling)? == missing_target);
+                    ensure!(fs::symlink_metadata(&absent).is_err());
+                    ensure!(fs::symlink_metadata(&missing_target).is_err());
+                    ensure!(fs::read_dir(&directory)?.count() == 5);
+                }
+            }
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "unsupported rename discarded a healthy master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(
+            !log.text().contains("protected-private"),
+            "rename audit disclosed private paths"
+        );
+        let log = fs::read_to_string(&requests)?;
+        ensure!(
+            log.contains("session opened") && log.contains("session closed"),
+            "{log}"
+        );
+        for mutation in [
+            "rename old ",
+            "open \"",
+            "mkdir ",
+            "remove name ",
+            "rmdir name ",
+            "symlink old ",
+            "hardlink old ",
+            "setstat name ",
+            "fsetstat ",
+        ] {
+            ensure!(
+                !log.contains(mutation),
+                "unsupported rename dispatched {mutation:?}: {log}"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_rename_without_posix_extension_preserves_entries() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let requests = work.path().join("sftp-requests");
+    let server = Fixture::sftp_server()?;
+    // OpenSSH suppresses the advertised extension for a denied request.
+    let script = format!(
+        "exec {} -P posix-rename -e -l VERBOSE 2>> {}",
+        server.display(),
+        requests.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let directory = fixture.root.path().join("extension-private");
+        fs::create_dir(&directory)?;
+        let source = directory.join("source");
+        let existing = directory.join("existing");
+        let live = directory.join("live");
+        let dangling = directory.join("dangling");
+        let absent = directory.join("absent");
+        let missing_target = directory.join("missing-target");
+        fs::write(&source, b"KEEP_EXTENSION_SOURCE")?;
+        fs::write(&existing, b"KEEP_EXTENSION_DESTINATION")?;
+        symlink(&existing, &live)?;
+        symlink(&missing_target, &dangling)?;
+        let entries = [&source, &existing, &live, &dangling];
+        let inodes = entries
+            .iter()
+            .map(|path| fs::symlink_metadata(path).map(|metadata| metadata.ino()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf EXTENSION_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            for destination in [&existing, &live, &dangling, &absent] {
+                let reply = client
+                    .call(
+                        "ssh_rename",
+                        json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
+                    )
+                    .await?;
+                failed(&reply, "unsupported")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                for (path, inode) in entries.iter().zip(&inodes) {
+                    ensure!(fs::symlink_metadata(path)?.ino() == *inode, "{} changed", path.display());
+                }
+                ensure!(fs::read(&source)? == b"KEEP_EXTENSION_SOURCE");
+                ensure!(fs::read(&existing)? == b"KEEP_EXTENSION_DESTINATION");
+                ensure!(fs::read_link(&live)? == existing);
+                ensure!(fs::read_link(&dangling)? == missing_target);
+                ensure!(fs::symlink_metadata(&absent).is_err());
+                ensure!(fs::symlink_metadata(&missing_target).is_err());
+                ensure!(fs::read_dir(&directory)?.count() == 4);
+            }
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "missing extension discarded a healthy master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(!log.text().contains("extension-private"), "rename audit disclosed private paths");
+        let log = fs::read_to_string(&requests)?;
+        ensure!(log.contains("session opened") && log.contains("session closed"), "{log}");
+        for mutation in [
+            "rename old ", "open \"", "mkdir ", "remove name ", "rmdir name ",
+            "symlink old ", "hardlink old ", "setstat name ", "fsetstat ",
+        ] {
+            ensure!(!log.contains(mutation), "missing extension dispatched {mutation:?}: {log}");
+        }
+        // OpenSSH logs one refusal while filtering each VERSION advertisement.
+        // Any additional refusal would mean a rename reached request dispatch.
+        ensure!(
+            log.lines().filter(|line| line.contains("Refusing denylisted posix-rename request")).count() == 4,
+            "expected only the four advertisement refusals: {log}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_rename_missing_source_is_not_replayed() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let requests = work.path().join("sftp-requests");
+    let launches = work.path().join("sftp-launches");
+    let server = Fixture::sftp_server()?;
+    let script = format!(
+        "echo launch >> {}; exec {} -e -l VERBOSE 2>> {}",
+        launches.display(),
+        server.display(),
+        requests.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf MISSING_SOURCE_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("dispatch-private");
+            fs::create_dir(&directory)?;
+            let source = directory.join("missing-source");
+            let destination = directory.join("destination");
+            fs::write(&destination, b"KEEP_DISPATCH_DESTINATION")?;
+            let inode = fs::symlink_metadata(&destination)?.ino();
+            let reply = client
+                .call(
+                    "ssh_rename",
+                    json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
+                )
+                .await?;
+            failed(&reply, "not_found")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(fs::symlink_metadata(&source).is_err());
+            ensure!(fs::symlink_metadata(&destination)?.ino() == inode);
+            ensure!(fs::read(&destination)? == b"KEEP_DISPATCH_DESTINATION");
+            ensure!(fs::read_dir(&directory)?.count() == 1);
+            let audit = await_audit(&client.log, "finish", "not_found").await?;
+            ensure!(audit["remote_state_unknown"] == true && audit["identity_role"] == "ordinary");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "dispatched rename failure discarded the healthy sibling master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(!log.text().contains("dispatch-private"), "rename audit disclosed private paths");
+        ensure!(
+            fs::read_to_string(&launches)?.lines().count() == 1,
+            "missing-source failure replayed the SFTP session"
+        );
+        let log = fs::read_to_string(&requests)?;
+        ensure!(
+            log.lines().filter(|line| line.contains("posix-rename old ")).count() == 1,
+            "expected exactly one real POSIX rename request: {log}"
+        );
+        ensure!(
+            !log.lines().any(|line| line.contains("rename old ") && !line.contains("posix-rename old ")),
+            "missing source caused standard rename fallback: {log}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
 }
