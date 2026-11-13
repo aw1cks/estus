@@ -53,6 +53,10 @@ enum SchemaCommand {
     ImportRole(crate::role_import::ImportArgs),
     /// Detect role/runtime/content drift and validate reviewed inputs offline.
     VerifyRole(crate::role_import::VerifyArgs),
+    /// Review one fixed project/playbook with an explicit input contract, without executing it.
+    ImportPlaybook(crate::playbook_import::ImportArgs),
+    /// Detect reviewed project/runtime drift and validate inputs without execution.
+    VerifyPlaybook(crate::playbook_import::VerifyArgs),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -329,6 +333,24 @@ async fn perform(
             )
             .await;
         }
+        SchemaCommand::ImportPlaybook(playbook) => {
+            return crate::playbook_import::perform(
+                config,
+                crate::playbook_import::Command::Import(playbook),
+                args.timeout_secs,
+                shutdown,
+            )
+            .await;
+        }
+        SchemaCommand::VerifyPlaybook(playbook) => {
+            return crate::playbook_import::perform(
+                config,
+                crate::playbook_import::Command::Verify(playbook),
+                args.timeout_secs,
+                shutdown,
+            )
+            .await;
+        }
         command => command,
     };
     let duration = config
@@ -376,8 +398,11 @@ async fn perform(
                     input,
                 ))
             }
-            SchemaCommand::ImportRole(_) | SchemaCommand::VerifyRole(_) => {
-                unreachable!("role commands are dispatched before module preparation")
+            SchemaCommand::ImportRole(_)
+            | SchemaCommand::VerifyRole(_)
+            | SchemaCommand::ImportPlaybook(_)
+            | SchemaCommand::VerifyPlaybook(_) => {
+                unreachable!("workflow commands are dispatched before module preparation")
             }
         }
     })

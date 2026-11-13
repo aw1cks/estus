@@ -63,6 +63,12 @@ pub(crate) struct RoleImport {
     pub collection: Option<RuntimeCollection>,
 }
 
+pub(crate) struct PlaybookImport {
+    pub identity: RuntimeIdentity,
+    pub content_sha256: String,
+    pub document: serde_json::Value,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RuntimeProvenance {
@@ -310,6 +316,52 @@ impl RoleError {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaybookReport {
+    schema: u32,
+    status: ModuleStatus,
+    #[serde(default, deserialize_with = "present_field")]
+    identity: Option<RuntimeIdentity>,
+    #[serde(default, deserialize_with = "present_field")]
+    document: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present_field")]
+    content_sha256: Option<String>,
+    #[serde(default, deserialize_with = "present_field")]
+    error_code: Option<PlaybookError>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PlaybookError {
+    InvalidPlaybook,
+    InvalidPlaybookSource,
+    InvalidPlaybookOutput,
+    PlaybookOutputInsideSource,
+    PlaybookNotFound,
+    PlaybookContentLimit,
+    PlaybookContentFailed,
+    PlaybookContentSymlink,
+    #[serde(untagged)]
+    Health(HealthError),
+}
+
+impl PlaybookError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::InvalidPlaybook => "invalid_playbook",
+            Self::InvalidPlaybookSource => "invalid_playbook_source",
+            Self::InvalidPlaybookOutput => "invalid_playbook_output",
+            Self::PlaybookOutputInsideSource => "playbook_output_inside_source",
+            Self::PlaybookNotFound => "playbook_not_found",
+            Self::PlaybookContentLimit => "playbook_content_limit",
+            Self::PlaybookContentFailed => "playbook_content_failed",
+            Self::PlaybookContentSymlink => "playbook_content_symlink",
+            Self::Health(error) => error.code(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DocumentationRequest<'a> {
     Module(&'a str),
@@ -317,6 +369,11 @@ enum DocumentationRequest<'a> {
         role: &'a str,
         entry_point: &'a str,
         role_path: Option<&'a Path>,
+        output: Option<&'a Path>,
+    },
+    Playbook {
+        playbook: &'a str,
+        project_root: &'a Path,
         output: Option<&'a Path>,
     },
 }
@@ -892,6 +949,74 @@ pub(crate) async fn import_role(
     }
 }
 
+pub(crate) async fn import_playbook(
+    runtime: Option<PathBuf>,
+    playbook: &str,
+    project_root: &Path,
+    output: Option<&Path>,
+    ctx: RuntimeContext<'_>,
+) -> Result<PlaybookImport, &'static str> {
+    if !crate::playbook_import::valid_playbook(playbook) {
+        return Err("invalid_playbook");
+    }
+    if project_root
+        .to_str()
+        .is_none_or(|value| !valid_private_path(value))
+    {
+        return Err("invalid_playbook_source");
+    }
+    if output.is_some_and(|path| {
+        path.to_str().is_none_or(|value| !valid_private_path(value)) || path.file_name().is_none()
+    }) {
+        return Err("invalid_playbook_output");
+    }
+    let request = DocumentationRequest::Playbook {
+        playbook,
+        project_root,
+        output,
+    };
+    let (reply, source) = run_selected(runtime, &ctx, Some(request))
+        .await
+        .map_err(RuntimeFailure::code)?;
+    let stdout = observed_stdout(reply)?;
+    if stdout.len() > REPORT_LIMIT as usize {
+        return Err("runtime_protocol_error");
+    }
+    let value =
+        crate::strict_json::parse(stdout.as_bytes()).map_err(|_| "runtime_protocol_error")?;
+    match serde_json::from_value::<PlaybookReport>(value).map_err(|_| "runtime_protocol_error")? {
+        PlaybookReport {
+            schema: 2,
+            status: ModuleStatus::Passed,
+            identity: Some(identity),
+            document: Some(document),
+            content_sha256: Some(content_sha256),
+            error_code: None,
+        } if valid_identity(&identity) && lower_hash(&content_sha256) => {
+            if !matches_source(&identity, &source) {
+                return Err("runtime_identity_mismatch");
+            }
+            if document != serde_json::json!({"playbook":playbook}) {
+                return Err("runtime_protocol_error");
+            }
+            Ok(PlaybookImport {
+                identity,
+                content_sha256,
+                document,
+            })
+        }
+        PlaybookReport {
+            schema: 2,
+            status: ModuleStatus::Failed,
+            identity: None,
+            document: None,
+            content_sha256: None,
+            error_code: Some(error),
+        } => Err(error.code()),
+        _ => Err("runtime_protocol_error"),
+    }
+}
+
 async fn run_selected(
     runtime: Option<PathBuf>,
     ctx: &RuntimeContext<'_>,
@@ -961,6 +1086,15 @@ async fn run_loaded(
             } => {
                 input["role"] = serde_json::json!({
                     "name": role, "entry_point": entry_point, "path": role_path, "output": output,
+                });
+            }
+            DocumentationRequest::Playbook {
+                playbook,
+                project_root,
+                output,
+            } => {
+                input["playbook"] = serde_json::json!({
+                    "name": playbook, "project_root": project_root, "output": output,
                 });
             }
         }

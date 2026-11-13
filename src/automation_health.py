@@ -477,6 +477,59 @@ def role_content(role, entry_point, role_path, roots):
     return directory, expected_path, collection, content, selected_collection, trees
 
 
+def playbook_contains(directory, path):
+    """Compare existing directory identities, including case-insensitive aliases."""
+    return any(parent.samefile(directory) for parent in (path, *path.parents))
+
+
+def playbook_content(playbook, project_root, roots, output=None):
+    """Hash Core and the complete fixed project without loading YAML or project code."""
+    require(isinstance(playbook, str) and 0 < len(playbook.encode("utf-8")) <= 4096
+            and not playbook.startswith(("/", "-")) and "\\" not in playbook
+            and not any(token in playbook for token in ("\0", "$", "{{", "{%", "{#"))
+            and all(part not in ("", ".", "..") for part in playbook.split("/"))
+            and playbook.endswith((".yml", ".yaml")), "invalid_playbook")
+    try:
+        require(isinstance(project_root, str)
+                and 0 < len(project_root.encode("utf-8")) <= 4096
+                and "\0" not in project_root and Path(project_root).is_absolute(),
+                "invalid_playbook_source")
+        directory = Path(project_root).resolve(strict=True)
+        require(directory.is_dir()
+                and not any(token in str(directory) for token in (":", "$", "{{", "{%", "{#")),
+                "invalid_playbook_source")
+        temporary = absolute_path(os.environ.get("TMPDIR")).resolve(strict=True)
+        require(not playbook_contains(directory, temporary), "invalid_playbook_source")
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        raise HealthFailure("invalid_playbook_source") from None
+    import ansible
+    try:
+        core = Path(ansible.__file__).parent.resolve(strict=True)
+        trees = [("ansible", core), ("project", directory)]
+        if output is not None:
+            try:
+                require(isinstance(output, str) and 0 < len(output.encode("utf-8")) <= 4096
+                        and "\0" not in output and Path(output).is_absolute()
+                        and Path(output).name not in ("", ".", ".."),
+                        "invalid_playbook_output")
+                destination = Path(output).parent.resolve(strict=True) / Path(output).name
+                require(destination.parent.is_dir(), "invalid_playbook_output")
+            except (OSError, RuntimeError, UnicodeError, ValueError):
+                raise HealthFailure("invalid_playbook_output") from None
+            require(not any(playbook_contains(tree, destination.parent) for _, tree in trees),
+                    "playbook_output_inside_source")
+        entry = directory / playbook
+        require(entry.exists() and entry.is_file() and not entry.is_symlink(),
+                "playbook_not_found")
+        domain = b"ssh-mcp-playbook-content-v1\0" + playbook.encode("utf-8") + b"\0"
+        content = content_hash(trees, entry, domain, skip_generated=False)
+    except HealthFailure as error:
+        raise HealthFailure(error.code.replace("module_", "playbook_", 1)) from None
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        raise HealthFailure("playbook_content_failed") from None
+    return directory, content
+
+
 def role_documentation(role, entry_point, role_path, output, roots):
     """Acquire public metadata only; output must remain outside every hashed tree."""
     destination = None
@@ -568,9 +621,15 @@ def main():
         require(type(payload) is dict)
         module = payload.pop("module", None)
         role = payload.pop("role", None)
-        require(module is None or role is None)
+        playbook = payload.pop("playbook", None)
+        require(sum(value is not None for value in (module, role, playbook)) <= 1)
         with contextlib.redirect_stdout(sys.stderr):
-            identity, roots = check(payload, role_request=role is not None)
+            try:
+                identity, roots = check(payload, role_request=role is not None or playbook is not None)
+            except HealthFailure as error:
+                if playbook is not None and error.code == "invalid_role_source":
+                    raise HealthFailure("invalid_playbook_source") from None
+                raise
             if module is not None:
                 document, content, collection = import_document(module, roots)
             elif role is not None:
@@ -578,9 +637,17 @@ def main():
                 document, content, collection = role_documentation(
                     role["name"], role["entry_point"], role["path"], role["output"], roots
                 )
+            elif playbook is not None:
+                exact_keys(playbook, ("name", "project_root", "output"))
+                _, content = playbook_content(
+                    playbook["name"], playbook["project_root"], roots, playbook["output"]
+                )
+                document = {"playbook": playbook["name"]}
         report = {"schema": 2, "status": "passed", "identity": identity}
         if module is not None or role is not None:
             report.update(document=document, content_sha256=content, collection=collection)
+        elif playbook is not None:
+            report.update(document=document, content_sha256=content)
     except HealthFailure as error:
         report = {"schema": 2, "status": "failed", "error_code": error.code}
     except BaseException:

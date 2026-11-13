@@ -12,6 +12,7 @@ mod filedata;
 mod filemeta;
 mod files;
 mod module_schema;
+mod playbook_import;
 mod process;
 mod projection;
 mod reply;
