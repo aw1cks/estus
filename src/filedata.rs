@@ -362,44 +362,51 @@ impl WriteRequest {
             .map_err(|_| {
                 invalid("Request leaves insufficient response budget for a write result")
             })?;
-        let content = match self.encoding {
-            Encoding::Utf8 => {
-                if self.content.len() as u64 > max_file_bytes {
-                    return Err(invalid("content exceeds the configured file limit"));
-                }
-                Cow::Borrowed(self.content.as_bytes())
-            }
-            Encoding::Base64 => {
-                let input = self.content.as_bytes();
-                if !input.len().is_multiple_of(4) {
-                    return Err(invalid_base64());
-                }
-                let padding = if input.ends_with(b"==") {
-                    2
-                } else {
-                    usize::from(input.ends_with(b"="))
-                };
-                let decoded_len = (input.len() / 4)
-                    .checked_mul(3)
-                    .and_then(|len| len.checked_sub(padding))
-                    .ok_or_else(invalid_base64)?;
-                // Inspect encoded length/padding before allocating a decoded
-                // buffer. Exact sizing also handles caps not divisible by three.
-                if decoded_len as u64 > max_file_bytes {
-                    return Err(invalid("content exceeds the configured file limit"));
-                }
-                let mut decoded = vec![0; decoded_len];
-                STANDARD
-                    .decode_slice(input, &mut decoded)
-                    .map_err(|_| invalid_base64())?;
-                Cow::Owned(decoded)
-            }
-        };
+        let content = decode_content(&self.content, self.encoding, max_file_bytes)?;
         Ok(WriteSpec {
             path: &self.path,
             content,
             overwrite: self.overwrite,
         })
+    }
+}
+
+fn decode_content(
+    content: &str,
+    encoding: Encoding,
+    max_file_bytes: u64,
+) -> Result<Cow<'_, [u8]>, ToolError> {
+    match encoding {
+        Encoding::Utf8 => {
+            if content.len() as u64 > max_file_bytes {
+                return Err(invalid("content exceeds the configured file limit"));
+            }
+            Ok(Cow::Borrowed(content.as_bytes()))
+        }
+        Encoding::Base64 => {
+            let input = content.as_bytes();
+            if !input.len().is_multiple_of(4) {
+                return Err(invalid_base64());
+            }
+            let padding = if input.ends_with(b"==") {
+                2
+            } else {
+                usize::from(input.ends_with(b"="))
+            };
+            let decoded_len = (input.len() / 4)
+                .checked_mul(3)
+                .and_then(|len| len.checked_sub(padding))
+                .ok_or_else(invalid_base64)?;
+            // Inspect the raw length before allocating the exact decoded buffer.
+            if decoded_len as u64 > max_file_bytes {
+                return Err(invalid("content exceeds the configured file limit"));
+            }
+            let mut decoded = vec![0; decoded_len];
+            STANDARD
+                .decode_slice(input, &mut decoded)
+                .map_err(|_| invalid_base64())?;
+            Ok(Cow::Owned(decoded))
+        }
     }
 }
 
