@@ -202,219 +202,13 @@ approval. Source hashing rejects interior symlinks/nonregular files and is
 bounded; it is not transitive dependency attestation or protection against
 same-user changes after verification.
 Write snapshots outside the hashed source trees, including through symlinked
-parents. Canonical search paths containing `:`, `# ssh-mcp
-
-A stdio MCP server for operator-configured SSH authority. The Rust application owns
-MCP, SSH connections, limits and cleanup. Only MCP JSON is written to server stdout.
-
-## Base wheel
-
-Build a platform wheel and source archive with Python 3.14 and Rust 1.88 or newer:
-
-```sh
-uv build --python 3.14
-```
-
-Install the resulting wheel as an isolated tool, without activating a virtualenv:
-
-```sh
-uv tool install --python 3.14 ./dist/ssh_mcp-*.whl
-ssh-mcp --help
-ssh-mcp --config /absolute/path/to/operator.toml
-```
-
-Alternatively, run the local wheel with `uvx --from ./dist/ssh_mcp-*.whl ssh-mcp`.
-These instructions use locally built artifacts; no public-index release is implied.
-Current wheel acceptance targets CPython 3.14 on arm64 macOS/Linux; older-OS runtime
-compatibility and x86_64 execution are not implied by the artifact tags.
-
-The wheel contains a private Rust executable and a Python console launcher that
-immediately replaces itself with that executable. It requires Python for bootstrap
-and trusts that Python environment. It does not embed CPython or host MCP in Python.
-Host OpenSSH must be installed and available to the application. Existing operator
-SSH identity, host-key policy and configuration still apply.
-
-The base wheel does not depend on Ansible, install packages at startup, or enable
-additional tools. An explicitly selected existing runtime bundle remains usable
-through the native application's configuration.
-
-## Pinned Nix wheel build and acceptance
-
-Nix orchestrates the same PEP 517 build and metadata, with Rust 1.88 and the pinned
-Python/build-backend inputs. It does not copy the native Nix wrapper into the wheel.
-
-```sh
-nix build .#wheel
-uv tool install --python 3.14 ./result/ssh_mcp-*.whl
-uvx --from ./result/ssh_mcp-*.whl ssh-mcp
-uv run --no-project --with ./result/ssh_mcp-*.whl ssh-mcp
-```
-
-The producer declares macOS 11.0 for the arm64 Mach-O payload and manylinux glibc
-2.17 for Linux. These are build/audit baselines for our executable, not a promise
-that every optional dependency supports the same minimum OS. The wheel needs no
-Nix runtime; compatible Python and host OpenSSH remain external prerequisites.
-
-Run explicit installed acceptance as a non-root user with trusted temporary paths:
-
-```sh
-nix run .#wheel-acceptance
-```
-
-This downloads managed, outside-Nix Python 3.14 and optional dependencies into owned
-temporary caches. It exercises the actual uvx, tool-install and uv-run entry points,
-base/extra health, stdio/RPC and signals, owned controller-child cleanup and ordinary
-SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
-`SSH_MCP_TEST_PYTHON` may select an existing absolute outside-Nix Python 3.14.
-
-## Optional Ansible environment
-
-Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`
-to the artifact built for your platform; for the currently exercised macOS build:
-
-```sh
-wheel=./dist/ssh_mcp-0.1.0-cp314-cp314-macosx_11_0_arm64.whl
-uv tool install --python 3.14 "${wheel}[ansible]"
-ssh-mcp doctor --runtime ansible
-```
-
-The extra pins Ansible 14.4.0, Core 2.21.5 and Runner 2.4.3. The Ansible distribution
-supplies the baseline collections; Core and Runner alone are insufficient.
-pip/uv resolves their transitive dependencies at installation time. This is not a
-fully locked or immutable environment, and no installer runs during MCP requests.
-
-The launcher supplies its own interpreter, installed package and script locations
-to Rust without requiring virtualenv activation or searching PATH for Python.
-Explicit roots also support uv-run overlays without importing arbitrary ambient
-Python paths. Explicit `[automation].runtime` configuration wins over
-`SSH_MCP_ANSIBLE_RUNTIME`; either wins over the launcher's environment.
-A broken explicit selection fails without falling back elsewhere.
-Without an explicit health request or `[automation] required = true`, Rust does not
-consult the optional runtime. Installing the extra never enables tools.
-
-`doctor --runtime ansible` and required startup check actual public imports,
-versions and baseline collection manifests. Installer-managed identity reports
-`provenance.kind = "python_environment"`, not an immutable runtime ID. Nix bundle
-identity instead reports `provenance.kind = "nix_bundle"` with its pinned runtime ID.
-Neither check executes a workload or establishes target/module compatibility.
-
-The selected Python environment and its normal console-bootstrap hooks are trusted.
-Rust runs the fixed health helper in an isolated, bounded subprocess with private
-configuration/temp paths and no ambient Ansible configuration or Python search path.
-Process ownership and isolation are not a security sandbox.
-
-## Offline module contracts
-
-Import metadata from the explicitly selected, already-provisioned environment:
-
-```sh
-nix run .#automation-msrv -- schema import ansible.builtin.stat \
-  --output ./stat.schema.json --overlay ./stat.binding.json
-nix run .#automation-msrv -- schema verify ./stat.schema.json \
-  --input ./stat.request.json
-```
-
-The same `schema` commands work through the wheel's public `ssh-mcp` launcher.
-No target connection, module execution, dependency installation, online catalog or
-tool registration occurs. `--output` must be new: imports never overwrite a reviewed
-snapshot. `--timeout-secs` bounds the selected worker's lifetime.
-
-For example, `stat.binding.json` fixes the backend path and exposes only a boolean:
-
-```json
-{
-  "input_schema": {
-    "type": "object",
-    "properties": {"follow": {"type": "boolean"}},
-    "required": ["follow"],
-    "additionalProperties": false
-  },
-  "fixed_args": {"path": "/srv/frontend/config"},
-  "input_map": {"follow": "follow"}
-}
-```
-
-`stat.request.json` can contain `{"follow": false}`. Verification validates the
-fully assembled backend argument object without printing its values or executing
-it. A request cannot supply `path` or an undeclared argument. An optional
-`schema verify --overlay FILE` checks an alternate reviewed overlay without
-changing the snapshot.
-
-Snapshots record runtime provenance, imported recursive structure/aliases and
-reviewed schema/content digests. Verification reimports installed metadata and
-rejects drift; it never silently refreshes approval. Documentation defaults remain
-metadata, not supplied arguments. Unsupported types/constraints fail explicitly;
-this is not complete Ansible argument-spec emulation. Effects, target authority and
-execution policy are not inferred from documentation.
-
-Backend argument names belong to the module's closed argument object, not the
-transport envelope. Documented `argv`/`stdin` are data; public `host`, timeout and
-execution controls remain reserved. The documented `free_form` pseudo-option is
-not a named argument: imports mark it unbindable and retain a review note. Use
-typed named parameters such as `argv`; unspecified types elsewhere still fail.
-
-Content digests detect changes to the selected Ansible/module collection source
-trees; they are not a sandbox, an immutable-environment attestation, or protection
-against a same-user attacker replacing trusted files. Mutable content can still
-change after verification. Enabled module execution checks selected source content
-again before dispatch; this is drift detection, not immutable attestation.
-
-## Offline role contracts
-
-Role authoring uses the same selected runtime and closed binding validator:
-
-```sh
-ssh-mcp schema import-role site.operations.observe --entry-point main \
-  --output observe.role.json --overlay observe.binding.json
-ssh-mcp schema verify-role observe.role.json --input observe.request.json
-```
-
-Collection roles resolve only inside that runtime's selected collections. A
-standalone role requires its exact directory on both commands; its basename must
-match the role name:
-
-```sh
-ssh-mcp schema import-role observe --role-path /etc/ssh-mcp/roles/observe \
-  --output observe.role.json --schema observe.inputs.json
-ssh-mcp schema verify-role observe.role.json \
-  --role-path /etc/ssh-mcp/roles/observe
-```
-
-`--schema` supplies a reviewed closed JSON Schema when public role metadata
-exposes no argspec entry, for example:
-
-```json
-{
-  "type": "object",
-  "properties": {"instance": {"type": "string", "minLength": 1}},
-  "required": ["instance"],
-  "additionalProperties": false
-}
-```
-
-It cannot replace an available argspec. Role defaults are never inferred as
-inputs or injected. Recursive argspec `options`, aliases, choices, types and
-requiredness reuse module contract rules; unknown structural constraints fail
-explicitly. Use a reviewed `--overlay` with `input_schema`, `fixed_args` and
-`input_map` to narrow inputs or express supported JSON Schema conditionals;
-`verify-role --input` requires such an overlay. Neither command publishes a tool.
-
-Snapshots bind the role/entry point, runtime/collection identity, whole selected
-role or collection plus Core content, explicit schema and overlay. They omit
-private source paths, refuse overwrite and detect drift without refreshing
-approval. Source hashing rejects interior symlinks/nonregular files and is
-bounded; it is not transitive dependency attestation or protection against
-same-user changes after verification.
-Write snapshots outside the hashed source trees, including through symlinked
- or Jinja delimiters are
+parents. Canonical search paths containing `:`, `$` or Jinja delimiters are
 rejected because Ansible would reinterpret them rather than select literal content.
 
 Role tasks and dependencies do not execute during import/verification. Upstream
 role dependencies can run before the dependent role's argspec validation:
 Rust prevalidation remains the approval boundary, not upstream execution order.
-Fixed ordinary role bindings use `execution.kind = "ansible_role"` with a reviewed
-snapshot and fixed source. Inputs are validated before roles or dependencies run;
-summary-only output or declared `mcp_result` projections use the existing owner.
+Import/verification does not enable execution; fixed role bindings are described below.
 
 ## Ordinary Ansible modules
 
@@ -478,6 +272,64 @@ metadata/transient files can contain secrets; supported duplicate output/event
 capture is suppressed and invocation files are removed after ownership ends.
 Crash recovery does not promise secure erasure. Privilege escalation and retained
 raw events remain outside this implementation.
+
+## Fixed ordinary Ansible roles
+
+[`examples/app_config.toml`](examples/app_config.toml) and
+[`examples/roles/app_config`](examples/roles/app_config) converge one ordinary
+application JSON file. The role validates its contract, writes trusted JSON
+without evaluating caller strings, reads the actual bytes/checksum, asserts its
+postcondition and publishes a typed receipt. It does not install software,
+restart a service or escalate privilege.
+
+Deploy the reviewed role independently, provision the configured private
+workspace and import its snapshot before enabling the binding:
+
+```sh
+ssh-mcp schema import-role app_config \
+  --role-path /etc/ssh-mcp/roles/app_config \
+  --output /etc/ssh-mcp/app_config.schema.json
+ssh-mcp --config examples/app_config.toml
+```
+
+Use the wheel's installed `ansible` extra or the selected Nix automation package.
+A reviewed `--overlay` may also bind the snapshot to the exact configured
+`input_schema`, `fixed_args` and `input_map`; when stored, it must match startup.
+Standalone execution fixes `role_path`; collection execution omits it and resolves
+only within the selected runtime. The reviewed snapshot fixes role and entry
+point. No caller can select role/path/entry, extra-vars, tags or connection controls.
+
+Roles use the same `{"host":"server","inputs":{...}}` envelope, target/profile
+authorization, timeout/admission, child owner and cancellation path as modules.
+Rust validates and canonicalizes the assembled inputs before starting any role
+or dependency. Source content is checked again before Runner dispatch; no
+per-request documentation introspection or approval refresh occurs.
+
+Existing roles can return `ansible_summary` without a custom result protocol.
+For domain data, a role may `set_fact: mcp_result: ...`; `ansible_projection`
+selects only declared members beneath that fact, with the same recursive schema
+and aggregate bounds as module projections. Collection runs after ordinary role
+handlers. Missing/invalid results produce an independent output error without
+erasing verified execution, change or failure evidence; `no_log` remains censored.
+
+Summaries include authoritative failed/skipped outcomes and nonzero
+`tasks.rescued`/`tasks.ignored`; rescued or ignored failures do not become invisible.
+Observed prior changes survive a later failure or incomplete run. Execution is
+bounded to 128 root results/256 starts; loop items are not retained as raw events.
+
+Role tasks, dependencies, handlers and templates are trusted operator code, not a
+sandbox. Selected-tree hashes do not attest external dependency trees or prevent
+same-user replacement after verification. No detached async tasks are generated;
+reviewed roles must not use them. Visible async metadata is rejected, including
+loop results, but public `no_log` events can hide it. Completion attests reconciled
+Runner workflow evidence, not remote quiescence, rollback or process confinement.
+
+```sh
+nix run .#role-acceptance-msrv
+```
+
+This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
+the same private-directory/non-root prerequisites as native acceptance.
 
 ## Typed module result fields
 

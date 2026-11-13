@@ -1394,3 +1394,419 @@ async fn agent_only(a: &Acceptance) -> Result<()> {
     ensure!(!socket.exists(), "owned agent socket survived cleanup");
     Ok(())
 }
+
+fn role_receipt_result() -> Value {
+    projection_result(
+        json!({"instance":["mcp_result","instance"],"path":["mcp_result","path"],
+            "checksum":["mcp_result","checksum"],"verified":["mcp_result","verified"]}),
+        json!({"type":"object","properties":{
+            "instance":{"type":"string","maxLength":512},
+            "path":{"type":"string","maxLength":4096},
+            "checksum":{"type":"string","minLength":64,"maxLength":64},
+            "verified":{"type":"boolean","const":true}},
+            "required":["instance","path","checksum","verified"],"additionalProperties":false}),
+        4096,
+        32,
+        4,
+    )
+}
+
+fn write_role(parent: &Path, name: &str, tasks: &str) -> Result<PathBuf> {
+    let role = parent.join(name);
+    fs::create_dir_all(role.join("tasks"))?;
+    fs::create_dir_all(role.join("meta"))?;
+    fs::write(role.join("tasks/main.yml"), tasks)?;
+    fs::write(
+        role.join("meta/argument_specs.yml"),
+        "---\nargument_specs:\n  main:\n    short_description: Fixed acceptance role\n    options:\n      marker:\n        type: path\n        required: true\n",
+    )?;
+    Ok(role)
+}
+
+async fn import_reviewed_role(a: &Acceptance, role: &Path, overlay: &Value) -> Result<PathBuf> {
+    let name = role
+        .file_name()
+        .context("role name")?
+        .to_str()
+        .context("UTF-8 role name")?;
+    let snapshot = a
+        .fixture
+        .root
+        .path()
+        .join(format!("role-{name}-reviewed.json"));
+    let overlay_path = snapshot.with_extension("overlay.json");
+    fs::write(&overlay_path, serde_json::to_vec(overlay)?)?;
+    let mut command = support::server_command(&a.fixture.config)?;
+    command
+        .args(["schema", "import-role", name])
+        .arg("--role-path")
+        .arg(role)
+        .arg("--output")
+        .arg(&snapshot)
+        .arg("--overlay")
+        .arg(&overlay_path);
+    let output = support::run(&mut command).await?;
+    ensure!(
+        output.status.success(),
+        "real role import failed for {name}: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        report["binding_validated"] == true,
+        "role overlay was not reviewed: {report}"
+    );
+    Ok(snapshot)
+}
+
+async fn configure_roles(a: &Acceptance) -> Result<PathBuf> {
+    let parent = a.fixture.root.path().join("reviewed-roles");
+    fs::create_dir(&parent)?;
+    // Ansible must receive the verified canonical source, not reinterpret this
+    // legitimate installation-root alias as a search-path list or $HOME.
+    let aliased_parent = a.fixture.root.path().join("roles:$HOME");
+    std::os::unix::fs::symlink(&parent, &aliased_parent)?;
+    let example: toml::Value = toml::from_str(include_str!("../examples/app_config.toml"))?;
+    let mut overlay = json!({});
+    for key in ["input_schema", "fixed_args", "input_map"] {
+        overlay[key] = serde_json::to_value(&example["tools"]["app_config"][key])?;
+    }
+    overlay["fixed_args"]["config_root"] = json!(text(&a.fixture.root.path().join("application"))?);
+    let app = parent.join("app_config");
+    for (file, source) in [
+        (
+            "meta/argument_specs.yml",
+            include_str!("../examples/roles/app_config/meta/argument_specs.yml"),
+        ),
+        (
+            "tasks/main.yml",
+            include_str!("../examples/roles/app_config/tasks/main.yml"),
+        ),
+        (
+            "templates/config.json.j2",
+            include_str!("../examples/roles/app_config/templates/config.json.j2"),
+        ),
+    ] {
+        let path = app.join(file);
+        fs::create_dir_all(path.parent().context("role file parent")?)?;
+        fs::write(path, source)?;
+    }
+    let dependency_marker = a.fixture.root.path().join("dependency-ran");
+    let dependency = write_role(
+        &parent,
+        "dependency",
+        &format!(
+            "---\n- name: Observe actual dependency execution\n  ansible.builtin.copy:\n    dest: {}\n    content: dependency-ran\n    mode: '0600'\n",
+            serde_json::to_string(&text(&dependency_marker)?)?
+        ),
+    )?;
+    // The dependency has no inputs; it must not fail for an unrelated missing marker.
+    fs::remove_file(dependency.join("meta/argument_specs.yml"))?;
+    fs::write(
+        app.join("meta/main.yml"),
+        "---\ndependencies:\n  - role: dependency\n",
+    )?;
+    let mutation = "- name: Make an owned observable mutation\n  ansible.builtin.copy:\n    dest: \"{{ marker }}\"\n    content: owned-change\n    mode: '0600'\n";
+    let mut definitions = vec![(
+        "app_config".to_owned(),
+        app,
+        overlay,
+        role_receipt_result(),
+        false,
+    )];
+    for (name, tasks, projected, no_log) in [
+        (
+            "partial",
+            format!(
+                "---\n{mutation}- name: Fail after mutation\n  ansible.builtin.fail:\n    msg: expected failure\n"
+            ),
+            false,
+            false,
+        ),
+        (
+            "unavailable",
+            format!(
+                "---\n{mutation}- name: Fail before domain collection\n  ansible.builtin.fail:\n    msg: expected failure\n"
+            ),
+            true,
+            false,
+        ),
+        (
+            "recovered",
+            format!(
+                "---\n{mutation}- name: Recover an ordinary failed block\n  block:\n    - ansible.builtin.fail:\n        msg: rescued failure\n  rescue:\n    - ansible.builtin.debug:\n        msg: recovered\n- name: Ignore one ordinary failure\n  ansible.builtin.fail:\n    msg: ignored failure\n  ignore_errors: true\n- name: Skip an ordinary task\n  ansible.builtin.debug:\n    msg: skipped\n  when: false\n"
+            ),
+            false,
+            false,
+        ),
+        ("summary", format!("---\n{mutation}"), false, false),
+        (
+            "invalid",
+            "---\n- ansible.builtin.set_fact:\n    mcp_result:\n      verified: wrong-type\n"
+                .to_owned(),
+            true,
+            false,
+        ),
+        (
+            "missing",
+            "---\n- ansible.builtin.debug:\n    msg: no-domain-result\n".to_owned(),
+            true,
+            false,
+        ),
+        (
+            "censored",
+            format!(
+                "---\n- ansible.builtin.set_fact:\n    mcp_result:\n      verified: {PRIVATE}\n"
+            ),
+            true,
+            true,
+        ),
+        ("drift", format!("---\n{mutation}"), false, false),
+        (
+            "handler",
+            format!("---\n{mutation}  notify: role_receipt\n"),
+            true,
+            false,
+        ),
+        (
+            "repeat_handler",
+            format!(
+                "---\n{}  notify: role_receipt\n- ansible.builtin.meta: flush_handlers\n{mutation}  notify: role_receipt\n",
+                mutation.replace("content: owned-change", "content: first-phase")
+            ),
+            true,
+            false,
+        ),
+    ] {
+        let role = write_role(&parent, name, &tasks)?;
+        if name == "handler" {
+            fs::create_dir(role.join("handlers"))?;
+            fs::write(
+                role.join("handlers/main.yml"),
+                "---\n- name: role_receipt\n  ansible.builtin.set_fact:\n    mcp_result:\n      verified: true\n",
+            )?;
+        }
+        if name == "repeat_handler" {
+            fs::create_dir(role.join("handlers"))?;
+            fs::write(
+                role.join("handlers/main.yml"),
+                "---\n- name: Read handler postcondition\n  listen: role_receipt\n  ansible.builtin.slurp:\n    src: \"{{ marker }}\"\n  register: handler_bytes\n- name: Publish handler postcondition\n  listen: role_receipt\n  ansible.builtin.set_fact:\n    mcp_result:\n      verified: \"{{ (handler_bytes.content | b64decode) == 'owned-change' }}\"\n",
+            )?;
+        }
+        let overlay = json!({"input_schema":{"type":"object","properties":{},
+            "additionalProperties":false},"fixed_args":{"marker":text(&a.fixture.root.path().join(format!("{name}-marker")))?},
+            "input_map":{}});
+        let result = if projected {
+            projection_result(
+                json!({"verified":["mcp_result","verified"]}),
+                json!({"type":"object","properties":{"verified":{"type":"boolean"}},
+                    "required":["verified"],"additionalProperties":false}),
+                1024,
+                16,
+                4,
+            )
+        } else {
+            json!({"kind":"ansible_summary"})
+        };
+        definitions.push((name.to_owned(), role, overlay, result, no_log));
+    }
+    let mut tools = toml::map::Map::new();
+    let mut enabled = Vec::new();
+    for (name, role, overlay, result, no_log) in definitions {
+        let snapshot = import_reviewed_role(a, &role, &overlay).await?;
+        let mut binding = json!({"description":"Reviewed real SSH role acceptance","revision":"1",
+            "authority":"automation","effects":["persistent_write","read"],"targets":["plain"],
+            "execution":{"kind":"ansible_role","snapshot":text(&snapshot)?,
+                "role_path":text(&if name == "summary" { aliased_parent.join(&name) } else { role })?,"no_log":no_log},
+            "result":result,"limits":{"timeout_secs":12}});
+        for key in ["input_schema", "fixed_args", "input_map"] {
+            binding[key] = overlay[key].clone();
+        }
+        enabled.push(name.clone());
+        tools.insert(name, table(binding)?);
+    }
+    let mut config: toml::Table = toml::from_str(&fs::read_to_string(&a.fixture.config)?)?;
+    config.insert("enabled_tools".into(), table(json!(enabled))?);
+    config.insert("tools".into(), toml::Value::Table(tools));
+    fs::write(&a.fixture.config, toml::to_string(&config)?)?;
+    Ok(parent)
+}
+
+fn verified_role(envelope: &Value, status: &str, changed: Value) -> Result<()> {
+    ensure!(
+        envelope["data"]["status"] == status
+            && envelope["data"]["complete"] == true
+            && envelope["data"]["changed"] == changed
+            && envelope["data"]["owned_group_cleanup"] == "signalled_and_reaped",
+        "role lost authoritative task evidence: {envelope}"
+    );
+    ensure!(
+        envelope["data"]["tasks"]["ok"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "multi-task role evidence is missing: {envelope}"
+    );
+    Ok(())
+}
+
+/// cargo test --test automation_exec real_runner_role_acceptance -- --ignored --exact --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]
+async fn real_runner_role_acceptance() -> Result<()> {
+    let acceptance = Acceptance::start().await?;
+    let result: Result<()> = async {
+        let roles = configure_roles(&acceptance).await?;
+        role_scenarios(&acceptance, &roles).await
+    }
+    .await;
+    let cleanup = acceptance.fixture.stop().await;
+    result?;
+    cleanup
+}
+
+async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
+    let mut server = a.server().await?;
+    let result: Result<()> = async {
+        let literal = format!("{{{{ lookup('pipe', 'touch {}') }}}}", text(&a.forbidden)?);
+        let banner = format!("雪😀 \"quoted\"\n{literal} {{{{ 6 * 7 }}}}");
+        let inputs = json!({"instance":literal,"config":{"banner":banner,"enabled":true,"port":8080}});
+        // Invalid schema and immutable executor/mapping controls are rejected at
+        // the real MCP boundary, before even the declared dependency can run.
+        for (index, arguments) in [
+            json!({"host":"plain","inputs":[]}),
+            json!({"host":"plain","inputs":{"instance":false,"config":{"banner":"x","enabled":false}}}),
+            json!({"host":"plain","inputs":{"instance":"x","config":{"banner":42,"enabled":false}}}),
+            json!({"host":"plain","inputs":{"config":{"banner":"x","enabled":false}}}),
+            json!({"host":"plain","inputs":{"instance":"x","config":{"banner":"x","enabled":true}}}),
+            json!({"host":"plain","inputs":{"instance":"x","config":{"banner":"x","enabled":false,"port":1}}}),
+            json!({"host":"plain","inputs":{"instance":"x","config":{"banner":"x","enabled":false},"config_root":"/tmp/not-approved"}}),
+            json!({"host":"plain","inputs":inputs,"role_path":"/tmp/not-approved"}),
+            json!({"host":"plain","inputs":inputs,"entry_point":"other"}),
+            json!({"host":"plain","inputs":inputs,"fixed_args":{"config_root":"/tmp/not-approved"}}),
+            json!({"host":"plain","inputs":inputs,"input_map":{"instance":"config_root"}}),
+            json!({"host":"plain","inputs":inputs,"no_log":false}),
+            json!({"host":"plain","inputs":inputs,"ansible_connection":"local"}),
+            json!({"host":"plain","inputs":inputs,"extra_vars":{"ansible_connection":"local"}}),
+        ].into_iter().enumerate() {
+            let reply = server.request(200 + index as u64, "tools/call",
+                json!({"name":"app_config","arguments":arguments})).await?;
+            ensure!(reply["error"]["code"] == -32602
+                || (reply["result"]["structuredContent"]["error"]["code"] == "invalid_argument"
+                    && reply["result"]["structuredContent"]["error"]["remote_state_unknown"] == false),
+                "invalid role inputs reached execution: {reply}");
+            ensure!(!a.fixture.root.path().join("dependency-ran").exists(),
+                "Rust-invalid inputs ran an Ansible dependency");
+            ensure!(!a.fixture.root.path().join("application").exists());
+            a.clean()?;
+        }
+        for (id, changed) in [(220, true), (221, false)] {
+            // Receipt paths and literal labels are explicitly public domain data;
+            // do not apply the module-only private-path assertion to this reply.
+            let response = server.request(id, "tools/call", json!({"name":"app_config",
+                "arguments":{"host":"plain","inputs":inputs}})).await?;
+            ensure!(response["error"].is_null(), "MCP role call rejected: {response}");
+            let envelope = &response["result"]["structuredContent"];
+            verified_role(envelope, "successful", json!(changed))?;
+            ensure!(envelope["error"].is_null() && envelope["data"]["runner_rc"] == 0);
+            let projection = &envelope["data"]["projection"];
+            ensure!(projection["status"] == "complete"
+                && projection["value"]["instance"] == inputs["instance"]
+                && projection["value"]["verified"] == true);
+            let path = a.fixture.root.path().join("application/config.json");
+            ensure!(projection["value"]["path"] == text(&path)?);
+            let checksum = projection["value"]["checksum"].as_str().context("receipt checksum")?;
+            ensure!(checksum.len() == 64 && checksum.bytes().all(|b| b.is_ascii_hexdigit()));
+            // Independent SSH reads, not the role's slurp or projected claim.
+            let observed = a.fixture.direct("plain",
+                &format!("cat {}", support::quote(&text(&path)?))).await?;
+            ensure!(observed.status.success(), "independent target read failed");
+            let bytes: Value = serde_json::from_slice(&observed.stdout)?;
+            ensure!(bytes == json!({"instance":inputs["instance"],"config":inputs["config"]}),
+                "root or nested caller data was interpreted rather than written literally");
+            use sha2::{Digest, Sha256};
+            ensure!(checksum == hex::encode(Sha256::digest(&observed.stdout)),
+                "receipt did not describe actual independently observed target bytes");
+            ensure!(fs::read_to_string(a.fixture.root.path().join("dependency-ran"))? == "dependency-ran");
+            a.clean()?;
+        }
+        // The disabled branch genuinely accepts an omitted optional port.
+        // Observe the target bytes rather than treating argspec metadata as data.
+        let disabled_inputs = json!({"instance":"disabled-instance",
+            "config":{"banner":"Disabled 雪","enabled":false}});
+        let disabled = server.request(222,"tools/call",json!({"name":"app_config",
+            "arguments":{"host":"plain","inputs":disabled_inputs}})).await?;
+        ensure!(disabled["error"].is_null());
+        let disabled = &disabled["result"]["structuredContent"];
+        verified_role(disabled, "successful", json!(true))?;
+        ensure!(disabled["error"].is_null());
+        let disabled_path = text(&a.fixture.root.path().join("application/config.json"))?;
+        let observed = a.fixture.direct("plain",
+            &format!("cat {}", support::quote(&disabled_path))).await?;
+        ensure!(observed.status.success());
+        ensure!(serde_json::from_slice::<Value>(&observed.stdout)?
+            == json!({"instance":disabled_inputs["instance"],"config":disabled_inputs["config"]}));
+        a.clean()?;
+        let partial = a.call(&mut server, 230, "partial", json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&partial, "failed", json!(true))?;
+        ensure!(!partial["error"].is_null() && partial["error"]["remote_state_unknown"] == false
+            && partial["data"]["runner_rc"] == 2 && partial["data"]["tasks"]["failed"] == 1);
+        ensure!(fs::read(a.fixture.root.path().join("partial-marker"))? == b"owned-change");
+        let unavailable = a.call(&mut server, 237, "unavailable",
+            json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&unavailable, "failed", json!(true))?;
+        ensure!(!unavailable["error"].is_null()
+            && unavailable["data"]["projection"] == json!({"status":"unavailable"}),
+            "unreached collector fabricated a domain value: {unavailable}");
+        ensure!(fs::read(a.fixture.root.path().join("unavailable-marker"))? == b"owned-change");
+        let recovered = a.call(&mut server, 231, "recovered", json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&recovered, "successful", json!(true))?;
+        ensure!(recovered["error"].is_null() && recovered["data"]["tasks"]["failed"] == 0
+            && recovered["data"]["tasks"]["rescued"] == 1
+            && recovered["data"]["tasks"]["ignored"] == 1
+            && recovered["data"]["tasks"]["skipped"] == 1);
+        ensure!(fs::read(a.fixture.root.path().join("recovered-marker"))? == b"owned-change");
+        let summary = a.call(&mut server, 232, "summary", json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&summary, "successful", json!(true))?;
+        ensure!(summary["error"].is_null() && summary["data"].get("projection").is_none());
+        ensure!(fs::read(a.fixture.root.path().join("summary-marker"))? == b"owned-change");
+        let handled = a.call(&mut server, 238, "handler", json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&handled, "successful", json!(true))?;
+        ensure!(handled["error"].is_null()
+            && handled["data"]["projection"]["status"] == "complete"
+            && handled["data"]["projection"]["value"]["verified"] == true,
+            "handler receipt was collected before handlers finished: {handled}");
+        ensure!(fs::read(a.fixture.root.path().join("handler-marker"))? == b"owned-change");
+        let repeated = a.call(&mut server, 239, "repeat_handler", json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&repeated, "successful", json!(true))?;
+        ensure!(repeated["error"].is_null()
+            && repeated["data"]["projection"]["status"] == "complete"
+            && repeated["data"]["projection"]["value"]["verified"] == true,
+            "repeated handler execution lost final postcondition: {repeated}");
+        ensure!(fs::read(a.fixture.root.path().join("repeat_handler-marker"))? == b"owned-change");
+        for (id, name, status) in [(233,"invalid","invalid"),(234,"missing","unavailable")] {
+            let reply = a.call(&mut server,id,name,json!({"host":"plain","inputs":{}})).await?;
+            verified_role(&reply, "successful", json!(false))?;
+            ensure!(reply["error"]["code"] == "invalid_result"
+                && reply["error"]["remote_state_unknown"] == false
+                && reply["data"]["projection"] == json!({"status":status}),
+                "domain failure erased verified role execution: {reply}");
+        }
+        let censored = a.call(&mut server,235,"censored",json!({"host":"plain","inputs":{}})).await?;
+        verified_role(&censored, "successful", Value::Null)?;
+        ensure!(censored["error"].is_null() && censored["data"]["censored"] == true
+            && censored["data"]["projection"] == json!({"status":"censored"}));
+        fs::write(roles.join("drift/tasks/main.yml"), "---\n- ansible.builtin.fail:\n    msg: tampered\n")?;
+        let response = server.request(236,"tools/call",json!({"name":"drift",
+            "arguments":{"host":"plain","inputs":{}}})).await?;
+        ensure!(response["error"].is_null());
+        let drift = &response["result"]["structuredContent"];
+        ensure!(!drift["error"].is_null() && drift["error"]["remote_state_unknown"] == false,
+            "post-startup source drift was not refused before dispatch: {response}");
+        ensure!(!a.fixture.root.path().join("drift-marker").exists());
+        a.clean()?;
+        Ok(())
+    }.await;
+    let cleanup = a.stop(server).await;
+    result?;
+    cleanup
+}

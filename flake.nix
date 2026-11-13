@@ -40,7 +40,9 @@
               path != "${toString ./.}/fuzz"
               && (craneLib.filterCargoSources path type
                 || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
-                  && pkgs.lib.hasSuffix ".py" path));
+                  && pkgs.lib.hasSuffix ".py" path)
+                || path == "${toString ./.}/examples/app_config.toml"
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/app_config/" path);
           };
           strictDeps = true;
           doCheck = true;
@@ -114,6 +116,7 @@
             '') [
               { name = "runner-acceptance"; scenario = "real_runner_fixture_acceptance"; }
               { name = "projection-acceptance"; scenario = "real_runner_projection_acceptance"; }
+              { name = "role-acceptance"; scenario = "real_runner_role_acceptance"; }
             ]}
           '';
       in
@@ -173,6 +176,14 @@
         apps.projection-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/projection-acceptance";
+        };
+        apps.role-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/role-acceptance";
+        };
+        apps.role-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/role-acceptance";
         };
         apps.wheel-acceptance = {
           type = "app";
