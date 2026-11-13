@@ -23,6 +23,7 @@ use crate::support::{find_program, quote, run};
 const STARTUP: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(10);
 const ACCOUNTS: [&str; 5] = ["mcp", "mcp-sudo", "mcp-admin", "mcp-password", "mcp-tty"];
+const AUTOMATION_ACCOUNTS: [&str; 2] = ["mcp-automation", "mcp-automation-password"];
 
 #[derive(Clone, Copy)]
 pub enum ImageKind {
@@ -271,6 +272,8 @@ pub struct Fixture {
     containers: Vec<ContainerAsync<GenericImage>>,
     names: Vec<String>,
     pub ssh: PathBuf,
+    pub authority_ssh_config: PathBuf,
+    kind: ImageKind,
     pub ssh_config: PathBuf,
     pub config: PathBuf,
 }
@@ -294,6 +297,8 @@ impl Fixture {
         let mut fixture = Self {
             ssh: find_program("ssh")?,
             ssh_config: root.path().join("ssh_config"),
+            authority_ssh_config: root.path().join("authority_ssh_config"),
+            kind,
             config: root.path().join("server.toml"),
             root,
             docker,
@@ -314,6 +319,14 @@ impl Fixture {
         Ok(fixture)
     }
 
+    fn accounts(&self) -> impl Iterator<Item = &'static str> + '_ {
+        ACCOUNTS.into_iter().chain(
+            AUTOMATION_ACCOUNTS
+                .into_iter()
+                .filter(move |_| matches!(self.kind, ImageKind::Automation)),
+        )
+    }
+
     async fn initialize(&mut self, extra: &str) -> Result<()> {
         let mut command = self.docker.command();
         command
@@ -327,8 +340,8 @@ impl Fixture {
         );
         self.docker.inspect_image(&self.artifact).await?;
         let keygen = find_program("ssh-keygen")?;
-        for name in ACCOUNTS
-            .into_iter()
+        for name in self
+            .accounts()
             .chain(["host-primary", "host-nosftp", "unknown"])
         {
             let path = self.root.path().join(name);
@@ -385,6 +398,10 @@ impl Fixture {
             "}
             .to_owned();
             config.push_str(extra);
+            if matches!(self.kind, ImageKind::Automation) {
+                // Intentional rejected-key matrices must not trigger sshd's source penalty gate.
+                config.push_str("PerSourcePenalties no\n");
+            }
             if index == 0 {
                 config.push_str("Subsystem sftp internal-sftp\n");
             }
@@ -408,7 +425,7 @@ impl Fixture {
                     CopyTargetOptions::new("/fixture/sshd_config").with_mode(0o644),
                     config.into_bytes(),
                 );
-            for account in ACCOUNTS {
+            for account in self.accounts() {
                 request = request.with_copy_to(
                     CopyTargetOptions::new(format!("/fixture/authorized_keys/{account}"))
                         .with_mode(0o644),
@@ -556,6 +573,42 @@ impl Fixture {
                 known = ssh_path(&self.root.path().join("known_hosts"))?,
             },
         )?;
+        if matches!(self.kind, ImageKind::Automation) {
+            let (host, port) = &endpoints[0];
+            let mut authority = String::new();
+            for (alias, account) in [
+                ("authority-ops-private", "mcp-automation"),
+                ("authority-password-private", "mcp-automation-password"),
+            ] {
+                authority.push_str(&formatdoc! {"
+                    Host {alias}
+                        HostName {host}
+                        Port {port}
+                        User {account}
+                        IdentityFile {identity}
+                ", identity = ssh_path(&self.root.path().join(account))?});
+            }
+            authority.push_str(&formatdoc! {"
+                Host *
+                    IdentityAgent none
+                    IdentitiesOnly yes
+                    BatchMode yes
+                    StrictHostKeyChecking yes
+                    UserKnownHostsFile {known}
+                    GlobalKnownHostsFile /dev/null
+                    PasswordAuthentication no
+                    KbdInteractiveAuthentication no
+                    ControlMaster no
+                    ControlPath none
+                    ConnectTimeout 5
+                    ConnectionAttempts 1
+            ", known = ssh_path(&self.root.path().join("known_hosts"))?});
+            fs::write(&self.authority_ssh_config, authority)?;
+            fs::set_permissions(
+                &self.authority_ssh_config,
+                fs::Permissions::from_mode(0o600),
+            )?;
+        }
         let mut config = format!(
             "[ssh]\nconfig_file = {}\n",
             serde_json::to_string(&self.ssh_config.to_string_lossy())?
@@ -592,6 +645,82 @@ impl Fixture {
             .arg(&self.ssh_config)
             .args(["-T", alias, command]))
         .await
+    }
+    #[allow(
+        dead_code,
+        reason = "used by the separately compiled automation acceptance crate"
+    )]
+    pub async fn authority_direct(&self, alias: &str, command: &str) -> Result<Output> {
+        ensure!(
+            matches!(self.kind, ImageKind::Automation),
+            "automation fixture required"
+        );
+        run(Command::new(&self.ssh)
+            .arg("-F")
+            .arg(&self.authority_ssh_config)
+            .args(["-T", alias, command]))
+        .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "used by the separately compiled automation acceptance crate"
+    )]
+    /// Ordinary and narrow native keys must not authenticate either broader account.
+    pub async fn reject_native_authority_keys(&self) -> Result<()> {
+        for alias in ["plain", "same", "split-admin"] {
+            for account in AUTOMATION_ACCOUNTS {
+                let output = run(Command::new(&self.ssh)
+                    .arg("-F")
+                    .arg(&self.ssh_config)
+                    .args(["-T", "-l", account, alias, "/usr/bin/id -u"]))
+                .await?;
+                ensure!(
+                    output.status.code() == Some(255)
+                        && String::from_utf8_lossy(&output.stderr)
+                            .contains("Permission denied (publickey)"),
+                    "native credential rejection failed: {alias}/{account}; status={:?}, stdout={}, stderr={}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "used by the separately compiled automation acceptance crate"
+    )]
+    /// Prime an actual global timestamp privately, with no product password input.
+    pub async fn prime_automation_password_cache(&self) -> Result<()> {
+        let primary = self.containers.first().context("fixture primary")?;
+        self.docker
+            .checked(
+                &[
+                    "exec",
+                    "--user",
+                    "1006:1006",
+                    primary.id(),
+                    "/bin/sh",
+                    "-c",
+                    "printf '%s\\n' fixture-cache-only | /usr/bin/sudo -S -p '' -v",
+                ],
+                STARTUP,
+            )
+            .await?;
+        let cached = self
+            .authority_direct(
+                "authority-password-private",
+                "/usr/bin/sudo -H -n -u root -- /usr/bin/id -u",
+            )
+            .await?;
+        ensure!(
+            cached.status.success() && cached.stdout == b"0\n",
+            "fixture prerequisite: real cached password sudo ticket unavailable"
+        );
+        Ok(())
     }
 
     pub async fn direct_tty(&self, alias: &str, command: &str) -> Result<Output> {
@@ -831,8 +960,8 @@ impl Fixture {
                 .context("fixture credential directory UTF-8")?
                 .to_owned(),
         ];
-        for key in ACCOUNTS
-            .into_iter()
+        for key in self
+            .accounts()
             .chain(["host-primary", "host-nosftp", "unknown"])
         {
             let private = fs::read_to_string(self.root.path().join(key))?;

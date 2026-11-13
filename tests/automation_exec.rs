@@ -1312,6 +1312,594 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
     cleanup
 }
 
+/// Real broader authority, using only the public import and MCP protocol.
+/// cargo test --test automation_exec real_runner_authority_acceptance -- --ignored --exact --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires rebuilt automation Nix image, explicit Docker backend and pinned Runner runtime"]
+async fn real_runner_authority_acceptance() -> Result<()> {
+    let runtime = fs::canonicalize(
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller bundle")?,
+    )?;
+    let private = tempfile::Builder::new()
+        .prefix("authority-private-")
+        .tempdir()?;
+    fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))?;
+    let workspace = private.path().join("workspaces");
+    fs::create_dir(&workspace)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
+    let result = authority_scenarios(&fixture, private.path(), &runtime, &workspace).await;
+    // Await removal even after a failed protocol/effect assertion.
+    let cleanup = fixture.stop().await;
+    result?;
+    cleanup
+}
+
+const AUTHORITY_MARKER: &str = "/root/estus-a08-authority";
+const AUTHORITY_PASSWORD_MARKER: &str = "/root/estus-a08-password";
+const AUTHORITY_CANCEL_MARKER: &str = "/root/estus-a08-cancel";
+const AUTHORITY_DONE_MARKER: &str = "/root/estus-a08-done";
+const AUTHORITY_OVERRIDE: &str = "A08_REJECTED_PRIVATE_OVERRIDE_7c39";
+const AUTHORITY_UNKNOWN: &str = "A08_UNDECLARED_PRIVATE_TARGET_29c1";
+
+async fn authority_python(
+    fixture: &isolated::Fixture,
+    script: &str,
+) -> Result<std::process::Output> {
+    fixture
+        .authority_direct(
+            "authority-ops-private",
+            &format!(
+                "/usr/bin/sudo -H -n -k -u root -- /usr/bin/python3 -I -c {}",
+                support::quote(script),
+            ),
+        )
+        .await
+}
+
+async fn authority_absent(fixture: &isolated::Fixture, paths: &[&str]) -> Result<()> {
+    let script = format!(
+        "import os,sys;sys.exit(any(os.path.exists(p) for p in {:?}))",
+        paths
+    );
+    let output = authority_python(fixture, &script).await?;
+    ensure!(
+        output.status.success(),
+        "rejected request had a privileged effect"
+    );
+    Ok(())
+}
+
+async fn authority_readback(fixture: &isolated::Fixture, path: &str, bytes: &str) -> Result<()> {
+    let script = format!(
+        "import json,os; p={path:?}; print(json.dumps({{'uid':os.stat(p).st_uid,'bytes':open(p).read()}}))"
+    );
+    let output = authority_python(fixture, &script).await?;
+    ensure!(
+        output.status.success(),
+        "independent privileged SSH readback failed"
+    );
+    let observed: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        observed == json!({"uid":0,"bytes":bytes}),
+        "privileged module did not write the actual root-owned bytes: {observed}"
+    );
+    Ok(())
+}
+
+async fn authority_wait_marker(fixture: &isolated::Fixture, path: &str) -> Result<()> {
+    timeout(WAIT, async {
+        loop {
+            let observed = fixture
+                .primary_exec(&format!(
+                    "if test -f {}; then printf ready; fi",
+                    support::quote(path),
+                ))
+                .await?;
+            if observed == b"ready" {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("finite privileged effect marker deadline")?
+}
+
+async fn authority_scenarios(
+    fixture: &isolated::Fixture,
+    private: &Path,
+    runtime: &Path,
+    workspace: &Path,
+) -> Result<()> {
+    let mut secrets = fixture.credential_markers()?;
+    secrets.extend([
+        text(private)?,
+        text(runtime)?,
+        text(&fixture.authority_ssh_config)?,
+        "authority-ops-private".into(),
+        "authority-password-private".into(),
+        "mcp-automation".into(),
+        PRIVATE.into(),
+        AUTHORITY_OVERRIDE.into(),
+        AUTHORITY_UNKNOWN.into(),
+        "fixture-cache-only".into(),
+    ]);
+    let assert_private = |output: &str| -> Result<()> {
+        for secret in &secrets {
+            ensure!(
+                !output.contains(secret),
+                "authority discovery/summary/audit disclosed private data"
+            );
+        }
+        Ok(())
+    };
+    // Neither ordinary replacement file can route to a privileged identity.
+    for file in [
+        &fixture.ssh_config,
+        &fixture
+            .ssh_config
+            .parent()
+            .context("fixture root")?
+            .join("included.conf"),
+    ] {
+        let ordinary = fs::read_to_string(file)?;
+        ensure!(
+            !ordinary.contains("mcp-automation") && !ordinary.contains("authority-"),
+            "ordinary replacement SSH config contains privileged identity"
+        );
+    }
+    fixture.reject_native_authority_keys().await?;
+    let mut fingerprints = BTreeSet::new();
+    for (account, alias, uid, authority) in [
+        ("mcp", "plain", b"1000\n".as_slice(), false),
+        ("mcp-sudo", "same", b"1001\n".as_slice(), false),
+        ("mcp-admin", "split-admin", b"1002\n".as_slice(), false),
+        (
+            "mcp-automation",
+            "authority-ops-private",
+            b"1005\n".as_slice(),
+            true,
+        ),
+        (
+            "mcp-automation-password",
+            "authority-password-private",
+            b"1006\n".as_slice(),
+            true,
+        ),
+    ] {
+        ensure!(
+            fingerprints.insert(fixture.key_fingerprint(account).await?),
+            "fixture reused an authority credential"
+        );
+        let login = if authority {
+            fixture.authority_direct(alias, "/usr/bin/id -u").await?
+        } else {
+            fixture.direct(alias, "/usr/bin/id -u").await?
+        };
+        ensure!(
+            login.status.success() && login.stdout == uid,
+            "wrong fixture login identity"
+        );
+    }
+    let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+    config.insert(
+        "automation".into(),
+        table(json!({"runtime":text(runtime)?}))?,
+    );
+    fs::write(&fixture.config, toml::to_string(&config)?)?;
+    let empty =
+        json!({"type":"object","properties":{},"additionalProperties":false,"maxProperties":0});
+    let partial_marker = "/root/estus-authority-partial";
+    let partial = format!(
+        "import os; p={partial_marker:?}; f=open(p,'w'); f.write({PRIVATE:?}); f.close(); os.chmod(p,0o600); raise SystemExit(7)"
+    );
+    let write = format!(
+        "import os; p={AUTHORITY_MARKER:?}; f=open(p,'w'); f.write({PRIVATE:?}); f.close(); os.chmod(p,0o600)"
+    );
+    let password_write = format!("open({AUTHORITY_PASSWORD_MARKER:?},'w').write({PRIVATE:?})");
+    let cancel = format!(
+        "import signal,time;signal.signal(signal.SIGHUP,signal.SIG_IGN);open({AUTHORITY_CANCEL_MARKER:?},'w').write({PRIVATE:?});time.sleep(8);open({AUTHORITY_DONE_MARKER:?},'w').write('finite-done')"
+    );
+    let mut tools = toml::map::Map::new();
+    for (name, authority, host, argv) in [
+        (
+            "authority_write",
+            "automation:ops",
+            "plain",
+            json!(["/usr/bin/python3", "-I", "-c", write]),
+        ),
+        (
+            "authority_partial",
+            "automation:ops",
+            "plain",
+            json!(["/usr/bin/python3", "-I", "-c", partial]),
+        ),
+        (
+            "ordinary_write",
+            "automation",
+            "plain",
+            json!(["/usr/bin/python3", "-I", "-c", write]),
+        ),
+        (
+            "ordinary_read",
+            "automation",
+            "plain",
+            json!([
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                format!("open({AUTHORITY_MARKER:?}).read()")
+            ]),
+        ),
+        (
+            "narrow_python",
+            "automation",
+            "same",
+            json!([
+                "/usr/bin/sudo",
+                "-H",
+                "-n",
+                "-k",
+                "-u",
+                "root",
+                "--",
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                write
+            ]),
+        ),
+        (
+            "password_write",
+            "automation:password",
+            "plain",
+            json!(["/usr/bin/python3", "-I", "-c", password_write]),
+        ),
+        (
+            "authority_cancel",
+            "automation:ops",
+            "plain",
+            json!(["/usr/bin/python3", "-I", "-c", cancel]),
+        ),
+        (
+            "hidden_authority",
+            "automation:ops",
+            "plain",
+            json!(["/usr/bin/python3", "-I", "-c", write]),
+        ),
+    ] {
+        let overlay = json!({"input_schema":empty,"fixed_args":{"argv":argv,"expand_argument_vars":false},"input_map":{}});
+        let snapshot = private.join(format!("{name}-reviewed.json"));
+        import_reviewed(
+            &fixture.config,
+            &snapshot,
+            "ansible.builtin.command",
+            &overlay,
+        )
+        .await?;
+        let mut binding = json!({
+            "description":"Reviewed fixed authority acceptance","revision":"a08-1",
+            "authority":authority,"targets":[host],"effects":["persistent_write"],
+            "execution":{"kind":"ansible_module","snapshot":text(&snapshot)?,"no_log":false},
+            "result":{"kind":"ansible_summary"},"limits":{"timeout_secs":12}
+        });
+        for key in ["input_schema", "fixed_args", "input_map"] {
+            binding[key] = overlay[key].clone();
+        }
+        tools.insert(name.into(), table(binding)?);
+    }
+    config.insert("tools".into(), toml::Value::Table(tools));
+    config.insert(
+        "enabled_tools".into(),
+        table(json!([
+            "authority_write",
+            "authority_partial",
+            "ordinary_write",
+            "ordinary_read",
+            "narrow_python",
+            "password_write",
+            "authority_cancel"
+        ]))?,
+    );
+    config.insert("automation".into(), table(json!({
+        "required":true,"runtime":text(runtime)?,"workspace_root":text(workspace)?,
+        "ssh_executable":text(&fixture.ssh)?,
+        "targets":{"plain":{"destination":"plain","python":"/usr/bin/python3"},
+            "same":{"destination":"same","python":"/usr/bin/python3"}},
+        "authorities":{
+            "ops":{"ssh_config_file":text(&fixture.authority_ssh_config)?,
+                "become":{"method":"sudo","user":"root"},
+                "targets":{"plain":{"destination":"authority-ops-private","python":"/usr/bin/python3"}}},
+            "password":{"ssh_config_file":text(&fixture.authority_ssh_config)?,
+                "become":{"method":"sudo","user":"root"},
+                "targets":{"plain":{"destination":"authority-password-private","python":"/usr/bin/python3"}}}
+        }
+    }))?);
+    config.insert(
+        "limits".into(),
+        table(json!({
+            "operation_timeout_secs":12,"max_timeout_secs":15,"max_output_bytes":8192
+        }))?,
+    );
+    fs::write(&fixture.config, toml::to_string(&config)?)?;
+    let mut hidden_config = config.clone();
+    hidden_config.insert("profile".into(), "read-only-files".into());
+    let hidden_path = private.join("profile-hidden.toml");
+    fs::write(&hidden_path, toml::to_string(&hidden_config)?)?;
+    let mut hidden_server = WireServer::start(&hidden_path)?;
+    let hidden_calls: Result<()> = async {
+        hidden_server.initialize().await?;
+        let listed = hidden_server.request(2, "tools/list", json!({})).await?;
+        assert_private(&listed.to_string())?;
+        ensure!(
+            !listed["result"]["tools"]
+                .as_array()
+                .context("profile tool discovery")?
+                .iter()
+                .any(|tool| tool["name"] == "authority_write"),
+            "profile-hidden named authority was published"
+        );
+        let denied = hidden_server
+            .request(
+                3,
+                "tools/call",
+                json!({
+                    "name":"authority_write","arguments":{"host":"plain","inputs":{}}
+                }),
+            )
+            .await?;
+        assert_private(&denied.to_string())?;
+        ensure!(
+            !denied["error"].is_null(),
+            "startup profile did not hide named authority route"
+        );
+        authority_absent(fixture, &[AUTHORITY_MARKER]).await?;
+        Ok(())
+    }
+    .await;
+    let hidden_stopped = hidden_server.stop(None).await;
+    let hidden_log = hidden_stopped?;
+    let ops_key = fixture.key_fingerprint("mcp-automation").await?;
+    let password_key = fixture.key_fingerprint("mcp-automation-password").await?;
+    assert_private(&hidden_log.text())?;
+    hidden_calls?;
+    let mut server = WireServer::start(&fixture.config)?;
+    let mut rejected_requests = Vec::new();
+    let calls: Result<()> = async {
+        server.initialize().await?;
+        let listed = server.request(2,"tools/list",json!({})).await?;
+        assert_private(&listed.to_string())?;
+        let published = listed["result"]["tools"].as_array().context("authority tool discovery")?;
+        let tool = published.iter().find(|tool| tool["name"] == "authority_write")
+            .context("named authority tool not published")?;
+        ensure!(tool["_meta"]["authority"] == "automation:ops", "logical authority metadata missing");
+        ensure!(!published.iter().any(|tool| tool["name"] == "hidden_authority"),
+            "disabled authority binding was published");
+        authority_absent(fixture, &[AUTHORITY_MARKER, AUTHORITY_PASSWORD_MARKER, AUTHORITY_CANCEL_MARKER]).await?;
+        // All transport/privilege knobs are operator-only, at either MCP nesting level.
+        let mut id = 100;
+        for key in [
+            "authority","become","become_user","become_method","become_password","password",
+            "credential","ssh_key","ssh_config_file","ssh_auth_sock","ssh_executable",
+            "transport","runtime","user","ansible_become","argv",
+        ] {
+            for nested in [false, true] {
+                let mut arguments = json!({"host":"plain","inputs":{}});
+                if nested {
+                    arguments["inputs"][key] = json!(AUTHORITY_OVERRIDE);
+                } else {
+                    arguments[key] = json!(AUTHORITY_OVERRIDE);
+                }
+                let response = server.request(id,"tools/call",json!({
+                    "name":"authority_write","arguments":arguments
+                })).await?;
+                assert_private(&response.to_string())?;
+                ensure!(response["error"]["code"] == -32602,
+                    "unknown caller privilege/transport input was not rejected at the shape boundary: {response}");
+                rejected_requests.push(id);
+                id += 1;
+            }
+        }
+        for host in ["same", AUTHORITY_UNKNOWN] {
+            let denied = server.request(id,"tools/call",json!({
+                "name":"authority_write","arguments":{"host":host,"inputs":{}}
+            })).await?;
+            assert_private(&denied.to_string())?;
+            ensure!(!denied["result"]["structuredContent"]["error"].is_null()
+                && denied["result"]["structuredContent"]["error"]["remote_state_unknown"] == false,
+                "undeclared named-authority target was dispatched: {denied}");
+            id += 1;
+        }
+        for name in ["hidden_authority","ops"] {
+            let denied = server.request(id,"tools/call",json!({
+                "name":name,"arguments":{"host":"plain","inputs":{}}
+            })).await?;
+            assert_private(&denied.to_string())?;
+            ensure!(!denied["error"].is_null(), "hidden authority callable");
+            id += 1;
+        }
+        authority_absent(fixture, &[AUTHORITY_MARKER]).await?;
+        for (name, host) in [("ordinary_write","plain"),("narrow_python","same")] {
+            let denied = server.request(id,"tools/call",json!({
+                "name":name,"arguments":{"host":host,"inputs":{}}
+            })).await?;
+            assert_private(&denied.to_string())?;
+            ensure!(denied["error"].is_null()
+                && !denied["result"]["structuredContent"]["error"].is_null()
+                && denied["result"]["structuredContent"]["data"]["status"] == "failed",
+                "ordinary/narrow module obtained root Python: {denied}");
+            id += 1;
+        }
+        authority_absent(fixture, &[AUTHORITY_MARKER]).await?;
+        // Prove actual root mutation, not merely sudo id or echoed module output.
+        let before_ops = fixture.authentication_keys().await?.into_iter()
+            .filter(|(account, key)| account == "mcp-automation" && key == &ops_key).count();
+        let written = server.request(300,"tools/call",json!({
+            "name":"authority_write","arguments":{"host":"plain","inputs":{}}
+        })).await?;
+        assert_private(&written.to_string())?;
+        let envelope = &written["result"]["structuredContent"];
+        ensure!(written["error"].is_null() && envelope["error"].is_null()
+            && envelope["data"]["status"] == "successful" && envelope["data"]["complete"] == true,
+            "named authority did not execute real module: {written}");
+        let after_ops = fixture.authentication_keys().await?.into_iter()
+            .filter(|(account, key)| account == "mcp-automation" && key == &ops_key).count();
+        ensure!(after_ops > before_ops, "product write did not use independent automation credentials");
+        authority_readback(fixture, AUTHORITY_MARKER, PRIVATE).await?;
+        for alias in ["plain","same","split-admin"] {
+            for script in [
+                format!("open({AUTHORITY_MARKER:?}).read()"),
+                format!("open({AUTHORITY_MARKER:?},'w').write('forbidden')"),
+            ] {
+                let denied = fixture.direct(alias, &format!(
+                    "/usr/bin/python3 -I -c {}", support::quote(&script),
+                )).await?;
+                ensure!(!denied.status.success(), "native identity read/mutated root marker");
+            }
+            let denied = fixture.direct(alias,
+                "/usr/bin/sudo -H -n -k -u root -- /usr/bin/python3 -I -c 'import os; print(os.getuid())'").await?;
+            ensure!(!denied.status.success(), "native narrow policy elevated module Python");
+        }
+        let native_denied = server.request(301,"tools/call",json!({
+            "name":"ssh_sudo","arguments":{"host":"same","user":"root",
+                "argv":["/usr/bin/python3","-I","-c","print('forbidden')"]}
+        })).await?;
+        ensure!(!native_denied["result"]["structuredContent"]["error"].is_null(),
+            "native sudo policy widened to Python: {native_denied}");
+        let ordinary_read = server.request(302,"tools/call",json!({
+            "name":"ordinary_read","arguments":{"host":"plain","inputs":{}}
+        })).await?;
+        assert_private(&ordinary_read.to_string())?;
+        ensure!(ordinary_read["result"]["structuredContent"]["data"]["status"] == "failed",
+            "ordinary module read root marker");
+        authority_readback(fixture, AUTHORITY_MARKER, PRIVATE).await?;
+        let partial = server.request(303, "tools/call", json!({
+            "name":"authority_partial","arguments":{"host":"plain","inputs":{}}
+        })).await?;
+        ensure!(partial["error"].is_null(), "partial-failure binding was rejected: {partial}");
+        let partial = &partial["result"]["structuredContent"];
+        ensure!(partial["data"]["status"] == "failed" && partial["data"]["complete"] == true
+            && partial["data"]["changed"] == true && partial["error"]["remote_state_unknown"] == false,
+            "failed module erased observed privileged mutation or completion: {partial}");
+        authority_readback(fixture, partial_marker, PRIVATE).await?;
+        // Refuse both a cold password account and an independently proven live timestamp.
+        for (request_id, cached) in [(400, false), (401, true)] {
+            if cached {
+                fixture.prime_automation_password_cache().await?;
+            }
+            let before_password = fixture.authentication_keys().await?.into_iter()
+                .filter(|(account, key)| account == "mcp-automation-password" && key == &password_key).count();
+            let refused = timeout(WAIT, server.request(request_id,"tools/call",json!({
+                "name":"password_write","arguments":{"host":"plain","inputs":{}}
+            }))).await.context("cached/password sudo refusal must be finite")??;
+            assert_private(&refused.to_string())?;
+            ensure!(refused["error"].is_null()
+                && !refused["result"]["structuredContent"]["error"].is_null()
+                && refused["result"]["structuredContent"]["data"]["status"] == "failed",
+                "product reused a sudo timestamp or requested a password: {refused}");
+            let after_password = fixture.authentication_keys().await?.into_iter()
+                .filter(|(account, key)| account == "mcp-automation-password" && key == &password_key).count();
+            ensure!(after_password > before_password,
+                "product password refusal did not use selected authority credentials");
+            authority_absent(fixture, &[AUTHORITY_PASSWORD_MARKER]).await?;
+        }
+        server.send(json!({"jsonrpc":"2.0","id":500,"method":"tools/call","params":{
+            "name":"authority_cancel","arguments":{"host":"plain","inputs":{}}
+        }})).await?;
+        authority_wait_marker(fixture, AUTHORITY_CANCEL_MARKER).await?;
+        authority_readback(fixture, AUTHORITY_CANCEL_MARKER, PRIVATE).await?;
+        server.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{
+            "requestId":500,"reason":"finite authority effect cancellation"
+        }})).await?;
+        timeout(WAIT, async {
+            loop {
+                if let Some(finish) = server.log.records()?.into_iter()
+                    .find(|record| record["event"] == "finish" && record["request_id"] == 500)
+                {
+                    ensure!(finish["identity_role"] == "automation"
+                        && finish["error_code"] == "cancelled"
+                        && finish["remote_state_unknown"] == true
+                        && finish["complete"] == false
+                        && finish["owned_group_cleanup"] == "signalled_and_reaped",
+                        "cancellation claimed privileged rollback or lost uncertainty: {finish}");
+                    return Ok::<_, anyhow::Error>(());
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        }).await.context("named authority cancellation audit deadline")??;
+        // Cancellation is not rollback: the independently observed root effect persists.
+        authority_readback(fixture, AUTHORITY_CANCEL_MARKER, PRIVATE).await?;
+        authority_wait_marker(fixture, AUTHORITY_DONE_MARKER).await?;
+        authority_readback(fixture, AUTHORITY_DONE_MARKER, "finite-done").await?;
+        Ok(())
+    }.await;
+    let stopped = server.stop(None).await;
+    let log = stopped?;
+    assert_private(&log.text())?;
+    calls?;
+    for id in rejected_requests {
+        ensure!(
+            log.records()?
+                .iter()
+                .any(|record| record["request_id"] == id
+                    && record["identity_role"] == "automation"
+                    && record.get("sudo_mode").is_none()),
+            "rejected authority override lost its authority audit identity"
+        );
+    }
+    for id in [300, 303, 400, 401, 500] {
+        let records = log.records()?;
+        for event in ["start", "finish"] {
+            ensure!(
+                records.iter().any(|record| record["request_id"] == id
+                    && record["event"] == event
+                    && record["identity_role"] == "automation"),
+                "named execution lacks correlated automation audit: {id}/{event}"
+            );
+        }
+    }
+    // Explicit named runtimes/disabled agents must not consult ordinary ambient references.
+    let mut dedicated_config = config.clone();
+    dedicated_config["enabled_tools"] = toml::Value::try_from(vec!["authority_write"])?;
+    dedicated_config["automation"]["runtime"] = "/missing/inherited-runtime-private".into();
+    dedicated_config["automation"]["authorities"]["ops"]
+        .as_table_mut()
+        .context("ops")?
+        .insert("runtime".into(), text(runtime)?.into());
+    let dedicated_path = fixture.config.with_file_name("authority-dedicated.toml");
+    fs::write(&dedicated_path, toml::to_string(&dedicated_config)?)?;
+    let mut command = support::server_command(&dedicated_path)?;
+    command.env("SSH_AUTH_SOCK", "relative-ambient-agent-private");
+    let mut dedicated = WireServer::start_command(command)?;
+    let dedicated_calls: Result<()> = async {
+        dedicated.initialize().await?;
+        let response = dedicated
+            .request(
+                600,
+                "tools/call",
+                json!({"name":"authority_write","arguments":{"host":"plain","inputs":{}}}),
+            )
+            .await?;
+        ensure!(
+            response["result"]["structuredContent"]["data"]["status"] == "successful",
+            "explicit authority consulted unavailable ordinary runtime/ambient agent: {response}"
+        );
+        authority_readback(fixture, AUTHORITY_MARKER, PRIVATE).await?;
+        Ok(())
+    }
+    .await;
+    let dedicated_log = dedicated.stop(None).await?;
+    assert_private(&dedicated_log.text())?;
+    dedicated_calls?;
+    ensure!(
+        fs::read_dir(workspace)?.next().is_none(),
+        "authority workspace survived shutdown"
+    );
+    Ok(())
+}
+
 async fn agent_only(a: &Acceptance) -> Result<()> {
     let original_config = fs::read(&a.fixture.config)?;
     let original_ssh = fs::read_to_string(&a.fixture.ssh_config)?;

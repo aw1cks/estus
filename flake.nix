@@ -111,6 +111,7 @@
               --prefix PATH : ${pkgs.lib.makeBinPath (
                 [ pkgs.openssh pkgs.coreutils pkgs.bash ]
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
+                ++ pkgs.lib.optionals (entry.isolated or false) [ pkgs.docker-client ]
               )} \
               --add-flags '--ignored --exact ${entry.scenario} --nocapture'
             '') [
@@ -118,6 +119,7 @@
               { name = "projection-acceptance"; scenario = "real_runner_projection_acceptance"; }
               { name = "role-acceptance"; scenario = "real_runner_role_acceptance"; }
               { name = "playbook-acceptance"; scenario = "real_runner_playbook_acceptance"; }
+              { name = "authority-acceptance"; scenario = "real_runner_authority_acceptance"; isolated = true; }
             ]}
           '';
       in
@@ -193,6 +195,14 @@
         apps.playbook-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/playbook-acceptance";
+        };
+        apps.authority-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/authority-acceptance";
+        };
+        apps.authority-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/authority-acceptance";
         };
         apps.wheel-acceptance = {
           type = "app";

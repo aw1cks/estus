@@ -460,6 +460,12 @@ this is policy/credential selection, not a security sandbox. Privileged mutation
 and partial failures remain observable; cancellation never implies rollback or
 remote quiescence.
 
+`nix run .#authority-acceptance-msrv` exercises distinct keys/accounts and real
+root-owned effects in the explicit automation fixture. It requires
+`ESTUS_TEST_FIXTURE` pointing to the built `ssh-automation-fixture-image` artifact
+and an explicit Docker-compatible backend (`DOCKER_HOST`); no host sudoers or
+accounts are changed.
+
 ## Typed module result fields
 
 [`examples/observe_platform.toml`](examples/observe_platform.toml) selects platform

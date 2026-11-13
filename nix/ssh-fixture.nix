@@ -28,9 +28,19 @@ let
     { name = "mcp-admin"; id = 1002; }
     { name = "mcp-password"; id = 1003; }
     { name = "mcp-tty"; id = 1004; }
+  ] ++ lib.optionals automation [
+    { name = "mcp-automation"; id = 1005; }
+    { name = "mcp-automation-password"; id = 1006; }
   ];
   accountLines = f: lib.concatMapStringsSep "\n" f accounts;
-  sudoers = pkgs.writeText "ssh-fixture-sudoers" ''
+  # Fixture-only secret, used privately to prime a real sudo timestamp. It is
+  # never placed in product configuration or MCP arguments.
+  automationPasswordHash = pkgs.runCommand "fixture-automation-password-hash" {
+    nativeBuildInputs = [ pkgs.mkpasswd ];
+  } ''
+    mkpasswd --method=sha-512 --salt=estusfixture fixture-cache-only > "$out"
+  '';
+  sudoers = pkgs.writeText "ssh-fixture-sudoers" (''
     Defaults env_reset
     Defaults secure_path="${commandPath}"
     Defaults timestamp_timeout=0
@@ -40,7 +50,11 @@ let
     mcp-admin ALL=(root) NOPASSWD: /usr/bin/id, /usr/bin/printf
     mcp-password ALL=(root) PASSWD: /usr/bin/id
     mcp-tty ALL=(root) NOPASSWD: /usr/bin/id
-  '';
+  '' + lib.optionalString automation ''
+    Defaults:mcp-automation-password timestamp_timeout=5,timestamp_type=global
+    mcp-automation ALL=(root) NOPASSWD: ALL
+    mcp-automation-password ALL=(root) PASSWD: ALL
+  '');
   rootfs = pkgs.runCommand "ssh-fixture-rootfs" { } ''
     mkdir -p "$out"/{bin,usr/bin,etc/ssh,etc/pam.d,home,root,run/sshd,run/sudo,var/empty,var/db/sudo,var/log,fixture/authorized_keys,tmp}
     ln -s ${pkgs.dash}/bin/dash "$out/bin/sh"
@@ -65,6 +79,15 @@ let
     sshd:!:1:0:99999:7:::
     ${accountLines (a: "${a.name}:x:1:0:99999:7:::")}
     EOF
+    ${lib.optionalString automation ''
+      sed -i "s|^mcp-automation-password:x:|mcp-automation-password:$(cat ${automationPasswordHash}):|" "$out/etc/shadow"
+    ''}
+    ${lib.optionalString automation ''
+      # The locked pam_unix module invokes this NixOS wrapper path.
+      # Copy only into the private image: never chmod a host/store inode.
+      mkdir -p "$out/run/wrappers/bin"
+      cp ${pkgs.pam}/bin/unix_chkpwd "$out/run/wrappers/bin/unix_chkpwd"
+    ''}
     cat > "$out/etc/nsswitch.conf" <<'EOF'
     passwd: files
     group: files
@@ -82,8 +105,8 @@ let
     Plugin sudoers_policy ${sudo}/libexec/sudo/sudoers.so
     Plugin sudoers_io ${sudo}/libexec/sudo/sudoers.so
     EOF
-    # Deliberate sudo-only PAM policy: no host/NixOS PAM includes. Login hashes
-    # are unusable; NOPASSWD still passes account/session checks without a secret.
+    # Deliberate sudo-only PAM policy: no host/NixOS PAM includes. Only the
+    # automation password account has a usable fixture-only login hash.
     cat > "$out/etc/pam.d/sudo" <<'EOF'
     auth required ${pkgs.pam}/lib/security/pam_unix.so
     account required ${pkgs.pam}/lib/security/pam_permit.so
@@ -112,6 +135,7 @@ let
       chmod 0600 etc/shadow
       chmod 0440 etc/sudoers
       chmod 4755 usr/bin/sudo
+      ${lib.optionalString automation "chmod 4755 run/wrappers/bin/unix_chkpwd"}
       ${lib.concatMapStringsSep "\n" (a: ''
         chown ${toString a.id}:${toString a.id} home/${a.name}
         chmod 0700 home/${a.name}
