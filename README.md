@@ -287,6 +287,40 @@ shutdown guarantee on a broken OS.
 ranges, expiry, permissions, quota/storage failures and cleanup with native test
 prerequisites.
 
+## Client-requested progress
+
+Include `_meta.progressToken` in `tools/call` parameters to request advisory
+`notifications/progress` updates. Tokens are strings or integers and must be unique
+across active requests. Requests without a token produce no progress.
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ssh_exec","arguments":{"host":"server","command":"your-command"},"_meta":{"progressToken":"request-7"}}}
+```
+
+Native/controller command progress counts actual stdout+stderr bytes drained,
+including bytes discarded beyond capture limits. SFTP reports observed channel,
+handshake and acknowledgement milestones. Runner reports only validated
+started/ready/task observations, never private frame bytes, names or results.
+Values increase; fixed messages identify the units. Unknown totals are omitted.
+Fast operations may complete without an update.
+
+Updates coalesce into one latest snapshot per request, at most four notifications
+per second, with at most16 active reporters and256-byte string tokens. Invalid,
+oversized, duplicate-active or capacity-exhausted tokens simply get no progress;
+execution and final results are unchanged. Tokens never enter audit or results.
+
+Progress producers never await delivery. A busy protocol writer drops advisory
+updates rather than queuing them behind normal replies. Reporting stops at
+terminal handling, cancellation or handler loss. A JSON frame already being
+written must finish to preserve framing, before any final response; cancellation
+cannot retract bytes already sent. A blocked consumer can delay protocol output,
+not stream draining, execution deadlines, reaping or owned cleanup. Progress is
+not output retrieval, proof of completion, replay, or a background-task API.
+
+`nix run .#progress-acceptance-msrv` exercises real native/controller/SFTP progress.
+`nix run .#runner-progress-acceptance-msrv` separately exercises the selected real
+Runner environment; it is not a prerequisite for native progress.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

@@ -774,6 +774,167 @@ async fn projection_reducer_probes(a: &Acceptance) -> Result<()> {
     Ok(())
 }
 
+/// Real selected-runtime milestones, without exposing the private Runner stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]
+async fn real_runner_progress_setup_acceptance() -> Result<()> {
+    let acceptance = Acceptance::start().await?;
+    let result: Result<()> = async {
+        acceptance.configure_projection().await?;
+        runner_progress_setup(&acceptance).await
+    }
+    .await;
+    let cleanup = acceptance.fixture.stop().await;
+    result?;
+    cleanup
+}
+
+async fn runner_progress_setup(a: &Acceptance) -> Result<()> {
+    let mut server = a.server().await?;
+    let result: Result<()> = async {
+        // The same actual module without metadata must remain notification-free.
+        server
+            .send(
+                json!({"jsonrpc":"2.0","id":70,"method":"tools/call","params":{
+            "name":"facts","arguments":{"host":"plain","inputs":{}}}}),
+            )
+            .await?;
+        let (baseline, _) = server.frame().await?;
+        ensure!(
+            baseline["id"] == 70 && baseline["error"].is_null(),
+            "no-token setup emitted a notification or failed: {baseline}"
+        );
+        a.private(&baseline.to_string())?;
+        let baseline_facts = projected_facts(&baseline["result"]["structuredContent"])?;
+        a.clean()?;
+
+        let token = "runner-progress-private-token-97c2";
+        server
+            .send(
+                json!({"jsonrpc":"2.0","id":71,"method":"tools/call","params":{
+            "name":"facts","arguments":{"host":"plain","inputs":{}},
+            "_meta":{"progressToken":token}}}),
+            )
+            .await?;
+        let mut previous = None;
+        let mut observed_execution = false;
+        let response = timeout(WAIT, async {
+            loop {
+                let (frame, bytes) = server.frame().await?;
+                a.private(&frame.to_string())?;
+                if frame["id"] == 71 {
+                    break Ok::<_, anyhow::Error>(frame);
+                }
+                ensure!(
+                    frame["method"] == "notifications/progress",
+                    "unexpected setup frame: {frame}"
+                );
+                let params = frame["params"].as_object().context("progress parameters")?;
+                ensure!(
+                    params.len() == 3
+                        && params.contains_key("message")
+                        && params.contains_key("progress")
+                        && params.contains_key("progressToken")
+                        && !params.contains_key("total")
+                        && bytes <= 512,
+                    "progress exposed extra data or exceeded its fixed bound: {frame}"
+                );
+                ensure!(
+                    params["progressToken"] == token,
+                    "wrong progress correlation"
+                );
+                let progress = params["progress"].as_f64().context("milestone ordinal")?;
+                ensure!(
+                    progress > 0.0
+                        && progress <= 3.0
+                        && progress.fract() == 0.0
+                        && previous.is_none_or(|last| progress > last),
+                    "milestones did not strictly increase within the actual stage bound: {frame}"
+                );
+                previous = Some(progress);
+                let message = params["message"].as_str().context("fixed progress label")?;
+                ensure!(
+                    matches!(
+                        message,
+                        "Runner started" | "Runner ready" | "Runner task observed"
+                    ),
+                    "private stream bytes or an unfixed label escaped: {frame}"
+                );
+                observed_execution |= matches!(message, "Runner ready" | "Runner task observed");
+                for private in [
+                    "\"kind\"",
+                    "\"schema\"",
+                    "\"tasks\"",
+                    "\"projection\"",
+                    "invocation",
+                    "runner.lease",
+                    "stdout",
+                    "stderr",
+                ] {
+                    ensure!(
+                        !frame.to_string().contains(private),
+                        "private frame data escaped progress"
+                    );
+                }
+            }
+        })
+        .await
+        .context("selected Runner progress deadline")??;
+        ensure!(
+            observed_execution,
+            "no accepted ready/task milestone reached the client"
+        );
+        ensure!(
+            response["error"].is_null(),
+            "token-bearing setup failed: {response}"
+        );
+        let envelope = &response["result"]["structuredContent"];
+        let facts = projected_facts(envelope)?;
+        ensure!(
+            envelope["error"].is_null()
+                && envelope["data"]["owned_group_cleanup"] == "signalled_and_reaped"
+                && envelope["data"]["tasks"]["failed"] == 0
+                && facts.platform == baseline_facts.platform
+                && facts.python == baseline_facts.python,
+            "progress changed actual setup evidence: {envelope}"
+        );
+        ensure!(
+            !response.to_string().contains(token),
+            "progress token leaked into result"
+        );
+        a.clean()?;
+
+        // Consume every public frame through a later response, not a filtered receive.
+        server
+            .send(json!({"jsonrpc":"2.0","id":72,"method":"tools/list","params":{}}))
+            .await?;
+        loop {
+            let (frame, _) = server.frame().await?;
+            ensure!(
+                frame["method"] != "notifications/progress",
+                "progress arrived after the terminal response: {frame}"
+            );
+            ensure!(
+                frame["id"] == 72 && frame["error"].is_null(),
+                "unexpected post-terminal frame: {frame}"
+            );
+            if frame["id"] == 72 {
+                break;
+            }
+        }
+        let audit = a.finish(&server.log, 71).await?;
+        ensure!(
+            !audit.to_string().contains(token) && !server.log.text().contains(token),
+            "progress token leaked into audit"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = a.stop(server).await;
+    result?;
+    cleanup
+}
+
 /// Explicit entry: cargo test --test automation_exec real_runner_projection_acceptance -- --ignored --exact --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]

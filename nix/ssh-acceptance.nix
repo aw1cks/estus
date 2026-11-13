@@ -9,12 +9,12 @@ craneLib.mkCargoDerivation (commonArgs // {
   # not a build-directory Cargo executable that disappears after installation.
   ESTUS_TEST_BINARY = "${package}/bin/estus";
   buildPhaseCargoCommand = ''
-    cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local --test controller --test doctor --test automation --test automation_exec --test wheel \
+    cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local --test controller --test doctor --test automation --test automation_exec --test wheel --test progress \
       --message-format=json-render-diagnostics > test-artifacts.json
   '';
   installPhaseCommand = ''
     mkdir -p "$out/bin" "$out/libexec"
-    for name in stdio ssh_e2e ssh_local controller doctor automation automation_exec wheel; do
+    for name in stdio ssh_e2e ssh_local controller doctor automation automation_exec wheel progress; do
       executable=$(jq -ers --arg name "$name" '
         [.[] | select(.reason == "compiler-artifact" and .profile.test
           and .target.name == $name and .executable != null)]
@@ -65,6 +65,10 @@ craneLib.mkCargoDerivation (commonArgs // {
     "$out/bin/output-controller"
     EOF
     chmod +x "$out/bin/output-acceptance"
+    makeWrapper "$out/libexec/progress" "$out/bin/progress-acceptance" \
+      --set ESTUS_TEST_BINARY ${package}/bin/estus \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
+      --add-flags '--ignored --nocapture --test-threads=2'
     makeWrapper "$out/libexec/ssh_e2e" "$out/bin/ssh-baseline" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils ]} \

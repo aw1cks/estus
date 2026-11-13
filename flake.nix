@@ -120,6 +120,7 @@
               { name = "role-acceptance"; scenario = "real_runner_role_acceptance"; }
               { name = "playbook-acceptance"; scenario = "real_runner_playbook_acceptance"; }
               { name = "authority-acceptance"; scenario = "real_runner_authority_acceptance"; isolated = true; }
+              { name = "progress-acceptance"; scenario = "real_runner_progress_setup_acceptance"; }
             ]}
           '';
       in
@@ -271,6 +272,22 @@
         apps.output-acceptance-msrv = {
           type = "app";
           program = "${msrvBuild.acceptance}/bin/output-acceptance";
+        };
+        apps.progress-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/progress-acceptance";
+        };
+        apps.progress-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/progress-acceptance";
+        };
+        apps.runner-progress-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/progress-acceptance";
+        };
+        apps.runner-progress-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/progress-acceptance";
         };
         apps.controller-scripts = {
           type = "app";

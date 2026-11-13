@@ -709,6 +709,7 @@ pub struct WireServer {
     child: Child,
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
+    frame: Vec<u8>,
     pub log: Log,
     drain: Option<JoinHandle<std::io::Result<()>>>,
 }
@@ -733,6 +734,7 @@ impl WireServer {
             child,
             input,
             output,
+            frame: Vec::new(),
             log,
             drain: Some(drain),
         })
@@ -753,19 +755,26 @@ impl WireServer {
         self.receive(id).await
     }
 
+    pub async fn frame(&mut self) -> Result<(Value, usize)> {
+        self.frame.clear();
+        let size = timeout(
+            Duration::from_secs(15),
+            self.output.read_until(b'\n', &mut self.frame),
+        )
+        .await??;
+        ensure!(size > 0, "wire server closed stdout");
+        ensure!(
+            self.frame.last() == Some(&b'\n'),
+            "unterminated wire response"
+        );
+        let value: Value = serde_json::from_slice(&self.frame).context("non-JSON server stdout")?;
+        ensure!(value["jsonrpc"] == "2.0", "non-protocol stdout");
+        Ok((value, size))
+    }
+
     pub async fn receive(&mut self, id: Value) -> Result<(Value, usize)> {
-        let mut frame = Vec::new();
         loop {
-            frame.clear();
-            let size = timeout(
-                Duration::from_secs(15),
-                self.output.read_until(b'\n', &mut frame),
-            )
-            .await??;
-            ensure!(size > 0, "wire server closed stdout");
-            ensure!(frame.last() == Some(&b'\n'), "unterminated wire response");
-            let value: Value = serde_json::from_slice(&frame).context("non-JSON server stdout")?;
-            ensure!(value["jsonrpc"] == "2.0", "non-protocol stdout");
+            let (value, size) = self.frame().await?;
             if value["id"] == id {
                 return Ok((value, size));
             }
