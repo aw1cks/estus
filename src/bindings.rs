@@ -230,6 +230,12 @@ enum RawExecution {
         #[serde(default)]
         no_log: bool,
     },
+    AnsiblePlaybook {
+        snapshot: String,
+        project_root: String,
+        #[serde(default)]
+        no_log: bool,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -400,7 +406,7 @@ enum Execution {
     },
     Ansible {
         snapshot: PathBuf,
-        role: Option<RoleSource>,
+        source: AnsibleSource,
         overlay: Value,
         no_log: bool,
         projection: Option<Arc<crate::projection::Plan>>,
@@ -409,9 +415,11 @@ enum Execution {
     },
 }
 
-#[derive(Debug)]
-struct RoleSource {
-    path: Option<PathBuf>,
+#[derive(Clone, Debug)]
+enum AnsibleSource {
+    Module,
+    Role { path: Option<PathBuf> },
+    Playbook { project_root: PathBuf },
 }
 
 #[derive(Debug)]
@@ -484,6 +492,10 @@ enum ReviewedContent {
         reviewed: crate::role_import::ReviewedRole,
         role_path: Option<PathBuf>,
     },
+    Playbook {
+        reviewed: crate::playbook_import::ReviewedPlaybook,
+        project_root: PathBuf,
+    },
 }
 
 impl ReviewedContent {
@@ -491,6 +503,7 @@ impl ReviewedContent {
         match self {
             Self::Module { reviewed, .. } => &reviewed.contract,
             Self::Role { reviewed, .. } => &reviewed.contract,
+            Self::Playbook { reviewed, .. } => &reviewed.contract,
         }
     }
 
@@ -498,6 +511,7 @@ impl ReviewedContent {
         match self {
             Self::Module { reviewed, .. } => reviewed.binding.as_ref(),
             Self::Role { reviewed, .. } => reviewed.binding.as_ref(),
+            Self::Playbook { reviewed, .. } => reviewed.binding.as_ref(),
         }
     }
 
@@ -521,6 +535,15 @@ impl ReviewedContent {
                 entry_point: &reviewed.entry_point,
                 role_path: role_path.as_deref(),
             }),
+            Self::Playbook {
+                reviewed,
+                project_root,
+            } => ExpectedContent::Playbook(PlaybookContent {
+                identity: &reviewed.runtime,
+                content_sha256: &reviewed.content_sha256,
+                playbook: &reviewed.playbook,
+                project_root,
+            }),
         }
     }
 
@@ -528,6 +551,7 @@ impl ReviewedContent {
         match self {
             Self::Module { .. } => crate::automation_exec::ExecutionMode::Module,
             Self::Role { .. } => crate::automation_exec::ExecutionMode::Role,
+            Self::Playbook { .. } => crate::automation_exec::ExecutionMode::Playbook,
         }
     }
 }
@@ -570,10 +594,19 @@ struct RoleContent<'a> {
 }
 
 #[derive(Serialize)]
+struct PlaybookContent<'a> {
+    identity: &'a crate::automation::RuntimeIdentity,
+    content_sha256: &'a str,
+    playbook: &'a str,
+    project_root: &'a Path,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 enum ExpectedContent<'a> {
     Module(ModuleContent<'a>),
     Role(RoleContent<'a>),
+    Playbook(PlaybookContent<'a>),
 }
 
 #[derive(Serialize)]
@@ -717,7 +750,7 @@ impl Bindings {
         let Execution::Ansible {
             snapshot,
             overlay,
-            role,
+            source,
             plan,
             ..
         } = &mut binding.execution
@@ -726,17 +759,21 @@ impl Bindings {
         };
         let snapshot = snapshot.clone();
         let overlay = overlay.clone();
-        let role_path = role.as_ref().map(|role| role.path.clone());
+        let source = source.clone();
         // Await started blocking work even when cancellation arrives, retaining its ownership.
         let prepared = tokio::task::spawn_blocking(move || {
-            let reviewed = match role_path {
-                Some(role_path) => ReviewedContent::Role {
+            let reviewed = match source {
+                AnsibleSource::Role { path } => ReviewedContent::Role {
                     reviewed: crate::role_import::load_reviewed(&snapshot).map_err(invalid)?,
-                    role_path,
+                    role_path: path,
                 },
-                None => ReviewedContent::Module {
+                AnsibleSource::Module => ReviewedContent::Module {
                     reviewed: crate::schema_import::load_reviewed(&snapshot).map_err(invalid)?,
                     source: String::new(),
+                },
+                AnsibleSource::Playbook { project_root } => ReviewedContent::Playbook {
+                    reviewed: crate::playbook_import::load_reviewed(&snapshot).map_err(invalid)?,
+                    project_root,
                 },
             };
             if reviewed
@@ -753,6 +790,9 @@ impl Bindings {
                 }
                 ReviewedContent::Role { .. } => {
                     crate::role_import::compile_binding(reviewed.contract(), &overlay)
+                }
+                ReviewedContent::Playbook { .. } => {
+                    crate::playbook_import::compile_binding(reviewed.contract(), &overlay)
                 }
             }
             .map_err(invalid)?;
@@ -786,6 +826,19 @@ impl Bindings {
                 .await
                 .map_err(invalid)?;
             }
+            ReviewedContent::Playbook {
+                reviewed,
+                project_root,
+            } => {
+                crate::playbook_import::verify_reviewed(
+                    reviewed,
+                    project_root,
+                    runtime.clone(),
+                    context,
+                )
+                .await
+                .map_err(invalid)?;
+            }
         }
         check_interrupted()?;
         let selected = tokio::task::spawn_blocking(move || {
@@ -811,8 +864,10 @@ impl CompiledBinding {
         limits: &Limits,
         target_exists: &impl Fn(&str) -> bool,
     ) -> Result<Self, ConfigError> {
-        let (snapshot, no_log, role) = match raw.execution {
-            RawExecution::AnsibleModule { snapshot, no_log } => (snapshot, no_log, None),
+        let (snapshot, no_log, source) = match raw.execution {
+            RawExecution::AnsibleModule { snapshot, no_log } => {
+                (snapshot, no_log, AnsibleSource::Module)
+            }
             RawExecution::AnsibleRole {
                 snapshot,
                 role_path,
@@ -824,9 +879,25 @@ impl CompiledBinding {
                 (
                     snapshot,
                     no_log,
-                    Some(RoleSource {
+                    AnsibleSource::Role {
                         path: role_path.map(PathBuf::from),
-                    }),
+                    },
+                )
+            }
+            RawExecution::AnsiblePlaybook {
+                snapshot,
+                project_root,
+                no_log,
+            } => {
+                if !absolute(&project_root) {
+                    return Err(invalid("Invalid fixed playbook project"));
+                }
+                (
+                    snapshot,
+                    no_log,
+                    AnsibleSource::Playbook {
+                        project_root: PathBuf::from(project_root),
+                    },
                 )
             }
             _ => unreachable!("automation execution selected"),
@@ -861,12 +932,14 @@ impl CompiledBinding {
                 max_items,
                 max_depth,
             } => {
-                if role.is_some()
+                if !matches!(source, AnsibleSource::Module)
                     && fields.values().any(|path| {
                         path.len() < 2 || path.first().map(String::as_str) != Some("mcp_result")
                     })
                 {
-                    return Err(invalid("Role projections require mcp_result member paths"));
+                    return Err(invalid(
+                        "Workflow projections require mcp_result member paths",
+                    ));
                 }
                 let schema = serde_json::to_value(schema)
                     .map_err(|_| invalid("Invalid projection schema"))?;
@@ -893,8 +966,14 @@ impl CompiledBinding {
         }
         let overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
         crate::module_schema::validate_overlay(&overlay).map_err(invalid)?;
-        if role.is_some() {
-            crate::role_import::validate_overlay(&overlay).map_err(invalid)?;
+        match &source {
+            AnsibleSource::Module => {}
+            AnsibleSource::Role { .. } => {
+                crate::role_import::validate_overlay(&overlay).map_err(invalid)?;
+            }
+            AnsibleSource::Playbook { .. } => {
+                crate::playbook_import::validate_overlay(&overlay).map_err(invalid)?;
+            }
         }
         let timeout_secs = raw.limits.as_ref().and_then(|limits| limits.timeout_secs);
         if timeout_secs.is_some_and(|value| value == 0 || value > limits.max_timeout_secs)
@@ -929,7 +1008,7 @@ impl CompiledBinding {
             inputs: Vec::new(),
             execution: Execution::Ansible {
                 snapshot: PathBuf::from(snapshot),
-                role,
+                source,
                 overlay,
                 no_log,
                 projection,
@@ -1035,7 +1114,9 @@ impl CompiledBinding {
     ) -> Result<Self, ConfigError> {
         if matches!(
             &raw.execution,
-            RawExecution::AnsibleModule { .. } | RawExecution::AnsibleRole { .. }
+            RawExecution::AnsibleModule { .. }
+                | RawExecution::AnsibleRole { .. }
+                | RawExecution::AnsiblePlaybook { .. }
         ) {
             return Self::compile_automation(name, raw, enabled, limits, target_exists);
         }
@@ -1234,7 +1315,9 @@ impl CompiledBinding {
                 };
                 (Execution::ControllerScript { plan }, Vec::new(), false)
             }
-            RawExecution::AnsibleModule { .. } | RawExecution::AnsibleRole { .. } => {
+            RawExecution::AnsibleModule { .. }
+            | RawExecution::AnsibleRole { .. }
+            | RawExecution::AnsiblePlaybook { .. } => {
                 unreachable!("compiled separately")
             }
         };
@@ -1419,8 +1502,18 @@ impl CompiledBinding {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::RemoteScript { .. } => "remote_script",
             Execution::ControllerScript { .. } => "controller_script",
-            Execution::Ansible { role: Some(_), .. } => "ansible_role",
-            Execution::Ansible { role: None, .. } => "ansible_module",
+            Execution::Ansible {
+                source: AnsibleSource::Role { .. },
+                ..
+            } => "ansible_role",
+            Execution::Ansible {
+                source: AnsibleSource::Playbook { .. },
+                ..
+            } => "ansible_playbook",
+            Execution::Ansible {
+                source: AnsibleSource::Module,
+                ..
+            } => "ansible_module",
         }
     }
 
@@ -1902,6 +1995,114 @@ mod tests {
         )
         .unwrap();
         raw
+    }
+
+    fn playbook_definition() -> toml::Value {
+        let mut raw = module_definition();
+        raw["execution"] = toml::from_str(
+            "kind='ansible_playbook'\nsnapshot='/unavailable/playbook.json'\nproject_root='/unavailable/project'",
+        )
+        .unwrap();
+        raw
+    }
+
+    #[test]
+    fn playbook_compilation_is_source_free_and_keeps_controls_private() {
+        for enabled in [Vec::new(), vec!["observe".into()]] {
+            let bindings = Bindings::compile(
+                BTreeMap::from([("observe".into(), playbook_definition())]),
+                &enabled,
+                &Limits::default(),
+                |_| true,
+                None,
+                false,
+            )
+            .unwrap();
+            let binding = bindings.get(BindingId(0)).unwrap();
+            assert_eq!(binding.executor_kind(), "ansible_playbook");
+            assert!(!binding.automation_activated());
+            let published = serde_json::to_string(&binding.input_schema).unwrap();
+            assert!(!published.contains("/unavailable"));
+            for control in [
+                "playbook",
+                "project_root",
+                "inventory",
+                "tags",
+                "extra_vars",
+            ] {
+                let mut arguments = json!({"host":"server","inputs":{"nested":{"items":[]}}});
+                arguments[control] = json!("caller");
+                assert!(
+                    binding
+                        .parse_request(arguments.as_object().unwrap().clone())
+                        .is_err()
+                );
+            }
+        }
+        for control in ["role_path", "playbook", "inventory", "tags", "extra_vars"] {
+            let mut raw = playbook_definition();
+            raw["execution"]
+                .as_table_mut()
+                .unwrap()
+                .insert(control.into(), "caller".into());
+            assert!(
+                compile(raw).is_err(),
+                "accepted execution control {control}"
+            );
+        }
+        let mut raw = playbook_definition();
+        raw["execution"]["project_root"] = "relative".into();
+        assert!(compile(raw).is_err());
+    }
+
+    #[test]
+    fn playbook_backend_controls_are_rejected_without_activation() {
+        for name in [
+            "playbook",
+            "project_root",
+            "ansible_connection",
+            "ansible_python_interpreter",
+            "inventory",
+            "tags",
+            "become",
+            "connection",
+            "interpreter",
+            "ssh_mcp_arguments",
+        ] {
+            for field in ["fixed_args", "input_map"] {
+                let mut raw = playbook_definition();
+                raw.as_table_mut().unwrap().insert(
+                    field.into(),
+                    toml::Value::try_from(json!({name:"nested"})).unwrap(),
+                );
+                assert!(
+                    compile(raw).is_err(),
+                    "accepted {field} playbook control {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn playbook_projection_requires_concrete_domain_members() {
+        for path in [
+            vec!["ansible_facts", "platform"],
+            vec!["mcp_result"],
+            vec!["mcp_result", "platform"],
+        ] {
+            let mut raw = playbook_definition();
+            let mut result = projection_result();
+            result["fields"]["platform"] = toml::Value::Array(
+                path.iter()
+                    .map(|part| toml::Value::String((*part).into()))
+                    .collect(),
+            );
+            raw["result"] = result;
+            assert_eq!(
+                compile(raw).is_ok(),
+                path.len() == 2 && path[0] == "mcp_result"
+            );
+        }
     }
 
     #[test]

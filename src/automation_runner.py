@@ -686,7 +686,13 @@ def validate(spec):
     require(type(spec["schema"]) is int and spec["schema"] == 2)
     require(type(spec["invocation_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", spec["invocation_id"]))
     expected = spec["expected"]
-    if "role" in expected:
+    if "playbook" in expected:
+        keys(expected, ("identity", "content_sha256", "playbook", "project_root"))
+        # The content verifier owns canonical entry syntax before any dispatch.
+        require(type(expected["playbook"]) is str
+                and 0 < len(expected["playbook"].encode("utf-8")) <= 4096)
+        absolute(expected["project_root"])
+    elif "role" in expected:
         keys(expected, ("identity", "collection", "content_sha256", "role", "entry_point", "role_path"))
         require(type(expected["role"]) is str and re.fullmatch(
             r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){0,2}", expected["role"])
@@ -723,9 +729,16 @@ def selected_runtime(spec, workspace):
     helper.write_text(_SSH_MCP_HEALTH_SOURCE, encoding="utf-8")
     namespace = {"__name__": "ssh_mcp_health", "__file__": str(helper)}
     exec(compile(_SSH_MCP_HEALTH_SOURCE, str(helper), "exec"), namespace)
-    observed, roots = namespace["check"](spec["runtime"], role_request="role" in spec["expected"])
+    observed, roots = namespace["check"](
+        spec["runtime"], role_request=any(key in spec["expected"] for key in ("role", "playbook")))
     expected = spec["expected"]
     require(observed == expected["identity"])
+    if "playbook" in expected:
+        directory, content = namespace["playbook_content"](
+            expected["playbook"], expected["project_root"], roots)
+        require(content == expected["content_sha256"])
+        expected["project_root"] = str(directory)
+        return roots
     if "role" in expected:
         directory, _, _, content, collection, _ = namespace["role_content"](
             expected["role"], expected["entry_point"], expected["role_path"], roots)
@@ -800,7 +813,10 @@ def layout(workspace, spec, roots, selected_path):
     document(project / "arguments.yml", {"ssh_mcp_arguments": literal(spec["arguments"])})
     expected = spec["expected"]
     role = "role" in expected
-    if role:
+    playbook = "playbook" in expected
+    if playbook:
+        tasks = []
+    elif role:
         tasks = [{"name": "ssh_mcp_role", "no_log": spec["no_log"],
                   "ansible.builtin.include_role": {
                       "name": expected["role"], "tasks_from": expected["entry_point"],
@@ -813,14 +829,21 @@ def layout(workspace, spec, roots, selected_path):
                                        for key in spec["arguments"]}}]
     play = {"name": "ssh_mcp_play", "hosts": HOST, "gather_facts": False, "become": False,
             "strategy": "linear", "vars_files": ["arguments.yml"], "tasks": tasks}
-    if role and spec["projection"] is not None:
+    if (role or playbook) and spec["projection"] is not None:
         # post_tasks run after ordinary role handlers, so their censorship is
         # known before the only domain-bearing result can leave this process.
         play["post_tasks"] = [{"name": "ssh_mcp_result", "no_log": spec["no_log"],
                                "ansible.builtin.debug": {"msg": {
                                    "present": "{{ mcp_result is defined }}",
                                    "value": "{{ mcp_result | default(none) }}"}}}]
-    document(project / "playbook.yml", [play])
+    if playbook:
+        imported = Path(expected["project_root"]) / expected["playbook"]
+        plays = [{"name": "ssh_mcp_import", "ansible.builtin.import_playbook": str(imported)}]
+        if spec["projection"] is not None:
+            plays.append(play)
+        document(project / "playbook.yml", plays)
+    else:
+        document(project / "playbook.yml", [play])
     ssh_args = (
         "-o BatchMode=yes -o NumberOfPasswordPrompts=0 -o StrictHostKeyChecking=yes "
         "-o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no "
@@ -840,6 +863,12 @@ def layout(workspace, spec, roots, selected_path):
         "ansible_become": False,
     })}}}
     document(workspace / "inventory" / "hosts.yml", inventory)
+    if playbook:
+        # Only this generated file carries high-precedence backend variables.
+        # Caller literals remain nested, never arbitrary Ansible extra vars.
+        controls = dict(inventory["all"]["hosts"][HOST])
+        controls["ssh_mcp_arguments"] = literal(spec["arguments"])
+        document(project / "arguments.yml", controls)
     config = workspace / "ansible.cfg"
     config.write_text("[defaults]\ncollections_scan_sys_path = False\nretry_files_enabled = False\n"
                       "fact_caching = memory\nhost_key_checking = True\ndisplay_args_to_stdout = False\n"
@@ -865,6 +894,21 @@ def layout(workspace, spec, roots, selected_path):
         "ANSIBLE_COLLECTIONS_SCAN_SYS_PATH": "False", "ANSIBLE_NOCOWS": "True",
         "ANSIBLE_RETRY_FILES_ENABLED": "False", "ANSIBLE_PIPELINING": "True",
     }
+    if playbook:
+        root = Path(expected["project_root"])
+        environment.update({
+            "ANSIBLE_STRATEGY": "linear",
+            "ANSIBLE_NO_LOG": "True" if spec["no_log"] else "False",
+            "ANSIBLE_ROLES_PATH": str(root / "roles"),
+            "ANSIBLE_LIBRARY": str(root / "library"),
+            "ANSIBLE_MODULE_UTILS": str(root / "module_utils"),
+            "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join(
+                (str(root / "collections"), *(str(path) for path in roots))),
+        })
+        for kind in ("action", "become", "cache", "callback", "cliconf", "connection",
+                     "filter", "httpapi", "inventory", "lookup", "netconf", "shell",
+                     "strategy", "terminal", "test", "vars"):
+            environment["ANSIBLE_" + kind.upper() + "_PLUGINS"] = str(root / (kind + "_plugins"))
     if role:
         environment["ANSIBLE_ROLES_PATH"] = (
             str(Path(expected["role_path"]).parent) if expected["role_path"] is not None
@@ -907,7 +951,7 @@ def main():
         from ansible_runner import run
         evidence = (RoleEvidence(frames, spec["no_log"], spec["projection"],
                                  workspace / "project" / "playbook.yml")
-                    if "role" in spec["expected"] else
+                    if any(key in spec["expected"] for key in ("role", "playbook")) else
                     Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"]))
         if cancellation.requested():
             status = cancellation.reason
@@ -916,6 +960,10 @@ def main():
             runner = run(private_data_dir=str(workspace), project_dir=str(workspace / "project"),
                          artifact_dir=str(workspace / "artifacts"), ident="run",
                          inventory=str(workspace / "inventory" / "hosts.yml"), playbook="playbook.yml",
+                         limit=HOST if "playbook" in spec["expected"] else None,
+                         cmdline=("--extra-vars " + shlex.quote(
+                             "@" + str(workspace / "project" / "arguments.yml"))
+                             if "playbook" in spec["expected"] else None),
                          forks=1, quiet=True, process_isolation=False, fact_cache_type="memory",
                          suppress_env_files=True, suppress_output_file=True, suppress_ansible_output=True,
                          omit_event_data=False, only_failed_event_data=False,
@@ -935,7 +983,8 @@ def main():
         # They deliberately do not cross either diagnostic or protocol boundaries.
         status = cancellation.reason if cancellation is not None and cancellation.reason else "invalid_result"
     if frames.id is not None:
-        role = type(spec) is dict and type(spec.get("expected")) is dict and "role" in spec["expected"]
+        role = (type(spec) is dict and type(spec.get("expected")) is dict
+                and any(key in spec["expected"] for key in ("role", "playbook")))
         empty = dict(ok=0, failed=0, unreachable=0, skipped=0)
         if role:
             empty.update(rescued=0, ignored=0)

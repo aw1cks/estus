@@ -27,6 +27,7 @@ pub(crate) fn invocation_id() -> String {
 pub(crate) enum ExecutionMode {
     Module,
     Role,
+    Playbook,
 }
 
 // Module framing deliberately retains its four-counter singleton contract.
@@ -319,7 +320,7 @@ impl Evidence {
         censored: bool,
         ignored: bool,
     ) {
-        if self.mode != ExecutionMode::Role
+        if !matches!(self.mode, ExecutionMode::Role | ExecutionMode::Playbook)
             || !self.ready
             || self.role_observations >= 128
             || (ignored && !matches!(outcome, TaskOutcome::Failed))
@@ -416,7 +417,7 @@ impl Evidence {
             | AutomationStatus::ResourceLimit => !complete,
             AutomationStatus::NotStarted | AutomationStatus::WorkerLost => false,
         };
-        if self.mode != ExecutionMode::Role
+        if !matches!(self.mode, ExecutionMode::Role | ExecutionMode::Playbook)
             || (complete && !self.ready)
             || !within_bounds
             || !matches_observed
@@ -1254,18 +1255,22 @@ mod role_evidence {
         send(&mut module, json!({"kind":"ready"}));
         task(&mut module, "ok", json!(false), false, false);
         assert!(module.failed());
-        let mut role = started();
-        send(
-            &mut role,
-            json!({"kind":"task","outcome":"ok","changed":false,"censored":false}),
-        );
-        assert!(role.failed());
-        let mut role = started();
-        task(&mut role, "ok", json!(false), false, true);
-        assert!(
-            role.failed(),
-            "ignored is meaningful only for a failed observation"
-        );
+        for mode in [ExecutionMode::Role, ExecutionMode::Playbook] {
+            let mut workflow = Evidence::new("role".into(), mode);
+            send(&mut workflow, json!({"kind":"ready"}));
+            send(
+                &mut workflow,
+                json!({"kind":"task","outcome":"ok","changed":false,"censored":false}),
+            );
+            assert!(workflow.failed(), "{mode:?} accepted singleton evidence");
+            let mut workflow = Evidence::new("role".into(), mode);
+            send(&mut workflow, json!({"kind":"ready"}));
+            task(&mut workflow, "ok", json!(false), false, true);
+            assert!(
+                workflow.failed(),
+                "ignored is meaningful only for a failed observation: {mode:?}"
+            );
+        }
     }
 
     #[test]

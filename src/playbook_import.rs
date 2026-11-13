@@ -117,6 +117,51 @@ fn read_snapshot(path: &Path) -> Result<Snapshot, &'static str> {
     Ok(snapshot)
 }
 
+pub(crate) struct ReviewedPlaybook {
+    pub playbook: String,
+    pub runtime: RuntimeIdentity,
+    pub content_sha256: String,
+    pub contract: Value,
+    pub binding: Option<Value>,
+    snapshot: PathBuf,
+}
+
+pub(crate) fn load_reviewed(path: &Path) -> Result<ReviewedPlaybook, &'static str> {
+    let snapshot = read_snapshot(path)?;
+    Ok(ReviewedPlaybook {
+        playbook: snapshot.playbook,
+        runtime: snapshot.runtime,
+        content_sha256: snapshot.content_sha256,
+        contract: snapshot.contract,
+        binding: snapshot.binding,
+        snapshot: std::fs::canonicalize(path).map_err(|_| "schema_file_unavailable")?,
+    })
+}
+
+pub(crate) async fn verify_reviewed(
+    reviewed: &ReviewedPlaybook,
+    project_root: &Path,
+    runtime: Option<PathBuf>,
+    context: RuntimeContext<'_>,
+) -> Result<(), &'static str> {
+    validate_contract(&reviewed.contract)?;
+    let observed = automation::import_playbook(
+        runtime,
+        &reviewed.playbook,
+        project_root,
+        Some(&reviewed.snapshot),
+        context,
+    )
+    .await?;
+    if reviewed.runtime != observed.identity
+        || reviewed.content_sha256 != observed.content_sha256
+        || observed.document["playbook"].as_str() != Some(&reviewed.playbook)
+    {
+        return Err("schema_drift");
+    }
+    Ok(())
+}
+
 fn playbook_variable(name: &str) -> bool {
     !matches!(
         name,
