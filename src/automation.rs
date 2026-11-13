@@ -1,5 +1,5 @@
-//! Optional selected-runtime health and explicit public module documentation import.
-//! Neither path executes automation workloads or attests execution compatibility.
+//! Optional selected-runtime health and explicit public module/role documentation import.
+//! No path executes automation workloads or attests execution compatibility.
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -50,6 +50,13 @@ pub(crate) struct RuntimeIdentity {
 }
 
 pub(crate) struct ModuleImport {
+    pub identity: RuntimeIdentity,
+    pub document: serde_json::Value,
+    pub content_sha256: String,
+    pub collection: Option<RuntimeCollection>,
+}
+
+pub(crate) struct RoleImport {
     pub identity: RuntimeIdentity,
     pub document: serde_json::Value,
     pub content_sha256: String,
@@ -241,6 +248,77 @@ impl ModuleError {
             Self::Health(error) => error.code(),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleReport {
+    schema: u32,
+    status: ModuleStatus,
+    #[serde(default, deserialize_with = "present_field")]
+    identity: Option<RuntimeIdentity>,
+    #[serde(default, deserialize_with = "present_field")]
+    document: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present_field")]
+    content_sha256: Option<String>,
+    #[serde(default, deserialize_with = "present_field")]
+    collection: Option<Option<RuntimeCollection>>,
+    #[serde(default, deserialize_with = "present_field")]
+    error_code: Option<RoleError>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RoleError {
+    InvalidRoleName,
+    InvalidRoleEntryPoint,
+    RoleSourceRequired,
+    InvalidRoleSource,
+    InvalidRoleOutput,
+    RoleOutputInsideSource,
+    RoleNotFound,
+    RoleEntryPointNotFound,
+    RoleDocumentationFailed,
+    RoleIdentifierMismatch,
+    RoleOutputLimit,
+    RoleContentLimit,
+    RoleContentFailed,
+    RoleContentSymlink,
+    #[serde(untagged)]
+    Health(HealthError),
+}
+
+impl RoleError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::InvalidRoleName => "invalid_role_name",
+            Self::InvalidRoleEntryPoint => "invalid_role_entry_point",
+            Self::RoleSourceRequired => "role_source_required",
+            Self::InvalidRoleSource => "invalid_role_source",
+            Self::InvalidRoleOutput => "invalid_role_output",
+            Self::RoleOutputInsideSource => "role_output_inside_source",
+            Self::RoleNotFound => "role_not_found",
+            Self::RoleEntryPointNotFound => "role_entry_point_not_found",
+            Self::RoleDocumentationFailed => "role_documentation_failed",
+            Self::RoleIdentifierMismatch => "role_identifier_mismatch",
+            Self::RoleOutputLimit => "role_output_limit",
+            Self::RoleContentLimit => "role_content_limit",
+            Self::RoleContentFailed => "role_content_failed",
+            Self::RoleContentSymlink => "role_content_symlink",
+            Self::Health(error) => error.code(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DocumentationRequest<'a> {
+    Module(&'a str),
+    Role {
+        role: &'a str,
+        entry_point: &'a str,
+        role_path: Option<&'a Path>,
+        output: Option<&'a Path>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -628,7 +706,7 @@ pub(crate) async fn import_module(
     if !crate::module_schema::valid_fqcn(module) {
         return Err("invalid_module_identifier");
     }
-    let (reply, source) = run_selected(runtime, &ctx, Some(module))
+    let (reply, source) = run_selected(runtime, &ctx, Some(DocumentationRequest::Module(module)))
         .await
         .map_err(RuntimeFailure::code)?;
     module_report(&observed_stdout(reply)?, &source, module)
@@ -704,10 +782,120 @@ fn module_report(
     }
 }
 
+pub(crate) async fn import_role(
+    runtime: Option<PathBuf>,
+    role: &str,
+    entry_point: &str,
+    role_path: Option<&Path>,
+    output: Option<&Path>,
+    ctx: RuntimeContext<'_>,
+) -> Result<RoleImport, &'static str> {
+    if !crate::role_schema::valid_role(role) {
+        return Err("invalid_role_name");
+    }
+    if !crate::role_schema::valid_entry_point(entry_point) {
+        return Err("invalid_role_entry_point");
+    }
+    match (crate::role_schema::is_collection_role(role), role_path) {
+        (true, Some(_)) => return Err("invalid_role_source"),
+        (false, None) => return Err("role_source_required"),
+        (_, Some(path))
+            if path.to_str().is_none_or(|value| !valid_private_path(value))
+                || path.file_name().and_then(OsStr::to_str) != Some(role) =>
+        {
+            return Err("invalid_role_source");
+        }
+        _ => {}
+    }
+    if output.is_some_and(|path| {
+        path.to_str().is_none_or(|value| !valid_private_path(value)) || path.file_name().is_none()
+    }) {
+        return Err("invalid_role_output");
+    }
+    let request = DocumentationRequest::Role {
+        role,
+        entry_point,
+        role_path,
+        output,
+    };
+    let (reply, source) = run_selected(runtime, &ctx, Some(request))
+        .await
+        .map_err(RuntimeFailure::code)?;
+    let stdout = observed_stdout(reply)?;
+    if stdout.len() > MODULE_REPORT_LIMIT as usize {
+        return Err("runtime_protocol_error");
+    }
+    match serde_json::from_str::<RoleReport>(&stdout).map_err(|_| "runtime_protocol_error")? {
+        RoleReport {
+            schema: 2,
+            status: ModuleStatus::Passed,
+            identity: Some(identity),
+            document: Some(document),
+            content_sha256: Some(content_sha256),
+            collection: Some(collection),
+            error_code: None,
+        } if valid_identity(&identity) && lower_hash(&content_sha256) => {
+            if !matches_source(&identity, &source) {
+                return Err("runtime_identity_mismatch");
+            }
+            let expected_collection = role.rsplit_once('.').map(|(name, _)| name);
+            match (&collection, expected_collection) {
+                (None, None) => {}
+                (Some(selected), Some(expected))
+                    if selected.name == expected && valid_collection(selected) =>
+                {
+                    if identity
+                        .collections
+                        .iter()
+                        .any(|baseline| baseline.name == selected.name && baseline != selected)
+                    {
+                        return Err("runtime_collection_mismatch");
+                    }
+                }
+                _ => return Err("runtime_collection_mismatch"),
+            }
+            let doc = document.as_object().ok_or("runtime_protocol_error")?;
+            let entries = doc
+                .get("entry_points")
+                .and_then(serde_json::Value::as_object)
+                .ok_or("runtime_protocol_error")?;
+            if doc.len() != 3
+                || doc.get("role").and_then(serde_json::Value::as_str) != Some(role)
+                || doc.get("collection")
+                    != Some(
+                        &expected_collection.map_or(serde_json::Value::Null, |name| {
+                            serde_json::Value::String(name.to_owned())
+                        }),
+                    )
+                || (!entries.is_empty()
+                    && (entries.len() != 1 || !entries.contains_key(entry_point)))
+            {
+                return Err("role_identifier_mismatch");
+            }
+            Ok(RoleImport {
+                identity,
+                document,
+                content_sha256,
+                collection,
+            })
+        }
+        RoleReport {
+            schema: 2,
+            status: ModuleStatus::Failed,
+            identity: None,
+            document: None,
+            content_sha256: None,
+            collection: None,
+            error_code: Some(error_code),
+        } => Err(error_code.code()),
+        _ => Err("runtime_protocol_error"),
+    }
+}
+
 async fn run_selected(
     runtime: Option<PathBuf>,
     ctx: &RuntimeContext<'_>,
-    module: Option<&str>,
+    documentation: Option<DocumentationRequest<'_>>,
 ) -> Result<(ControllerReply, Source), RuntimeFailure> {
     if let Some(code) = interrupted(ctx) {
         return Err(RuntimeFailure::NotTested(code));
@@ -739,7 +927,7 @@ async fn run_selected(
     let result = if let Some(code) = interrupted(ctx) {
         Err(RuntimeFailure::NotTested(code))
     } else {
-        run_loaded(loaded, root.path(), ctx, module).await
+        run_loaded(loaded, root.path(), ctx, documentation).await
     };
     // The private root outlives the controller's pending process-group owner.
     if !matches!(
@@ -755,20 +943,34 @@ async fn run_loaded(
     loaded: Loaded,
     workspace: &Path,
     ctx: &RuntimeContext<'_>,
-    module: Option<&str>,
+    documentation: Option<DocumentationRequest<'_>>,
 ) -> Result<(ControllerReply, Source), RuntimeFailure> {
     let mut input_json = request(&loaded).map_err(RuntimeFailure::Failed)?;
-    if let Some(module) = module {
+    if let Some(documentation) = documentation {
         let mut input: serde_json::Value = serde_json::from_slice(&input_json)
             .map_err(|_| RuntimeFailure::Failed("invalid_runtime_manifest"))?;
-        input["module"] = serde_json::Value::String(module.to_owned());
+        match documentation {
+            DocumentationRequest::Module(module) => {
+                input["module"] = serde_json::Value::String(module.to_owned());
+            }
+            DocumentationRequest::Role {
+                role,
+                entry_point,
+                role_path,
+                output,
+            } => {
+                input["role"] = serde_json::json!({
+                    "name": role, "entry_point": entry_point, "path": role_path, "output": output,
+                });
+            }
+        }
         input_json = serde_json::to_vec(&input)
             .map_err(|_| RuntimeFailure::Failed("invalid_runtime_manifest"))?;
         if input_json.len() > REQUEST_LIMIT {
             return Err(RuntimeFailure::Failed("invalid_runtime_manifest"));
         }
     }
-    let limit = if module.is_some() {
+    let limit = if documentation.is_some() {
         MODULE_REPORT_LIMIT
     } else {
         REPORT_LIMIT

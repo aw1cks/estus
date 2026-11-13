@@ -160,7 +160,7 @@ def check_collections(roots, expected):
     return observed
 
 
-def check(payload):
+def check(payload, role_request=False):
     require(type(payload) is dict and type(payload.get("schema")) is int and payload["schema"] == 2)
     source = payload.get("source")
     if source == "bundle":
@@ -184,6 +184,13 @@ def check(payload):
         config = None
     else:
         raise HealthFailure("runtime_check_failed")
+    if role_request:
+        try:
+            collection_roots = [root.resolve(strict=True) for root in collection_roots]
+            require(all(":" not in str(root) and "$" not in str(root)
+                        for root in collection_roots), "invalid_role_source")
+        except (OSError, RuntimeError, ValueError):
+            raise HealthFailure("invalid_role_source") from None
     temporary = absolute_path(os.environ.get("TMPDIR"))
     require(temporary.is_dir())
     for key in list(os.environ):
@@ -254,8 +261,8 @@ class BoundedOutput(io.StringIO):
         return super().write(value)
 
 
-def content_hash(trees, documented):
-    result = hashlib.sha256(b"ssh-mcp-module-content-v1\0")
+def content_hash(trees, documented, domain=b"ssh-mcp-module-content-v1\0", skip_generated=True):
+    result = hashlib.sha256(domain)
     total = 0
     entries = 0
     found = False
@@ -273,7 +280,7 @@ def content_hash(trees, documented):
                 for child in iterator:
                     entries += 1
                     require(entries <= ENTRY_LIMIT, "module_content_limit")
-                    if child.name == "__pycache__" or child.name.endswith((".pyc", ".pyo")):
+                    if skip_generated and (child.name == "__pycache__" or child.name.endswith((".pyc", ".pyo"))):
                         continue
                     children.append(child)
             for child in sorted(children, key=lambda item: item.name):
@@ -398,18 +405,173 @@ def import_document(module, roots):
     return entry, content, selected_collection
 
 
+def role_documentation(role, entry_point, role_path, output, roots):
+    """Acquire public metadata only; output must remain outside every hashed tree."""
+    require(isinstance(role, str) and len(role) <= 256 and re.fullmatch(
+        r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){0,2}", role)
+        and len(role.split(".")) in (1, 3)
+        and all(len(part) <= 128 for part in role.split(".")), "invalid_role_name")
+    require(isinstance(entry_point, str) and len(entry_point) <= 128
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry_point),
+            "invalid_role_entry_point")
+    destination = None
+    if output is not None:
+        try:
+            require(isinstance(output, str) and 0 < len(output.encode("utf-8")) <= 4096
+                    and "\0" not in output and Path(output).is_absolute()
+                    and Path(output).name not in ("", ".", ".."), "invalid_role_output")
+            # Publication replaces the final directory entry: resolve only its
+            # existing parent, not an existing final symlink's target.
+            path = Path(output)
+            parent = path.parent.resolve(strict=True)
+            require(parent.is_dir(), "invalid_role_output")
+            destination = parent / path.name
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            raise HealthFailure("invalid_role_output") from None
+    os.environ["LC_ALL"] = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
+    os.environ["LANG"] = os.environ["LC_ALL"]
+    # Defaults and playbook-relative role paths must not participate in selection.
+    private = absolute_path(os.environ.get("TMPDIR"))
+    os.environ["ANSIBLE_ROLES_PATH"] = str(private / "no-roles")
+    os.chdir(private)
+    import ansible
+    trees = [("ansible", Path(ansible.__file__).parent.resolve(strict=True))]
+    selected_collection = None
+    collection = None
+    arguments = ["ansible-doc", "--type", "role", "--json"]
+    if "." in role:
+        require(role_path is None, "invalid_role_source")
+        namespace, name, simple = role.split(".")
+        collection = namespace + "." + name
+        candidates = list(dict.fromkeys(
+            (root / "ansible_collections" / namespace / name).resolve(strict=True)
+            for root in roots
+            if (root / "ansible_collections" / namespace / name).is_dir()
+        ))
+        require(len(candidates) == 1, "role_not_found")
+        collection_root = candidates[0]
+        directory = collection_root / "roles" / simple
+        trees.append((collection, collection_root))
+        try:
+            manifest, raw = read_json(collection_root / "MANIFEST.json", 1048576)
+            info = manifest["collection_info"]
+            version = info["version"]
+            require(info["namespace"] == namespace and info["name"] == name
+                    and public_string(version) and re.fullmatch(
+                        r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?", version
+                    ), "runtime_collection_mismatch")
+            selected_collection = {
+                "name": collection, "version": version,
+                "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        except BaseException:
+            raise HealthFailure("runtime_collection_mismatch") from None
+        expected_path = collection_root
+    else:
+        require(role_path is not None, "role_source_required")
+        try:
+            require(isinstance(role_path, str) and 0 < len(role_path.encode("utf-8")) <= 4096
+                    and "\0" not in role_path and Path(role_path).is_absolute()
+                    and Path(role_path).name == role, "invalid_role_source")
+            directory = Path(role_path).resolve(strict=True)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            raise HealthFailure("invalid_role_source") from None
+        require(directory.name == role and directory.is_dir()
+                and ":" not in str(directory.parent) and "$" not in str(directory.parent),
+                "invalid_role_source")
+        arguments.extend(["--roles-path", str(directory.parent)])
+        expected_path = directory
+        trees.append(("role", directory))
+    require(directory.is_dir(), "role_not_found")
+    if destination is not None:
+        require(not any(destination.is_relative_to(root) for _, root in trees),
+                "role_output_inside_source")
+    tasks = [directory / "tasks" / (entry_point + suffix) for suffix in ("", ".yml", ".yaml")]
+    present = [path for path in tasks if path.exists() or path.is_symlink()]
+    require(len(present) == 1, "role_entry_point_not_found")
+    require(not present[0].is_symlink() and present[0].is_file(), "role_content_failed")
+    # Hash before ansible-doc reads metadata, bounding and rejecting unsafe tree
+    # entries first. The common walker retains module hashes exactly as before.
+    try:
+        domain = b"ssh-mcp-role-content-v1\0" + role.encode("ascii") + b"\0" + entry_point.encode("ascii") + b"\0"
+        content = content_hash(trees, present[0], domain, skip_generated=False)
+    except HealthFailure as error:
+        raise HealthFailure(error.code.replace("module_", "role_", 1)) from None
+    except (OSError, UnicodeError, ValueError):
+        raise HealthFailure("role_content_failed") from None
+    for name in tuple(sys.modules):
+        if name == "ansible_collections" or name.startswith("ansible_collections."):
+            del sys.modules[name]
+
+    def acquire(selected):
+        output = BoundedOutput()
+        argv = sys.argv
+        try:
+            sys.argv = arguments + (["--entry-point", selected] if selected is not None else []) + [role]
+            with contextlib.redirect_stdout(output):
+                try:
+                    runpy.run_module("ansible.cli.doc", run_name="__main__")
+                except SystemExit as error:
+                    require(error.code in (None, 0), "role_documentation_failed")
+            entries = json.loads(output.getvalue(), object_pairs_hook=unique_object)
+            require(type(entries) is dict, "role_documentation_failed")
+            return entries
+        except HealthFailure as error:
+            if error.code == "module_output_limit":
+                raise HealthFailure("role_output_limit") from None
+            raise
+        except BaseException:
+            raise HealthFailure("role_documentation_failed") from None
+        finally:
+            sys.argv = argv
+
+    entries = acquire(entry_point)
+    if not entries:
+        # The public CLI omits roles without specs and also omits unmatched entry
+        # points. An unfiltered public query distinguishes the latter; a dedicated
+        # argspec file must never silently degrade to an explicit-schema import.
+        all_entries = acquire(None)
+        dedicated = any((directory / "meta" / ("argument_specs" + suffix)).exists()
+                        for suffix in (".yml", ".yaml", ".json"))
+        require(not all_entries, "role_entry_point_not_found")
+        require(not dedicated, "role_documentation_failed")
+        return {"role": role, "collection": collection, "entry_points": {}}, content, selected_collection
+    require(list(entries) == [role], "role_identifier_mismatch")
+    document = entries[role]
+    require(type(document) is dict and set(document) == {"collection", "path", "entry_points"}
+            and document["collection"] == collection, "role_identifier_mismatch")
+    require(isinstance(document["path"], str)
+            and Path(document["path"]).resolve(strict=True) == expected_path,
+            "role_identifier_mismatch")
+    points = document["entry_points"]
+    require(type(points) is dict and list(points) == [entry_point],
+            "role_entry_point_not_found")
+    # Only public argspec semantics survive. Neither runtime nor role source
+    # paths are persisted in the private report or the eventual snapshot.
+    del document["path"]
+    document["role"] = role
+    return document, content, selected_collection
+
+
 def main():
     try:
         # The controller captures stderr privately. Dependency chatter must not corrupt JSON.
         payload, _ = read_json(Path(sys.argv[1]), 66560) if len(sys.argv) == 2 else (None, None)
         require(type(payload) is dict)
         module = payload.pop("module", None)
+        role = payload.pop("role", None)
+        require(module is None or role is None)
         with contextlib.redirect_stdout(sys.stderr):
-            identity, roots = check(payload)
+            identity, roots = check(payload, role_request=role is not None)
             if module is not None:
                 document, content, collection = import_document(module, roots)
+            elif role is not None:
+                exact_keys(role, ("name", "entry_point", "path", "output"))
+                document, content, collection = role_documentation(
+                    role["name"], role["entry_point"], role["path"], role["output"], roots
+                )
         report = {"schema": 2, "status": "passed", "identity": identity}
-        if module is not None:
+        if module is not None or role is not None:
             report.update(document=document, content_sha256=content, collection=collection)
     except HealthFailure as error:
         report = {"schema": 2, "status": "failed", "error_code": error.code}

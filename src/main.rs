@@ -15,6 +15,8 @@ mod module_schema;
 mod process;
 mod projection;
 mod reply;
+mod role_import;
+mod role_schema;
 mod schema_import;
 mod server;
 mod ssh;

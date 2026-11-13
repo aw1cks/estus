@@ -155,6 +155,61 @@ against a same-user attacker replacing trusted files. Mutable content can still
 change after verification. Enabled module execution checks selected source content
 again before dispatch; this is drift detection, not immutable attestation.
 
+## Offline role contracts
+
+Role authoring uses the same selected runtime and closed binding validator:
+
+```sh
+ssh-mcp schema import-role site.operations.observe --entry-point main \
+  --output observe.role.json --overlay observe.binding.json
+ssh-mcp schema verify-role observe.role.json --input observe.request.json
+```
+
+Collection roles resolve only inside that runtime's selected collections. A
+standalone role requires its exact directory on both commands; its basename must
+match the role name:
+
+```sh
+ssh-mcp schema import-role observe --role-path /etc/ssh-mcp/roles/observe \
+  --output observe.role.json --schema observe.inputs.json
+ssh-mcp schema verify-role observe.role.json \
+  --role-path /etc/ssh-mcp/roles/observe
+```
+
+`--schema` supplies a reviewed closed JSON Schema when public role metadata
+exposes no argspec entry, for example:
+
+```json
+{
+  "type": "object",
+  "properties": {"instance": {"type": "string", "minLength": 1}},
+  "required": ["instance"],
+  "additionalProperties": false
+}
+```
+
+It cannot replace an available argspec. Role defaults are never inferred as
+inputs or injected. Recursive argspec `options`, aliases, choices, types and
+requiredness reuse module contract rules; unknown structural constraints fail
+explicitly. Use a reviewed `--overlay` with `input_schema`, `fixed_args` and
+`input_map` to narrow inputs or express supported JSON Schema conditionals;
+`verify-role --input` requires such an overlay. Neither command publishes a tool.
+
+Snapshots bind the role/entry point, runtime/collection identity, whole selected
+role or collection plus Core content, explicit schema and overlay. They omit
+private source paths, refuse overwrite and detect drift without refreshing
+approval. Source hashing rejects interior symlinks/nonregular files and is
+bounded; it is not transitive dependency attestation or protection against
+same-user changes after verification.
+Write snapshots outside the hashed source trees, including through symlinked
+parents. Role search paths containing `:` or `$` are rejected because the public
+Ansible CLI would reinterpret them rather than select the literal source.
+
+Role tasks and dependencies do not execute during import/verification. Upstream
+role dependencies can run before the dependent role's argspec validation:
+Rust prevalidation remains the approval boundary, not upstream execution order.
+Role execution is not enabled by this slice.
+
 ## Ordinary Ansible modules
 
 [`examples/automation_probe.toml`](examples/automation_probe.toml) enables one real,

@@ -49,6 +49,10 @@ enum SchemaCommand {
         #[arg(long)]
         input: Option<PathBuf>,
     },
+    /// Import one reviewed role entry point; never execute its tasks or dependencies.
+    ImportRole(crate::role_import::ImportArgs),
+    /// Detect role/runtime/content drift and validate reviewed inputs offline.
+    VerifyRole(crate::role_import::VerifyArgs),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -128,6 +132,15 @@ pub(crate) struct Report {
 }
 
 impl Report {
+    pub(crate) fn validated(binding: bool, input: bool) -> Self {
+        Self {
+            ok: true,
+            error_code: None,
+            binding_validated: Some(binding),
+            input_validated: Some(input),
+        }
+    }
+
     fn failed(code: &'static str) -> Self {
         Self {
             ok: false,
@@ -297,6 +310,27 @@ async fn perform(
     args: SchemaArgs,
     shutdown: CancellationToken,
 ) -> Result<Report, &'static str> {
+    let command = match args.command {
+        SchemaCommand::ImportRole(role) => {
+            return crate::role_import::perform(
+                config,
+                crate::role_import::Command::Import(role),
+                args.timeout_secs,
+                shutdown,
+            )
+            .await;
+        }
+        SchemaCommand::VerifyRole(role) => {
+            return crate::role_import::perform(
+                config,
+                crate::role_import::Command::Verify(role),
+                args.timeout_secs,
+                shutdown,
+            )
+            .await;
+        }
+        command => command,
+    };
     let duration = config
         .timeout(args.timeout_secs)
         .map_err(|_| "invalid_timeout")?;
@@ -308,7 +342,7 @@ async fn perform(
         .map_err(|_| "runtime_unavailable")?;
     // Join filesystem work even when interrupted: dropping blocking I/O is not cancellation.
     let command = tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
-        match args.command {
+        match command {
             SchemaCommand::Import {
                 module,
                 output,
@@ -341,6 +375,9 @@ async fn perform(
                     binding,
                     input,
                 ))
+            }
+            SchemaCommand::ImportRole(_) | SchemaCommand::VerifyRole(_) => {
+                unreachable!("role commands are dispatched before module preparation")
             }
         }
     })

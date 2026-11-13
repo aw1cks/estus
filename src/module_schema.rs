@@ -74,7 +74,7 @@ pub(crate) fn valid_fqcn(value: &str) -> bool {
 
 // Limit numbers to binary64's exact integer magnitude range so bounds and
 // JSON Schema numeric equality cannot collapse distinct integer values.
-fn bounded(value: &Value) -> bool {
+pub(crate) fn bounded(value: &Value) -> bool {
     fn walk(value: &Value, depth: usize, nodes: &mut usize, bytes: &mut usize) -> bool {
         *nodes += 1;
         if depth > DEPTH || *nodes > NODES {
@@ -193,6 +193,46 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
     }
     if !bounded(&result) {
         return Err(INVALID);
+    }
+    Ok(result)
+}
+
+/// Build the same contract for a reviewed, explicitly typed closed schema.
+/// Conditional predicates remain the existing schema checker's responsibility.
+pub(crate) fn import_explicit_schema(schema: &Value) -> Result<Value, &'static str> {
+    fn identity_aliases(schema: &Value) -> Result<Aliases, &'static str> {
+        let mut aliases = Aliases::default();
+        match schema.get("type").and_then(Value::as_str).ok_or(SCHEMA)? {
+            "object" => {
+                for (key, value) in schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .ok_or(SCHEMA)?
+                {
+                    aliases
+                        .properties
+                        .insert(key.clone(), identity_aliases(value)?);
+                }
+            }
+            "array" => {
+                aliases.items = Some(Box::new(identity_aliases(
+                    schema.get("items").ok_or(SCHEMA)?,
+                )?));
+            }
+            _ => (),
+        }
+        Ok(aliases)
+    }
+    check_schema(schema, true)?;
+    let result = serde_json::to_value(Contract {
+        schema: schema.clone(),
+        aliases: identity_aliases(schema)?,
+        defaults: BTreeMap::new(),
+        review_required: Vec::new(),
+    })
+    .map_err(|_| SCHEMA)?;
+    if !bounded(&result) {
+        return Err(SCHEMA);
     }
     Ok(result)
 }
