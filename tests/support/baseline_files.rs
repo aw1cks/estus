@@ -709,7 +709,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
     // Collect every cleanup result before returning a scenario failure. Stopping
     // the container also bounds a still-waiting finite remote barrier on errors.
     let log = wire.log.clone();
-    let server_cleanup = wire.stop(false).await.map(|_| ());
+    let server_cleanup = wire.stop(None).await.map(|_| ());
     let master_cleanup = match support::masters(&log) {
         Ok(owned) if owned.is_empty() => Ok(()),
         Ok(owned) => support::assert_masters_gone(&owned).await,

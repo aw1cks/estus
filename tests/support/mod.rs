@@ -715,10 +715,15 @@ pub struct WireServer {
 
 impl WireServer {
     pub fn start(config: &Path) -> Result<Self> {
-        let mut child = server_command(config)?
+        Self::start_command(server_command(config)?)
+    }
+
+    pub fn start_command(mut command: Command) -> Result<Self> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
         let input = Some(child.stdin.take().context("wire stdin")?);
         let output = BufReader::new(child.stdout.take().context("wire stdout")?);
@@ -797,11 +802,15 @@ impl WireServer {
         Ok(())
     }
 
-    pub async fn stop(mut self, sigterm: bool) -> Result<Log> {
-        if sigterm && self.child.try_wait()?.is_none() {
+    pub async fn stop(mut self, signal: Option<Signal>) -> Result<Log> {
+        if let Some(signal) = signal {
+            ensure!(
+                self.child.try_wait()?.is_none(),
+                "server exited before shutdown signal"
+            );
             kill(
                 Pid::from_raw(i32::try_from(self.child.id().context("owned server PID")?)?),
-                Signal::SIGTERM,
+                signal,
             )?;
         } else {
             drop(self.input.take());

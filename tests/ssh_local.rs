@@ -15,6 +15,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use indoc::{formatdoc, indoc};
+use nix::sys::signal::Signal;
 use rmcp::{
     model::{CallToolRequest, ClientRequest},
     service::PeerRequestOptions,
@@ -703,7 +704,7 @@ async fn shutdown_case(fixture: &Fixture, sigterm: bool) -> Result<()> {
         Fixture::await_file(&started).await?;
         masters(&server.log)
     }.await;
-    let stopped = server.stop(sigterm).await;
+    let stopped = server.stop(sigterm.then_some(Signal::SIGTERM)).await;
     // Closing a listener/master is not proof that remote descendants stopped.
     let completed = if dispatched {
         Fixture::await_file(&done).await
@@ -1388,7 +1389,7 @@ async fn ssh_response_wire_budget() -> Result<()> {
         }
         .await;
         let raw_log = server.log.clone();
-        let stopped = server.stop(false).await;
+        let stopped = server.stop(None).await;
         let gone = match masters(&raw_log) {
             Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
             Ok(_) => Ok(()),
@@ -1966,7 +1967,7 @@ async fn ssh_closed_stderr() -> Result<()> {
                         Ok::<_, anyhow::Error>(())
                     }.await;
                     // Result-based teardown runs even if any assertion above failed.
-                    let stopped = server.stop(sigterm).await;
+                    let stopped = server.stop(sigterm.then_some(Signal::SIGTERM)).await;
                     let completed = async {
                         for (start, finish) in [
                             (&started, &done), (&shutdown_started, &shutdown_done),
@@ -3003,7 +3004,7 @@ async fn ssh_list_directory() -> Result<()> {
             Ok::<_, anyhow::Error>(())
         }.await;
         let owned = masters(&wire.log);
-        let stopped = wire.stop(false).await;
+        let stopped = wire.stop(None).await;
         let gone = match owned {
             Ok(owned) => assert_masters_gone(&owned).await,
             Err(error) => Err(error),
@@ -4126,7 +4127,7 @@ async fn ssh_remote_scripts() -> Result<()> {
         let release_script = fs::write(&interrupted_release, b"release");
         let restore_permissions = fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o600));
         let owned = masters(&server.log);
-        let stopped = server.stop(false).await;
+        let stopped = server.stop(None).await;
         let gone = match owned {
             Ok(owned) => assert_masters_gone(&owned).await,
             Err(error) => Err(error),

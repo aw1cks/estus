@@ -1039,7 +1039,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
     }
     .await;
     let log = wire.log.clone();
-    let server = wire.stop(false).await;
+    let server = wire.stop(None).await;
     let master_cleanup = match masters(&log) {
         Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
         Ok(_) => Ok(()),
@@ -1470,7 +1470,7 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
     }
     .await;
     let log = wire.log.clone();
-    let server = wire.stop(false).await;
+    let server = wire.stop(None).await;
     let master_cleanup = match masters(&log) {
         Ok(owned) => assert_masters_gone(&owned).await,
         Err(error) => Err(error),

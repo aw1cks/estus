@@ -563,7 +563,10 @@ async fn shutdown_once(fixture: &isolated::Fixture, sigterm: bool, index: usize)
         Ok(())
     }.await;
     // WireServer retains its stdin until after SIGTERM has been handled.
-    let stopped = server.stop(sigterm).await.map(|_| ());
+    let stopped = server
+        .stop(sigterm.then_some(nix::sys::signal::Signal::SIGTERM))
+        .await
+        .map(|_| ());
     let gone = match masters(&log) {
         Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
         Ok(_) => Ok(()),
@@ -770,7 +773,7 @@ async fn ssh_packaged_complete_wire_budget() -> Result<()> {
             Ok(())
         }
         .await;
-        let stopped = wire.stop(false).await.map(|_| ());
+        let stopped = wire.stop(None).await.map(|_| ());
         let gone = match masters(&log) {
             Ok(owned) if !owned.is_empty() => assert_masters_gone(&owned).await,
             Ok(_) => Ok(()),
