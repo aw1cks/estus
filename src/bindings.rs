@@ -416,7 +416,7 @@ pub(crate) struct ControllerRequest {
 
 #[derive(Debug)]
 pub(crate) struct ControllerPlan {
-    pub(crate) source: String,
+    pub(crate) source: Cow<'static, str>,
     pub(crate) interpreter: String,
     pub(crate) interpreter_argv: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
@@ -695,7 +695,7 @@ impl CompiledBinding {
                         crate::filedata::verify_script(bytes, true, &digest, max_bytes as usize)
                             .map_err(|_| invalid("Controller source verification failed"))?;
                     Some(Arc::new(ControllerPlan {
-                        source,
+                        source: Cow::Owned(source),
                         interpreter: interpreter.program,
                         interpreter_argv: interpreter.argv,
                         cwd: cwd.map(PathBuf::from),

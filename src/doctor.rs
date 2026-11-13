@@ -6,6 +6,7 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::automation::{self, RuntimeCheck, RuntimeContext};
 use crate::{
     config::{Config, DoctorArgs, IdentityRole},
     files::{self, FileContext},
@@ -65,6 +66,8 @@ pub(crate) struct Report {
     ok: bool,
     targets: Vec<TargetReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<RuntimeCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
     #[serde(skip)]
     exit: u8,
@@ -75,6 +78,7 @@ impl Report {
         Self {
             ok: false,
             targets: Vec::new(),
+            runtime: None,
             error_code: Some(code),
             exit: 2,
         }
@@ -143,7 +147,7 @@ fn stopped(shutdown: &CancellationToken, deadline: tokio::time::Instant) -> Opti
 
 pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: CancellationToken) -> Report {
     let mut selected = args.targets;
-    if selected.is_empty() || selected.len() > MAX_TARGETS {
+    if (selected.is_empty() && args.runtime.is_none()) || selected.len() > MAX_TARGETS {
         return Report::invalid("invalid_target_selection");
     }
     selected.sort_unstable();
@@ -161,8 +165,34 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
     let Some(deadline) = tokio::time::Instant::now().checked_add(duration) else {
         return Report::invalid("invalid_timeout");
     };
+    let runtime = if let Some(kind) = args.runtime {
+        Some(match kind {
+            crate::config::RuntimeKind::Ansible => {
+                if let Some(code) = stopped(&shutdown, deadline) {
+                    RuntimeCheck::not_tested(code)
+                } else {
+                    match config.automation_runtime() {
+                        Ok(reference) => {
+                            automation::check(
+                                reference,
+                                RuntimeContext {
+                                    deadline,
+                                    ct: &shutdown,
+                                    shutdown: &shutdown,
+                                },
+                            )
+                            .await
+                        }
+                        Err(_) => RuntimeCheck::failed("runtime_unavailable"),
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
     let mut targets = Vec::with_capacity(selected.len());
-    let mut ok = true;
+    let mut ok = runtime.as_ref().is_none_or(RuntimeCheck::is_passed);
     for name in selected {
         if let Some(code) = stopped(&shutdown, deadline) {
             ok = false;
@@ -229,6 +259,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
     Report {
         ok,
         targets,
+        runtime,
         error_code: None,
         exit: if ok { 0 } else { 1 },
     }
@@ -243,6 +274,7 @@ mod tests {
         let mut report = Report {
             ok: true,
             error_code: None,
+            runtime: None,
             exit: 0,
             targets: vec![TargetReport {
                 target: "site-\"\\\n☃".into(),

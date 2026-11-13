@@ -1,4 +1,5 @@
 mod audit;
+mod automation;
 mod bindings;
 mod capture;
 mod command;
@@ -88,6 +89,47 @@ async fn run(config: config::Config, command: Option<config::CliCommand>) -> Exi
             },
         };
         return ExitCode::from(report.publish().await);
+    }
+    if config.automation_required() {
+        let shutdown = CancellationToken::new();
+        let duration = match config.timeout(None) {
+            Ok(duration) => duration,
+            Err(_) => return fail("automation_runtime_unavailable"),
+        };
+        let Some(deadline) = tokio::time::Instant::now().checked_add(duration) else {
+            return fail("automation_runtime_unavailable");
+        };
+        let verification = async {
+            match config.automation_runtime() {
+                Ok(reference) => {
+                    automation::check(
+                        reference,
+                        automation::RuntimeContext {
+                            deadline,
+                            ct: &shutdown,
+                            shutdown: &shutdown,
+                        },
+                    )
+                    .await
+                }
+                Err(_) => automation::RuntimeCheck::failed("runtime_unavailable"),
+            }
+        };
+        tokio::pin!(verification);
+        let health = tokio::select! {
+            health = &mut verification => health,
+            _ = interrupt.recv() => {
+                shutdown.cancel();
+                verification.as_mut().await
+            },
+            _ = terminate.recv() => {
+                shutdown.cancel();
+                verification.as_mut().await
+            },
+        };
+        if !health.is_passed() {
+            return fail("automation_runtime_unavailable");
+        }
     }
     let application = match server::SshMcp::new(config) {
         Ok(application) => application,

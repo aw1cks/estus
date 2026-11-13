@@ -35,10 +35,13 @@
           }
         );
         commonArgs = {
-          src = craneLib.cleanCargoSource (pkgs.lib.cleanSourceWith {
+          src = pkgs.lib.cleanSourceWith {
             src = ./.;
-            filter = path: _: path != "${toString ./.}/fuzz";
-          });
+            filter = path: type:
+              path != "${toString ./.}/fuzz"
+              && (craneLib.filterCargoSources path type
+                || path == "${toString ./.}/src/automation_health.py");
+          };
           strictDeps = true;
           doCheck = true;
         };
@@ -53,6 +56,16 @@
         };
         inherit (defaultBuild) package acceptance;
         automationRuntime = import ./nix/automation-runtime.nix { inherit pkgs; };
+        withAutomation = native: pkgs.runCommand "ssh-mcp-automation-${native.version}" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          meta.mainProgram = "ssh-mcp";
+        } ''
+          mkdir -p "$out/bin"
+          makeWrapper ${native}/bin/ssh-mcp "$out/bin/ssh-mcp" \
+            --set SSH_MCP_ANSIBLE_RUNTIME ${automationRuntime}
+        '';
+        automation = withAutomation package;
+        automationMsrv = withAutomation msrvBuild.package;
       in
       {
         packages = {
@@ -61,12 +74,22 @@
           ssh-acceptance = acceptance;
           ssh-acceptance-msrv = msrvBuild.acceptance;
           automation-runtime = automationRuntime;
+          inherit automation;
+          automation-msrv = automationMsrv;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
         };
         apps.default = {
           type = "app";
           program = "${package}/bin/ssh-mcp";
+        };
+        apps.automation = {
+          type = "app";
+          program = "${automation}/bin/ssh-mcp";
+        };
+        apps.automation-msrv = {
+          type = "app";
+          program = "${automationMsrv}/bin/ssh-mcp";
         };
         apps.ssh-baseline = {
           type = "app";

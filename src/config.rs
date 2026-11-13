@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
@@ -134,15 +134,28 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum CliCommand {
-    /// Check configured logical targets without running commands or sudo.
+    /// Check runtime health or configured targets without executing automation or commands.
     Doctor(DoctorArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RuntimeKind {
+    Ansible,
 }
 
 #[derive(Args)]
 pub(crate) struct DoctorArgs {
     /// Configured logical target; repeat to select additional targets.
-    #[arg(long = "target", value_name = "LOGICAL_TARGET", required = true)]
+    #[arg(
+        long = "target",
+        value_name = "LOGICAL_TARGET",
+        required_unless_present = "runtime"
+    )]
     pub targets: Vec<String>,
+    /// Check the explicitly selected optional runtime's import and identity health.
+    #[arg(long, value_enum)]
+    pub runtime: Option<RuntimeKind>,
     /// Deadline in seconds for the entire diagnostic run.
     #[arg(long)]
     pub timeout_secs: Option<u64>,
@@ -173,6 +186,7 @@ pub(crate) struct Config {
     limits: Limits,
     targets: Option<BTreeMap<String, Target>>,
     bindings: Bindings,
+    automation: Automation,
 }
 
 #[derive(Default, Deserialize)]
@@ -185,6 +199,14 @@ struct Document {
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
     controller: Controller,
+    automation: Automation,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Automation {
+    required: bool,
+    runtime: Option<PathBuf>,
 }
 
 #[derive(Default, Deserialize)]
@@ -634,7 +656,37 @@ impl Config {
             limits: document.limits,
             targets: document.targets,
             bindings,
+            automation: document.automation,
         })
+    }
+
+    /// A startup prerequisite only; this does not enable automation tools.
+    pub(crate) fn automation_required(&self) -> bool {
+        self.automation.required
+    }
+
+    /// Resolve the optional reference only when runtime health is requested.
+    /// This validates its shape without inspecting any runtime files.
+    pub(crate) fn automation_runtime(&self) -> Result<Option<PathBuf>, ConfigError> {
+        self.automation_runtime_with(|key| std::env::var_os(key))
+    }
+
+    fn automation_runtime_with(
+        &self,
+        env: impl FnOnce(&str) -> Option<OsString>,
+    ) -> Result<Option<PathBuf>, ConfigError> {
+        if let Some(path) = &self.automation.runtime {
+            return Ok(Some(path.clone()));
+        }
+        env("SSH_MCP_ANSIBLE_RUNTIME")
+            .map(|value| {
+                let value = value.to_str().ok_or_else(|| {
+                    invalid("automation.runtime", "must be a bounded absolute path")
+                })?;
+                validate_runtime_path(value)?;
+                Ok(PathBuf::from(value))
+            })
+            .transpose()
     }
 
     pub(crate) fn targets<'a>(&'a self, tools: &'a ToolCatalog) -> TargetDiscovery<'a> {
@@ -872,6 +924,16 @@ fn resolve_path(path: PathBuf, base: &Path, field: &'static str) -> Result<PathB
     })
 }
 
+fn validate_runtime_path(value: &str) -> Result<(), ConfigError> {
+    if !Path::new(value).is_absolute() || value.len() > 4096 || value.contains('\0') {
+        return Err(invalid(
+            "automation.runtime",
+            "must be a bounded absolute path",
+        ));
+    }
+    Ok(())
+}
+
 // Named POSIX-style accounts only, not sudo's numeric-ID syntax or options.
 pub(crate) fn account_name(user: &str) -> bool {
     !user.is_empty()
@@ -1035,6 +1097,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "tools",
             "enabled_tools",
             "controller",
+            "automation",
         ],
     )?;
     if let Some(value) = root.get("tools")
@@ -1052,6 +1115,20 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     }
     if let Some(value) = root.get("profile") {
         validate_profile(value, "profile")?;
+    }
+    if let Some(value) = root.get("automation") {
+        let automation = table(value, "automation", &["required", "runtime"])?;
+        if let Some(value) = automation.get("required")
+            && !value.is_bool()
+        {
+            return Err(invalid("automation.required", "must be a boolean"));
+        }
+        if let Some(value) = automation.get("runtime") {
+            let value = value
+                .as_str()
+                .ok_or_else(|| invalid("automation.runtime", "must be a string"))?;
+            validate_runtime_path(value)?;
+        }
     }
     if let Some(value) = root.get("controller") {
         let controller = table(value, "controller", &["workspace_root"])?;
@@ -1201,6 +1278,7 @@ mod tests {
         };
         assert_eq!(args.targets, ["two", "one"]);
         assert_eq!(args.timeout_secs, Some(7));
+        assert_eq!(args.runtime, None);
 
         let parsed = Cli::try_parse_from(["ssh-mcp", "doctor", "--target", "one"]).unwrap();
         let Some(CliCommand::Doctor(args)) = parsed.command else {
@@ -1210,7 +1288,47 @@ mod tests {
     }
 
     #[test]
-    fn doctor_requires_named_targets_and_exposes_no_execution_controls() {
+    fn doctor_runtime_selection_allows_no_targets_or_combined_targets() {
+        for argv in [
+            vec!["ssh-mcp", "doctor", "--runtime", "ansible"],
+            vec![
+                "ssh-mcp",
+                "doctor",
+                "--runtime",
+                "ansible",
+                "--target",
+                "one",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            let Some(CliCommand::Doctor(args)) = parsed.command else {
+                panic!("doctor subcommand expected");
+            };
+            assert_eq!(args.runtime, Some(RuntimeKind::Ansible));
+        }
+        for argv in [
+            vec!["ssh-mcp", "doctor", "--runtime"],
+            vec!["ssh-mcp", "doctor", "--runtime", "unknown"],
+            vec!["ssh-mcp", "--runtime", "ansible"],
+            vec![
+                "ssh-mcp",
+                "doctor",
+                "--runtime",
+                "ansible",
+                "--runtime-path",
+                "/private",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::Ansible).unwrap(),
+            "\"ansible\""
+        );
+    }
+
+    #[test]
+    fn doctor_requires_named_selection_and_exposes_no_execution_controls() {
         for args in [
             vec!["ssh-mcp", "doctor"],
             vec!["ssh-mcp", "doctor", "one"],
@@ -2639,6 +2757,121 @@ programs=['/private/program']
                 &[]
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn automation_loading_never_reads_the_runtime_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load_with(cli(), dir.path(), |key| {
+            assert_ne!(key, "SSH_MCP_ANSIBLE_RUNTIME");
+            None
+        })
+        .unwrap();
+        assert!(!config.automation_required());
+        assert_eq!(config.automation_runtime_with(|_| None).unwrap(), None);
+
+        // Neither required nor a configured reference inspects runtime files.
+        for required in [false, true] {
+            let config = load_text(
+                &format!(
+                    "[automation]\nrequired={required}\nruntime='/nonexistent-private-runtime'"
+                ),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(config.automation_required(), required);
+            assert_eq!(
+                config
+                    .automation_runtime_with(|_| panic!("file reference must win"))
+                    .unwrap(),
+                Some(PathBuf::from("/nonexistent-private-runtime"))
+            );
+        }
+    }
+
+    #[test]
+    fn automation_environment_reference_is_validated_only_when_requested() {
+        let config = load_text("", &[]).unwrap();
+        assert_eq!(
+            config
+                .automation_runtime_with(|key| {
+                    assert_eq!(key, "SSH_MCP_ANSIBLE_RUNTIME");
+                    Some("/nonexistent-private-runtime".into())
+                })
+                .unwrap(),
+            Some(PathBuf::from("/nonexistent-private-runtime"))
+        );
+        for value in [
+            String::new(),
+            "private-relative-runtime".to_owned(),
+            "/private\0runtime".to_owned(),
+            format!("/{}", "x".repeat(4096)),
+        ] {
+            let error = config
+                .automation_runtime_with(|_| Some(value.into()))
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "automation.runtime: must be a bounded absolute path"
+            );
+        }
+        let boundary = format!("/{}", "x".repeat(4095));
+        assert_eq!(
+            config
+                .automation_runtime_with(|_| Some(boundary.clone().into()))
+                .unwrap(),
+            Some(PathBuf::from(boundary))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automation_non_unicode_environment_reference_is_sanitized_on_use() {
+        use std::os::unix::ffi::OsStringExt;
+        let config = load_text("", &[]).unwrap();
+        let error = config
+            .automation_runtime_with(|_| Some(OsString::from_vec(vec![b'/', 0xff])))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "automation.runtime: must be a bounded absolute path"
+        );
+    }
+
+    #[test]
+    fn automation_schema_rejects_private_invalid_shapes_without_disclosure() {
+        for (text, field) in [
+            ("automation='secret_payload'", "automation"),
+            ("[automation]\nsecret_payload=true", "automation"),
+            (
+                "[automation]\nrequired='secret_payload'",
+                "automation.required",
+            ),
+            (
+                "[automation]\nruntime=['secret_payload']",
+                "automation.runtime",
+            ),
+            (
+                "[automation]\nruntime='secret_payload'",
+                "automation.runtime",
+            ),
+            ("[automation]\nruntime=''", "automation.runtime"),
+            (
+                "[automation]\nruntime=\"/secret_payload\\u0000\"",
+                "automation.runtime",
+            ),
+        ] {
+            let error = load_text(text, &[]).err().unwrap();
+            assert_eq!(error.field, field);
+            assert!(!error.to_string().contains("secret_payload"));
+            assert!(!format!("{error:?}").contains("secret_payload"));
+            assert!(std::error::Error::source(&error).is_none());
+        }
+        let oversized = format!("[automation]\nruntime='/{}'", "x".repeat(4096));
+        assert_eq!(
+            load_text(&oversized, &[]).err().unwrap().field,
+            "automation.runtime"
         );
     }
 

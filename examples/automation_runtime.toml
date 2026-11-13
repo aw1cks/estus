@@ -1,0 +1,12 @@
+# Run with the optional package, which supplies its private pinned runtime:
+#   nix run .#automation-msrv -- --config examples/automation_runtime.toml doctor --runtime ansible
+#   nix run .#automation-msrv -- --config examples/automation_runtime.toml
+# This validates dependencies only; it does not publish or execute Ansible tools.
+# The native package stays independent unless this prerequisite is explicitly required.
+profile = "actions-only"
+enabled_tools = []
+
+[automation]
+required = true
+# A site may instead declare an absolute runtime bundle path here. The file
+# reference wins over the optional wrapper's SSH_MCP_ANSIBLE_RUNTIME reference.
