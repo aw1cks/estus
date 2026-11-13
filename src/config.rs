@@ -30,6 +30,7 @@ pub(crate) enum ToolId {
     WriteFile,
     Mkdir,
     Rename,
+    RemoveFile,
     Stat,
     ListDirectory,
     Sudo,
@@ -62,7 +63,7 @@ impl Profile {
             ToolId::ReadFile | ToolId::Stat | ToolId::ListDirectory => {
                 matches!(self, Self::Baseline | Self::ReadOnlyFiles | Self::FilesOnly)
             }
-            ToolId::WriteFile | ToolId::Mkdir | ToolId::Rename => {
+            ToolId::WriteFile | ToolId::Mkdir | ToolId::Rename | ToolId::RemoveFile => {
                 matches!(self, Self::Baseline | Self::FilesOnly)
             }
             ToolId::Exec | ToolId::Run | ToolId::Sudo => matches!(self, Self::Baseline),
@@ -418,6 +419,7 @@ impl Serialize for PermittedOperations<'_> {
                                 | ToolId::WriteFile
                                 | ToolId::Mkdir
                                 | ToolId::Rename
+                                | ToolId::RemoveFile
                                 | ToolId::Stat
                                 | ToolId::ListDirectory => true,
                             }
@@ -1117,6 +1119,7 @@ impl Config {
             | ToolId::WriteFile
             | ToolId::Mkdir
             | ToolId::Rename
+            | ToolId::RemoveFile
             | ToolId::Stat
             | ToolId::ListDirectory => {}
         }

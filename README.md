@@ -136,6 +136,30 @@ server refusal or cleanup failure; no replay or rollback is inferred.
 `nix run .#rename-acceptance-msrv` exercises real moves, replacement consent,
 unsupported protection and dispatch uncertainty with the same native prerequisites.
 
+## Ordinary SFTP file unlink
+
+`ssh_remove_file` removes one named file or final symlink entry:
+
+```json
+{"host":"server","path":"/srv/example/obsolete-file","timeout_secs":10}
+```
+
+This is destructive, not secure erasure. A final symlink itself is unlinked; its
+file/directory target survives. Directories and missing entries remain backend
+errors. There is no recursion, wildcard expansion, `missing_ok`, sudo, RMDIR,
+canonicalization or shell/SCP fallback. Intermediate symlinks and other filesystem
+rules remain server-defined; paths are literal UTF-8, not a path sandbox.
+
+Success returns `{"removed":true}` in the standard envelope after acknowledgement
+and bounded cleanup. Profile/admission/ordinary-channel ownership matches the other
+SFTP mutations. Invalid or denied calls reject before SSH; handshake failure cannot
+have dispatched REMOVE. Every failure after REMOVE polling retains
+`remote_state_unknown=true`, including server refusal or cleanup failure. The
+operation is never replayed and channel closure never proves rollback.
+
+`nix run .#remove-file-acceptance-msrv` exercises actual entries, preserved link
+targets, literal names and dispatch uncertainty with the same native prerequisites.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

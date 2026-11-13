@@ -171,6 +171,42 @@ impl RenameRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct RemoveFileRequest {
+    pub(crate) host: String,
+    pub(crate) path: String,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RemoveFileSpec<'a> {
+    pub(crate) path: &'a str,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct RemoveFileData {
+    pub(crate) removed: bool,
+}
+
+impl RemoveFileRequest {
+    pub(crate) fn validate(&self, budget: ReplyBudget) -> Result<RemoveFileSpec<'_>, ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        budget
+            .remaining(&ToolReply {
+                data: Some(RemoveFileData { removed: true }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            })
+            .map_err(|_| invalid("Request leaves insufficient response budget for file removal"))?;
+        Ok(RemoveFileSpec { path: &self.path })
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StatRequest {
     pub(crate) host: String,
     pub(crate) path: String,

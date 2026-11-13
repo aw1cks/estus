@@ -28,8 +28,9 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
     filedata::{
-        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RenameData,
-        RenameSpec, StatSpec, WriteData, WriteSpec, encode, verify_script,
+        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RemoveFileData,
+        RemoveFileSpec, RenameData, RenameSpec, StatSpec, WriteData, WriteSpec, encode,
+        verify_script,
     },
     filemeta::{ListEntry, StatData, metadata_data},
     reply::{ToolError, ToolReply},
@@ -466,6 +467,28 @@ async fn rename_sftp(
     combine_close(result, close)
 }
 
+async fn remove_file_sftp(
+    sftp: Sftp,
+    spec: RemoveFileSpec<'_>,
+    mutation_started: &mut bool,
+) -> Result<RemoveFileData, Failure> {
+    let result = async {
+        let mut fs = sftp.fs();
+        // REMOVE unlinks one entry, including a final symlink, not its target.
+        // No metadata/canonicalization preflight can strengthen that guarantee.
+        // Set before polling: cancellation may hide the REMOVE acknowledgement.
+        *mutation_started = true;
+        fs.remove_file(spec.path).await.map_err(sftp_failure)?;
+        Ok(RemoveFileData { removed: true })
+    }
+    .await;
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> {
     let result = {
         // Fs retains library resources: drop it before waiting for Sftp::close.
@@ -654,6 +677,22 @@ pub(crate) async fn rename(
     let mut mutation_started = false;
     let mut outcome = run_sftp(session, context, |sftp| {
         rename_sftp(sftp, spec, &mut mutation_started)
+    })
+    .await;
+    if let Some(error) = &mut outcome.reply.error {
+        error.remote_state_unknown = mutation_started;
+    }
+    outcome
+}
+
+pub(crate) async fn remove_file(
+    session: &Session,
+    spec: RemoveFileSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<RemoveFileData> {
+    let mut mutation_started = false;
+    let mut outcome = run_sftp(session, context, |sftp| {
+        remove_file_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
     if let Some(error) = &mut outcome.reply.error {

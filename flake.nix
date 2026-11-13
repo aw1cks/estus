@@ -240,6 +240,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/rename-acceptance";
         };
+        apps.remove-file-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/remove-file-acceptance";
+        };
+        apps.remove-file-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/remove-file-acceptance";
+        };
         apps.controller-scripts = {
           type = "app";
           program = "${acceptance}/bin/controller-scripts";

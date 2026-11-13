@@ -33,8 +33,8 @@ use crate::{
     },
     exec::{self, RunContext},
     filedata::{
-        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RenameData,
-        RenameRequest, StatRequest, WriteData, WriteRequest,
+        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RemoveFileData,
+        RemoveFileRequest, RenameData, RenameRequest, StatRequest, WriteData, WriteRequest,
     },
     filemeta::StatData,
     files::{self, FileContext},
@@ -204,7 +204,7 @@ impl Estus {
         }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
-        let routes: [(ToolId, ToolRoute<Self>); 10] = [
+        let routes: [(ToolId, ToolRoute<Self>); 11] = [
             (
                 ToolId::Targets,
                 (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
@@ -232,6 +232,10 @@ impl Estus {
             (
                 ToolId::Rename,
                 (Self::ssh_rename_tool_attr(), Self::ssh_rename).into_tool_route(),
+            ),
+            (
+                ToolId::RemoveFile,
+                (Self::ssh_remove_file_tool_attr(), Self::ssh_remove_file).into_tool_route(),
             ),
             (
                 ToolId::Stat,
@@ -902,6 +906,31 @@ impl Estus {
         .await
     }
 
+    async fn remove_file(
+        &self,
+        request: RemoveFileRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(&request.host, ToolId::RemoveFile, &self.state, &context.id);
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<RemoveFileData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .remove_file(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -1082,6 +1111,21 @@ impl Estus {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.rename(request, context).await
+    }
+
+    #[tool(
+        name = "ssh_remove_file",
+        description = "Unlink one file or final symlink entry through an independently owned ordinary SFTP channel. path is literal UTF-8: no shell, tilde, variable or wildcard expansion or path sandbox. A final symlink itself is removed, not its file/directory target; intermediate symlinks follow server semantics. Directories and missing paths remain backend errors, never recursive deletion or missing_ok success. No RMDIR, canonicalization, sudo, shell/SCP fallback, retry or replay. Success returns removed=true only after REMOVE acknowledgement and bounded channel cleanup. Any failure after REMOVE dispatch retains remote-state uncertainty, including server refusal or cleanup failure; timeout/cancellation never asserts rollback or secure erasure.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<RemoveFileRequest>(),
+        output_schema = schema_for_type::<ToolReply<RemoveFileData>>()
+    )]
+    async fn ssh_remove_file(
+        &self,
+        Arguments(request): Arguments<RemoveFileRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.remove_file(request, context).await
     }
 
     #[tool(
@@ -1759,6 +1803,61 @@ impl State {
         {
             Ok(lease) => {
                 let outcome = files::rename(
+                    lease.session(),
+                    spec,
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn remove_file(
+        &self,
+        request: RemoveFileRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<RemoveFileData> {
+        let metadata = file_metadata(&request.host, ToolId::RemoveFile, self, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request.validate(budget).and_then(|spec| {
+            let target = self.config.resolve(&request.host, ToolId::RemoveFile)?;
+            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+            Ok((spec, target, deadline))
+        });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::remove_file(
                     lease.session(),
                     spec,
                     FileContext {

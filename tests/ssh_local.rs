@@ -3062,6 +3062,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             "ssh_list_directory",
                             "ssh_mkdir",
                             "ssh_read_file",
+                            "ssh_remove_file",
                             "ssh_rename",
                             "ssh_stat",
                             "ssh_targets",
@@ -3126,6 +3127,20 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 failed(&reply, "policy_denied")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
                 ensure!(fs::read(&file)? == b"abc" && !denied_rename.exists());
+                let reply = client
+                    .call(
+                        "ssh_remove_file",
+                        json!({
+                            "host":"locked","path":file
+                        }),
+                    )
+                    .await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(
+                    fs::read(&file)? == b"abc",
+                    "read-only target unlinked an entry"
+                );
                 ensure!(
                     masters(&client.log)?.is_empty(),
                     "profile denial started an SSH master"
@@ -3225,6 +3240,22 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     .call("ssh_read_file", json!({"host":"locked","path":renamed}))
                     .await?;
                 ensure!(succeeded(&reply)?["content"] == payload);
+                let reply = client
+                    .call("ssh_remove_file", json!({"host":"locked","path":renamed}))
+                    .await?;
+                failed(&reply, "policy_denied")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+                ensure!(fs::symlink_metadata(&renamed)?.ino() == before);
+                ensure!(fs::read(&renamed)? == payload.as_bytes());
+                let reply = client
+                    .call("ssh_remove_file", json!({"host":"allowed","path":renamed}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"removed":true}));
+                ensure!(
+                    fs::symlink_metadata(&renamed).is_err(),
+                    "files-only profile did not unlink the actual allowed entry"
+                );
+                ensure!(created_directory.is_dir() && fs::read_dir(&directory)?.count() == 1);
                 ensure!(
                     !masters(&client.log)?.is_empty(),
                     "successful file calls started no master"
@@ -5104,6 +5135,384 @@ async fn ssh_rename_missing_source_is_not_replayed() -> Result<()> {
         ensure!(
             !log.lines().any(|line| line.contains("rename old ") && !line.contains("posix-rename old ")),
             "missing source caused standard rename fallback: {log}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_remove_file_entries_and_validation() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let mut config = fs::read_to_string(&fixture.config)?;
+        config.push_str(
+            "\n[targets.remove-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+        );
+        fs::write(&fixture.config, config)?;
+        let directory = fixture.root.path().join("remove-private");
+        fs::create_dir(&directory)?;
+        let file = directory.join("ordinary");
+        let retained = directory.join("retained-hardlink");
+        fs::write(&file, b"REMOVE_KEEP_INODE_BYTES")?;
+        fs::hard_link(&file, &retained)?;
+        let inode = fs::symlink_metadata(&file)?.ino();
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let initial_auth = fixture.authentications();
+            for args in [
+                json!({"host":"plain","path":""}),
+                json!({"host":"plain","path":"remove\0invalid"}),
+                json!({"host":"plain","path":file,"timeout_secs":0}),
+                json!({"host":"plain","path":file,"timeout_secs":16}),
+            ] {
+                let reply = client.call("ssh_remove_file", args).await?;
+                failed(&reply, "invalid_argument")?;
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            }
+            let reply = client
+                .call("ssh_remove_file", json!({"host":"remove-locked","path":file}))
+                .await?;
+            failed(&reply, "policy_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(masters(&client.log)?.is_empty(), "rejected unlink acquired SSH");
+            ensure!(fixture.authentications() == initial_auth, "rejected unlink authenticated");
+            ensure!(fs::symlink_metadata(&file)?.ino() == inode);
+            ensure!(fs::read(&file)? == b"REMOVE_KEEP_INODE_BYTES");
+            ensure!(fs::read_dir(&directory)?.count() == 2);
+
+            succeeded(&exec(&client, "printf REMOVE_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let reply = client
+                .call("ssh_remove_file", json!({"host":"plain","path":file}))
+                .await?;
+            ensure!(succeeded(&reply)? == &json!({"removed":true}));
+            ensure!(
+                matches!(fs::symlink_metadata(&file), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                "successful unlink retained its entry"
+            );
+            ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
+            ensure!(fs::symlink_metadata(&retained)?.nlink() == 1);
+            ensure!(fs::read(&retained)? == b"REMOVE_KEEP_INODE_BYTES");
+
+            let empty = directory.join("empty-directory");
+            let tree = directory.join("tree");
+            let child = tree.join("child");
+            fs::create_dir(&empty)?;
+            fs::create_dir(&tree)?;
+            fs::write(&child, b"KEEP_TREE_CHILD")?;
+            let empty_inode = fs::symlink_metadata(&empty)?.ino();
+            let tree_inode = fs::symlink_metadata(&tree)?.ino();
+            let child_inode = fs::symlink_metadata(&child)?.ino();
+            let absent = directory.join("absent-target");
+            for (index, target) in [&retained, &tree, &absent].into_iter().enumerate() {
+                let link = directory.join(format!("final-link-{index}"));
+                symlink(target, &link)?;
+                let reply = client
+                    .call("ssh_remove_file", json!({"host":"plain","path":link}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"removed":true}));
+                ensure!(
+                    matches!(fs::symlink_metadata(&link), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                    "final symlink {index} survived unlink"
+                );
+                ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
+                ensure!(fs::read(&retained)? == b"REMOVE_KEEP_INODE_BYTES");
+                ensure!(fs::symlink_metadata(&tree)?.ino() == tree_inode);
+                ensure!(fs::symlink_metadata(&child)?.ino() == child_inode);
+                ensure!(fs::read(&child)? == b"KEEP_TREE_CHILD");
+                ensure!(fs::symlink_metadata(&absent).is_err());
+            }
+
+            let wildcard_sibling = directory.join("wildcard-KEEP");
+            fs::write(&wildcard_sibling, b"KEEP_LITERAL_SIBLING")?;
+            let sibling_inode = fs::symlink_metadata(&wildcard_sibling)?.ino();
+            for name in [
+                "  é雪 entry  ",
+                "wildcard-*",
+                "'\";~$*\n$(printf EVALUATED)",
+                "${HOME} {{remove}}\n'\";*",
+            ] {
+                let literal = directory.join(name);
+                fs::write(&literal, b"REMOVE_LITERAL_ONLY")?;
+                let reply = client
+                    .call("ssh_remove_file", json!({"host":"plain","path":literal}))
+                    .await?;
+                ensure!(succeeded(&reply)? == &json!({"removed":true}), "{name:?}: {reply}");
+                ensure!(fs::symlink_metadata(&literal).is_err(), "{name:?}: entry survived");
+                ensure!(fs::symlink_metadata(&wildcard_sibling)?.ino() == sibling_inode);
+                ensure!(fs::read(&wildcard_sibling)? == b"KEEP_LITERAL_SIBLING");
+            }
+
+            // A real REMOVE must reject both directories, not walk or use RMDIR.
+            for path in [&empty, &tree] {
+                let reply = client
+                    .call("ssh_remove_file", json!({"host":"plain","path":path}))
+                    .await?;
+                ensure!(
+                    matches!(reply["error"]["code"].as_str(), Some("permission_denied" | "io_error")),
+                    "directory unlink did not fail: {reply}"
+                );
+                ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+                ensure!(fs::symlink_metadata(&empty)?.ino() == empty_inode);
+                ensure!(fs::read_dir(&empty)?.next().is_none());
+                ensure!(fs::symlink_metadata(&tree)?.ino() == tree_inode);
+                ensure!(fs::symlink_metadata(&child)?.ino() == child_inode);
+                ensure!(fs::read(&child)? == b"KEEP_TREE_CHILD");
+                ensure!(fs::read_dir(&tree)?.count() == 1);
+            }
+            // Missing is an acknowledged backend failure, never missing_ok.
+            let reply = client
+                .call("ssh_remove_file", json!({"host":"plain","path":file}))
+                .await?;
+            failed(&reply, "not_found")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            let mut entries = fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort();
+            let mut expected = [
+                "retained-hardlink", "empty-directory", "tree", "wildcard-KEEP",
+            ].map(std::ffi::OsString::from);
+            expected.sort();
+            ensure!(entries == expected, "unlink expanded literal paths or changed siblings");
+            ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
+            let reply = client
+                .call("ssh_read_file", json!({"host":"plain","path":retained}))
+                .await?;
+            ensure!(succeeded(&reply)?["content"] == "REMOVE_KEEP_INODE_BYTES");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "unlink discarded the shared healthy master"
+            );
+
+            let reply = client
+                .call("ssh_remove_file", json!({"host":"nosftp","path":retained}))
+                .await?;
+            ensure!(
+                matches!(reply["error"]["code"].as_str(), Some("unsupported" | "io_error" | "connection_lost")),
+                "{reply}"
+            );
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
+            ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
+            ensure!(fs::read(&retained)? == b"REMOVE_KEEP_INODE_BYTES");
+            let before = observed_masters(&client.log, 2).await?;
+            let reply = client.call("ssh_exec", json!({
+                "host":"nosftp","command":"printf REMOVE_NO_SUBSYSTEM_HEALTHY"
+            })).await?;
+            ensure!(succeeded(&reply)?["stdout"] == "REMOVE_NO_SUBSYSTEM_HEALTHY");
+            ensure!(masters(&client.log)? == before, "unavailable SFTP replaced a healthy master");
+            fixture.await_authentications(4).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(!log.text().contains("remove-private"), "unlink audit disclosed private paths");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_remove_file_dispatch_refusal_is_not_replayed() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let requests = work.path().join("sftp-requests");
+    let launches = work.path().join("sftp-launches");
+    let server = Fixture::sftp_server()?;
+    // -P refuses the actual standard REMOVE, without hiding an extension.
+    let script = format!(
+        "echo launch >> {}; exec {} -P remove -e -l VERBOSE 2>> {}",
+        launches.display(),
+        server.display(),
+        requests.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf REMOVE_REFUSAL_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("remove-refusal-private");
+            fs::create_dir(&directory)?;
+            let file = directory.join("denied");
+            let sibling = directory.join("sibling");
+            fs::write(&file, b"KEEP_REFUSED_ENTRY")?;
+            fs::write(&sibling, b"KEEP_REFUSAL_SIBLING")?;
+            let inode = fs::symlink_metadata(&file)?.ino();
+            let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
+            let reply = client
+                .call("ssh_remove_file", json!({"host":"plain","path":file}))
+                .await?;
+            failed(&reply, "permission_denied")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(
+                fs::symlink_metadata(&file)?.ino() == inode,
+                "refusal caused fallback unlink"
+            );
+            ensure!(fs::read(&file)? == b"KEEP_REFUSED_ENTRY");
+            ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+            ensure!(fs::read(&sibling)? == b"KEEP_REFUSAL_SIBLING");
+            ensure!(fs::read_dir(&directory)?.count() == 2);
+            let audit = await_audit(&client.log, "finish", "permission_denied").await?;
+            ensure!(audit["remote_state_unknown"] == true && audit["identity_role"] == "ordinary");
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "refused unlink discarded a healthy shared master"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        gone?;
+        ensure!(
+            !log.text().contains("remove-refusal-private"),
+            "unlink audit disclosed private paths"
+        );
+        ensure!(
+            fs::read_to_string(&launches)?.lines().count() == 1,
+            "refused unlink replayed the SFTP session"
+        );
+        let log = fs::read_to_string(&requests)?;
+        ensure!(
+            log.lines()
+                .filter(|line| line.contains("Refusing") && line.contains("remove request"))
+                .count()
+                == 1,
+            "expected exactly one actual REMOVE refusal, without retry: {log}"
+        );
+        ensure!(
+            !log.lines().any(|line| {
+                [
+                    "lstat name ",
+                    "stat name ",
+                    "readlink ",
+                    "opendir ",
+                    "rmdir name ",
+                ]
+                .iter()
+                .any(|operation| line.contains(operation))
+            }),
+            "unlink performed a preflight or recursive fallback: {log}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    let removed = work.close();
+    scenario?;
+    cleanup?;
+    removed?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_remove_file_prehandshake_timeout() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let started = work.path().join("sftp-started");
+    let done = work.path().join("sftp-delay-done");
+    let server = Fixture::sftp_server()?;
+    let script = format!(
+        "trap \"\" HUP; echo launch >> {}; sleep 3; printf done > {}; exec {}",
+        started.display(),
+        done.display(),
+        server.display(),
+    );
+    let subsystem = format!("/bin/sh -c {}", quote(&script));
+    let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            succeeded(&exec(&client, "printf REMOVE_DELAY_MASTER").await?)?;
+            let owned = observed_masters(&client.log, 1).await?;
+            let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+            let directory = fixture.root.path().join("remove-delay-private");
+            fs::create_dir(&directory)?;
+            let file = directory.join("never-dispatched");
+            let sibling = directory.join("sibling");
+            fs::write(&file, b"KEEP_UNDISPATCHED_ENTRY")?;
+            fs::write(&sibling, b"KEEP_DELAY_SIBLING")?;
+            let inode = fs::symlink_metadata(&file)?.ino();
+            let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
+            let reply = client
+                .call(
+                    "ssh_remove_file",
+                    json!({
+                        "host":"plain","path":file,"timeout_secs":1
+                    }),
+                )
+                .await?;
+            Fixture::await_file(&started).await?;
+            failed(&reply, "timeout")?;
+            ensure!(
+                reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false,
+                "handshake timeout acquired mutation uncertainty: {reply}"
+            );
+            ensure!(
+                live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                "handshake timeout discarded the healthy sibling transport"
+            );
+            Fixture::await_file(&done).await?;
+            ensure!(
+                fs::read_to_string(&started)?.lines().count() == 1,
+                "timeout replayed SFTP"
+            );
+            ensure!(fs::symlink_metadata(&file)?.ino() == inode);
+            ensure!(fs::read(&file)? == b"KEEP_UNDISPATCHED_ENTRY");
+            ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
+            ensure!(fs::read(&sibling)? == b"KEEP_DELAY_SIBLING");
+            ensure!(fs::read_dir(&directory)?.count() == 2);
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        // The finite guard must finish even if an assertion above failed.
+        let completed = if started.exists() {
+            Fixture::await_file(&done).await
+        } else {
+            Ok(())
+        };
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        let log = stopped?;
+        completed?;
+        gone?;
+        ensure!(
+            !log.text().contains("remove-delay-private"),
+            "unlink audit disclosed private paths"
         );
         Ok::<_, anyhow::Error>(())
     }
