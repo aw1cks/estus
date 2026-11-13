@@ -28,8 +28,8 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
     filedata::{
-        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, StatSpec, WriteData,
-        WriteSpec, encode, verify_script,
+        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RenameData,
+        RenameSpec, StatSpec, WriteData, WriteSpec, encode, verify_script,
     },
     filemeta::{ListEntry, StatData, metadata_data},
     reply::{ToolError, ToolReply},
@@ -420,6 +420,52 @@ async fn mkdir_sftp(
     combine_close(result, close)
 }
 
+async fn rename_sftp(
+    sftp: Sftp,
+    spec: RenameSpec<'_>,
+    mutation_started: &mut bool,
+) -> Result<RenameData, Failure> {
+    let result = async {
+        // SFTP v3 has no atomic no-replace flag. Its standard RENAME is not
+        // equivalent: OpenSSH can fall back to a racy stat-then-rename.
+        if !spec.overwrite {
+            return Err(Failure {
+                error: ToolError::new(
+                    "unsupported",
+                    "Atomic no-overwrite rename is unavailable on this SFTP backend",
+                    false,
+                ),
+                check_master: false,
+            });
+        }
+        // Fs::rename silently falls back to standard RENAME without this
+        // extension; reject before mutation rather than weaken atomicity.
+        if !sftp.support_posix_rename() {
+            return Err(Failure {
+                error: ToolError::new(
+                    "unsupported",
+                    "Atomic overwrite rename requires the SFTP POSIX-rename extension",
+                    false,
+                ),
+                check_master: false,
+            });
+        }
+        let mut fs = sftp.fs();
+        // Set before polling: loss/cancellation may hide the acknowledgement.
+        *mutation_started = true;
+        fs.rename(spec.source, spec.destination)
+            .await
+            .map_err(sftp_failure)?;
+        Ok(RenameData { renamed: true })
+    }
+    .await;
+    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+        .await
+        .map_err(|_| Failure::cleanup())
+        .and_then(|result| result.map_err(sftp_failure));
+    combine_close(result, close)
+}
+
 async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> {
     let result = {
         // Fs retains library resources: drop it before waiting for Sftp::close.
@@ -592,6 +638,22 @@ pub(crate) async fn mkdir(
     let mut mutation_started = false;
     let mut outcome = run_sftp(session, context, |sftp| {
         mkdir_sftp(sftp, spec, &mut mutation_started)
+    })
+    .await;
+    if let Some(error) = &mut outcome.reply.error {
+        error.remote_state_unknown = mutation_started;
+    }
+    outcome
+}
+
+pub(crate) async fn rename(
+    session: &Session,
+    spec: RenameSpec<'_>,
+    context: FileContext<'_>,
+) -> FileOutcome<RenameData> {
+    let mut mutation_started = false;
+    let mut outcome = run_sftp(session, context, |sftp| {
+        rename_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
     if let Some(error) = &mut outcome.reply.error {

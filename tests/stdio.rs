@@ -256,7 +256,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .collect::<Result<_>>()?;
         names.sort_unstable();
         ensure!(names == [
-            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_run",
+            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_rename", "ssh_run",
             "ssh_stat", "ssh_targets", "ssh_write_file",
         ], "omitting a profile changed the baseline inventory");
         let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
@@ -422,6 +422,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                         "ssh_list_directory",
                         "ssh_mkdir",
                         "ssh_read_file",
+                        "ssh_rename",
                         "ssh_run",
                         "ssh_stat",
                         "ssh_sudo",
@@ -433,6 +434,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                         "ssh_list_directory",
                         "ssh_mkdir",
                         "ssh_read_file",
+                        "ssh_rename",
                         "ssh_run",
                         "ssh_stat",
                         "ssh_write_file"
@@ -915,6 +917,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_rename",
                     "ssh_run",
                     "ssh_stat",
                     "ssh_sudo",
@@ -969,6 +972,10 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
                 "ssh_mkdir",
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
+            (
+                "ssh_rename",
+                json!({"host":"127.0.0.1","source":"budget-private-source","destination":"budget-private-destination","overwrite":true}),
+            ),
         ] {
             let id = Value::String("i".repeat(MESSAGE_LIMIT - 256));
             let request = json!({
@@ -996,6 +1003,10 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
             ensure!(
                 response_bytes <= MESSAGE_LIMIT,
                 "response exceeds limit including newline: {response_bytes} bytes"
+            );
+            ensure!(
+                !serde_json::to_string(&response)?.contains("budget-private-"),
+                "{name}: reply-budget rejection disclosed private paths"
             );
         }
         server
@@ -1129,7 +1140,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_write_file"] {
+        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_rename", "ssh_write_file"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
@@ -1838,6 +1849,258 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispatch() -> Result<()>
+{
+    for modern in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("operator.toml");
+        let probe = directory.path().join("rename-must-not-probe");
+        std::fs::write(
+            directory.path().join("replacement.conf"),
+            format!(
+                "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+                probe.display()
+            ),
+        )?;
+        std::fs::write(
+            &path,
+            indoc::indoc! {"
+            [ssh]
+            config_file = 'replacement.conf'
+            [limits]
+            connect_timeout_secs = 1
+            operation_timeout_secs = 2
+            max_timeout_secs = 3
+            [targets.allowed]
+            ssh_host = 'rename-private-backend.invalid'
+        "},
+        )?;
+        let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+        let scenario = async {
+            if !modern {
+                server.initialize().await?;
+            }
+            let request = if modern {
+                modern_request(json!(2), "tools/list", json!({}), MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+            };
+            server.send(request).await?;
+            let listed = server.response(2).await?;
+            let rename = listed["result"]["tools"]
+                .as_array()
+                .context("tool catalog")?
+                .iter()
+                .find(|tool| tool["name"] == "ssh_rename")
+                .context("rename route")?;
+            ensure!(rename["annotations"]["readOnlyHint"] == false);
+            ensure!(rename["annotations"]["destructiveHint"] == true);
+            ensure!(rename["annotations"]["idempotentHint"] == false);
+            let input = &rename["inputSchema"];
+            ensure!(input["type"] == "object" && input["additionalProperties"] == false);
+            let mut fields: Vec<&str> = input["properties"]
+                .as_object()
+                .context("rename input fields")?
+                .keys()
+                .map(String::as_str)
+                .collect();
+            fields.sort_unstable();
+            ensure!(fields == ["destination", "host", "overwrite", "source", "timeout_secs"]);
+            let mut required: Vec<&str> = input["required"]
+                .as_array()
+                .context("rename required fields")?
+                .iter()
+                .map(|field| field.as_str().context("required field"))
+                .collect::<Result<_>>()?;
+            required.sort_unstable();
+            ensure!(required == ["destination", "host", "source"]);
+            ensure!(input["properties"]["overwrite"]["type"] == "boolean");
+            for field in ["source", "destination"] {
+                ensure!(input["properties"][field]["type"] == "string");
+                ensure!(
+                    !schema_has_property(&rename["outputSchema"], field),
+                    "rename output schema publishes private {field}"
+                );
+            }
+            ensure!(schema_has_property(&rename["outputSchema"], "renamed"));
+            ensure!(schema_has_property(
+                &rename["outputSchema"],
+                "remote_state_unknown"
+            ));
+            let valid = json!({
+                "host":"allowed", "source":"RENAME_PRIVATE_SOURCE 雪 ~/$*'\"\n",
+                "destination":"RENAME_PRIVATE_DESTINATION {{literal}}\n", "overwrite":true
+            });
+            for (index, (label, field, value, code)) in [
+                ("empty source", "source", json!(""), "invalid_argument"),
+                (
+                    "NUL source",
+                    "source",
+                    json!("RENAME_PRIVATE_SOURCE\0tail"),
+                    "invalid_argument",
+                ),
+                (
+                    "empty destination",
+                    "destination",
+                    json!(""),
+                    "invalid_argument",
+                ),
+                (
+                    "NUL destination",
+                    "destination",
+                    json!("RENAME_PRIVATE_DESTINATION\0tail"),
+                    "invalid_argument",
+                ),
+                ("zero timeout", "timeout_secs", json!(0), "invalid_argument"),
+                (
+                    "configured timeout ceiling",
+                    "timeout_secs",
+                    json!(4),
+                    "invalid_argument",
+                ),
+                (
+                    "literal paths reach policy",
+                    "host",
+                    json!("denied"),
+                    "policy_denied",
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = 100 + index as u64;
+                let mut arguments = valid.clone();
+                arguments[field] = value;
+                let params = json!({"name":"ssh_rename","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let called = server.response(id).await?;
+                ensure!(
+                    called.get("error").is_none(),
+                    "{label}: valid shape rejected"
+                );
+                let result = &called["result"];
+                let reply = &result["structuredContent"];
+                ensure!(
+                    result["isError"] == true && reply["data"].is_null(),
+                    "{label}"
+                );
+                ensure!(reply["error"]["code"] == code, "{label}: wrong rejection");
+                ensure!(
+                    reply["error"]["remote_state_unknown"] == false,
+                    "{label}: mutation uncertainty"
+                );
+                let text: Value = serde_json::from_str(
+                    result["content"][0]["text"]
+                        .as_str()
+                        .context("rename error text")?,
+                )?;
+                ensure!(text == *reply, "{label}: text/structured mismatch");
+                let encoded = serde_json::to_string(&called)?;
+                for secret in [
+                    "RENAME_PRIVATE_SOURCE",
+                    "RENAME_PRIVATE_DESTINATION",
+                    "rename-private-backend",
+                ] {
+                    ensure!(
+                        !encoded.contains(secret),
+                        "{label}: private input disclosed"
+                    );
+                }
+            }
+            for (index, (control, value)) in [
+                ("recursive", json!(true)),
+                ("mode", json!(448)),
+                ("permissions", json!(448)),
+                ("sudo", json!(true)),
+                ("path", json!("RENAME_PRIVATE_SOURCE")),
+                ("overwrite", json!("true")),
+                ("overwrite", json!(1)),
+                ("overwrite", Value::Null),
+                ("timeout_secs", json!(-1)),
+                ("source", json!(false)),
+                ("destination", json!(42)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = 200 + index as u64;
+                let mut arguments = valid.clone();
+                arguments[control] = value;
+                let params = json!({"name":"ssh_rename","arguments":arguments});
+                let request = if modern {
+                    modern_request(json!(id), "tools/call", params, MODERN_VERSION)
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params})
+                };
+                server.send(request).await?;
+                let rejected = server.response(id).await?;
+                ensure!(
+                    rejected["error"]["code"] == -32602 && rejected.get("result").is_none(),
+                    "{control}: malformed rename control reached handler"
+                );
+                ensure!(
+                    !serde_json::to_string(&rejected)?.contains("RENAME_PRIVATE_"),
+                    "shape error disclosed paths"
+                );
+            }
+            let params = json!({"name":"ssh_targets","arguments":{}});
+            let request = if modern {
+                modern_request(json!(300), "tools/call", params, MODERN_VERSION)
+            } else {
+                json!({"jsonrpc":"2.0","id":300,"method":"tools/call","params":params})
+            };
+            server.send(request).await?;
+            let healthy = server.response(300).await?;
+            ensure!(
+                discovery_data(&healthy["result"], "configured")?["targets"][0]["name"]
+                    == "allowed"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+        ensure!(
+            !probe.exists(),
+            "rename rejection evaluated SSH configuration"
+        );
+        let audit = std::str::from_utf8(&stderr)?;
+        for secret in [
+            "RENAME_PRIVATE_SOURCE",
+            "RENAME_PRIVATE_DESTINATION",
+            "rename-private-backend",
+        ] {
+            ensure!(
+                !audit.contains(secret),
+                "rename rejection audit disclosed private input"
+            );
+        }
+        for line in audit.lines() {
+            let record: Value = serde_json::from_str(line)?;
+            ensure!(
+                record["tool"] != "ssh_rename" || record["event"] == "reject",
+                "rename admitted before prevalidation"
+            );
+            for field in ["source", "destination", "path", "content", "payload"] {
+                ensure!(
+                    record.get(field).is_none(),
+                    "rename audit disclosed {field}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -1913,6 +2176,9 @@ fn profile_call_arguments(tool: &str, host: &str) -> Value {
         "ssh_exec" => json!({"host":host,"command":"true"}),
         "ssh_run" => json!({"host":host,"argv":["/usr/bin/true"]}),
         "ssh_sudo" => json!({"host":host,"argv":["/usr/bin/true"]}),
+        "ssh_rename" => {
+            json!({"host":host,"source":"/private/profile-payload-source","destination":"/private/profile-payload-destination","overwrite":true})
+        }
         "ssh_write_file" => {
             json!({"host":host,"path":"/private/profile-payload","content":"PROFILE_PAYLOAD"})
         }
@@ -1965,6 +2231,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
         "ssh_list_directory",
         "ssh_mkdir",
         "ssh_read_file",
+        "ssh_rename",
         "ssh_run",
         "ssh_stat",
         "ssh_sudo",
@@ -1982,6 +2249,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                 "ssh_list_directory",
                 "ssh_mkdir",
                 "ssh_read_file",
+                "ssh_rename",
                 "ssh_stat",
                 "ssh_write_file",
             ][..],
@@ -2161,7 +2429,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
             .await?;
         let listed = server.response(2).await?;
-        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 9);
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 10);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}}))
@@ -2179,6 +2447,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_rename",
                     "ssh_run",
                     "ssh_stat",
                     "ssh_write_file"
@@ -2191,6 +2460,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_rename",
                     "ssh_run",
                     "ssh_stat",
                     "ssh_write_file"
@@ -2202,6 +2472,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_list_directory",
                     "ssh_mkdir",
                     "ssh_read_file",
+                    "ssh_rename",
                     "ssh_stat",
                     "ssh_write_file"
                 ]),
@@ -2226,6 +2497,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_run",
                     "ssh_write_file",
                     "ssh_mkdir",
+                    "ssh_rename",
                     "ssh_sudo",
                 ][..],
             ),
@@ -2241,6 +2513,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
                     "ssh_stat",
                     "ssh_list_directory",
                     "ssh_mkdir",
+                    "ssh_rename",
                 ][..],
             ),
             ("base", &["ssh_sudo"][..]),
@@ -2324,6 +2597,7 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
             "ssh_list_directory",
             "ssh_write_file",
             "ssh_mkdir",
+            "ssh_rename",
         ]
         .into_iter()
         .enumerate()

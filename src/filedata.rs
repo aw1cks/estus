@@ -121,6 +121,56 @@ impl MkdirRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct RenameRequest {
+    pub(crate) host: String,
+    pub(crate) source: String,
+    pub(crate) destination: String,
+    #[serde(default)]
+    pub(crate) overwrite: bool,
+    pub(crate) timeout_secs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RenameSpec<'a> {
+    pub(crate) source: &'a str,
+    pub(crate) destination: &'a str,
+    pub(crate) overwrite: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct RenameData {
+    pub(crate) renamed: bool,
+}
+
+impl RenameRequest {
+    pub(crate) fn validate(&self, budget: ReplyBudget) -> Result<RenameSpec<'_>, ToolError> {
+        if [&self.source, &self.destination]
+            .into_iter()
+            .any(|path| path.is_empty() || path.contains('\0'))
+        {
+            return Err(invalid(
+                "source and destination must be nonempty and NUL-free",
+            ));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        budget
+            .remaining(&ToolReply {
+                data: Some(RenameData { renamed: true }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            })
+            .map_err(|_| invalid("Request leaves insufficient response budget for rename"))?;
+        Ok(RenameSpec {
+            source: &self.source,
+            destination: &self.destination,
+            overwrite: self.overwrite,
+        })
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StatRequest {
     pub(crate) host: String,
     pub(crate) path: String,

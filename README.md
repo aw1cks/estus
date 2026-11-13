@@ -107,6 +107,35 @@ closure. A missing parent remains a backend error, never recursive creation.
 nonrecursive failure and uncertainty boundaries outside the Nix sandbox with the
 usual non-root/private-runtime-directory prerequisites.
 
+## Ordinary SFTP rename
+
+`ssh_rename` renames one entry through the ordinary SSH identity:
+
+```json
+{"host":"server","source":"/srv/example/old","destination":"/srv/example/new","overwrite":true,"timeout_secs":10}
+```
+
+**This example explicitly permits replacement of an existing destination.**
+`overwrite` defaults to `false`; the SFTP v3 backend cannot guarantee atomic
+no-overwrite rename, so false/omitted returns `unsupported` without mutation,
+even if the destination is absent. It never substitutes stat-then-rename or
+link-then-unlink. Explicit `true` requires the server's advertised
+`posix-rename@openssh.com` extension; missing support also rejects without
+mutation. There is no standard-rename, copy/delete, sudo or shell/SCP fallback.
+
+Success returns `{"renamed":true}` in the standard envelope after acknowledgement
+and bounded channel cleanup. Files, directories and final source symlinks retain
+ordinary POSIX rename rules; the symlink entry moves rather than its target.
+Paths are literal UTF-8 and intermediate symlinks retain server semantics. No
+cross-filesystem, path sandbox, metadata-preservation or crash-durability promise
+is added.
+
+Policy, pre-SSH validation, admission and channel ownership match `ssh_mkdir`.
+Any error after rename dispatch retains `remote_state_unknown=true`, including
+server refusal or cleanup failure; no replay or rollback is inferred.
+`nix run .#rename-acceptance-msrv` exercises real moves, replacement consent,
+unsupported protection and dispatch uncertainty with the same native prerequisites.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

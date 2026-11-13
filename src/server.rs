@@ -33,8 +33,8 @@ use crate::{
     },
     exec::{self, RunContext},
     filedata::{
-        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, StatRequest,
-        WriteData, WriteRequest,
+        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RenameData,
+        RenameRequest, StatRequest, WriteData, WriteRequest,
     },
     filemeta::StatData,
     files::{self, FileContext},
@@ -204,7 +204,7 @@ impl Estus {
         }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
-        let routes: [(ToolId, ToolRoute<Self>); 9] = [
+        let routes: [(ToolId, ToolRoute<Self>); 10] = [
             (
                 ToolId::Targets,
                 (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
@@ -228,6 +228,10 @@ impl Estus {
             (
                 ToolId::Mkdir,
                 (Self::ssh_mkdir_tool_attr(), Self::ssh_mkdir).into_tool_route(),
+            ),
+            (
+                ToolId::Rename,
+                (Self::ssh_rename_tool_attr(), Self::ssh_rename).into_tool_route(),
             ),
             (
                 ToolId::Stat,
@@ -873,6 +877,31 @@ impl Estus {
         .await
     }
 
+    async fn rename(
+        &self,
+        request: RenameRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let metadata = file_metadata(&request.host, ToolId::Rename, &self.state, &context.id);
+        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<RenameData>::failure(error));
+            }
+        };
+        let state = Arc::clone(&self.state);
+        self.file_result(budget, permit, async move {
+            state
+                .rename(request, context.id, context.ct, started, budget)
+                .await
+        })
+        .await
+    }
+
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -1038,6 +1067,21 @@ impl Estus {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.mkdir(request, context).await
+    }
+
+    #[tool(
+        name = "ssh_rename",
+        description = "Rename one file, directory or symlink entry through ordinary SFTP. source and destination are literal UTF-8 without shell, tilde, variable or wildcard expansion or a path sandbox. overwrite defaults to false: this SFTP v3 backend cannot guarantee atomic no-overwrite rename, so false/omitted returns unsupported without mutation even when destination is absent. Explicit overwrite=true requires the advertised POSIX-rename extension and permits atomic replacement under server filesystem rules; no standard-rename, stat-then-rename, unlink, copy, sudo or shell/SCP fallback. Intermediate symlinks follow server semantics; a final source symlink itself moves. Success returns renamed=true only after acknowledgement and bounded channel cleanup. Any failure after rename dispatch retains remote-state uncertainty, including server refusal or cleanup failure. Never retries, replays or asserts rollback; no cross-filesystem or durability guarantee.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<RenameRequest>(),
+        output_schema = schema_for_type::<ToolReply<RenameData>>()
+    )]
+    async fn ssh_rename(
+        &self,
+        Arguments(request): Arguments<RenameRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.rename(request, context).await
     }
 
     #[tool(
@@ -1660,6 +1704,61 @@ impl State {
         {
             Ok(lease) => {
                 let outcome = files::mkdir(
+                    lease.session(),
+                    spec,
+                    FileContext {
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                    },
+                )
+                .await;
+                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+                {
+                    lease.invalidate();
+                }
+                outcome.reply
+            }
+            Err(error) => ToolReply::failure(error),
+        };
+        audit.finish(None, reply.error.as_ref());
+        reply
+    }
+
+    async fn rename(
+        &self,
+        request: RenameRequest,
+        request_id: RequestId,
+        ct: CancellationToken,
+        started: Instant,
+        budget: ReplyBudget,
+    ) -> ToolReply<RenameData> {
+        let metadata = file_metadata(&request.host, ToolId::Rename, self, &request_id);
+        if self.shutdown.is_cancelled() || ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return ToolReply::failure(error);
+        }
+        let validated = request.validate(budget).and_then(|spec| {
+            let target = self.config.resolve(&request.host, ToolId::Rename)?;
+            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
+            Ok((spec, target, deadline))
+        });
+        let (spec, target, deadline) = match validated {
+            Ok(validated) => validated,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let reply = match self
+            .pool
+            .acquire(target.name, target.destination, target.role, deadline, &ct)
+            .await
+        {
+            Ok(lease) => {
+                let outcome = files::rename(
                     lease.session(),
                     spec,
                     FileContext {
