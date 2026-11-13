@@ -96,6 +96,21 @@
               --set SSH_MCP_TEST_AUTOMATION_BINARY ${optional}/bin/ssh-mcp \
               --add-flags '--include-ignored --nocapture --test-threads=2 --skip wheel::'
           '';
+        runnerAcceptance = native: harness:
+          pkgs.runCommand "ssh-mcp-runner-acceptance" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p "$out/bin"
+            makeWrapper ${harness}/libexec/automation_exec "$out/bin/runner-acceptance" \
+              --set SSH_MCP_TEST_BINARY ${native}/bin/ssh-mcp \
+              --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+              --set SSH_MCP_TEST_TARGET_PYTHON ${pkgs.python314}/bin/python3 \
+              --prefix PATH : ${pkgs.lib.makeBinPath (
+                [ pkgs.openssh pkgs.coreutils pkgs.bash ]
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
+              )} \
+              --add-flags '--ignored --exact real_runner_fixture_acceptance --nocapture'
+          '';
       in
       {
         packages = {
@@ -109,6 +124,8 @@
           automation-msrv = automationMsrv;
           automation-acceptance = automationAcceptance package acceptance automation;
           automation-acceptance-msrv = automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv;
+          runner-acceptance = runnerAcceptance package acceptance;
+          runner-acceptance-msrv = runnerAcceptance msrvBuild.package msrvBuild.acceptance;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           ssh-fixture-image = import ./nix/ssh-fixture.nix { inherit pkgs; };
           ssh-automation-fixture-image = import ./nix/ssh-fixture.nix {
@@ -135,6 +152,14 @@
         apps.automation-acceptance-msrv = {
           type = "app";
           program = "${automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv}/bin/automation-acceptance";
+        };
+        apps.runner-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/runner-acceptance";
+        };
+        apps.runner-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/runner-acceptance";
         };
         apps.wheel-acceptance = {
           type = "app";
