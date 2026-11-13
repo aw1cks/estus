@@ -136,7 +136,7 @@ impl ReplyBudget {
         let mut reservation = serde_json::json!({
             "data":{
                 "host":"","status":"resource_limit","runner_rc":i32::MIN,
-                "changed":false,"tasks":{"ok":u32::MAX,"failed":u32::MAX,"unreachable":u32::MAX,"skipped":u32::MAX},
+                "changed":false,"tasks":{"ok":u32::MAX,"failed":u32::MAX,"unreachable":u32::MAX,"skipped":u32::MAX,"rescued":u32::MAX,"ignored":u32::MAX},
                 "censored":false,"complete":false,"duration_ms":u64::MAX,
                 "owned_group_cleanup":"signalled_and_reaped"
             },

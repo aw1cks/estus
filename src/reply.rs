@@ -186,6 +186,14 @@ pub(crate) struct AutomationTasks {
     pub failed: u32,
     pub unreachable: u32,
     pub skipped: u32,
+    #[serde(default, skip_serializing_if = "zero_count")]
+    pub rescued: u32,
+    #[serde(default, skip_serializing_if = "zero_count")]
+    pub ignored: u32,
+}
+
+fn zero_count(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Projection availability is independent of authoritative workflow completion.

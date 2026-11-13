@@ -1,4 +1,4 @@
-//! Offline role authoring. Snapshots approve metadata, never publish or execute a role.
+//! Reviewed role contracts for offline authoring and fixed execution activation.
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -123,6 +123,207 @@ fn read_snapshot(path: &Path) -> Result<Snapshot, &'static str> {
         return Err("invalid_schema_snapshot");
     }
     Ok(snapshot)
+}
+
+/// Reviewed role metadata; source selection is snapshot-owned and never refreshed.
+pub(crate) struct ReviewedRole {
+    pub role: String,
+    pub entry_point: String,
+    pub runtime: RuntimeIdentity,
+    pub collection: Option<RuntimeCollection>,
+    pub content_sha256: String,
+    pub contract: Value,
+    pub binding: Option<Value>,
+    source: Source,
+    explicit_schema: Option<Value>,
+}
+
+pub(crate) fn load_reviewed(path: &Path) -> Result<ReviewedRole, &'static str> {
+    let snapshot = read_snapshot(path)?;
+    Ok(ReviewedRole {
+        role: snapshot.role,
+        entry_point: snapshot.entry_point,
+        runtime: snapshot.runtime,
+        collection: snapshot.collection,
+        content_sha256: snapshot.content_sha256,
+        contract: snapshot.contract,
+        binding: snapshot.binding,
+        source: snapshot.source,
+        explicit_schema: snapshot.explicit_schema,
+    })
+}
+
+pub(crate) async fn verify_reviewed(
+    reviewed: &ReviewedRole,
+    role_path: Option<&Path>,
+    runtime: Option<PathBuf>,
+    context: RuntimeContext<'_>,
+) -> Result<(), &'static str> {
+    if source(&reviewed.role, &reviewed.entry_point, role_path)? != reviewed.source {
+        return Err("invalid_role_source");
+    }
+    let observed = automation::import_role(
+        runtime,
+        &reviewed.role,
+        &reviewed.entry_point,
+        role_path,
+        None,
+        context,
+    )
+    .await?;
+    let contract = role_schema::import_document(
+        &observed.document,
+        &reviewed.entry_point,
+        reviewed.explicit_schema.as_ref(),
+    )?;
+    if reviewed.runtime != observed.identity
+        || reviewed.collection != observed.collection
+        || reviewed.content_sha256 != observed.content_sha256
+        || reviewed.contract != contract
+    {
+        return Err("schema_drift");
+    }
+    Ok(())
+}
+
+fn role_variable(name: &str) -> bool {
+    !name.starts_with("ssh_mcp_")
+        && !name.starts_with("ansible_")
+        && !name.starts_with("become")
+        && !name.starts_with("inventory_")
+        && !name.starts_with("callback_")
+        && !matches!(
+            name,
+            "mcp_result"
+                | "host"
+                | "hosts"
+                | "hostvars"
+                | "groups"
+                | "group_names"
+                | "inventory"
+                | "connection"
+                | "remote_user"
+                | "port"
+                | "password"
+                | "private_key_file"
+                | "ssh_args"
+                | "ssh_common_args"
+                | "ssh_extra_args"
+                | "environment"
+                | "executable"
+                | "interpreter"
+                | "runtime"
+                | "collections"
+                | "roles"
+                | "role"
+                | "role_name"
+                | "role_path"
+                | "entry_point"
+                | "tasks"
+                | "tasks_from"
+                | "handlers_from"
+                | "vars_from"
+                | "defaults_from"
+                | "tags"
+                | "skip_tags"
+                | "start_at_task"
+                | "check_mode"
+                | "diff"
+                | "delegate_to"
+                | "delegate_facts"
+                | "run_once"
+                | "serial"
+                | "strategy"
+                | "execution"
+                | "authority"
+                | "program"
+                | "command"
+                | "shell"
+                | "sudo"
+                | "action"
+                | "local_action"
+                | "module_defaults"
+                | "module"
+                | "module_name"
+                | "async"
+                | "poll"
+                | "until"
+                | "retries"
+                | "delay"
+                | "timeout"
+                | "when"
+                | "loop"
+                | "loop_control"
+                | "with_items"
+                | "block"
+                | "rescue"
+                | "always"
+                | "ignore_errors"
+                | "ignore_unreachable"
+                | "any_errors_fatal"
+                | "failed_when"
+                | "changed_when"
+                | "register"
+                | "vars"
+                | "vars_files"
+                | "vars_prompt"
+                | "include_role"
+                | "import_role"
+                | "include_tasks"
+                | "import_tasks"
+                | "playbook_dir"
+                | "inventory_dir"
+                | "inventory_file"
+                | "inventory_hostname"
+                | "inventory_hostname_short"
+                | "omit"
+                | "role_names"
+                | "play_hosts"
+                | "gather_facts"
+                | "no_log"
+                | "notify"
+                | "listen"
+                | "allow_duplicates"
+                | "public"
+                | "rolespec_validate"
+        )
+}
+
+/// Add role variable restrictions to the existing shared overlay validator.
+pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
+    module_schema::validate_overlay(overlay)?;
+    for field in ["fixed_args", "input_map"] {
+        if overlay[field]
+            .as_object()
+            .is_some_and(|values| values.keys().any(|name| !role_variable(name)))
+        {
+            return Err("invalid_binding_schema");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn compile_binding(
+    contract: &Value,
+    overlay: &Value,
+) -> Result<module_schema::CompiledModuleBinding, &'static str> {
+    validate_overlay(overlay)?;
+    // Aliases must not turn a harmless-looking configured name into a control.
+    for field in ["fixed_args", "input_map"] {
+        for name in overlay[field]
+            .as_object()
+            .ok_or("invalid_binding_schema")?
+            .keys()
+        {
+            let canonical = contract["aliases"]["aliases"][name]
+                .as_str()
+                .unwrap_or(name);
+            if !role_variable(canonical) {
+                return Err("invalid_binding_schema");
+            }
+        }
+    }
+    module_schema::compile_binding(contract, overlay)
 }
 
 fn source(role: &str, entry_point: &str, path: Option<&Path>) -> Result<Source, &'static str> {
@@ -283,7 +484,7 @@ pub(crate) async fn perform(
         return Err("schema_drift");
     }
     if let Some(binding) = &prepared.binding {
-        let compiled = module_schema::compile_binding(&contract, binding)?;
+        let compiled = compile_binding(&contract, binding)?;
         if let Some(input) = &prepared.input {
             compiled.prepare(input)?;
         }
@@ -326,4 +527,40 @@ pub(crate) async fn perform(
             .map_err(|_| "schema_output_failed")??;
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_role_alias_cannot_restore_a_reserved_control() {
+        let overlay = json!({
+            "input_schema": {"type":"object", "additionalProperties":false,
+                "required":[], "properties":{}},
+            "fixed_args": {"approved_name":"literal"},
+            "input_map": {}
+        });
+        validate_overlay(&overlay).unwrap();
+        let contract = json!({"aliases":{"aliases":{"approved_name":"mcp_result"}}});
+        assert_eq!(
+            compile_binding(&contract, &overlay).err(),
+            Some("invalid_binding_schema")
+        );
+    }
+
+    #[test]
+    fn role_variable_policy_does_not_interpret_nested_domain_data() {
+        let overlay = json!({
+            "input_schema": {"type":"object", "additionalProperties":false,
+                "required":[], "properties":{}},
+            "fixed_args": {"configuration":{
+                "connection":"{{ lookup('env', 'PRIVATE') }}",
+                "mcp_result":{"ssh_mcp_arguments":"ordinary nested data"}
+            }},
+            "input_map": {}
+        });
+        validate_overlay(&overlay).unwrap();
+    }
 }

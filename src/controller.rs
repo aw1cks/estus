@@ -35,6 +35,7 @@ pub(crate) enum ControllerSupervision {
     Script,
     Automation {
         invocation_id: String,
+        mode: crate::automation_exec::ExecutionMode,
         scratch_bytes: u64,
         scratch_files: usize,
     },
@@ -567,10 +568,11 @@ pub(crate) async fn run(
         },
         ControllerSupervision::Automation {
             invocation_id,
+            mode,
             scratch_bytes,
             scratch_files,
         } => Monitoring {
-            automation: Some(crate::automation_exec::Evidence::new(invocation_id)),
+            automation: Some(crate::automation_exec::Evidence::new(invocation_id, mode)),
             scratch: Some((scratch_bytes, scratch_files)),
         },
     };

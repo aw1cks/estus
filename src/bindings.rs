@@ -224,6 +224,12 @@ enum RawExecution {
         #[serde(default)]
         no_log: bool,
     },
+    AnsibleRole {
+        snapshot: String,
+        role_path: Option<String>,
+        #[serde(default)]
+        no_log: bool,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,14 +398,20 @@ enum Execution {
     ControllerScript {
         plan: Option<Arc<ControllerPlan>>,
     },
-    AnsibleModule {
+    Ansible {
         snapshot: PathBuf,
+        role: Option<RoleSource>,
         overlay: Value,
         no_log: bool,
         projection: Option<Arc<crate::projection::Plan>>,
         // One startup allocation keeps native bindings from reserving the large plan.
-        plan: Option<Box<ModulePlan>>,
+        plan: Option<Box<AutomationPlan>>,
     },
+}
+
+#[derive(Debug)]
+struct RoleSource {
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -450,17 +462,73 @@ pub(crate) struct AutomationTransport<'a> {
     pub started: std::time::Instant,
 }
 
-pub(crate) struct ModulePlan {
-    reviewed: crate::schema_import::ReviewedModule,
+pub(crate) struct AutomationPlan {
+    reviewed: ReviewedContent,
     binding: crate::module_schema::CompiledModuleBinding,
-    source: String,
     runtime: Value,
     controller: Arc<ControllerPlan>,
 }
 
-impl std::fmt::Debug for ModulePlan {
+impl std::fmt::Debug for AutomationPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ModulePlan { reviewed: <private> }")
+        f.write_str("AutomationPlan { reviewed: <private> }")
+    }
+}
+
+enum ReviewedContent {
+    Module {
+        reviewed: crate::schema_import::ReviewedModule,
+        source: String,
+    },
+    Role {
+        reviewed: crate::role_import::ReviewedRole,
+        role_path: Option<PathBuf>,
+    },
+}
+
+impl ReviewedContent {
+    fn contract(&self) -> &Value {
+        match self {
+            Self::Module { reviewed, .. } => &reviewed.contract,
+            Self::Role { reviewed, .. } => &reviewed.contract,
+        }
+    }
+
+    fn binding(&self) -> Option<&Value> {
+        match self {
+            Self::Module { reviewed, .. } => reviewed.binding.as_ref(),
+            Self::Role { reviewed, .. } => reviewed.binding.as_ref(),
+        }
+    }
+
+    fn expected(&self) -> ExpectedContent<'_> {
+        match self {
+            Self::Module { reviewed, source } => ExpectedContent::Module(ModuleContent {
+                identity: &reviewed.runtime,
+                collection: &reviewed.collection,
+                content_sha256: &reviewed.content_sha256,
+                source,
+                module: &reviewed.module,
+            }),
+            Self::Role {
+                reviewed,
+                role_path,
+            } => ExpectedContent::Role(RoleContent {
+                identity: &reviewed.runtime,
+                collection: &reviewed.collection,
+                content_sha256: &reviewed.content_sha256,
+                role: &reviewed.role,
+                entry_point: &reviewed.entry_point,
+                role_path: role_path.as_deref(),
+            }),
+        }
+    }
+
+    fn mode(&self) -> crate::automation_exec::ExecutionMode {
+        match self {
+            Self::Module { .. } => crate::automation_exec::ExecutionMode::Module,
+            Self::Role { .. } => crate::automation_exec::ExecutionMode::Role,
+        }
     }
 }
 
@@ -492,11 +560,28 @@ struct ModuleContent<'a> {
 }
 
 #[derive(Serialize)]
-struct ModuleSpec<'a> {
+struct RoleContent<'a> {
+    identity: &'a crate::automation::RuntimeIdentity,
+    collection: &'a Option<crate::automation::RuntimeCollection>,
+    content_sha256: &'a str,
+    role: &'a str,
+    entry_point: &'a str,
+    role_path: Option<&'a Path>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ExpectedContent<'a> {
+    Module(ModuleContent<'a>),
+    Role(RoleContent<'a>),
+}
+
+#[derive(Serialize)]
+struct AutomationSpec<'a> {
     schema: u32,
     invocation_id: &'a str,
     runtime: &'a Value,
-    expected: ModuleContent<'a>,
+    expected: ExpectedContent<'a>,
     destination: &'a str,
     target_python: &'a str,
     ssh_config: Option<&'a Path>,
@@ -607,7 +692,7 @@ impl Bindings {
         self.entries.get(id.0)
     }
 
-    pub(crate) async fn activate_module(
+    pub(crate) async fn activate_automation(
         &mut self,
         id: BindingId,
         runtime: Option<PathBuf>,
@@ -628,60 +713,90 @@ impl Bindings {
         let binding = self
             .entries
             .get_mut(id.0)
-            .ok_or_else(|| invalid("Unknown module binding"))?;
-        let Execution::AnsibleModule {
+            .ok_or_else(|| invalid("Unknown automation binding"))?;
+        let Execution::Ansible {
             snapshot,
             overlay,
+            role,
             plan,
             ..
         } = &mut binding.execution
         else {
-            return Err(invalid("Not a module binding"));
+            return Err(invalid("Not an automation binding"));
         };
         let snapshot = snapshot.clone();
         let overlay = overlay.clone();
+        let role_path = role.as_ref().map(|role| role.path.clone());
         // Await started blocking work even when cancellation arrives, retaining its ownership.
         let prepared = tokio::task::spawn_blocking(move || {
-            let reviewed = crate::schema_import::load_reviewed(&snapshot).map_err(invalid)?;
+            let reviewed = match role_path {
+                Some(role_path) => ReviewedContent::Role {
+                    reviewed: crate::role_import::load_reviewed(&snapshot).map_err(invalid)?,
+                    role_path,
+                },
+                None => ReviewedContent::Module {
+                    reviewed: crate::schema_import::load_reviewed(&snapshot).map_err(invalid)?,
+                    source: String::new(),
+                },
+            };
             if reviewed
-                .binding
-                .as_ref()
+                .binding()
                 .is_some_and(|expected| expected != &overlay)
             {
                 return Err(invalid(
                     "Reviewed binding overlay does not match configuration",
                 ));
             }
-            let compiled = crate::module_schema::compile_binding(&reviewed.contract, &overlay)
-                .map_err(invalid)?;
+            let compiled = match &reviewed {
+                ReviewedContent::Module { .. } => {
+                    crate::module_schema::compile_binding(reviewed.contract(), &overlay)
+                }
+                ReviewedContent::Role { .. } => {
+                    crate::role_import::compile_binding(reviewed.contract(), &overlay)
+                }
+            }
+            .map_err(invalid)?;
             Ok((reviewed, compiled))
         })
         .await;
         check_interrupted()?;
-        let (reviewed, compiled) =
-            prepared.map_err(|_| invalid("Module activation preparation failed"))??;
-        let source = crate::schema_import::verify_reviewed(
-            &reviewed,
-            runtime.clone(),
-            crate::automation::RuntimeContext {
-                deadline,
-                ct,
-                shutdown: ct,
-            },
-        )
-        .await
-        .map_err(invalid)?;
+        let (mut reviewed, compiled) =
+            prepared.map_err(|_| invalid("Automation activation preparation failed"))??;
+        let context = crate::automation::RuntimeContext {
+            deadline,
+            ct,
+            shutdown: ct,
+        };
+        match &mut reviewed {
+            ReviewedContent::Module { reviewed, source } => {
+                *source = crate::schema_import::verify_reviewed(reviewed, runtime.clone(), context)
+                    .await
+                    .map_err(invalid)?;
+            }
+            ReviewedContent::Role {
+                reviewed,
+                role_path,
+            } => {
+                crate::role_import::verify_reviewed(
+                    reviewed,
+                    role_path.as_deref(),
+                    runtime.clone(),
+                    context,
+                )
+                .await
+                .map_err(invalid)?;
+            }
+        }
         check_interrupted()?;
         let selected = tokio::task::spawn_blocking(move || {
             crate::automation::runner_runtime(runtime, root).map_err(invalid)
         })
         .await;
         check_interrupted()?;
-        let selected = selected.map_err(|_| invalid("Module runtime preparation failed"))??;
-        *plan = Some(Box::new(ModulePlan {
+        let selected = selected.map_err(|_| invalid("Automation runtime preparation failed"))??;
+        *plan = Some(Box::new(AutomationPlan {
             reviewed,
             binding: compiled,
-            source,
             runtime: selected.payload,
             controller: selected.plan,
         }));
@@ -689,15 +804,32 @@ impl Bindings {
     }
 }
 impl CompiledBinding {
-    fn compile_module(
+    fn compile_automation(
         name: String,
         raw: RawBinding,
         enabled: bool,
         limits: &Limits,
         target_exists: &impl Fn(&str) -> bool,
     ) -> Result<Self, ConfigError> {
-        let RawExecution::AnsibleModule { snapshot, no_log } = raw.execution else {
-            unreachable!("module execution selected");
+        let (snapshot, no_log, role) = match raw.execution {
+            RawExecution::AnsibleModule { snapshot, no_log } => (snapshot, no_log, None),
+            RawExecution::AnsibleRole {
+                snapshot,
+                role_path,
+                no_log,
+            } => {
+                if role_path.as_deref().is_some_and(|path| !absolute(path)) {
+                    return Err(invalid("Invalid fixed role source"));
+                }
+                (
+                    snapshot,
+                    no_log,
+                    Some(RoleSource {
+                        path: role_path.map(PathBuf::from),
+                    }),
+                )
+            }
+            _ => unreachable!("automation execution selected"),
         };
         let targets = raw.targets.unwrap_or_default();
         if raw.authority.as_str() != Some("automation")
@@ -716,7 +848,9 @@ impl CompiledBinding {
             || raw.effects.is_empty()
             || raw.effects.iter().collect::<BTreeSet<_>>().len() != raw.effects.len()
         {
-            return Err(invalid("Invalid module binding authority or definition"));
+            return Err(invalid(
+                "Invalid automation binding authority or definition",
+            ));
         }
         let projection = match raw.result {
             RawResult::AnsibleSummary {} => None,
@@ -727,6 +861,13 @@ impl CompiledBinding {
                 max_items,
                 max_depth,
             } => {
+                if role.is_some()
+                    && fields.values().any(|path| {
+                        path.len() < 2 || path.first().map(String::as_str) != Some("mcp_result")
+                    })
+                {
+                    return Err(invalid("Role projections require mcp_result member paths"));
+                }
                 let schema = serde_json::to_value(schema)
                     .map_err(|_| invalid("Invalid projection schema"))?;
                 Some(Arc::new(
@@ -752,6 +893,9 @@ impl CompiledBinding {
         }
         let overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
         crate::module_schema::validate_overlay(&overlay).map_err(invalid)?;
+        if role.is_some() {
+            crate::role_import::validate_overlay(&overlay).map_err(invalid)?;
+        }
         let timeout_secs = raw.limits.as_ref().and_then(|limits| limits.timeout_secs);
         if timeout_secs.is_some_and(|value| value == 0 || value > limits.max_timeout_secs)
             || raw
@@ -783,8 +927,9 @@ impl CompiledBinding {
             enabled,
             effects: raw.effects,
             inputs: Vec::new(),
-            execution: Execution::AnsibleModule {
+            execution: Execution::Ansible {
                 snapshot: PathBuf::from(snapshot),
+                role,
                 overlay,
                 no_log,
                 projection,
@@ -810,7 +955,7 @@ impl CompiledBinding {
             scratch_files,
             started,
         } = transport;
-        let Execution::AnsibleModule {
+        let Execution::Ansible {
             plan: Some(plan),
             no_log,
             projection,
@@ -830,24 +975,18 @@ impl CompiledBinding {
             || timeout == 0
             || timeout > self.timeout_secs.unwrap_or(limits.max_timeout_secs)
         {
-            return Err(bound("Invalid module host or timeout"));
+            return Err(bound("Invalid automation host or timeout"));
         }
         let arguments = plan
             .binding
             .prepare(&request.inputs)
-            .map_err(|_| bound("Module inputs violate the reviewed binding"))?;
+            .map_err(|_| bound("Automation inputs violate the reviewed binding"))?;
         let invocation_id = crate::automation_exec::invocation_id();
-        let spec = ModuleSpec {
+        let spec = AutomationSpec {
             schema: 2,
             invocation_id: &invocation_id,
             runtime: &plan.runtime,
-            expected: ModuleContent {
-                identity: &plan.reviewed.runtime,
-                collection: &plan.reviewed.collection,
-                content_sha256: &plan.reviewed.content_sha256,
-                source: &plan.source,
-                module: &plan.reviewed.module,
-            },
+            expected: plan.reviewed.expected(),
             destination: &target.destination,
             target_python: &target.python,
             ssh_config,
@@ -866,7 +1005,7 @@ impl CompiledBinding {
             limit: 256 * 1024,
         };
         serde_json::to_writer(&mut writer, &spec)
-            .map_err(|_| bound("Module invocation exceeds byte bound"))?;
+            .map_err(|_| bound("Automation invocation exceeds byte bound"))?;
         let input_json = writer.bytes;
         Ok(crate::automation_exec::PreparedAutomation {
             controller: PreparedController {
@@ -876,6 +1015,7 @@ impl CompiledBinding {
                 max_output_bytes: 65_536,
                 supervision: crate::controller::ControllerSupervision::Automation {
                     invocation_id,
+                    mode: plan.reviewed.mode(),
                     scratch_bytes,
                     scratch_files,
                 },
@@ -893,8 +1033,11 @@ impl CompiledBinding {
         target_exists: &impl Fn(&str) -> bool,
         activation: &mut ControllerActivation<'_>,
     ) -> Result<Self, ConfigError> {
-        if matches!(&raw.execution, RawExecution::AnsibleModule { .. }) {
-            return Self::compile_module(name, raw, enabled, limits, target_exists);
+        if matches!(
+            &raw.execution,
+            RawExecution::AnsibleModule { .. } | RawExecution::AnsibleRole { .. }
+        ) {
+            return Self::compile_automation(name, raw, enabled, limits, target_exists);
         }
         if raw.fixed_args.is_some() || raw.input_map.is_some() {
             return Err(invalid(
@@ -1091,7 +1234,9 @@ impl CompiledBinding {
                 };
                 (Execution::ControllerScript { plan }, Vec::new(), false)
             }
-            RawExecution::AnsibleModule { .. } => unreachable!("compiled separately"),
+            RawExecution::AnsibleModule { .. } | RawExecution::AnsibleRole { .. } => {
+                unreachable!("compiled separately")
+            }
         };
         let timeout_secs = raw.limits.as_ref().and_then(|v| v.timeout_secs);
         let max_output_bytes = raw.limits.as_ref().and_then(|v| v.max_output_bytes);
@@ -1274,7 +1419,8 @@ impl CompiledBinding {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::RemoteScript { .. } => "remote_script",
             Execution::ControllerScript { .. } => "controller_script",
-            Execution::AnsibleModule { .. } => "ansible_module",
+            Execution::Ansible { role: Some(_), .. } => "ansible_role",
+            Execution::Ansible { role: None, .. } => "ansible_module",
         }
     }
 
@@ -1283,19 +1429,16 @@ impl CompiledBinding {
     }
 
     pub(crate) fn is_automation(&self) -> bool {
-        matches!(self.execution, Execution::AnsibleModule { .. })
+        matches!(self.execution, Execution::Ansible { .. })
     }
 
     pub(crate) fn automation_activated(&self) -> bool {
-        matches!(
-            self.execution,
-            Execution::AnsibleModule { plan: Some(_), .. }
-        )
+        matches!(self.execution, Execution::Ansible { plan: Some(_), .. })
     }
 
     pub(crate) fn projection(&self) -> Option<&Arc<crate::projection::Plan>> {
         match &self.execution {
-            Execution::AnsibleModule { projection, .. } => projection.as_ref(),
+            Execution::Ansible { projection, .. } => projection.as_ref(),
             _ => None,
         }
     }
@@ -1327,7 +1470,7 @@ impl CompiledBinding {
         let prefix = match &self.execution {
             Execution::NativeArgv { .. }
             | Execution::ControllerScript { .. }
-            | Execution::AnsibleModule { .. } => &[][..],
+            | Execution::Ansible { .. } => &[][..],
             Execution::RemoteScript { prefix, .. } => prefix.as_slice(),
         };
         let mut arguments = Vec::with_capacity(prefix.len() + self.argv.len());
@@ -1357,7 +1500,7 @@ impl CompiledBinding {
                 cwd: cwd.as_deref(),
             },
             Execution::ControllerScript { .. }
-            | Execution::AnsibleModule { .. }
+            | Execution::Ansible { .. }
             | Execution::NativeArgv {
                 authority: Authority::Controller,
                 ..
@@ -1397,7 +1540,7 @@ impl CompiledBinding {
             if !arguments.is_empty() {
                 return Err(shape());
             }
-            let Execution::AnsibleModule { overlay, .. } = &self.execution else {
+            let Execution::Ansible { overlay, .. } = &self.execution else {
                 unreachable!("module request selected");
             };
             crate::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
@@ -1488,7 +1631,7 @@ impl CompiledBinding {
             script: match &self.execution {
                 Execution::RemoteScript { source, .. } => Some(source),
                 Execution::NativeArgv { .. } => None,
-                Execution::ControllerScript { .. } | Execution::AnsibleModule { .. } => {
+                Execution::ControllerScript { .. } | Execution::Ansible { .. } => {
                     return Err(bound("Controller requires local preparation"));
                 }
             },
@@ -1750,6 +1893,95 @@ mod tests {
             toml::from_str("nested='nested'").unwrap(),
         );
         raw
+    }
+
+    fn role_definition() -> toml::Value {
+        let mut raw = module_definition();
+        raw["execution"] = toml::from_str(
+            "kind='ansible_role'\nsnapshot='/unavailable/role.json'\nrole_path='/unavailable/role'",
+        )
+        .unwrap();
+        raw
+    }
+
+    #[test]
+    fn role_compilation_keeps_source_private_and_caller_controls_closed() {
+        let bindings = compile(role_definition()).unwrap();
+        let binding = bindings.get(BindingId(0)).unwrap();
+        assert_eq!(binding.executor_kind(), "ansible_role");
+        assert_eq!(binding.result_kind(), "ansible_summary");
+        assert!(binding.is_automation());
+        assert!(!binding.automation_activated());
+        let published = serde_json::to_string(&binding.input_schema).unwrap();
+        assert!(!published.contains("/unavailable"));
+        for control in ["role", "entry_point", "role_path", "extra_vars"] {
+            let mut arguments = json!({"host":"server","inputs":{"nested":{"items":[]}}});
+            arguments[control] = json!("caller");
+            assert!(
+                binding
+                    .parse_request(arguments.as_object().unwrap().clone())
+                    .is_err()
+            );
+            let mut raw = role_definition();
+            raw["execution"]
+                .as_table_mut()
+                .unwrap()
+                .insert(control.into(), "caller".into());
+            assert!(compile(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn role_projection_requires_a_concrete_mcp_result_member() {
+        for path in [
+            vec!["ansible_facts", "platform"],
+            vec!["mcp_result"],
+            vec!["mcp_result", "platform"],
+        ] {
+            let mut raw = role_definition();
+            let mut result = projection_result();
+            result["fields"]["platform"] = toml::Value::Array(
+                path.iter()
+                    .map(|part| toml::Value::String((*part).into()))
+                    .collect(),
+            );
+            raw["result"] = result;
+            assert_eq!(
+                compile(raw).is_ok(),
+                path.len() == 2 && path[0] == "mcp_result"
+            );
+        }
+    }
+
+    #[test]
+    fn role_backend_controls_are_rejected_even_without_activation() {
+        for name in [
+            "mcp_result",
+            "ssh_mcp_arguments",
+            "ansible_connection",
+            "connection",
+            "become_user",
+            "hostvars",
+            "inventory_file",
+            "callback_plugins",
+            "role_path",
+            "tasks_from",
+            "tags",
+            "no_log",
+        ] {
+            let mut raw = role_definition();
+            raw.as_table_mut().unwrap().insert(
+                "fixed_args".into(),
+                toml::Value::try_from(json!({name:"value"})).unwrap(),
+            );
+            assert!(compile(raw).is_err(), "accepted fixed role control {name}");
+            let mut raw = role_definition();
+            raw["input_map"] = toml::Value::try_from(json!({name:"nested"})).unwrap();
+            assert!(compile(raw).is_err(), "accepted mapped role control {name}");
+        }
+        let mut raw = role_definition();
+        raw["execution"]["role_path"] = "relative/role".into();
+        assert!(compile(raw).is_err());
     }
 
     #[test]

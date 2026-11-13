@@ -719,7 +719,7 @@ impl Config {
             {
                 return Err(invalid(
                     "tools",
-                    "module targets require explicit automation authority",
+                    "automation targets require explicit automation authority",
                 ));
             }
         }
@@ -806,7 +806,7 @@ impl Config {
         let root = crate::bindings::controller_root(self.automation.workspace_root.as_deref())?;
         for id in active {
             self.bindings
-                .activate_module(id, runtime.clone(), root.clone(), ct)
+                .activate_automation(id, runtime.clone(), root.clone(), ct)
                 .await?;
         }
         Ok(true)
@@ -1483,12 +1483,15 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
             ("files-only", "baseline", true),
             ("baseline", "files-only", true),
         ] {
-            let mut config = load_text(&automation_text(global, target, enabled), &[]).unwrap();
-            config
-                .activate_automation(&tokio_util::sync::CancellationToken::new())
-                .await
-                .unwrap();
-            assert!(!config.binding_enabled(BindingId(0)));
+            for kind in ["ansible_module", "ansible_role"] {
+                let text = automation_text(global, target, enabled).replace("ansible_module", kind);
+                let mut config = load_text(&text, &[]).unwrap();
+                config
+                    .activate_automation(&tokio_util::sync::CancellationToken::new())
+                    .await
+                    .unwrap();
+                assert!(!config.binding_enabled(BindingId(0)));
+            }
         }
     }
 

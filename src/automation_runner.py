@@ -87,7 +87,7 @@ class Frames:
             count = os.write(self.fd, raw)
             require(count > 0)
             raw = raw[count:]
-        self.terminal = kind == "terminal"
+        self.terminal = kind in ("terminal", "role_terminal")
 
 
 class ProjectionLimit(Exception):
@@ -409,6 +409,191 @@ class Evidence:
         return "failed"
 
 
+class RoleEvidence(Evidence):
+    """Bounded root observations, reconciled against Core's authoritative stats."""
+
+    def __init__(self, frames, no_log, projection, playbook):
+        super().__init__(frames, None, no_log, projection)
+        self.starts = []
+        self.results = set()
+        self.active = None
+        self.observations = 0
+        self.event_ids = set()
+        self.pending_include = None
+        self.include_completed = 0
+        self.raw = dict(ok=0, failed=0, unreachable=0, skipped=0)
+        self.tasks.update(rescued=0, ignored=0)
+        self.ignored = 0
+        self.include_ok = 0
+        self.meta_skipped = 0
+        self.playbook = str(playbook)
+        self.collected = False
+
+    def consume(self, event):
+        require(not self.invalid)
+        require(type(event) is dict and type(event.get("event")) is str)
+        kind = event["event"]
+        data = event.get("event_data", {})
+        require(type(data) is dict)
+        if "host" in data:
+            require(data["host"] == HOST)
+        relevant = (kind in ("playbook_on_task_start", "playbook_on_handler_task_start", "playbook_on_stats")
+                    or kind.startswith("runner_") or kind == "playbook_on_include")
+        if relevant:
+            require(self.stats is None)
+        if kind in ("playbook_on_task_start", "playbook_on_handler_task_start"):
+            require(len(self.starts) < 256)
+            if self.active is not None and self.active not in self.results:
+                require(self.starts[self.active][1] in ("meta", "ansible.builtin.meta", "ansible.legacy.meta"))
+            uuid = data.get("task_uuid")
+            require(type(uuid) is str and 0 < len(uuid) <= 128)
+            action = data.get("task_action")
+            require(type(action) is str and 0 < len(action) <= 256)
+            # Meta controls generate starts but usually no root result.
+            self.starts.append((uuid, action))
+            self.active = len(self.starts) - 1
+            self.pending_include = None
+        elif kind in ("runner_on_ok", "runner_on_failed", "runner_on_unreachable", "runner_on_skipped"):
+            uuid = data.get("task_uuid")
+            require(data.get("host") == HOST and self.active is not None
+                    and uuid == self.starts[self.active][0])
+            action = self.starts[self.active][1]
+            # A successfully executed include first emits OK, then loading can
+            # emit a failed result for that same occurrence in linear strategy.
+            require(self.active not in self.results or
+                    (self.pending_include == self.active and kind == "runner_on_failed"))
+            self.observe(event)
+            require(data.get("task_action") == action)
+            result = data.get("res", {})
+            require(type(result) is dict and not any(
+                key in result for key in ("ansible_job_id", "results_file", "started", "finished")))
+            outcome = kind.removeprefix("runner_on_")
+            ignored = data.get("ignore_errors", False)
+            require(type(ignored) is bool and (not ignored or outcome == "failed"))
+            changed = result.get("changed")
+            require(changed is None or type(changed) is bool)
+            # Runner replaces no_log root/item results with {"censored": ...}.
+            pending = [result]
+            nodes = 0
+            while pending:
+                value = pending.pop()
+                nodes += 1
+                require(nodes <= 16384)
+                if type(value) is dict:
+                    require(not any(key in value for key in (
+                        "ansible_job_id", "results_file", "started", "finished")))
+                    self.censored = self.censored or bool(value.get("_ansible_no_log")) or "censored" in value
+                    children = value.get("results", [])
+                    require(type(children) is list)
+                    require(len(pending) + len(children) <= 16384)
+                    pending.extend(children)
+            if self.censored:
+                self.changed = None
+            elif changed is True:
+                self.changed = True
+            self.results.add(self.active)
+            self.raw[outcome] += 1
+            self.ignored += int(ignored)
+            short = action.removeprefix("ansible.builtin.").removeprefix("ansible.legacy.")
+            if outcome == "ok" and short in ("include_role", "include_tasks"):
+                self.include_ok += 1
+                self.pending_include = self.active
+            if outcome == "skipped" and short == "meta":
+                self.meta_skipped += 1
+            self.tasks.update(self.raw)
+            self.tasks["failed"] -= self.ignored
+            self.tasks["ok"] += self.ignored - self.include_ok + self.include_completed
+            self.tasks["skipped"] -= self.meta_skipped
+            self.tasks["ignored"] = self.ignored
+            # Initial include OK is deferred: linear strategy counts successful
+            # loads at playbook_on_include, potentially once per loop inclusion.
+            # Skipped meta controls never contribute to Core's skipped count.
+            counted = not ((outcome == "ok" and short in ("include_role", "include_tasks"))
+                           or (outcome == "skipped" and short == "meta"))
+            if counted:
+                self.frames.emit("role_task", outcome=outcome,
+                                 changed=None if self.censored else changed,
+                                 censored=self.censored, ignored=ignored)
+            collector = (data.get("task") == "ssh_mcp_result" and short == "debug"
+                         and data.get("task_path", "").rsplit(":", 1)[0] == self.playbook)
+            if collector:
+                require(self.projection is not None and not self.collected)
+                self.collected = True
+                selected = dict(status="invalid")
+                envelope = result.get("msg")
+                if self.censored:
+                    selected = dict(status="censored")
+                elif (outcome == "ok" and type(envelope) is dict
+                      and set(envelope) == {"present", "value"} and type(envelope["present"]) is bool):
+                    if not envelope["present"]:
+                        selected = dict(status="unavailable")
+                    elif type(envelope["value"]) is dict:
+                        selected = Projection(self.projection).reduce(
+                            {"mcp_result": envelope["value"]}, False)
+                self.frames.emit("projection", projection=selected)
+        elif kind == "playbook_on_include":
+            require(self.active is not None and self.pending_include == self.active
+                    and self.active in self.results)
+            require(data.get("task_uuid") == self.starts[self.active][0])
+            self.observe(event)
+            self.include_completed += 1
+            self.tasks["ok"] += 1
+            self.frames.emit("role_task", outcome="ok", changed=None if self.censored else False,
+                             censored=self.censored, ignored=False)
+        elif kind == "playbook_on_stats":
+            require(self.results)
+            observed = {}
+            if self.active not in self.results:
+                require(self.active is not None and self.starts[self.active][1] in (
+                    "meta", "ansible.builtin.meta", "ansible.legacy.meta"))
+            for name in ("ok", "failures", "dark", "skipped", "changed", "processed", "rescued", "ignored"):
+                counts = data.get(name)
+                require(type(counts) is dict and set(counts).issubset({HOST}))
+                require(all(type(value) is int and 0 <= value <= 128 for value in counts.values()))
+                observed[name] = counts.get(HOST, 0)
+            require(observed["processed"] == 1 or
+                    (observed["processed"] == 0 and not any(
+                        observed[name] for name in observed if name != "processed")))
+            require(self.raw["failed"] == observed["failures"] + observed["rescued"] + observed["ignored"])
+            require(self.ignored == observed["ignored"])
+            require(self.raw["ok"] - self.include_ok + self.include_completed + self.ignored == observed["ok"])
+            require(self.raw["unreachable"] == observed["dark"])
+            require(self.raw["skipped"] - self.meta_skipped == observed["skipped"])
+            require(observed["changed"] <= observed["ok"])
+            if not self.censored and self.changed is not True:
+                self.changed = bool(observed["changed"])
+            self.tasks = dict(ok=observed["ok"], failed=observed["failures"],
+                              unreachable=observed["dark"], skipped=observed["skipped"],
+                              rescued=observed["rescued"], ignored=observed["ignored"])
+            self.stats = observed
+        elif kind.startswith("runner_on_async") or kind in ("playbook_on_no_hosts_matched",):
+            raise Invalid()
+        elif kind.startswith("runner_") and kind not in (
+                "runner_on_start", "runner_item_on_ok", "runner_item_on_failed",
+                "runner_item_on_skipped", "runner_on_file_diff", "runner_retry"):
+            raise Invalid()
+
+    def observe(self, event):
+        """Bound root/completion observations and reject replayed result events."""
+        event_id = event.get("uuid")
+        require(type(event_id) is str and 0 < len(event_id) <= 128
+                and event_id not in self.event_ids and self.observations < 128)
+        self.event_ids.add(event_id)
+        self.observations += 1
+
+    def reconcile(self, runner):
+        require(not self.invalid and self.stats is not None)
+        require(self.statuses == ["starting", "running", runner.status])
+        if self.tasks["unreachable"]:
+            require(runner.status == "failed" and runner.rc == 4)
+            return "unreachable"
+        if self.tasks["failed"]:
+            require(runner.status == "failed" and runner.rc == 2)
+            return "failed"
+        require(runner.status == "successful" and runner.rc == 0)
+        return "successful"
+
+
 class Cancellation:
     def __init__(self, workspace, spec):
         self.workspace = workspace
@@ -500,12 +685,22 @@ def validate(spec):
                 "projection"))
     require(type(spec["schema"]) is int and spec["schema"] == 2)
     require(type(spec["invocation_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", spec["invocation_id"]))
-    keys(spec["expected"], ("identity", "collection", "content_sha256", "source", "module"))
     expected = spec["expected"]
-    require(type(expected["module"]) is str and len(expected["module"]) <= 256 and re.fullmatch(
-        r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){2,}", expected["module"]))
+    if "role" in expected:
+        keys(expected, ("identity", "collection", "content_sha256", "role", "entry_point", "role_path"))
+        require(type(expected["role"]) is str and re.fullmatch(
+            r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){0,2}", expected["role"])
+                and len(expected["role"].split(".")) in (1, 3))
+        require(type(expected["entry_point"]) is str and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]{0,127}", expected["entry_point"]))
+        if expected["role_path"] is not None:
+            absolute(expected["role_path"])
+    else:
+        keys(expected, ("identity", "collection", "content_sha256", "source", "module"))
+        require(type(expected["module"]) is str and len(expected["module"]) <= 256 and re.fullmatch(
+            r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){2,}", expected["module"]))
+        require(type(expected["source"]) is str and 0 < len(expected["source"]) <= 4096)
     require(type(expected["content_sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", expected["content_sha256"]))
-    require(type(expected["source"]) is str and 0 < len(expected["source"]) <= 4096)
     destination = spec["destination"]
     whitespace = "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
     require(type(destination) is str and destination and not destination.startswith("-")
@@ -528,9 +723,18 @@ def selected_runtime(spec, workspace):
     helper.write_text(_SSH_MCP_HEALTH_SOURCE, encoding="utf-8")
     namespace = {"__name__": "ssh_mcp_health", "__file__": str(helper)}
     exec(compile(_SSH_MCP_HEALTH_SOURCE, str(helper), "exec"), namespace)
-    observed, roots = namespace["check"](spec["runtime"])
+    observed, roots = namespace["check"](spec["runtime"], role_request="role" in spec["expected"])
     expected = spec["expected"]
     require(observed == expected["identity"])
+    if "role" in expected:
+        directory, _, _, content, collection, _ = namespace["role_content"](
+            expected["role"], expected["entry_point"], expected["role_path"], roots)
+        require(content == expected["content_sha256"] and collection == expected["collection"])
+        if expected["role_path"] is not None:
+            # Use the exact verified parent, not a lexical path that Ansible
+            # could expand or split differently from the content verifier.
+            expected["role_path"] = str(directory)
+        return roots
     import ansible
     core = Path(ansible.__file__).parent.resolve(strict=True)
     trees = [("ansible", core)]
@@ -594,13 +798,29 @@ def layout(workspace, spec, roots, selected_path):
         json.dumps({"schema": 1, "pid": os.getpid()}, separators=(",", ":")), encoding="ascii")
     project = workspace / "project"
     document(project / "arguments.yml", {"ssh_mcp_arguments": literal(spec["arguments"])})
-    document(project / "playbook.yml", [{
-        "name": "ssh_mcp_play", "hosts": HOST, "gather_facts": False, "become": False,
-        "strategy": "linear", "vars_files": ["arguments.yml"],
-        "tasks": [{"name": TASK, "no_log": spec["no_log"], "become": False,
-                   spec["expected"]["module"]: {key: "{{ ssh_mcp_arguments['" + key + "'] }}"
-                                                  for key in spec["arguments"]}}],
-    }])
+    expected = spec["expected"]
+    role = "role" in expected
+    if role:
+        tasks = [{"name": "ssh_mcp_role", "no_log": spec["no_log"],
+                  "ansible.builtin.include_role": {
+                      "name": expected["role"], "tasks_from": expected["entry_point"],
+                      "public": False, "apply": {"no_log": spec["no_log"], "become": False}},
+                  "vars": {key: "{{ ssh_mcp_arguments['" + key + "'] }}"
+                           for key in spec["arguments"]}}]
+    else:
+        tasks = [{"name": TASK, "no_log": spec["no_log"], "become": False,
+                  expected["module"]: {key: "{{ ssh_mcp_arguments['" + key + "'] }}"
+                                       for key in spec["arguments"]}}]
+    play = {"name": "ssh_mcp_play", "hosts": HOST, "gather_facts": False, "become": False,
+            "strategy": "linear", "vars_files": ["arguments.yml"], "tasks": tasks}
+    if role and spec["projection"] is not None:
+        # post_tasks run after ordinary role handlers, so their censorship is
+        # known before the only domain-bearing result can leave this process.
+        play["post_tasks"] = [{"name": "ssh_mcp_result", "no_log": spec["no_log"],
+                               "ansible.builtin.debug": {"msg": {
+                                   "present": "{{ mcp_result is defined }}",
+                                   "value": "{{ mcp_result | default(none) }}"}}}]
+    document(project / "playbook.yml", [play])
     ssh_args = (
         "-o BatchMode=yes -o NumberOfPasswordPrompts=0 -o StrictHostKeyChecking=yes "
         "-o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no "
@@ -645,6 +865,10 @@ def layout(workspace, spec, roots, selected_path):
         "ANSIBLE_COLLECTIONS_SCAN_SYS_PATH": "False", "ANSIBLE_NOCOWS": "True",
         "ANSIBLE_RETRY_FILES_ENABLED": "False", "ANSIBLE_PIPELINING": "True",
     }
+    if role:
+        environment["ANSIBLE_ROLES_PATH"] = (
+            str(Path(expected["role_path"]).parent) if expected["role_path"] is not None
+            else str(workspace / "no-roles"))
     agent = os.environ.get("SSH_AUTH_SOCK")
     if agent is not None:
         absolute(agent)
@@ -681,7 +905,10 @@ def main():
         require(selected_path and all(part and Path(part).is_absolute() for part in selected_path.split(os.pathsep)))
         layout(workspace, spec, roots, selected_path)
         from ansible_runner import run
-        evidence = Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"])
+        evidence = (RoleEvidence(frames, spec["no_log"], spec["projection"],
+                                 workspace / "project" / "playbook.yml")
+                    if "role" in spec["expected"] else
+                    Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"]))
         if cancellation.requested():
             status = cancellation.reason
         else:
@@ -708,9 +935,13 @@ def main():
         # They deliberately do not cross either diagnostic or protocol boundaries.
         status = cancellation.reason if cancellation is not None and cancellation.reason else "invalid_result"
     if frames.id is not None:
-        frames.emit("terminal", status=status, rc=rc,
+        role = type(spec) is dict and type(spec.get("expected")) is dict and "role" in spec["expected"]
+        empty = dict(ok=0, failed=0, unreachable=0, skipped=0)
+        if role:
+            empty.update(rescued=0, ignored=0)
+        frames.emit("role_terminal" if role else "terminal", status=status, rc=rc,
                     changed=evidence.changed if evidence is not None else None,
-                    tasks=evidence.tasks if evidence is not None else dict(ok=0, failed=0, unreachable=0, skipped=0),
+                    tasks=evidence.tasks if evidence is not None else empty,
                     censored=evidence.censored if evidence is not None else False, complete=complete)
 
 

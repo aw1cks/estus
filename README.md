@@ -412,7 +412,9 @@ rejected because Ansible would reinterpret them rather than select literal conte
 Role tasks and dependencies do not execute during import/verification. Upstream
 role dependencies can run before the dependent role's argspec validation:
 Rust prevalidation remains the approval boundary, not upstream execution order.
-Role execution is not enabled by this slice.
+Fixed ordinary role bindings use `execution.kind = "ansible_role"` with a reviewed
+snapshot and fixed source. Inputs are validated before roles or dependencies run;
+summary-only output or declared `mcp_result` projections use the existing owner.
 
 ## Ordinary Ansible modules
 
@@ -462,7 +464,7 @@ fields as described below; whole raw events/arguments/environment are not return
 `no_log` remains censored. Nested module input strings use documented `!unsafe`
 tags rather than caller-supplied Jinja evaluation.
 
-`automation.max_concurrent` defaults to 2; each logical target admits one module
+`automation.max_concurrent` defaults to 2; each logical target admits one automation
 invocation at a time. The existing global operation cap also applies. Admission
 and private workspaces remain owned through cleanup, including client loss.
 Cancellation first lets the owned CLI propagate termination through Ansible's
@@ -474,8 +476,8 @@ Scratch defaults to 16 MiB/512 entries. Byte/file polling cancels on an observed
 watermark, not a hard filesystem or memory quota. Runner's unavoidable private
 metadata/transient files can contain secrets; supported duplicate output/event
 capture is suppressed and invocation files are removed after ownership ends.
-Crash recovery does not promise secure erasure. Roles, privilege escalation and
-retained raw events remain outside this implementation.
+Crash recovery does not promise secure erasure. Privilege escalation and retained
+raw events remain outside this implementation.
 
 ## Typed module result fields
 
