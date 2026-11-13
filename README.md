@@ -184,6 +184,48 @@ There is no replay or rollback inference.
 `nix run .#remove-directory-acceptance-msrv` proves empty-only effects, preserved
 contents and dispatch uncertainty with the same native prerequisites.
 
+## Explicit atomic file replacement
+
+`ssh_replace_file` requires explicit replacement consent:
+
+```json
+{"host":"server","path":"/srv/example/config.json","content":"{\"enabled\":true}\n","overwrite":true}
+```
+
+`encoding` also accepts strict padded `base64`; decoded content obeys the same
+configured file limit as direct writes. False consent, root/trailing-slash/dot
+final entries, invalid content/timeouts and insufficient reply budget reject
+before SSH. A missing destination may be created, but `overwrite=true` is still
+required.
+
+The server must advertise POSIX rename before any filesystem mutation. Estus
+exclusively creates a random `.estus-replace-<32 hex digits>` sibling, sets mode0600
+before writing content, completes the full write and CLOSE, then atomically
+renames it over the destination. The initial empty stage briefly uses server
+creation defaults before chmod; no payload is written until chmod succeeds.
+Unsupported atomicity never falls back to standard rename, destination truncate,
+unlink/copy/delete, sudo or shell/SCP.
+
+A final destination symlink entry is replaced, not its target. The new inode uses
+mode0600 and the SSH account/server parent-group inheritance rules; old
+ownership/mode/ACL/xattrs and hardlink identity are not preserved. Components retain
+server semantics: no sandbox, no-follow, adversarial pathname protection,
+compare-and-swap or concurrent-writer exclusion. This guarantees atomic visibility,
+not fsync/power-loss durability.
+
+Success returns `{"bytes_written":N}` in the standard envelope after acknowledgement
+and bounded channel cleanup. Any failure after mutating OPEN polling retains
+uncertainty, even if normal pre-rename cleanup succeeds. Only an acknowledged,
+exclusively created staging entry may be removed before rename polling. No cleanup
+ever deletes the destination or a staging pathname after rename starts. Cancel,
+timeout, connection loss or ambiguous rename may leave `.estus-replace-*` siblings;
+review possible leftovers out of band rather than automatically retrying or
+sweeping names. Channel closure never proves rollback. Direct `ssh_write_file`
+retains its existing non-atomic contract.
+
+`nix run .#replace-file-acceptance-msrv` exercises atomic visibility, metadata,
+failure cleanup and real lost-rename-ack uncertainty with native prerequisites.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

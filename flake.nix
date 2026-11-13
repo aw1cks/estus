@@ -256,6 +256,14 @@
           type = "app";
           program = "${msrvBuild.acceptance}/bin/remove-directory-acceptance";
         };
+        apps.replace-file-acceptance = {
+          type = "app";
+          program = "${acceptance}/bin/replace-file-acceptance";
+        };
+        apps.replace-file-acceptance-msrv = {
+          type = "app";
+          program = "${msrvBuild.acceptance}/bin/replace-file-acceptance";
+        };
         apps.controller-scripts = {
           type = "app";
           program = "${acceptance}/bin/controller-scripts";

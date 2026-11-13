@@ -1,4 +1,6 @@
 //! Real native command and SFTP acceptance; isolated sudo remains separate.
+#[path = "support/replace_relay.rs"]
+mod replace_relay;
 mod support;
 
 use std::{
@@ -5947,4 +5949,393 @@ async fn ssh_remove_directory_prehandshake_timeout() -> Result<()> {
     );
     removed?;
     Ok(())
+}
+
+// All replacement observations below use the real server's shared filesystem,
+// independently of the MCP response and of the SFTP client's buffers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_replace_file_atomic_visibility_and_lost_ack() -> Result<()> {
+    for drop_ack in [false, true] {
+        let work = tempfile::tempdir()?;
+        let destination = work.path().join("destination");
+        let hardlink = work.path().join("old-hardlink");
+        let old = vec![b'O'; 262_144];
+        let new = vec![b'N'; 786_432];
+        fs::write(&destination, &old)?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o644))?;
+        fs::hard_link(&destination, &hardlink)?;
+        let before = fs::metadata(&destination)?;
+        let fault = if drop_ack {
+            replace_relay::Fault::RenameAck
+        } else {
+            replace_relay::Fault::None
+        };
+        let relay = replace_relay::Relay::start(
+            &Fixture::sftp_server()?,
+            fault,
+            Some(replace_relay::Oracle {
+                destination: destination.clone(),
+                hardlink: hardlink.clone(),
+                old: old.clone(),
+                inode: before.ino(),
+                new_len: new.len(),
+            }),
+        )
+        .await?;
+        let evidence = relay.evidence.clone();
+        let setup = Fixture::start_with_sftp_subsystem("", &relay.subsystem).await;
+        let fixture = match setup {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                let _ = relay.stop().await;
+                return Err(error);
+            }
+        };
+        let scenario = async {
+            let configured = fs::read_to_string(&fixture.config)?
+                .replace("[limits]", "[limits]\nmax_file_bytes = 1048576");
+            fs::write(&fixture.config, configured)?;
+            // Explicitly configured above the 64KiB write boundary.
+            let client = Client::start(&fixture.config).await?;
+            let cases = async {
+                let observed_path = destination.clone();
+                let observed_old = old.clone();
+                let observed_new = new.clone();
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+                let mut observer = tokio::spawn(async move {
+                    let mut ready = Some(ready_tx);
+                    let mut old_reads = 0usize;
+                    let mut new_reads = 0usize;
+                    timeout(Duration::from_secs(15), async {
+                        loop {
+                            let bytes = fs::read(&observed_path)?;
+                            if bytes == observed_old { old_reads += 1; }
+                            else if bytes == observed_new { new_reads += 1; }
+                            else { anyhow::bail!("ordinary reader observed missing/partial/mixed replacement bytes"); }
+                            if let Some(ready) = ready.take() { let _ = ready.send(()); }
+                            if stop_rx.try_recv().is_ok() {
+                                ensure!(fs::read(&observed_path)? == observed_new, "final independent publication observation");
+                                new_reads += 1;
+                                ensure!(old_reads > 0 && new_reads > 0, "observer missed old/new visibility");
+                                return Ok::<_, anyhow::Error>(());
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.context("bounded visibility observer")?
+                });
+                let operation = async {
+                    timeout(Duration::from_secs(5), ready_rx).await??;
+                    let reply = client.call("ssh_replace_file", json!({
+                        "host":"plain","path":destination,"content":String::from_utf8(new.clone())?,
+                        "overwrite":true,"timeout_secs":3,
+                    })).await?;
+                    if drop_ack {
+                        failed(&reply, "timeout")?;
+                        ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+                    } else {
+                        ensure!(succeeded(&reply)? == &json!({"bytes_written":new.len()}));
+                    }
+                    ensure!(fs::read(&destination)? == new, "real server did not publish new bytes");
+                    ensure!(fs::read(&hardlink)? == old);
+                    let after = fs::metadata(&destination)?;
+                    ensure!(after.ino() != before.ino());
+                    ensure!(after.mode() & 0o7777 == 0o600);
+                    ensure!(after.uid() == nix::unistd::Uid::current().as_raw());
+                    ensure!(after.gid() == fs::metadata(work.path())?.gid());
+                    ensure!(fs::metadata(&hardlink)?.ino() == before.ino());
+                    ensure!(fs::metadata(&hardlink)?.mode() & 0o7777 == 0o644);
+                    ensure!(fs::read_dir(work.path())?.count() == 2, "successful rename left a stage");
+                    let seen = evidence.lock().map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+                    ensure!(!seen.requests.iter().any(|kind| matches!(*kind, 13 | 18)),
+                        "replacement deleted an entry or used standard rename: {seen:?}");
+                    ensure!(seen.renames == 1, "rename replayed: {seen:?}");
+                    ensure!(seen.dropped_success == drop_ack, "lost ack was not a genuine successful STATUS");
+                    ensure!(seen.writes > 1 && seen.staged_partial, "did not observe real multi-write staging");
+                    let rename = seen.rename_index.context("POSIX rename request")?;
+                    ensure!(seen.requests[rename + 1..].iter().all(|kind| !matches!(*kind, 3 | 6 | 13 | 18 | 200)),
+                        "mutation/replay/cleanup after rename: {seen:?}");
+                    Ok::<_, anyhow::Error>(())
+                }.await;
+                // Always stop and join the owned independent reader, including failed calls/assertions.
+                let _ = stop_tx.send(());
+                let observed = match timeout(Duration::from_secs(5), &mut observer).await {
+                    Ok(result) => result.context("visibility observer panic").and_then(|result| result),
+                    Err(error) => {
+                        observer.abort();
+                        let _ = observer.await;
+                        Err(error.into())
+                    }
+                };
+                operation?;
+                observed
+            }.await;
+            let owned = masters(&client.log);
+            let stopped = client.stop().await;
+            let gone = match owned { Ok(owned) => assert_masters_gone(&owned).await, Err(error) => Err(error) };
+            cases?;
+            stopped?;
+            gone?;
+            ensure!(fs::read_to_string(&relay.launches)?.lines().count() == 1, "replacement replayed the subsystem");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let observed_state = format!(
+            "drop_ack={drop_ack}; evidence={:?}; destination={:?}",
+            evidence.lock(),
+            fs::metadata(&destination).map(|metadata| (metadata.ino(), metadata.len()))
+        );
+        let relayed = relay.stop().await;
+        let cleanup = fixture.stop().await;
+        let removed = work.close();
+        scenario.with_context(|| format!("{observed_state}; relay cleanup={relayed:?}"))?;
+        relayed?;
+        cleanup?;
+        removed?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let directory = fixture.root.path().join("replace-private");
+            fs::create_dir(&directory)?;
+            for (name, content, encoding, expected) in [
+                ("é雪 space-'\"\n${HOME}$(printf NEVER)", "UTF8_é雪\0END", "utf8", "UTF8_é雪\0END".as_bytes()),
+                ("binary", "AP+AQQ==", "base64", b"\0\xff\x80A".as_slice()),
+                ("empty", "", "utf8", b"".as_slice()),
+            ] {
+                let path = directory.join(name);
+                let reply = client.call("ssh_replace_file", json!({
+                    "host":"plain","path":path,"content":content,"encoding":encoding,"overwrite":true,
+                })).await?;
+                ensure!(succeeded(&reply)? == &json!({"bytes_written":expected.len()}));
+                ensure!(fs::read(&path)? == expected);
+                ensure!(fs::metadata(&path)?.mode() & 0o7777 == 0o600);
+            }
+            let target = directory.join("target");
+            let link = directory.join("final-link");
+            fs::write(&target, b"SYMLINK_TARGET_UNCHANGED")?;
+            let target_inode = fs::metadata(&target)?.ino();
+            symlink(&target, &link)?;
+            let reply = client.call("ssh_replace_file", json!({
+                "host":"plain","path":link,"content":"LINK_ENTRY_REPLACED","overwrite":true,
+            })).await?;
+            succeeded(&reply)?;
+            ensure!(fs::symlink_metadata(&link)?.file_type().is_file());
+            ensure!(fs::read(&link)? == b"LINK_ENTRY_REPLACED");
+            ensure!(fs::read(&target)? == b"SYMLINK_TARGET_UNCHANGED");
+            ensure!(fs::metadata(&target)?.ino() == target_inode);
+            let missing_target = directory.join("missing-target");
+            let dangling = directory.join("dangling");
+            symlink(&missing_target, &dangling)?;
+            succeeded(&client.call("ssh_replace_file", json!({
+                "host":"plain","path":dangling,"content":"NEW_ENTRY","overwrite":true,
+            })).await?)?;
+            ensure!(fs::read(&dangling)? == b"NEW_ENTRY" && !missing_target.exists());
+            // Raw repeated slashes and intermediate symlinks keep server pathname semantics.
+            let parent_link = fixture.root.path().join("replace-parent-link");
+            symlink(&directory, &parent_link)?;
+            let raw = format!("{}//through-parent", parent_link.display());
+            succeeded(&client.call("ssh_replace_file", json!({
+                "host":"plain","path":raw,"content":"RAW_PARENT","overwrite":true,
+            })).await?)?;
+            ensure!(fs::read(directory.join("through-parent"))? == b"RAW_PARENT");
+            let tree = directory.join("tree");
+            fs::create_dir(&tree)?;
+            fs::write(tree.join("child"), b"TREE_UNCHANGED")?;
+            let tree_inode = fs::metadata(&tree)?.ino();
+            let reply = client.call("ssh_replace_file", json!({
+                "host":"plain","path":tree,"content":"NO_DIRECTORY_REPLACE","overwrite":true,
+            })).await?;
+            ensure!(reply["error"].is_object() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(fs::metadata(&tree)?.ino() == tree_inode);
+            ensure!(fs::read(tree.join("child"))? == b"TREE_UNCHANGED");
+            let stages = fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
+            let stages: Vec<_> = stages.iter().filter(|entry| entry.file_name().to_string_lossy().starts_with(".estus-replace-")).collect();
+            ensure!(stages.len() == 1, "rename-attempt failure must not clean its stage");
+            ensure!(fs::read(stages[0].path())? == b"NO_DIRECTORY_REPLACE");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned { Ok(owned) => assert_masters_gone(&owned).await, Err(error) => Err(error) };
+        cases?;
+        let log = stopped?;
+        ensure!(!log.text().contains("replace-private") && !log.text().contains("LINK_ENTRY_REPLACED"));
+        gone
+    }.await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
+    let server = Fixture::sftp_server()?;
+    for request in ["posix-rename", "write", "fsetstat", "close"] {
+        let work = tempfile::tempdir()?;
+        let requests = work.path().join("requests.log");
+        let script = format!(
+            "exec {} -P {request} -e -l DEBUG3 2>> {}",
+            server.display(),
+            requests.display()
+        );
+        let subsystem = format!("/bin/sh -c {}", quote(&script));
+        let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+        let scenario = async {
+            let client = Client::start(&fixture.config).await?;
+            let cases = async {
+                let directory = fixture.root.path().join("replace-fault");
+                fs::create_dir(&directory)?;
+                let path = directory.join("destination");
+                fs::write(&path, b"PRESERVED_DESTINATION")?;
+                let inode = fs::metadata(&path)?.ino();
+                let reply = client.call("ssh_replace_file", json!({
+                    "host":"plain","path":path,"content":"MUST_NOT_PUBLISH","overwrite":true,
+                })).await?;
+                failed(
+                    &reply,
+                    if request == "posix-rename" {
+                        "unsupported"
+                    } else {
+                        "permission_denied"
+                    },
+                )?;
+                ensure!(reply["data"].is_null());
+                ensure!(reply["error"]["remote_state_unknown"] == (request != "posix-rename"));
+                ensure!(fs::read(&path)? == b"PRESERVED_DESTINATION");
+                ensure!(fs::metadata(&path)?.ino() == inode);
+                ensure!(
+                    fs::read_dir(&directory)?.count() == 1,
+                    "acknowledged pre-rename stage not removed"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            let owned = masters(&client.log);
+            let stopped = client.stop().await;
+            let gone = match owned {
+                Ok(owned) => assert_masters_gone(&owned).await,
+                Err(error) => Err(error),
+            };
+            cases?;
+            stopped?;
+            gone?;
+            let log = fs::read_to_string(&requests)?;
+            if request == "posix-rename" {
+                for mutation in [
+                    "open \"",
+                    "remove name ",
+                    "setstat name ",
+                    "fsetstat ",
+                    "rename old ",
+                    "mkdir ",
+                    "rmdir name ",
+                ] {
+                    ensure!(
+                        !log.contains(mutation),
+                        "unsupported extension mutated filesystem: {log}"
+                    );
+                }
+                ensure!(
+                    log.lines()
+                        .filter(|line| line.contains("Refusing denylisted posix-rename request"))
+                        .count()
+                        == 1
+                );
+            } else {
+                ensure!(
+                    log.lines()
+                        .filter(|line| line.contains("remove name "))
+                        .count()
+                        == 1,
+                    "expected one owned-stage REMOVE: {log}"
+                );
+                ensure!(
+                    !log.contains("rename old "),
+                    "pre-rename failure attempted publication: {log}"
+                );
+                if request == "fsetstat" {
+                    ensure!(
+                        !log.contains("write \""),
+                        "content was written before successful chmod: {log}"
+                    );
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let cleanup = fixture.stop().await;
+        let removed = work.close();
+        scenario?;
+        cleanup?;
+        removed?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_replace_file_unacknowledged_open_does_not_claim_stage() -> Result<()> {
+    let relay = replace_relay::Relay::start(
+        &Fixture::sftp_server()?,
+        replace_relay::Fault::OpenAck,
+        None,
+    )
+    .await?;
+    let setup = Fixture::start_with_sftp_subsystem("", &relay.subsystem).await;
+    let fixture = match setup {
+        Ok(fixture) => fixture,
+        Err(error) => {
+            let _ = relay.stop().await;
+            return Err(error);
+        }
+    };
+    let scenario = async {
+        let client = Client::start(&fixture.config).await?;
+        let cases = async {
+            let directory = fixture.root.path().join("replace-unacknowledged");
+            fs::create_dir(&directory)?;
+            let path = directory.join("destination");
+            fs::write(&path, b"UNACKNOWLEDGED_OLD")?;
+            let inode = fs::metadata(&path)?.ino();
+            let reply = client.call("ssh_replace_file", json!({
+                "host":"plain","path":path,"content":"NEVER_WRITE_UNOWNED","overwrite":true,"timeout_secs":2,
+            })).await?;
+            failed(&reply, "timeout")?;
+            ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+            ensure!(fs::metadata(&path)?.ino() == inode && fs::read(&path)? == b"UNACKNOWLEDGED_OLD");
+            let entries = fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
+            let stages: Vec<_> = entries.iter().filter(|entry| entry.file_name().to_string_lossy().starts_with(".estus-replace-")).collect();
+            ensure!(stages.len() == 1 && fs::metadata(stages[0].path())?.len() == 0,
+                "uncertain OPEN must leave the real empty stage, never claim/delete it");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        let gone = match owned { Ok(owned) => assert_masters_gone(&owned).await, Err(error) => Err(error) };
+        cases?;
+        stopped?;
+        gone?;
+        let seen = relay.evidence.lock().map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+        ensure!(seen.dropped_open && !seen.dropped_success && seen.renames == 0 && seen.writes == 0);
+        ensure!(seen.requests.iter().filter(|kind| **kind == 3).count() == 1, "uncertain OPEN replayed");
+        let open = seen.requests.iter().position(|kind| *kind == 3).context("real OPEN request")?;
+        ensure!(!seen.requests[open + 1..].iter().any(|kind| matches!(*kind, 6 | 13 | 18 | 9 | 10 | 200)),
+            "uncertain OPEN triggered write/chmod/cleanup/rename: {seen:?}");
+        ensure!(fs::read_to_string(&relay.launches)?.lines().count() == 1);
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let relayed = relay.stop().await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    relayed?;
+    cleanup
 }
