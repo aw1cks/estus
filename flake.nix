@@ -117,6 +117,7 @@
               { name = "runner-acceptance"; scenario = "real_runner_fixture_acceptance"; }
               { name = "projection-acceptance"; scenario = "real_runner_projection_acceptance"; }
               { name = "role-acceptance"; scenario = "real_runner_role_acceptance"; }
+              { name = "playbook-acceptance"; scenario = "real_runner_playbook_acceptance"; }
             ]}
           '';
       in
@@ -184,6 +185,14 @@
         apps.role-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/role-acceptance";
+        };
+        apps.playbook-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/playbook-acceptance";
+        };
+        apps.playbook-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/playbook-acceptance";
         };
         apps.wheel-acceptance = {
           type = "app";

@@ -1810,3 +1810,525 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
     result?;
     cleanup
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaybookReceipt {
+    instance: String,
+    path: String,
+    checksum: String,
+    verified: bool,
+}
+
+async fn import_reviewed_playbook(
+    a: &Acceptance,
+    project: &Path,
+    entry: &str,
+    name: &str,
+    contract: &Value,
+    overlay: &Value,
+) -> Result<PathBuf> {
+    let snapshot = a
+        .fixture
+        .root
+        .path()
+        .join(format!("playbook-{name}-reviewed.json"));
+    let contract_path = snapshot.with_extension("contract.json");
+    let overlay_path = snapshot.with_extension("overlay.json");
+    let input_path = snapshot.with_extension("input.json");
+    fs::write(&contract_path, serde_json::to_vec(contract)?)?;
+    fs::write(&overlay_path, serde_json::to_vec(overlay)?)?;
+    fs::write(
+        &input_path,
+        serde_json::to_vec(&json!({
+            "instance":"review-only","config":{"banner":"not executed","enabled":false}
+        }))?,
+    )?;
+    let mut command = support::server_command(&a.fixture.config)?;
+    command
+        .args(["schema", "import-playbook", entry])
+        .arg("--project-root")
+        .arg(project)
+        .arg("--input-schema")
+        .arg(&contract_path)
+        .arg("--overlay")
+        .arg(&overlay_path)
+        .arg("--output")
+        .arg(&snapshot);
+    let output = support::run(&mut command).await?;
+    ensure!(
+        output.status.success(),
+        "public playbook import failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        report["binding_validated"] == true,
+        "playbook overlay was not reviewed: {report}"
+    );
+    let mut command = support::server_command(&a.fixture.config)?;
+    command
+        .args(["schema", "verify-playbook"])
+        .arg(&snapshot)
+        .arg("--project-root")
+        .arg(project)
+        .arg("--overlay")
+        .arg(&overlay_path)
+        .arg("--input")
+        .arg(&input_path);
+    let output = support::run(&mut command).await?;
+    ensure!(
+        output.status.success(),
+        "public playbook verification failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(snapshot)
+}
+
+async fn configure_playbooks(a: &Acceptance) -> Result<PathBuf> {
+    let project = a.fixture.root.path().join("reviewed-project");
+    fs::create_dir_all(project.join("tasks/nested"))?;
+    fs::create_dir(project.join("vars"))?;
+    fs::create_dir(project.join("templates"))?;
+    let modules = project.join("collections/ansible_collections/reviewed/fixture/plugins/modules");
+    fs::create_dir_all(&modules)?;
+    fs::write(
+        modules.join("read_file.py"),
+        r#"#!/usr/bin/python
+import base64
+from ansible.module_utils.basic import AnsibleModule
+
+def main():
+    module = AnsibleModule(argument_spec={"path": {"type": "path", "required": True}},
+                           supports_check_mode=True)
+    try:
+        with open(module.params["path"], "rb") as stream:
+            content = stream.read(65537)
+        if len(content) > 65536:
+            module.fail_json(msg="File exceeds reviewed read bound")
+        module.exit_json(changed=False, content=base64.b64encode(content).decode("ascii"))
+    except OSError:
+        module.fail_json(msg="Reviewed file could not be read")
+
+if __name__ == "__main__":
+    main()
+"#,
+    )?;
+    fs::write(
+        project.join("vars/site.yml"),
+        "---\nreviewed_label: fixed-project\n",
+    )?;
+    fs::write(
+        project.join("templates/document.json.j2"),
+        "{{ {'instance': ssh_mcp_arguments.instance, 'config': ssh_mcp_arguments.config, 'source': reviewed_label} | to_json }}\n",
+    )?;
+    fs::write(
+        project.join("tasks/first.yml"),
+        "---\n- name: Nested fixed include\n  ansible.builtin.include_tasks: nested/write.yml\n",
+    )?;
+    fs::write(
+        project.join("tasks/nested/write.yml"),
+        r#"---
+- name: Prove first play executed
+  ansible.builtin.copy:
+    dest: "{{ ssh_mcp_arguments.first_marker }}"
+    content: first-play
+    mode: '0600'
+- name: Render reviewed project template with literal caller data
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/document.json.j2"
+    dest: "{{ ssh_mcp_arguments.destination }}"
+    mode: '0600'
+"#,
+    )?;
+    fs::write(
+        project.join("site.yml"),
+        r#"---
+- name: Fixed project first play
+  hosts: all
+  no_log: false
+  vars_files:
+    - vars/site.yml
+  tasks:
+    - name: Include reviewed tasks
+      ansible.builtin.include_tasks: tasks/first.yml
+- name: Fixed project second play
+  hosts: all
+  gather_facts: false
+  no_log: false
+  tasks:
+    - name: Prove second play executed
+      ansible.builtin.copy:
+        dest: "{{ ssh_mcp_arguments.second_marker }}"
+        content: second-play
+        mode: '0600'
+    - name: Read actual converged bytes
+      reviewed.fixture.read_file:
+        path: "{{ ssh_mcp_arguments.destination }}"
+      register: observed_document
+    - name: Publish typed receipt
+      ansible.builtin.set_fact:
+        mcp_result:
+          instance: "{{ ssh_mcp_arguments.instance }}"
+          path: "{{ ssh_mcp_arguments.destination }}"
+          checksum: "{{ observed_document.content | b64decode | hash('sha256') }}"
+          verified: "{{ (observed_document.content | b64decode | from_json).config == ssh_mcp_arguments.config }}"
+"#,
+    )?;
+    fs::write(
+        project.join("partial.yml"),
+        r#"---
+- name: Partial mutation is not rollback
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Mutate before ordinary failure
+      ansible.builtin.copy:
+        dest: "{{ ssh_mcp_arguments.first_marker }}"
+        content: partial-change
+        mode: '0600'
+    - name: Deliberate known failure
+      ansible.builtin.fail:
+        msg: expected-playbook-failure
+"#,
+    )?;
+    fs::write(
+        project.join("drift.yml"),
+        r#"---
+- name: Drift must not dispatch
+  hosts: all
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: tasks/drift.yml
+"#,
+    )?;
+    fs::write(
+        project.join("tasks/drift.yml"),
+        r#"---
+- name: Observable drift workload
+  ansible.builtin.copy:
+    dest: "{{ ssh_mcp_arguments.first_marker }}"
+    content: drift-workload-ran
+    mode: '0600'
+"#,
+    )?;
+    // The alternate tree is valid operator content but never selected by a call.
+    let alternate = a.fixture.root.path().join("hostile-project");
+    fs::create_dir(&alternate)?;
+    fs::write(
+        alternate.join("site.yml"),
+        format!(
+            "---\n- hosts: all\n  gather_facts: false\n  tasks:\n    - ansible.builtin.copy:\n        dest: {}\n        content: alternate-project-ran\n",
+            serde_json::to_string(&text(
+                &a.fixture.root.path().join("alternate-project-marker")
+            )?)?
+        ),
+    )?;
+    let input_schema = json!({"type":"object","properties":{
+        "instance":{"type":"string","minLength":1,"maxLength":512},
+        "config":{"type":"object","properties":{
+            "banner":{"type":"string","maxLength":2048},
+            "enabled":{"type":"boolean"},
+            "port":{"type":"integer","minimum":1024,"maximum":65535}},
+            "required":["banner","enabled"],"additionalProperties":false,
+            "if":{"properties":{"enabled":{"const":true}},"required":["enabled"]},
+            "then":{"required":["port"]}}},
+        "required":["instance","config"],"additionalProperties":false});
+    let mut contract = input_schema.clone();
+    for key in ["destination", "first_marker", "second_marker"] {
+        contract["properties"][key] = json!({"type":"string","minLength":1,"maxLength":4096});
+        contract["required"]
+            .as_array_mut()
+            .context("contract required")?
+            .push(json!(key));
+    }
+    let mut tools = toml::map::Map::new();
+    let mut enabled = Vec::new();
+    for (name, entry, result) in [
+        ("document", "site.yml", role_receipt_result()),
+        ("censored", "site.yml", role_receipt_result()),
+        ("summary", "site.yml", json!({"kind":"ansible_summary"})),
+        ("partial", "partial.yml", json!({"kind":"ansible_summary"})),
+        ("drift", "drift.yml", json!({"kind":"ansible_summary"})),
+    ] {
+        let overlay = json!({"input_schema":input_schema,"fixed_args":{
+            "destination":text(&a.fixture.root.path().join(format!("playbook-{name}-document.json")))?,
+            "first_marker":text(&a.fixture.root.path().join(format!("playbook-{name}-first")))?,
+            "second_marker":text(&a.fixture.root.path().join(format!("playbook-{name}-second")))?},
+            "input_map":{"instance":"instance","config":"config"}});
+        let snapshot =
+            import_reviewed_playbook(a, &project, entry, name, &contract, &overlay).await?;
+        let mut binding = json!({"description":"Reviewed fixed project real SSH acceptance",
+            "revision":"1","authority":"automation","effects":["persistent_write","read"],
+            "targets":["plain"],"execution":{"kind":"ansible_playbook",
+                "snapshot":text(&snapshot)?,"project_root":text(&project)?,"no_log":name == "censored"},
+            "result":result,"limits":{"timeout_secs":12}});
+        for key in ["input_schema", "fixed_args", "input_map"] {
+            binding[key] = overlay[key].clone();
+        }
+        tools.insert(name.into(), table(binding)?);
+        enabled.push(name);
+    }
+    // Public authoring must refuse an output inside the hashed source and an
+    // internal source symlink. Neither rejection is allowed to execute tasks.
+    let contract_path = a
+        .fixture
+        .root
+        .path()
+        .join("playbook-document-reviewed.contract.json");
+    let inside_output = project.join("not-a-snapshot.json");
+    for linked in [false, true] {
+        let link = project.join("linked-source");
+        if linked {
+            std::os::unix::fs::symlink(&alternate, &link)?;
+        }
+        let output_path = if linked {
+            a.fixture.root.path().join("symlink-project-refused.json")
+        } else {
+            inside_output.clone()
+        };
+        let mut command = support::server_command(&a.fixture.config)?;
+        command
+            .args(["schema", "import-playbook", "site.yml"])
+            .arg("--project-root")
+            .arg(&project)
+            .arg("--input-schema")
+            .arg(&contract_path)
+            .arg("--output")
+            .arg(&output_path);
+        let output = support::run(&mut command).await?;
+        if linked {
+            fs::remove_file(&link)?;
+        }
+        ensure!(
+            !output.status.success() && !output_path.exists(),
+            "unsafe source/output was accepted by public playbook import"
+        );
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        ensure!(
+            report["error_code"]
+                == if linked {
+                    "playbook_content_symlink"
+                } else {
+                    "playbook_output_inside_source"
+                },
+            "source/output rejection came from an unrelated error: {report}"
+        );
+    }
+    let mut guarded = vec![(PathBuf::from("/tmp"), "invalid_playbook_source")];
+    // APFS aliases may have distinct lexical paths but identical directory identity.
+    let case_alias = project.with_file_name("REVIEWED-PROJECT");
+    if case_alias.is_dir() {
+        guarded.push((case_alias, "playbook_output_inside_source"));
+    }
+    for (source, expected) in guarded {
+        let output_path = project.join("case-alias-snapshot.json");
+        let mut command = support::server_command(&a.fixture.config)?;
+        command
+            .args(["schema", "import-playbook", "site.yml"])
+            .arg("--project-root")
+            .arg(source)
+            .arg("--input-schema")
+            .arg(&contract_path)
+            .arg("--output")
+            .arg(&output_path);
+        let output = support::run(&mut command).await?;
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        ensure!(
+            !output.status.success() && report["error_code"] == expected && !output_path.exists(),
+            "source identity/workspace overlap guard failed: {report}"
+        );
+    }
+    let mut config: toml::Table = toml::from_str(&fs::read_to_string(&a.fixture.config)?)?;
+    config.insert("enabled_tools".into(), table(json!(enabled))?);
+    config.insert("tools".into(), toml::Value::Table(tools));
+    fs::write(&a.fixture.config, toml::to_string(&config)?)?;
+    Ok(project)
+}
+
+async fn playbook_target_bytes(a: &Acceptance, name: &str) -> Result<Vec<u8>> {
+    let path = a.fixture.root.path().join(name);
+    let output = a
+        .fixture
+        .direct("plain", &format!("cat {}", support::quote(&text(&path)?)))
+        .await?;
+    ensure!(
+        output.status.success(),
+        "independent SSH target read failed for {name}"
+    );
+    Ok(output.stdout)
+}
+
+async fn playbook_markers_absent(a: &Acceptance, names: &[&str]) -> Result<()> {
+    for name in names {
+        let path = a.fixture.root.path().join(name);
+        let output = a
+            .fixture
+            .direct(
+                "plain",
+                &format!("test ! -e {}", support::quote(&text(&path)?)),
+            )
+            .await?;
+        ensure!(
+            output.status.success(),
+            "refused operation mutated target {name}"
+        );
+    }
+    a.clean()
+}
+
+/// cargo test --test automation_exec real_runner_playbook_acceptance -- --ignored --exact --nocapture
+/// Uses the same selected pinned Runner, target Python, Nix sshd and unprivileged
+/// localhost prerequisites as the role entry. No external network is contacted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]
+async fn real_runner_playbook_acceptance() -> Result<()> {
+    let acceptance = Acceptance::start().await?;
+    let result: Result<()> = async {
+        let project = configure_playbooks(&acceptance).await?;
+        playbook_scenarios(&acceptance, &project).await
+    }
+    .await;
+    let cleanup = acceptance.fixture.stop().await;
+    result?;
+    cleanup
+}
+
+async fn playbook_scenarios(a: &Acceptance, project: &Path) -> Result<()> {
+    let untouched = [
+        "playbook-document-first",
+        "playbook-document-second",
+        "playbook-document-document.json",
+        "playbook-summary-first",
+        "playbook-partial-first",
+        "playbook-drift-first",
+        "alternate-project-marker",
+    ];
+    // Import and verification above are source-only, even for a mutating play.
+    playbook_markers_absent(a, &untouched).await?;
+    let mut server = a.server().await?;
+    let result: Result<()> = async {
+        let literal = format!("{{{{ lookup('pipe', 'touch {}') }}}}", text(&a.forbidden)?);
+        let inputs = json!({"instance":literal,"config":{
+            "banner":format!("雪😀 \"quoted\"\nnext\\line\t{literal} {{{{ 6 * 7 }}}}"),
+            "enabled":true,"port":8080}});
+        let mut invalid = vec![
+            json!({"host":"plain","inputs":[]}),
+            json!({"host":"plain","inputs":{"instance":"x","config":{"banner":"x","enabled":true}}}),
+            json!({"host":"plain","inputs":{"instance":"x","config":{"banner":42,"enabled":false}}}),
+        ];
+        for (key, value) in [
+            ("inventory", json!("/tmp/unreviewed-inventory")),
+            ("tags", json!(["skip-reviewed"])),
+            ("ansible_connection", json!("local")),
+            ("ansible_python_interpreter", json!("/tmp/unreviewed-python")),
+            ("ansible_become", json!(true)),
+            ("become", json!(true)),
+            ("playbook", json!("partial.yml")),
+            ("project_root", json!(text(&a.fixture.root.path().join("hostile-project"))?)),
+            ("extra_vars", json!({"ansible_connection":"local"})),
+            ("fixed_args", json!({"destination":"/tmp/unreviewed-destination"})),
+            ("input_map", json!({"instance":"ansible_connection"})),
+        ] {
+            let mut top = json!({"host":"plain","inputs":inputs});
+            top[key] = value.clone();
+            invalid.push(top);
+            let mut nested = json!({"host":"plain","inputs":inputs});
+            nested["inputs"][key] = value;
+            invalid.push(nested);
+        }
+        for (index, arguments) in invalid.into_iter().enumerate() {
+            let reply = server.request(310 + index as u64, "tools/call",
+                json!({"name":"document","arguments":arguments})).await?;
+            ensure!(reply["error"]["code"] == -32602
+                || (reply["result"]["structuredContent"]["error"]["code"] == "invalid_argument"
+                    && reply["result"]["structuredContent"]["error"]["remote_state_unknown"] == false),
+                "invalid controls or conditional inputs reached playbook execution: {reply}");
+            playbook_markers_absent(a, &untouched).await?;
+        }
+        for (id, changed) in [(350, true), (351, false)] {
+            // The receipt intentionally publishes domain paths and literal labels;
+            // only the private audit and summary-only replies exclude these.
+            let response = server.request(id, "tools/call", json!({"name":"document",
+                "arguments":{"host":"plain","inputs":inputs}})).await?;
+            ensure!(response["error"].is_null(), "MCP playbook call rejected: {response}");
+            let envelope = &response["result"]["structuredContent"];
+            verified_role(envelope, "successful", json!(changed))?;
+            ensure!(envelope["error"].is_null() && envelope["data"]["runner_rc"] == 0);
+            let projection = &envelope["data"]["projection"];
+            let receipt: PlaybookReceipt = serde_json::from_value(projection["value"].clone())?;
+            ensure!(projection["status"] == "complete" && receipt.verified
+                && receipt.instance == inputs["instance"].as_str().context("literal instance")?);
+            ensure!(receipt.path ==
+                text(&a.fixture.root.path().join("playbook-document-document.json"))?);
+            let observed = playbook_target_bytes(a, "playbook-document-document.json").await?;
+            let document: Value = serde_json::from_slice(&observed)?;
+            ensure!(document == json!({"instance":inputs["instance"],"config":inputs["config"],
+                "source":"fixed-project"}), "literal inputs or fixed vars/template/include changed target bytes");
+            use sha2::{Digest, Sha256};
+            ensure!(receipt.checksum == hex::encode(Sha256::digest(&observed)),
+                "projected checksum did not describe independently read target bytes");
+            ensure!(playbook_target_bytes(a, "playbook-document-first").await? == b"first-play");
+            ensure!(playbook_target_bytes(a, "playbook-document-second").await? == b"second-play");
+            playbook_markers_absent(a, &["alternate-project-marker"]).await?;
+        }
+        let disabled_inputs = json!({"instance":"disabled","config":{"banner":"disabled 雪","enabled":false}});
+        let response = server.request(352, "tools/call", json!({"name":"document",
+            "arguments":{"host":"plain","inputs":disabled_inputs}})).await?;
+        ensure!(response["error"].is_null());
+        verified_role(&response["result"]["structuredContent"], "successful", json!(true))?;
+        ensure!(response["result"]["structuredContent"]["error"].is_null());
+        let observed = playbook_target_bytes(a, "playbook-document-document.json").await?;
+        ensure!(serde_json::from_slice::<Value>(&observed)? ==
+            json!({"instance":"disabled","config":disabled_inputs["config"],"source":"fixed-project"}));
+        let summary = a.call(&mut server, 353, "summary",
+            json!({"host":"plain","inputs":inputs})).await?;
+        verified_role(&summary, "successful", json!(true))?;
+        ensure!(summary["error"].is_null() && summary["data"].get("projection").is_none());
+        let summary_bytes = playbook_target_bytes(a, "playbook-summary-document.json").await?;
+        ensure!(serde_json::from_slice::<Value>(&summary_bytes)? ==
+            json!({"instance":inputs["instance"],"config":inputs["config"],"source":"fixed-project"}));
+        let censored = a.call(&mut server, 357, "censored",
+            json!({"host":"plain","inputs":inputs})).await?;
+        verified_role(&censored, "successful", Value::Null)?;
+        ensure!(censored["error"].is_null() && censored["data"]["censored"] == true
+            && censored["data"]["projection"] == json!({"status":"censored"}),
+            "trusted no_log:false play overrode public binding censorship: {censored}");
+        let censored_bytes = playbook_target_bytes(a, "playbook-censored-document.json").await?;
+        ensure!(serde_json::from_slice::<Value>(&censored_bytes)? ==
+            json!({"instance":inputs["instance"],"config":inputs["config"],"source":"fixed-project"}));
+        let partial = a.call(&mut server, 354, "partial",
+            json!({"host":"plain","inputs":inputs})).await?;
+        ensure!(partial["data"]["status"] == "failed" && partial["data"]["complete"] == true
+            && partial["data"]["changed"] == true && partial["data"]["runner_rc"] == 2
+            && partial["data"]["tasks"]["failed"] == 1
+            && partial["data"]["owned_group_cleanup"] == "signalled_and_reaped"
+            && !partial["error"].is_null() && partial["error"]["remote_state_unknown"] == false,
+            "ordinary playbook failure erased known partial mutation: {partial}");
+        ensure!(playbook_target_bytes(a, "playbook-partial-first").await? == b"partial-change");
+        // Exercise both included-source and entry-source drift independently:
+        // restore the first exact byte sequence before changing the other file.
+        for (id, source) in [(355, "tasks/drift.yml"), (356, "drift.yml")] {
+            let path = project.join(source);
+            let reviewed = fs::read(&path)?;
+            let mut changed = reviewed.clone();
+            changed.extend_from_slice(b"\n# post-startup source drift\n");
+            fs::write(&path, changed)?;
+            let response = server.request(id, "tools/call", json!({"name":"drift",
+                "arguments":{"host":"plain","inputs":inputs}})).await;
+            fs::write(&path, reviewed)?;
+            let response = response?;
+            ensure!(response["error"].is_null());
+            let envelope = &response["result"]["structuredContent"];
+            ensure!(!envelope["error"].is_null()
+                && envelope["error"]["remote_state_unknown"] == false,
+                "changed reviewed {source} was dispatched: {response}");
+            playbook_markers_absent(a, &["playbook-drift-first", "alternate-project-marker"]).await?;
+        }
+        Ok(())
+    }.await;
+    // Await EOF/reaping and private-workspace cleanup even after a failed assertion.
+    let cleanup = a.stop(server).await;
+    result?;
+    cleanup
+}

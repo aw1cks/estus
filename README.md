@@ -331,6 +331,71 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
+## Fixed ordinary Ansible playbooks
+
+Review a deployed project without parsing or executing its YAML:
+
+```sh
+ssh-mcp schema import-playbook site.yml \
+  --project-root /etc/ssh-mcp/project \
+  --input-schema backend.schema.json --overlay binding.json \
+  --output /etc/ssh-mcp/site.schema.json
+ssh-mcp schema verify-playbook /etc/ssh-mcp/site.schema.json \
+  --project-root /etc/ssh-mcp/project --input request-inputs.json
+```
+
+`backend.schema.json` is an explicit closed schema for the complete constructed
+argument object. `binding.json` contains the reviewed caller `input_schema`,
+`fixed_args` and `input_map`, using the same recursive validator as roles.
+Store the snapshot outside the project, including through case/symlink aliases.
+Project roots must not contain the importer's or invocation's temporary workspace.
+The entry is a fixed canonical relative `.yml`/`.yaml` path; no caller path or YAML
+is accepted. Import does not infer a contract from play variables or defaults.
+
+An explicitly enabled tool uses `authority="automation"`, its reviewed overlay,
+operator-declared effects and an `ansible_summary` or `ansible_projection` result.
+Its fixed execution selector is:
+
+```toml
+[tools.site.execution]
+kind = "ansible_playbook"
+snapshot = "/etc/ssh-mcp/site.schema.json"
+project_root = "/etc/ssh-mcp/project"
+```
+
+Calls retain `{"host":"server","inputs":{...}}`. The playbook reads only the
+constructed dictionary as `ssh_mcp_arguments`, for example
+`"{{ ssh_mcp_arguments.configuration }}"`. Recursive caller strings are literal
+data, not arbitrary top-level extra-vars. Inventory, host patterns, tags, selected
+playbook/project, connection/interpreter and become controls are not caller inputs.
+The generated initial inventory contains only `ssh_mcp_target`; the CLI fixes its
+limit, transport/interpreter settings and `ansible_become=false`. Existing target
+authorization, admission, timeouts, cancellation and cleanup remain in force.
+
+Runtime identity and bounded Core/project bytes are checked at startup and again
+before dispatch. Interior symlinks/nonregular files are rejected. Relative task,
+vars and template paths use the fixed project; project-local roles, plugins and
+`collections/ansible_collections` are reviewed content, not ambient search paths.
+The generated private configuration and HOME replace ambient Ansible settings.
+Source may still change after verification: this is drift detection, not immutable
+or transitive dependency attestation.
+
+Multi-play summaries use the same bounded reconciled evidence as roles. Optional
+`ansible_projection` selects declared `mcp_result` members after the imported plays;
+failed or missing output never erases known workload failure or earlier mutation.
+Binding `no_log=true` suppresses public values/change evidence even when trusted
+plays override their own logging defaults.
+
+Playbooks, plugins, lookups and external includes are trusted operator code.
+Initial inventory/CLI limits do not confine delegated or controller-side effects.
+The linear strategy/logging settings are defaults, not a rewrite of trusted play
+keywords. Unsupported execution evidence fails closed; it does not prove effects
+were prevented or rolled back. No detached async, elevation, multi-host scheduler,
+automatic replay, dependency installation or rollback guarantee is added.
+
+`nix run .#playbook-acceptance-msrv` runs the installed real SSH/Runner suite with
+the same non-root/private-directory prerequisites as role acceptance.
+
 ## Typed module result fields
 
 [`examples/observe_platform.toml`](examples/observe_platform.toml) selects platform
