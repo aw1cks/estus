@@ -1459,3 +1459,546 @@ async fn real_schema_import_refuses_unreadable_snapshot_envelope() -> Result<()>
     );
     Ok(())
 }
+
+// These fixtures exercise the installed CLI and public ansible-doc role metadata,
+// without copying or changing the selected Ansible installation.
+fn standalone_role(fixture: &Local, name: &str, argspec: Option<&str>) -> Result<PathBuf> {
+    let role = fixture.root.path().join("roles").join(name);
+    for directory in ["tasks", "meta", "defaults"] {
+        fs::create_dir_all(role.join(directory))?;
+    }
+    let task = serde_json::to_vec(&json!([{
+        "name":"Forbidden role task",
+        "ansible.builtin.command":{
+            "argv":["/usr/bin/touch",fixture.root.path().join("role-task-ran")]
+        },
+        "delegate_to":"localhost"
+    }]))?;
+    fs::write(role.join("tasks/main.yml"), &task)?;
+    fs::write(role.join("tasks/alternate.yaml"), &task)?;
+    fs::write(
+        role.join("defaults/main.yml"),
+        format!("misleading_default: {SECRET}\n"),
+    )?;
+    fs::write(
+        role.join("meta/main.yml"),
+        "dependencies:\n  - role: acceptance_dependency\n",
+    )?;
+    let dependency = role
+        .parent()
+        .context("role parent")?
+        .join("acceptance_dependency");
+    fs::create_dir_all(dependency.join("tasks"))?;
+    fs::write(
+        dependency.join("tasks/main.yml"),
+        serde_json::to_vec(&json!([{
+            "name":"Forbidden dependency task",
+            "ansible.builtin.command":{
+                "argv":["/usr/bin/touch",fixture.root.path().join("role-dependency-ran")]
+            },
+            "delegate_to":"localhost"
+        }]))?,
+    )?;
+    if let Some(argspec) = argspec {
+        fs::write(role.join("meta/argument_specs.yml"), argspec)?;
+    }
+    Ok(role)
+}
+
+fn role_import_command(
+    fixture: &Local,
+    role: &str,
+    source: &Path,
+    entry: &str,
+    snapshot: &Path,
+) -> Result<Command> {
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command
+        .args(["schema", "import-role", role, "--entry-point", entry])
+        .arg("--role-path")
+        .arg(source)
+        .arg("--output")
+        .arg(snapshot);
+    Ok(command)
+}
+
+fn role_verify_command(fixture: &Local, snapshot: &Path, source: &Path) -> Result<Command> {
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command
+        .args(["schema", "verify-role"])
+        .arg(snapshot)
+        .arg("--role-path")
+        .arg(source);
+    Ok(command)
+}
+
+fn role_no_effects(fixture: &Local) -> Result<()> {
+    ensure!(!fixture.marker.exists(), "role authoring dispatched SSH");
+    ensure!(
+        !fixture.root.path().join("role-task-ran").exists(),
+        "role authoring executed tasks"
+    );
+    ensure!(
+        !fixture.root.path().join("role-dependency-ran").exists(),
+        "role authoring executed dependencies"
+    );
+    Ok(())
+}
+
+fn role_snapshot(fixture: &Local, path: &Path) -> Result<Value> {
+    let bytes = fs::read(path)?;
+    let text = std::str::from_utf8(&bytes)?;
+    for private in [
+        SECRET,
+        fixture.root.path().to_str().context("UTF-8 fixture")?,
+        "/nix/store/",
+    ] {
+        ensure!(
+            !text.contains(private),
+            "role snapshot disclosed private source content"
+        );
+    }
+    serde_json::from_slice(&bytes).context("role snapshot")
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_argspec_aliases_required_defaults_entrypoints_and_drift() -> Result<()> {
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let argspec = r#"argument_specs:
+  main:
+    short_description: Acceptance main entry
+    options:
+      app_name:
+        type: str
+        required: true
+        aliases: [app]
+        choices: [web, worker]
+        default: web
+      settings:
+        type: dict
+        options:
+          count:
+            type: int
+            required: true
+            aliases: [number]
+          enabled:
+            type: bool
+            default: true
+      entries:
+        type: list
+        elements: dict
+        options:
+          label:
+            type: str
+            required: true
+            aliases: [name]
+            choices: [a, b]
+  alternate:
+    short_description: Acceptance alternate entry
+    options:
+      token:
+        type: str
+        required: true
+"#;
+    let role = standalone_role(&fixture, "acceptance", Some(argspec))?;
+    let snapshot = fixture.root.path().join("role.json");
+    let overlay = fixture.root.path().join("binding.json");
+    let input = fixture.root.path().join("input.json");
+    fs::write(
+        &overlay,
+        serde_json::to_vec(&json!({
+            "input_schema":{"type":"object","properties":{
+                "application":{"type":"string","enum":["web","worker"]},
+                "settings":{"type":"object","properties":{
+                    "number":{"type":"integer"},"enabled":{"type":"boolean"}
+                },"required":["number"],"additionalProperties":false},
+                "entries":{"type":"array","items":{"type":"object","properties":{
+                    "name":{"type":"string","enum":["a","b"]}
+                },"required":["name"],"additionalProperties":false}}
+            },"required":["application"],"additionalProperties":false},
+            "fixed_args":{},"input_map":{"app":"application","settings":"settings","entries":"entries"}
+        }))?,
+    )?;
+    let mut command = role_import_command(&fixture, "acceptance", &role, "main", &snapshot)?;
+    command.arg("--overlay").arg(&overlay);
+    let imported = output(command).await?;
+    ensure!(schema_report(&fixture, &imported, true)?["binding_validated"] == true);
+    let reviewed = fs::read(&snapshot)?;
+    let value = role_snapshot(&fixture, &snapshot)?;
+    ensure!(
+        value["contract"]["schema"]["properties"]
+            .get("misleading_default")
+            .is_none()
+    );
+    ensure!(
+        value["contract"]["schema"]["properties"]["app_name"]
+            .get("default")
+            .is_none()
+    );
+    ensure!(
+        value["contract"]["schema"]["properties"]["settings"]["properties"]["enabled"]
+            .get("default")
+            .is_none()
+    );
+    for (request, valid) in [
+        (json!({"application":"web"}), true),
+        (
+            json!({"application":"worker","settings":{"number":2},"entries":[{"name":"a"}]}),
+            true,
+        ),
+        (json!({}), false),
+        (json!({"application":"other"}), false),
+        (json!({"application":"web","extra":SECRET}), false),
+        (json!({"application":"web","settings":{}}), false),
+        (
+            json!({"application":"web","settings":{"number":"2"}}),
+            false,
+        ),
+        (
+            json!({"application":"web","settings":{"number":2,"unknown":SECRET}}),
+            false,
+        ),
+        (json!({"application":"web","entries":[{}]}), false),
+        (json!({"application":"web","entries":[{"name":"c"}]}), false),
+        (
+            json!({"application":"web","entries":[{"name":"a","label":"b"}]}),
+            false,
+        ),
+    ] {
+        fs::write(&input, serde_json::to_vec(&request)?)?;
+        let mut command = role_verify_command(&fixture, &snapshot, &role)?;
+        command.arg("--input").arg(&input);
+        let checked = output(command).await?;
+        let report = schema_report(&fixture, &checked, valid)?;
+        if valid {
+            ensure!(report["input_validated"] == true);
+        }
+        role_no_effects(&fixture)?;
+    }
+    // Alias/canonical duplication is rejected by backend canonicalization too,
+    // not merely by the public request's closed schema.
+    let collision = fixture.root.path().join("collision.json");
+    fs::write(
+        &collision,
+        serde_json::to_vec(&json!({
+            "input_schema":{"type":"object","properties":{
+                "application":{"type":"string","enum":["web","worker"]}
+            },"required":["application"],"additionalProperties":false},
+            "fixed_args":{"settings":{"number":1,"count":2}},
+            "input_map":{"app":"application"}
+        }))?,
+    )?;
+    let mut command = role_verify_command(&fixture, &snapshot, &role)?;
+    command.arg("--overlay").arg(&collision);
+    let rejected = output(command).await?;
+    schema_report(&fixture, &rejected, false)?;
+    ensure!(fs::read(&snapshot)? == reviewed);
+    let replacement = fixture.root.path().join("replacement.json");
+    fs::write(
+        &replacement,
+        serde_json::to_vec(&json!({"type":"object","properties":{},"additionalProperties":false}))?,
+    )?;
+    let replaced_snapshot = fixture.root.path().join("replacement-role.json");
+    let mut command =
+        role_import_command(&fixture, "acceptance", &role, "main", &replaced_snapshot)?;
+    command.arg("--schema").arg(&replacement);
+    let rejected = output(command).await?;
+    schema_report(&fixture, &rejected, false)?;
+    ensure!(
+        !replaced_snapshot.exists(),
+        "explicit schema replaced present argspec"
+    );
+    let alternate = fixture.root.path().join("alternate.json");
+    let imported = output(role_import_command(
+        &fixture,
+        "acceptance",
+        &role,
+        "alternate",
+        &alternate,
+    )?)
+    .await?;
+    schema_report(&fixture, &imported, true)?;
+    let alternate_value = role_snapshot(&fixture, &alternate)?;
+    ensure!(
+        alternate_value["contract"]["schema"]["properties"]
+            .get("token")
+            .is_some()
+    );
+    ensure!(
+        alternate_value["contract"]["schema"]["properties"]
+            .get("app_name")
+            .is_none()
+    );
+    let verified = output(role_verify_command(&fixture, &alternate, &role)?).await?;
+    schema_report(&fixture, &verified, true)?;
+
+    let rejected = output(role_import_command(
+        &fixture,
+        "acceptance",
+        &role,
+        "main",
+        &snapshot,
+    )?)
+    .await?;
+    ensure!(
+        schema_report(&fixture, &rejected, false)?["error_code"]
+            == "schema_output_exists_or_failed"
+    );
+    ensure!(fs::read(&snapshot)? == reviewed);
+    // Each source class independently changes the content approval, even when
+    // the public argument contract is unchanged.
+    for relative in [
+        "tasks/main.yml",
+        "defaults/main.yml",
+        "meta/argument_specs.yml",
+    ] {
+        let path = role.join(relative);
+        let original = fs::read(&path)?;
+        let mut changed = original.clone();
+        changed.extend_from_slice(b"\n# acceptance content drift\n");
+        fs::write(&path, changed)?;
+        let rejected = output(role_verify_command(&fixture, &snapshot, &role)?).await?;
+        ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
+        fs::write(&path, original)?;
+    }
+    let verified = output(role_verify_command(&fixture, &snapshot, &role)?).await?;
+    schema_report(&fixture, &verified, true)?;
+    role_no_effects(&fixture)
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_missing_argspec_explicit_nested_schema_and_conditional_overlay()
+-> Result<()> {
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let role = standalone_role(&fixture, "undocumented", None)?;
+    let snapshot = fixture.root.path().join("role.json");
+    let schema = fixture.root.path().join("explicit.json");
+    let overlay = fixture.root.path().join("binding.json");
+    let input = fixture.root.path().join("input.json");
+    let rejected = output(role_import_command(
+        &fixture,
+        "undocumented",
+        &role,
+        "main",
+        &snapshot,
+    )?)
+    .await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "role_schema_required");
+    ensure!(!snapshot.exists());
+    let explicit = json!({"type":"object","properties":{
+        "mode":{"type":"string","enum":["basic","advanced"]},
+        "settings":{"type":"object","properties":{
+            "count":{"type":"integer"},
+            "entries":{"type":"array","items":{"type":"object","properties":{
+                "label":{"type":"string"}
+            },"required":["label"],"additionalProperties":false}}
+        },"required":["count"],"additionalProperties":false}
+    },"required":["mode"],"additionalProperties":false});
+    fs::write(&schema, serde_json::to_vec(&explicit)?)?;
+    let mut public = explicit.clone();
+    public["if"] = json!({"properties":{"mode":{"const":"advanced"}},"required":["mode"]});
+    public["then"] = json!({"required":["settings"]});
+    public["else"] = json!({"not":{"required":["settings"]}});
+    fs::write(
+        &overlay,
+        serde_json::to_vec(&json!({
+            "input_schema":public,"fixed_args":{},"input_map":{"mode":"mode","settings":"settings"}
+        }))?,
+    )?;
+    let mut command = role_import_command(&fixture, "undocumented", &role, "main", &snapshot)?;
+    command
+        .arg("--schema")
+        .arg(&schema)
+        .arg("--overlay")
+        .arg(&overlay);
+    let imported = output(command).await?;
+    ensure!(schema_report(&fixture, &imported, true)?["binding_validated"] == true);
+    let reviewed = role_snapshot(&fixture, &snapshot)?;
+    ensure!(reviewed["contract"]["defaults"] == json!({}));
+    ensure!(
+        reviewed["contract"]["schema"]["properties"]
+            .get("misleading_default")
+            .is_none()
+    );
+    for (request, valid) in [
+        (json!({"mode":"basic"}), true),
+        (
+            json!({"mode":"advanced","settings":{"count":1,"entries":[{"label":"a"}]}}),
+            true,
+        ),
+        (json!({}), false),
+        (json!({"mode":"advanced"}), false),
+        (json!({"mode":"basic","settings":{"count":1}}), false),
+        (json!({"mode":"advanced","settings":{}}), false),
+        (json!({"mode":"advanced","settings":{"count":"1"}}), false),
+        (
+            json!({"mode":"advanced","settings":{"count":1,"entries":[{}]}}),
+            false,
+        ),
+        (
+            json!({"mode":"advanced","settings":{"count":1,"entries":[{"label":"a","extra":SECRET}]}}),
+            false,
+        ),
+        (json!({"mode":"basic","misleading_default":SECRET}), false),
+    ] {
+        fs::write(&input, serde_json::to_vec(&request)?)?;
+        let mut command = role_verify_command(&fixture, &snapshot, &role)?;
+        command.arg("--input").arg(&input);
+        let checked = output(command).await?;
+        let report = schema_report(&fixture, &checked, valid)?;
+        if valid {
+            ensure!(report["input_validated"] == true);
+        }
+        role_no_effects(&fixture)?;
+    }
+    // Verification must be supplied an exact source again, not search ambient roles.
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command.args(["schema", "verify-role"]).arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "role_source_required");
+    role_no_effects(&fixture)
+}
+
+#[tokio::test]
+#[ignore = "requires installed SSH_MCP_TEST_BINARY and shipped SSH_MCP_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_rejects_malformed_sources_and_explicit_contracts() -> Result<()> {
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let role = standalone_role(&fixture, "selection", None)?;
+    let snapshot = fixture.root.path().join("role.json");
+    let schema = fixture.root.path().join("explicit.json");
+    let closed = json!({"type":"object","properties":{},"additionalProperties":false});
+    fs::write(&schema, serde_json::to_vec(&closed)?)?;
+    for (name, entry, source, code) in [
+        ("bad.role", "main", role.clone(), Some("invalid_role_name")),
+        (
+            "selection",
+            "../main",
+            role.clone(),
+            Some("invalid_role_entry_point"),
+        ),
+        ("selection", "missing", role.clone(), None),
+        (
+            "selection",
+            "main",
+            PathBuf::from("roles/selection"),
+            Some("invalid_role_source"),
+        ),
+        (
+            "selection",
+            "main",
+            role.join("tasks/main.yml"),
+            Some("invalid_role_source"),
+        ),
+        (
+            "selection",
+            "main",
+            fixture.root.path().join("absent"),
+            None,
+        ),
+        (
+            "selection",
+            "main",
+            role.parent().context("role parent")?.to_path_buf(),
+            None,
+        ),
+        ("wrong_name", "main", role.clone(), None),
+        (
+            "example.collection.selection",
+            "main",
+            role.clone(),
+            Some("invalid_role_source"),
+        ),
+    ] {
+        let mut command = role_import_command(&fixture, name, &source, entry, &snapshot)?;
+        command.arg("--schema").arg(&schema);
+        let rejected = output(command).await?;
+        let report = schema_report(&fixture, &rejected, false)?;
+        if let Some(code) = code {
+            ensure!(report["error_code"] == code, "role selection: {report}");
+        }
+        ensure!(!snapshot.exists());
+    }
+    let mut command = fixture.installed_command("SSH_MCP_TEST_BINARY")?;
+    command
+        .args([
+            "schema",
+            "import-role",
+            "selection",
+            "--entry-point",
+            "main",
+        ])
+        .arg("--output")
+        .arg(&snapshot)
+        .arg("--schema")
+        .arg(&schema)
+        .env("ANSIBLE_ROLES_PATH", role.parent().context("role parent")?);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "role_source_required");
+    ensure!(!snapshot.exists());
+
+    // Both task spellings present is ambiguous; interior symlinks are not approved content.
+    fs::write(role.join("tasks/main.yaml"), "[]\n")?;
+    let mut command = role_import_command(&fixture, "selection", &role, "main", &snapshot)?;
+    command.arg("--schema").arg(&schema);
+    let rejected = output(command).await?;
+    schema_report(&fixture, &rejected, false)?;
+    ensure!(!snapshot.exists());
+    fs::remove_file(role.join("tasks/main.yaml"))?;
+    let outside = fixture.root.path().join("outside-private");
+    fs::write(&outside, SECRET)?;
+    symlink(&outside, role.join("defaults/linked.yml"))?;
+    let mut command = role_import_command(&fixture, "selection", &role, "main", &snapshot)?;
+    command.arg("--schema").arg(&schema);
+    let rejected = output(command).await?;
+    schema_report(&fixture, &rejected, false)?;
+    ensure!(!snapshot.exists());
+    fs::remove_file(role.join("defaults/linked.yml"))?;
+
+    for malformed in [
+        json!({"type":"object","properties":{}}),
+        json!({"type":"object","properties":{"nested":{"type":"object","properties":{}}},
+            "additionalProperties":false}),
+        json!({"type":"object","properties":{},"additionalProperties":false,"required":["missing"]}),
+        json!({"type":"string"}),
+    ] {
+        fs::write(&schema, serde_json::to_vec(&malformed)?)?;
+        let mut command = role_import_command(&fixture, "selection", &role, "main", &snapshot)?;
+        command.arg("--schema").arg(&schema);
+        let rejected = output(command).await?;
+        schema_report(&fixture, &rejected, false)?;
+        ensure!(!snapshot.exists());
+    }
+    fs::write(
+        &schema,
+        r#"{"type":"object","properties":{},"additionalProperties":false,"type":"object"}"#,
+    )?;
+    let mut command = role_import_command(&fixture, "selection", &role, "main", &snapshot)?;
+    command.arg("--schema").arg(&schema);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_schema_json");
+    ensure!(!snapshot.exists());
+
+    // Present but unusable metadata must never fall back to an explicit schema.
+    fs::write(&schema, serde_json::to_vec(&closed)?)?;
+    for argspec in [
+        "argument_specs: [unterminated",
+        "argument_specs:\n  alternate:\n    options: {}\n",
+        "argument_specs:\n  main:\n    options:\n      first:\n        type: str\n        aliases: [second]\n      second:\n        type: str\n",
+        "argument_specs:\n  main:\n    options:\n      token:\n        type: str\n    required_if:\n      - [token, secret, [other]]\n",
+    ] {
+        fs::write(role.join("meta/argument_specs.yml"), argspec)?;
+        for explicit in [false, true] {
+            let mut command = role_import_command(&fixture, "selection", &role, "main", &snapshot)?;
+            if explicit {
+                command.arg("--schema").arg(&schema);
+            }
+            let rejected = output(command).await?;
+            schema_report(&fixture, &rejected, false)?;
+            ensure!(!snapshot.exists());
+        }
+    }
+    role_no_effects(&fixture)
+}
+
