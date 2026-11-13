@@ -31,9 +31,42 @@ Host OpenSSH must be installed and available to the application. Existing operat
 SSH identity, host-key policy and configuration still apply.
 
 The base wheel does not depend on Ansible, install packages at startup, or enable
-additional tools. Installer-managed Ansible environments and an `[ansible]` extra
-are not implemented yet. An explicitly selected existing runtime bundle remains
-usable through the native application's configuration.
+additional tools. An explicitly selected existing runtime bundle remains usable
+through the native application's configuration.
+
+## Optional Ansible environment
+
+Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`
+to the artifact built for your platform; for the currently exercised macOS build:
+
+```sh
+wheel=./dist/ssh_mcp-0.1.0-cp314-cp314-macosx_11_0_arm64.whl
+uv tool install --python 3.14 "${wheel}[ansible]"
+ssh-mcp doctor --runtime ansible
+```
+
+The extra pins Ansible 14.4.0, Core 2.21.5 and Runner 2.4.3. The Ansible distribution
+supplies the baseline collections; Core and Runner alone are insufficient.
+pip/uv resolves their transitive dependencies at installation time. This is not a
+fully locked or immutable environment, and no installer runs during MCP requests.
+
+The launcher supplies its own interpreter/environment to Rust without requiring
+virtualenv activation or searching PATH for Python. Explicit `[automation].runtime`
+configuration wins over `SSH_MCP_ANSIBLE_RUNTIME`; either wins over the launcher's
+environment. A broken explicit selection fails without falling back elsewhere.
+Without an explicit health request or `[automation] required = true`, Rust does not
+consult the optional runtime. Installing the extra never enables tools.
+
+`doctor --runtime ansible` and required startup check actual public imports,
+versions and baseline collection manifests. Installer-managed identity reports
+`provenance.kind = "python_environment"`, not an immutable runtime ID. Nix bundle
+identity instead reports `provenance.kind = "nix_bundle"` with its pinned runtime ID.
+Neither check executes a workload or establishes target/module compatibility.
+
+The selected Python environment and its normal console-bootstrap hooks are trusted.
+Rust runs the fixed health helper in an isolated, bounded subprocess with private
+configuration/temp paths and no ambient Ansible configuration or Python search path.
+Process ownership and isolation are not a security sandbox.
 
 ## Native / Nix
 
@@ -49,6 +82,3 @@ Native Nix packaging supplies OpenSSH and has no Python/Ansible runtime dependen
 The separate `.#automation-msrv` output supplies the optional pinned Ansible runtime;
 see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
 That health check verifies imports and identity, not Ansible workload execution.
-
-Runtime health reports pinned bundle provenance as `provenance.kind = "nix_bundle"`
-with its runtime ID. This is distinct from observed installer-managed identity.

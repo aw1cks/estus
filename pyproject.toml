@@ -17,6 +17,9 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 
+[project.optional-dependencies]
+ansible = ["ansible==14.4.0", "ansible-core==2.21.5", "ansible-runner==2.4.3"]
+
 [project.scripts]
 ssh-mcp = "ssh_mcp:main"
 

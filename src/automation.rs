@@ -707,4 +707,197 @@ mod tests {
             Some("runtime_protocol_error")
         );
     }
+
+    fn descriptor(interpreter: &str, prefix: &str) -> OsString {
+        json!({"schema": 1, "interpreter": interpreter, "prefix": prefix})
+            .to_string()
+            .into()
+    }
+
+    #[test]
+    fn descriptor_rejects_unknown_duplicate_schema_and_invalid_paths() {
+        let invalid = [
+            r#"{"schema":1,"interpreter":"/python","prefix":"/venv","extra":true}"#,
+            r#"{"schema":1,"schema":1,"interpreter":"/python","prefix":"/venv"}"#,
+            r#"{"schema":1,"interpreter":"/python","interpreter":"/other","prefix":"/venv"}"#,
+            r#"{"schema":1,"interpreter":"/python","prefix":"/venv","prefix":"/other"}"#,
+            r#"{"schema":2,"interpreter":"/python","prefix":"/venv"}"#,
+            r#"{"schema":true,"interpreter":"/python","prefix":"/venv"}"#,
+            r#"{"schema":1,"interpreter":"/python"}"#,
+            r#"{"schema":1,"interpreter":"/python","prefix":"/venv"} {}"#,
+        ];
+        for raw in invalid {
+            assert!(
+                matches!(
+                    parse_descriptor(OsStr::new(raw)),
+                    Err("invalid_runtime_manifest")
+                ),
+                "{raw}"
+            );
+        }
+        for path in ["", "relative", "/bad\0path"] {
+            assert!(
+                parse_descriptor(&descriptor(path, "/venv")).is_err(),
+                "{path:?}"
+            );
+            assert!(
+                parse_descriptor(&descriptor("/python", path)).is_err(),
+                "{path:?}"
+            );
+        }
+        use std::os::unix::ffi::OsStringExt;
+        assert!(parse_descriptor(&OsString::from_vec(vec![0xff])).is_err());
+    }
+
+    #[test]
+    fn descriptor_enforces_exact_raw_and_utf8_path_bounds() {
+        let path = format!("/{}", "x".repeat(PATH_LIMIT - 1));
+        assert!(parse_descriptor(&descriptor(&path, &path)).is_ok());
+        let too_long = format!("{path}x");
+        assert!(parse_descriptor(&descriptor(&too_long, "/venv")).is_err());
+        assert!(parse_descriptor(&descriptor("/python", &too_long)).is_err());
+        let multibyte = format!("/{}", "é".repeat(PATH_LIMIT / 2));
+        assert!(parse_descriptor(&descriptor(&multibyte, "/venv")).is_err());
+        let mut raw = descriptor("/python", "/venv").into_string().unwrap();
+        raw.extend(std::iter::repeat_n(' ', DESCRIPTOR_LIMIT - raw.len()));
+        assert!(parse_descriptor(OsStr::new(&raw)).is_ok());
+        raw.push(' ');
+        assert!(parse_descriptor(OsStr::new(&raw)).is_err());
+    }
+
+    #[test]
+    fn explicit_bundle_never_consults_environment_even_if_broken() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            load_selected(Some(root.path().join("missing")), || panic!(
+                "descriptor consulted"
+            )),
+            Err("runtime_unavailable")
+        ));
+        assert!(matches!(
+            load_selected(Some(root.path().to_owned()), || panic!(
+                "descriptor consulted"
+            )),
+            Err("invalid_runtime_manifest")
+        ));
+        assert!(matches!(
+            load_selected(None, || None),
+            Err("runtime_unavailable")
+        ));
+    }
+
+    #[test]
+    fn environment_selection_preserves_symlink_and_tags_bounded_request() {
+        let root = tempfile::tempdir().unwrap();
+        let interpreter = root.path().join("python");
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &interpreter).unwrap();
+        let raw = descriptor(interpreter.to_str().unwrap(), root.path().to_str().unwrap());
+        let loaded = load_selected(None, || Some(raw)).unwrap();
+        assert_eq!(loaded.interpreter, interpreter.to_str().unwrap());
+        fs::remove_file(&interpreter).unwrap();
+        fs::write(&interpreter, b"not executable").unwrap();
+        fs::set_permissions(&interpreter, Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            load_selected(None, || Some(descriptor(
+                interpreter.to_str().unwrap(),
+                "/venv"
+            ))),
+            Err("runtime_unavailable")
+        ));
+        assert!(matches!(
+            load_selected(None, || Some(descriptor(
+                root.path().to_str().unwrap(),
+                "/venv"
+            ))),
+            Err("runtime_unavailable")
+        ));
+        let escaped = format!("/{}", "\u{1}".repeat(PATH_LIMIT - 1));
+        let loaded = Loaded {
+            interpreter: escaped.clone(),
+            source: Source::PythonEnvironment { prefix: escaped },
+        };
+        assert!(matches!(request(&loaded), Err("invalid_runtime_manifest")));
+    }
+
+    #[test]
+    fn reports_bind_source_and_reject_provenance_spoofing() {
+        let bundle_identity = parse_manifest(&serde_json::to_vec(&manifest()).unwrap())
+            .unwrap()
+            .identity;
+        let bundle = Source::Bundle {
+            root: PathBuf::from("/private/bundle"),
+            identity: bundle_identity.clone(),
+        };
+        let environment = Source::PythonEnvironment {
+            prefix: "/private/venv".to_owned(),
+        };
+        let mut observed_identity = bundle_identity.clone();
+        observed_identity.provenance = RuntimeProvenance::PythonEnvironment {};
+        // Environment Python patch versions are observations, not Nix pins.
+        observed_identity.python = "3.14.9".to_owned();
+        let environment_report =
+            json!({"schema": 2, "status": "passed", "identity": observed_identity});
+        let passed = report(&environment_report.to_string(), &environment);
+        assert!(passed.is_passed());
+        let public = serde_json::to_value(passed).unwrap();
+        assert_eq!(
+            public["identity"]["provenance"],
+            json!({"kind": "python_environment"})
+        );
+        assert!(!public.to_string().contains("/private"));
+        assert_eq!(
+            report(&environment_report.to_string(), &bundle).error_code,
+            Some("runtime_identity_mismatch")
+        );
+        let bundle_report = json!({"schema": 2, "status": "passed", "identity": bundle_identity});
+        assert!(report(&bundle_report.to_string(), &bundle).is_passed());
+        assert_eq!(
+            report(&bundle_report.to_string(), &environment).error_code,
+            Some("runtime_identity_mismatch")
+        );
+        for provenance in [
+            json!({"kind": "python_environment", "runtime_id": "a".repeat(64)}),
+            json!({"kind": "python_environment", "prefix": "/private/venv"}),
+            json!({"kind": "nix_bundle"}),
+            json!({"kind": "nix_bundle", "runtime_id": "A".repeat(64)}),
+            json!({"kind": "unknown"}),
+        ] {
+            let mut invalid = environment_report.clone();
+            invalid["identity"]["provenance"] = provenance;
+            assert_eq!(
+                report(&invalid.to_string(), &environment).error_code,
+                Some("runtime_protocol_error")
+            );
+        }
+        for provenance in [
+            r#"{"kind":"python_environment","kind":"nix_bundle","runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            r#"{"kind":"nix_bundle","runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        ] {
+            let identity_json = environment_report["identity"]
+                .to_string()
+                .replace(r#"{"kind":"python_environment"}"#, provenance);
+            let text = format!(r#"{{"schema":2,"status":"passed","identity":{identity_json}}}"#);
+            assert_eq!(
+                report(&text, &environment).error_code,
+                Some("runtime_protocol_error")
+            );
+        }
+        let mut wrong_platform = environment_report.clone();
+        wrong_platform["identity"]["platform"] = json!("wrong-platform");
+        assert_eq!(
+            report(&wrong_platform.to_string(), &environment).error_code,
+            Some("runtime_identity_mismatch")
+        );
+        let mut leaked_path = environment_report;
+        leaked_path["identity"]["python"] = json!("/private/python");
+        assert_eq!(
+            report(&leaked_path.to_string(), &environment).error_code,
+            Some("runtime_protocol_error")
+        );
+        let failure = r#"{"schema":2,"status":"failed","error_code":"runtime_import_failed"}"#;
+        assert_eq!(
+            report(failure, &environment).error_code,
+            Some("runtime_import_failed")
+        );
+    }
 }
