@@ -1,17 +1,21 @@
-//! Explicit portable wheel payload compatibility audit.
+//! Explicit, network-enabled acceptance of the portable artifact through real uv channels.
 #![cfg(unix)]
 
 #[allow(dead_code)]
 mod support;
 
 use anyhow::{Context, Result, ensure};
+use nix::sys::signal::Signal;
+use serde_json::{Value, json};
 use std::{
     fs,
+    os::unix::fs::symlink,
     path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
 };
-use support::find_program;
+use support::{Fixture, WireServer, assert_masters_gone, executable, find_program, masters};
+use tempfile::TempDir;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 const SETUP: Duration = Duration::from_secs(900);
@@ -23,6 +27,118 @@ fn input(name: &str) -> Result<PathBuf> {
         "{name} must name an absolute existing file"
     );
     Ok(path)
+}
+
+struct Installed {
+    root: TempDir,
+    uv: PathBuf,
+    path: std::ffi::OsString,
+}
+
+impl Installed {
+    fn new() -> Result<Self> {
+        // Keep cached launcher shebangs and native Unix socket paths short on Darwin.
+        let root = tempfile::Builder::new()
+            .prefix("ssh-mcp-wheel-")
+            .tempdir_in("/tmp")?;
+        for directory in [
+            "home",
+            "cache",
+            "python",
+            "python-bin",
+            "work",
+            "tmp",
+            "config",
+            "data",
+            "runtime",
+        ] {
+            fs::create_dir(root.path().join(directory))?;
+        }
+        Ok(Self {
+            root,
+            uv: find_program("uv")?,
+            path: std::env::var_os("PATH").context("PATH prerequisite")?,
+        })
+    }
+
+    fn command(&self, program: &Path) -> Command {
+        let root = self.root.path();
+        let mut command = Command::new(program);
+        command
+            .env_clear()
+            .env("PATH", &self.path)
+            .env("HOME", root.join("home"))
+            .env("TMPDIR", root.join("tmp"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("UV_CACHE_DIR", root.join("cache/uv"))
+            .env("UV_PYTHON_INSTALL_DIR", root.join("python"))
+            .env("UV_PYTHON_BIN_DIR", root.join("python-bin"))
+            .env("UV_TOOL_DIR", root.join("tools-base"))
+            .env("UV_TOOL_BIN_DIR", root.join("bin-base"))
+            .env("UV_NO_CONFIG", "1")
+            .env("UV_LINK_MODE", "copy")
+            .current_dir(root.join("work"))
+            .kill_on_drop(true);
+        command
+    }
+
+    fn uv(&self) -> Command {
+        let mut command = self.command(&self.uv);
+        command.args(["--no-config", "--quiet"]);
+        command
+    }
+
+    fn tools(&self, command: &mut Command, extra: bool) {
+        let suffix = if extra { "extra" } else { "base" };
+        command
+            .env(
+                "UV_TOOL_DIR",
+                self.root.path().join(format!("tools-{suffix}")),
+            )
+            .env(
+                "UV_TOOL_BIN_DIR",
+                self.root.path().join(format!("bin-{suffix}")),
+            );
+    }
+
+    fn launcher(&self, extra: bool) -> PathBuf {
+        self.root
+            .path()
+            .join(if extra { "tools-extra" } else { "tools-base" })
+            .join("ssh-mcp/bin/ssh-mcp")
+    }
+
+    async fn python(&self) -> Result<PathBuf> {
+        let python = if std::env::var_os("SSH_MCP_TEST_PYTHON").is_some() {
+            input("SSH_MCP_TEST_PYTHON")?
+        } else {
+            checked(self.uv().args(["python", "install", "--no-bin", "3.14"])).await?;
+            // Query output is data; uv's global quiet mode suppresses it.
+            let found = checked(self.command(&self.uv).args([
+                "--no-config",
+                "python",
+                "find",
+                "--managed-python",
+                "3.14",
+            ]))
+            .await?;
+            PathBuf::from(std::str::from_utf8(&found.stdout)?.trim())
+        };
+        let python = executable(&python)?;
+        ensure!(
+            !fs::canonicalize(&python)?.starts_with("/nix/store"),
+            "wheel acceptance requires an outside-Nix Python"
+        );
+        let version = checked(self.command(&python).arg("--version")).await?;
+        ensure!(
+            std::str::from_utf8(&version.stdout)?.starts_with("Python 3.14."),
+            "requires Python 3.14, got {version:?}"
+        );
+        Ok(python)
+    }
 }
 
 // Downloads and existing compiled suites need a longer deadline than short fixture helpers.
@@ -68,6 +184,361 @@ async fn checked(command: &mut Command) -> Result<Output> {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(output)
+}
+
+// libtest exits successfully for an empty filter. Require its final successful
+// result to report real passing tests, without fixing a suite's evolving size.
+async fn checked_suite(command: &mut Command) -> Result<()> {
+    let description = format!("{command:?}");
+    let output = checked(command).await?;
+    let stdout = std::str::from_utf8(&output.stdout)?;
+    let result = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("test result: ok. "))
+        .with_context(|| format!("missing libtest result: {description}\n{stdout}"))?;
+    let passed: usize = result
+        .split_once(" passed;")
+        .context("unrecognized libtest passing count")?
+        .0
+        .parse()?;
+    ensure!(
+        passed > 0,
+        "nested suite ran no tests: {description}\n{stdout}"
+    );
+    Ok(())
+}
+
+fn copy_environment(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            symlink(fs::read_link(entry.path())?, target)?;
+        } else if kind.is_dir() {
+            copy_environment(&entry.path(), &target)?;
+        } else {
+            ensure!(
+                kind.is_file(),
+                "unexpected environment asset: {}",
+                entry.path().display()
+            );
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+async fn catalog(server: &mut WireServer) -> Result<Value> {
+    server.initialize().await?;
+    let tools = server.request(2, "tools/list", json!({})).await?;
+    ensure!(
+        tools["result"]["tools"].is_array(),
+        "discovery failed: {tools}"
+    );
+    let hosts = server
+        .request(
+            3,
+            "tools/call",
+            json!({"name":"ssh_targets","arguments":{}}),
+        )
+        .await?;
+    ensure!(
+        hosts.get("error").is_none() && hosts["result"]["isError"] != true,
+        "RPC failed: {hosts}"
+    );
+    Ok(tools["result"]["tools"].clone())
+}
+
+async fn ordinary_ssh(installed: &Installed) -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let path = fixture.root.path().join("wheel-file");
+        fs::write(&path, b"portable-wheel\n")?;
+        let mut command = installed.command(&installed.launcher(false));
+        command.arg("--config").arg(&fixture.config);
+        let mut server = WireServer::start_command(command)?;
+        let operations = async {
+            catalog(&mut server).await?;
+            for (id, name, arguments, expected) in [
+                (
+                    4,
+                    "ssh_exec",
+                    json!({"host":"plain","command":"printf portable-command"}),
+                    "portable-command",
+                ),
+                (
+                    5,
+                    "ssh_read_file",
+                    json!({"host":"plain","path":path}),
+                    "portable-wheel\n",
+                ),
+            ] {
+                let frame = server
+                    .request(id, "tools/call", json!({"name":name,"arguments":arguments}))
+                    .await?;
+                ensure!(
+                    frame.get("error").is_none() && frame["result"]["isError"] != true,
+                    "{name}: {frame}"
+                );
+                let reply: Value = serde_json::from_str(
+                    frame["result"]["content"][0]["text"]
+                        .as_str()
+                        .context("tool envelope")?,
+                )?;
+                ensure!(
+                    reply["error"].is_null() && reply["data"].is_object(),
+                    "{name}: {reply}"
+                );
+                let field = if name == "ssh_exec" {
+                    "stdout"
+                } else {
+                    "content"
+                };
+                ensure!(reply["data"][field] == expected, "{name}: {reply}");
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&server.log);
+        let stopped = server.stop(None).await;
+        operations?;
+        stopped?;
+        let owned = owned?;
+        ensure!(
+            !owned.is_empty(),
+            "installed command did not own an SSH master"
+        );
+        assert_masters_gone(&owned).await
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "downloads managed Python/Ansible; requires portable wheel, installed suites, Nix OpenSSH/coreutils, trusted temporary ancestry and non-root account"]
+async fn installed_wheel_channels() -> Result<()> {
+    let wheel = input("SSH_MCP_TEST_WHEEL")?;
+    ensure!(
+        wheel
+            .extension()
+            .is_some_and(|extension| extension == "whl"),
+        "expected an actual wheel file"
+    );
+    let stdio = executable(&input("SSH_MCP_TEST_STDIO_SUITE")?)?;
+    let controller = executable(&input("SSH_MCP_TEST_CONTROLLER_SUITE")?)?;
+    let automation = executable(&input("SSH_MCP_TEST_AUTOMATION_SUITE")?)?;
+    let native = executable(&input("SSH_MCP_TEST_BINARY")?)?;
+    let runtime = PathBuf::from(
+        std::env::var_os("SSH_MCP_TEST_ANSIBLE_RUNTIME")
+            .context("set SSH_MCP_TEST_ANSIBLE_RUNTIME")?,
+    );
+    ensure!(
+        runtime.is_absolute() && runtime.join("runtime.json").is_file(),
+        "missing immutable Ansible bundle"
+    );
+    let installed = Installed::new()?;
+    let python = installed.python().await?;
+    let extra_requirement = format!("{}[ansible]", wheel.to_str().context("UTF-8 wheel path")?);
+    for extra in [false, true] {
+        let mut command = installed.uv();
+        installed.tools(&mut command, extra);
+        command
+            .args(["tool", "install", "--python"])
+            .arg(&python)
+            .args(["--no-python-downloads", "--link-mode", "copy"])
+            .arg(if extra {
+                Path::new(&extra_requirement)
+            } else {
+                &wheel
+            });
+        checked(&mut command).await?;
+        executable(&installed.launcher(extra))?;
+    }
+    let config = installed.root.path().join("work/server.toml");
+    fs::write(&config, "")?;
+    let required_config = installed.root.path().join("work/required.toml");
+    fs::write(&required_config, "[automation]\nrequired = true\n")?;
+    let mut expected_identity = None;
+    let mut expected = None;
+    // Each real channel gets discovery/RPC and all three shutdown paths; signal
+    // cases retain stdin until the launched process has exited.
+    #[derive(Clone, Copy)]
+    enum Channel {
+        Uvx,
+        Tool,
+        Run,
+    }
+    for selection in [Channel::Uvx, Channel::Tool, Channel::Run] {
+        let channel = match selection {
+            Channel::Uvx => "uvx",
+            Channel::Tool => "tool",
+            Channel::Run => "run",
+        };
+        let launch = |extra| {
+            let requirement = if extra {
+                Path::new(&extra_requirement)
+            } else {
+                &wheel
+            };
+            match selection {
+                Channel::Tool => installed.command(&installed.launcher(extra)),
+                Channel::Uvx => {
+                    let mut command = installed.uv();
+                    command
+                        .args(["tool", "run", "--isolated", "--python"])
+                        .arg(&python)
+                        .args(["--no-python-downloads", "--from"])
+                        .arg(requirement)
+                        .arg("ssh-mcp");
+                    command
+                }
+                Channel::Run => {
+                    let mut command = installed.uv();
+                    command
+                        .args(["run", "--no-project", "--python"])
+                        .arg(&python)
+                        .args(["--no-python-downloads", "--with"])
+                        .arg(requirement)
+                        .arg("ssh-mcp");
+                    command
+                }
+            }
+        };
+        for signal in [None, Some(Signal::SIGINT), Some(Signal::SIGTERM)] {
+            let mut command = launch(false);
+            command.arg("--config").arg(&config);
+            let mut server = WireServer::start_command(command)?;
+            let observed = catalog(&mut server)
+                .await
+                .with_context(|| format!("{channel} {signal:?}"));
+            let stopped = server
+                .stop(signal)
+                .await
+                .with_context(|| format!("{channel} {signal:?} shutdown"));
+            let observed = observed?;
+            stopped?;
+            if let Some(expected) = &expected {
+                ensure!(&observed == expected, "channel catalog diverged");
+            } else {
+                expected = Some(observed);
+            }
+        }
+        // An extra in an ephemeral uv environment must be observed through the
+        // selected launcher, including uv run's actual sysconfig/overlay layout.
+        let checked = checked(launch(true).arg("--config").arg(&required_config).args([
+            "doctor",
+            "--runtime",
+            "ansible",
+        ]))
+        .await
+        .with_context(|| format!("{channel} extra doctor"))?;
+        ensure!(
+            checked.stdout.last() == Some(&b'\n')
+                && checked.stdout.iter().filter(|&&byte| byte == b'\n').count() == 1,
+            "{channel} doctor did not emit exactly one JSON report"
+        );
+        let report: Value = serde_json::from_slice(&checked.stdout)?;
+        ensure!(
+            report["ok"] == true
+                && report["targets"] == json!([])
+                && report["runtime"]["kind"] == "ansible"
+                && report["runtime"]["status"] == "passed",
+            "{channel} extra health failed: {report}"
+        );
+        let identity = &report["runtime"]["identity"];
+        ensure!(
+            identity["provenance"] == json!({"kind":"python_environment"})
+                && identity["python"]
+                    .as_str()
+                    .is_some_and(|version| version.starts_with("3.14.")),
+            "{channel} did not observe the selected installed environment: {report}"
+        );
+        if let Some(expected) = &expected_identity {
+            ensure!(
+                identity == expected,
+                "{channel} extra runtime identity diverged"
+            );
+        } else {
+            expected_identity = Some(identity.clone());
+        }
+        let mut command = launch(true);
+        command.arg("--config").arg(&required_config);
+        let mut server = WireServer::start_command(command)?;
+        let observed = catalog(&mut server)
+            .await
+            .with_context(|| format!("{channel} required extra startup"));
+        let stopped = server.stop(None).await;
+        let observed = observed?;
+        stopped?;
+        ensure!(
+            Some(&observed) == expected.as_ref(),
+            "{channel} extra registered tools"
+        );
+    }
+    checked_suite(
+        installed
+            .command(&stdio)
+            .args(["--nocapture", "--test-threads=1"])
+            .env("SSH_MCP_TEST_BINARY", installed.launcher(false)),
+    )
+    .await?;
+    for case in [
+        "real_stream_capture_nonzero_and_signal_are_distinct",
+        "normal_exit_timeout_cancel_eof_and_sigterm_clean_actual_group_children",
+    ] {
+        checked_suite(
+            installed
+                .command(&controller)
+                .args(["--include-ignored", "--exact", case, "--nocapture"])
+                .env("SSH_MCP_TEST_BINARY", installed.launcher(true)),
+        )
+        .await?;
+    }
+    let extra_prefix = installed
+        .launcher(true)
+        .parent()
+        .and_then(Path::parent)
+        .context("extra prefix")?
+        .to_owned();
+    // Diagnostic availability only, not Runner execution or target readiness.
+    let scripts = extra_prefix.join("bin");
+    let child_path =
+        std::env::join_paths([scripts.as_path(), Path::new("/usr/bin"), Path::new("/bin")])?;
+    let diagnostic = checked(
+        installed
+            .command(&scripts.join("ansible-playbook"))
+            .arg("--version")
+            .env("PATH", child_path),
+    )
+    .await?;
+    eprintln!(
+        "selected-environment Ansible CLI:\n{}",
+        String::from_utf8_lossy(&diagnostic.stdout)
+    );
+    let mutable = installed.root.path().join("mutable-extra");
+    copy_environment(&extra_prefix, &mutable)?;
+    checked_suite(
+        installed
+            .command(&automation)
+            .args(["--ignored", "wheel::", "--nocapture", "--test-threads=1"])
+            .env("SSH_MCP_TEST_BINARY", &native)
+            .env("SSH_MCP_TEST_ANSIBLE_RUNTIME", &runtime)
+            .env("SSH_MCP_TEST_BASE_WHEEL_BINARY", installed.launcher(false))
+            .env("SSH_MCP_TEST_WHEEL_BINARY", installed.launcher(true))
+            .env("SSH_MCP_TEST_MUTABLE_PREFIX", &mutable)
+            .env("SSH_MCP_TEST_MUTABLE_PYTHON", mutable.join("bin/python")),
+    )
+    .await?;
+    ordinary_ssh(&installed).await?;
+    let root = installed.root.path().to_owned();
+    installed.root.close()?;
+    ensure!(!root.exists(), "owned wheel workspace survived cleanup");
+    Ok(())
 }
 
 fn baseline_version(value: &str) -> Result<[u32; 3]> {

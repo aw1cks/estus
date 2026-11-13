@@ -51,14 +51,17 @@ The producer declares macOS 11.0 for the arm64 Mach-O payload and manylinux glib
 that every optional dependency supports the same minimum OS. The wheel needs no
 Nix runtime; compatible Python and host OpenSSH remain external prerequisites.
 
-Run the explicit payload compatibility audit with pinned inspection tools:
+Run explicit installed acceptance as a non-root user with trusted temporary paths:
 
 ```sh
 nix run .#wheel-acceptance
 ```
 
-This checks actual load metadata against the wheel tags, without downloading a
-Python runtime or running network fixtures.
+This downloads managed, outside-Nix Python 3.14 and optional dependencies into owned
+temporary caches. It exercises the actual uvx, tool-install and uv-run entry points,
+base/extra health, stdio/RPC and signals, owned controller-child cleanup and ordinary
+SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
+`SSH_MCP_TEST_PYTHON` may select an existing absolute outside-Nix Python 3.14.
 
 ## Optional Ansible environment
 

@@ -62,7 +62,15 @@
           mkdir -p "$out/bin"
           makeWrapper ${msrvBuild.acceptance}/libexec/wheel "$out/bin/wheel-acceptance" \
             --set SSH_MCP_TEST_WHEEL ${wheel}/${wheel.wheelName} \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.unzip pkgs.llvmPackages.llvm ]} \
+            --set SSH_MCP_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
+            --set SSH_MCP_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
+            --set SSH_MCP_TEST_AUTOMATION_SUITE ${msrvBuild.acceptance}/libexec/automation \
+            --set SSH_MCP_TEST_BINARY ${msrvBuild.package}/bin/ssh-mcp \
+            --set SSH_MCP_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+            --prefix PATH : ${pkgs.lib.makeBinPath (
+              [ pkgs.uv pkgs.openssh pkgs.coreutils pkgs.bash pkgs.unzip pkgs.llvmPackages.llvm ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
+            )} \
             --add-flags '--ignored --nocapture --test-threads=1'
         '';
         withAutomation = native: pkgs.runCommand "ssh-mcp-automation-${native.version}" {
