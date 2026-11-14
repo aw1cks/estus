@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     os::unix::ffi::OsStrExt,
     panic::AssertUnwindSafe,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, MutexGuard, Weak},
     time::Duration,
@@ -37,6 +37,7 @@ enum Policy {
 
 pub(crate) struct Pool {
     entries: Mutex<HashMap<Key, Arc<Entry>>>,
+    executable: PathBuf,
     ssh_config: Option<PathBuf>,
     policy: Policy,
     connect_timeout: Duration,
@@ -139,23 +140,38 @@ impl Lease {
 
 impl Pool {
     pub(crate) fn new(
+        executable: PathBuf,
         ssh_config: Option<PathBuf>,
         connect_timeout: Duration,
         shutdown: CancellationToken,
     ) -> Arc<Self> {
-        Self::with_policy(ssh_config, connect_timeout, shutdown, Policy::Native)
+        Self::with_policy(
+            executable,
+            ssh_config,
+            connect_timeout,
+            shutdown,
+            Policy::Native,
+        )
     }
 
     /// Negotiate with configured credentials and trust, without changing either.
     pub(crate) fn diagnostic(
+        executable: PathBuf,
         ssh_config: Option<PathBuf>,
         connect_timeout: Duration,
         shutdown: CancellationToken,
     ) -> Arc<Self> {
-        Self::with_policy(ssh_config, connect_timeout, shutdown, Policy::Diagnostic)
+        Self::with_policy(
+            executable,
+            ssh_config,
+            connect_timeout,
+            shutdown,
+            Policy::Diagnostic,
+        )
     }
 
     fn with_policy(
+        executable: PathBuf,
         ssh_config: Option<PathBuf>,
         connect_timeout: Duration,
         shutdown: CancellationToken,
@@ -163,6 +179,7 @@ impl Pool {
     ) -> Arc<Self> {
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
+            executable,
             ssh_config,
             policy,
             connect_timeout,
@@ -238,6 +255,7 @@ impl Pool {
         let interest = Interest(Arc::clone(&entry));
         if launch {
             let owner = Arc::downgrade(self);
+            let executable = self.executable.clone();
             let config = self.ssh_config.clone();
             let policy = self.policy;
             let destination = destination.to_owned();
@@ -251,6 +269,7 @@ impl Pool {
             // if the request future is dropped at the very next await point.
             tokio::spawn(async move {
                 let control = EntryControl {
+                    executable,
                     policy,
                     deadline: connection_deadline,
                     shutdown,
@@ -315,6 +334,7 @@ struct Master {
 
 impl Master {
     fn launch(
+        executable: &Path,
         config: Option<&PathBuf>,
         destination: &str,
         policy: Policy,
@@ -329,7 +349,7 @@ impl Master {
         if socket.as_os_str().as_bytes().len() > 100 {
             return Err(Failure::Connect);
         }
-        let mut command = Command::new("ssh");
+        let mut command = Command::new(executable);
         command.args(["-M", "-N", "-T", "-S"]).arg(&socket);
         for option in [
             "ControlMaster=yes",
@@ -502,6 +522,7 @@ impl Drop for Master {
 }
 
 struct EntryControl {
+    executable: PathBuf,
     policy: Policy,
     deadline: Option<Instant>,
     shutdown: CancellationToken,
@@ -657,14 +678,18 @@ async fn run_entry(
             });
             return;
         }
-        let (mut master, session) =
-            match Master::launch(config.as_ref(), &destination, control.policy) {
-                Ok(resources) => resources,
-                Err(failure) => {
-                    lock(&entry.state).failure = Some(failure);
-                    return;
-                }
-            };
+        let (mut master, session) = match Master::launch(
+            &control.executable,
+            config.as_ref(),
+            &destination,
+            control.policy,
+        ) {
+            Ok(resources) => resources,
+            Err(failure) => {
+                lock(&entry.state).failure = Some(failure);
+                return;
+            }
+        };
         master.finalizer = finalizer.take();
         let (master, session) = resources.insert((master, Arc::new(session)));
         let pid = master.child.as_ref().and_then(Child::id);
@@ -740,7 +765,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unwound_master_reaps_before_pool_completion() {
-        let pool = Pool::new(None, Duration::from_secs(1), CancellationToken::new());
+        let pool = Pool::new(
+            PathBuf::from("/unused-ssh"),
+            None,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
         let key = ("unwind-owned".to_owned(), IdentityRole::Ordinary);
         let entry = Arc::new(Entry {
             state: Mutex::new(State {

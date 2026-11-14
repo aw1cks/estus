@@ -191,9 +191,12 @@ impl Acceptance {
         limits.insert("operation_timeout_secs".into(), 12.into());
         limits.insert("max_timeout_secs".into(), 15.into());
         limits.insert("max_output_bytes".into(), 8192.into());
+        config["ssh"]
+            .as_table_mut()
+            .context("fixture SSH table")?
+            .insert("executable".into(), text(&self.fixture.ssh)?.into());
         let mut automation = json!({
             "required":true,"workspace_root":text(&self.workspace)?,
-            "ssh_executable":text(&self.fixture.ssh)?,
             "max_concurrent":2,"max_scratch_bytes":16777216,"max_scratch_files":512,
             "targets":{"plain":{"destination":"plain","python":text(&self.python)?},
                 "nosftp":{"destination":"nosftp","python":text(&self.python)?}}
@@ -1413,9 +1416,12 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
         config.insert("tools".into(), table(json!({
             "isolated_probe":binding,"isolated_facts":facts_binding
         }))?);
+        config["ssh"]
+            .as_table_mut()
+            .context("fixture SSH table")?
+            .insert("executable".into(), text(&fixture.ssh)?.into());
         config.insert("automation".into(), table(json!({
             "required":true,"runtime":text(&runtime)?,"workspace_root":text(&workspace)?,
-            "ssh_executable":text(&fixture.ssh)?,
             "targets":{"plain":{"destination":"plain","python":"/usr/bin/python3"}}
         }))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
@@ -1834,7 +1840,10 @@ async fn real_host_summary_acceptance() -> Result<()> {
         let mut automation = example["automation"].as_table().context("example automation table")?.clone();
         automation.insert("runtime".into(), text(&runtime)?.into());
         automation.insert("workspace_root".into(), text(&workspace)?.into());
-        automation.insert("ssh_executable".into(), text(&fixture.ssh)?.into());
+        config["ssh"]
+            .as_table_mut()
+            .context("fixture SSH table")?
+            .insert("executable".into(), text(&fixture.ssh)?.into());
         automation.insert("targets".into(), table(json!({
             "plain":{"destination":"plain","python":"/usr/bin/python3"}
         }))?);
@@ -2603,7 +2612,10 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
             .clone();
         automation.insert("runtime".into(), text(&runtime)?.into());
         automation.insert("workspace_root".into(), text(&workspace)?.into());
-        automation.insert("ssh_executable".into(), text(&fixture.ssh)?.into());
+        config["ssh"]
+            .as_table_mut()
+            .context("fixture SSH table")?
+            .insert("executable".into(), text(&fixture.ssh)?.into());
         automation.insert(
             "targets".into(),
             table(json!({
@@ -3351,7 +3363,10 @@ async fn real_memory_stats_acceptance() -> Result<()> {
             .clone();
         automation.insert("runtime".into(), text(&runtime)?.into());
         automation.insert("workspace_root".into(), text(&workspace)?.into());
-        automation.insert("ssh_executable".into(), text(&fixture.ssh)?.into());
+        config["ssh"]
+            .as_table_mut()
+            .context("fixture SSH table")?
+            .insert("executable".into(), text(&fixture.ssh)?.into());
         automation.insert(
             "targets".into(),
             table(json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}))?,
@@ -3682,9 +3697,12 @@ async fn authority_scenarios(
             "authority_cancel"
         ]))?,
     );
+    config["ssh"]
+        .as_table_mut()
+        .context("fixture SSH table")?
+        .insert("executable".into(), text(&fixture.ssh)?.into());
     config.insert("automation".into(), table(json!({
         "required":true,"runtime":text(runtime)?,"workspace_root":text(workspace)?,
-        "ssh_executable":text(&fixture.ssh)?,
         "targets":{"plain":{"destination":"plain","python":"/usr/bin/python3"},
             "same":{"destination":"same","python":"/usr/bin/python3"}},
         "authorities":{

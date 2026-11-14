@@ -136,6 +136,9 @@ pub(crate) struct Cli {
     /// Replacement OpenSSH configuration (not an overlay).
     #[arg(long, global = true, env = "ESTUS_SSH_CONFIG", hide_env_values = true)]
     ssh_config: Option<PathBuf>,
+    /// Local OpenSSH executable; defaults to ssh resolved from PATH.
+    #[arg(long, global = true, env = "ESTUS_SSH", hide_env_values = true)]
+    ssh: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Option<CliCommand>,
 }
@@ -193,6 +196,7 @@ fn invalid(field: &'static str, reason: &'static str) -> ConfigError {
 pub(crate) struct Config {
     profile: Profile,
     ssh_config: Option<PathBuf>,
+    ssh_executable: PathBuf,
     limits: Limits,
     output: crate::output::Limits,
     targets: Option<BTreeMap<String, Target>>,
@@ -225,7 +229,6 @@ struct Automation {
     max_scratch_files: usize,
     targets: BTreeMap<String, AutomationTarget>,
     authorities: BTreeMap<String, NamedAutomationAuthority>,
-    ssh_executable: Option<PathBuf>,
 }
 
 impl Default for Automation {
@@ -233,7 +236,6 @@ impl Default for Automation {
         Self {
             required: false,
             runtime: None,
-            ssh_executable: None,
             workspace_root: None,
             max_concurrent: 2,
             max_scratch_bytes: 16 * 1024 * 1024,
@@ -291,6 +293,7 @@ struct Controller {
 #[serde(default, deny_unknown_fields)]
 struct Ssh {
     config_file: Option<PathBuf>,
+    executable: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -794,9 +797,20 @@ impl Config {
                 ));
             }
         }
+        let ssh_override = cli.ssh.or_else(|| env("ESTUS_SSH").map(PathBuf::from));
+        let selected = match ssh_override {
+            Some(path) => Some(resolve_path(path, cwd, "ssh.executable")?),
+            None => document
+                .ssh
+                .executable
+                .map(|path| resolve_path(path, &base, "ssh.executable"))
+                .transpose()?,
+        };
+        let ssh_executable = resolve_ssh_executable(selected, cwd, || env("PATH"))?;
         Ok(Self {
             profile: document.profile,
             ssh_config,
+            ssh_executable,
             limits: document.limits,
             output: document.output,
             targets: document.targets,
@@ -851,33 +865,6 @@ impl Config {
         if active.is_empty() {
             return Ok(false);
         }
-        let ssh = self
-            .automation
-            .ssh_executable
-            .clone()
-            .or_else(|| std::env::var_os("ESTUS_AUTOMATION_SSH").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("/usr/bin/ssh"));
-        let text = ssh.to_str().ok_or_else(|| {
-            invalid(
-                "automation.ssh_executable",
-                "must be a bounded absolute path",
-            )
-        })?;
-        validate_runtime_path(text)?;
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(&ssh).map_err(|_| {
-            invalid(
-                "automation.ssh_executable",
-                "selected executable is unavailable",
-            )
-        })?;
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-            return Err(invalid(
-                "automation.ssh_executable",
-                "selected executable is unavailable",
-            ));
-        }
-        self.automation.ssh_executable = Some(ssh);
         let needs_inherited_runtime = active.iter().any(|id| {
             match self
                 .bindings
@@ -981,11 +968,7 @@ impl Config {
         {
             return Err(denied());
         }
-        let ssh_executable = self
-            .automation
-            .ssh_executable
-            .as_deref()
-            .ok_or_else(denied)?;
+        let ssh_executable = self.ssh_executable();
         match self
             .bindings
             .get(id)
@@ -1048,6 +1031,10 @@ impl Config {
 
     pub(crate) fn ssh_config(&self) -> Option<&Path> {
         self.ssh_config.as_deref()
+    }
+
+    pub(crate) fn ssh_executable(&self) -> &Path {
+        &self.ssh_executable
     }
 
     pub(crate) fn limits(&self) -> &Limits {
@@ -1446,6 +1433,46 @@ fn resolve_path(path: PathBuf, base: &Path, field: &'static str) -> Result<PathB
     })
 }
 
+fn resolve_ssh_executable(
+    selected: Option<PathBuf>,
+    cwd: &Path,
+    path: impl FnOnce() -> Option<OsString>,
+) -> Result<PathBuf, ConfigError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let available = |path: &Path| {
+        path.is_absolute()
+            && path
+                .to_str()
+                .is_some_and(|text| text.len() <= 4096 && !text.contains('\0'))
+            && std::fs::metadata(path).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+    };
+    if let Some(selected) = selected {
+        return if available(&selected) {
+            Ok(selected)
+        } else {
+            Err(invalid(
+                "ssh.executable",
+                "selected executable is unavailable",
+            ))
+        };
+    }
+    if let Some(path) = path() {
+        for directory in std::env::split_paths(&path) {
+            let candidate = cwd.join(directory).join("ssh");
+            if available(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(invalid(
+        "ssh.executable",
+        "cannot find an executable ssh on PATH",
+    ))
+}
+
 fn validate_runtime_path(value: &str) -> Result<(), ConfigError> {
     if !Path::new(value).is_absolute() || value.len() > 4096 || value.contains('\0') {
         return Err(invalid(
@@ -1681,7 +1708,6 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 "max_scratch_files",
                 "targets",
                 "authorities",
-                "ssh_executable",
             ],
         )?;
         if let Some(value) = automation.get("required")
@@ -1706,9 +1732,12 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
         }
     }
     if let Some(value) = root.get("ssh") {
-        let ssh = table(value, "ssh", &["config_file"])?;
+        let ssh = table(value, "ssh", &["config_file", "executable"])?;
         if let Some(value) = ssh.get("config_file") {
             string(value, "ssh.config_file")?;
+        }
+        if let Some(value) = ssh.get("executable") {
+            string(value, "ssh.executable")?;
         }
     }
     if let Some(value) = root.get("limits") {
@@ -1949,10 +1978,7 @@ python='/private-authority/python'
 
     #[test]
     fn named_authority_resolution_never_falls_back_to_native_or_ordinary_credentials() {
-        let text = named_authority_text("baseline", "baseline", true).replace(
-            "[automation]\n",
-            "[automation]\nssh_executable='/selected/ssh'\n",
-        );
+        let text = named_authority_text("baseline", "baseline", true);
         for (socket_config, fixed) in [("", false), ("ssh_auth_sock='/selected/agent'\n", true)] {
             let config = load_text(
                 &text.replace("become={", &format!("{socket_config}become={{")),
@@ -1966,7 +1992,7 @@ python='/private-authority/python'
                 authority.ssh_config,
                 Some(Path::new("/private-authority/config"))
             );
-            assert_eq!(authority.ssh_executable, Path::new("/selected/ssh"));
+            assert_eq!(authority.ssh_executable, config.ssh_executable());
             assert_eq!(
                 serde_json::to_value(authority.r#become).unwrap(),
                 serde_json::json!({"method":"sudo","user":"root"})
@@ -2107,12 +2133,11 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
     #[tokio::test]
     async fn active_automation_requires_real_startup_prerequisites() {
         let mut config = load_text(&automation_text("baseline", "baseline", true), &[]).unwrap();
-        assert!(
-            config
-                .activate_automation(&tokio_util::sync::CancellationToken::new())
-                .await
-                .is_err()
-        );
+        let error = config
+            .activate_automation(&tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.field, "tools");
         let target = config.automation_target(BindingId(0), "server").unwrap();
         assert_eq!(target.target.destination, "automation-alias");
         assert!(
@@ -2142,6 +2167,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
         Cli {
             config: None,
             ssh_config: None,
+            ssh: Some(std::env::current_exe().unwrap()),
             command: None,
         }
     }
@@ -2242,6 +2268,8 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
         )
         .unwrap();
         std::fs::write(dir.path().join("selected-ssh"), "").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let executable = executable.to_str().unwrap();
         for argv in [
             vec![
                 "estus",
@@ -2249,6 +2277,8 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
                 "nested/operator.toml",
                 "--ssh-config",
                 "selected-ssh",
+                "--ssh",
+                executable,
                 "doctor",
                 "--target",
                 "one",
@@ -2262,12 +2292,16 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
                 "nested/operator.toml",
                 "--ssh-config",
                 "selected-ssh",
+                "--ssh",
+                executable,
             ],
         ] {
             let parsed = Cli::try_parse_from(argv).unwrap();
             assert!(matches!(parsed.command, Some(CliCommand::Doctor(_))));
             let config = Config::load_with(parsed, dir.path(), |key| match key {
-                "ESTUS_CONFIG" | "ESTUS_SSH_CONFIG" => Some("missing-env-private".into()),
+                "ESTUS_CONFIG" | "ESTUS_SSH_CONFIG" | "ESTUS_SSH" => {
+                    Some("missing-env-private".into())
+                }
                 _ => None,
             })
             .unwrap();
@@ -2275,6 +2309,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
                 config.ssh_config(),
                 Some(dir.path().join("selected-ssh").as_path())
             );
+            assert_eq!(config.ssh_executable(), Path::new(executable));
             assert_eq!(
                 config.doctor_target("one").unwrap().destination,
                 "private-alias"
@@ -3111,6 +3146,7 @@ result = { kind = "command" }
             Cli {
                 config: Some(path),
                 ssh_config: None,
+                ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
             },
             dir.path(),
@@ -3495,6 +3531,141 @@ programs=['/private/program']
     }
 
     #[test]
+    fn ssh_executable_obeys_cli_environment_file_and_path_precedence() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::create_dir(cwd.join("nested")).unwrap();
+        std::fs::create_dir(cwd.join("bin")).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        for name in ["cli-ssh", "env-ssh", "nested/$HOME", "bin/ssh"] {
+            symlink(&executable, cwd.join(name)).unwrap();
+        }
+        let file = cwd.join("nested/operator.toml");
+        for (cli_value, env_value, file_value, expected) in [
+            (
+                Some("cli-ssh"),
+                Some("missing-env"),
+                Some("missing-file"),
+                "cli-ssh",
+            ),
+            (None, Some("env-ssh"), Some("missing-file"), "env-ssh"),
+            (None, None, Some("./$HOME"), "nested/./$HOME"),
+            (None, None, None, "bin/ssh"),
+        ] {
+            let text = file_value
+                .map(|value| format!("[ssh]\nexecutable={value:?}\n"))
+                .unwrap_or_default();
+            std::fs::write(&file, text).unwrap();
+            let mut args = cli();
+            args.config = Some(file.clone());
+            args.ssh = cli_value.map(PathBuf::from);
+            let config = Config::load_with(args, cwd, |key| match key {
+                "ESTUS_SSH" => env_value.map(OsString::from),
+                "PATH" => Some("bin".into()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(config.ssh_executable(), cwd.join(expected));
+        }
+    }
+
+    #[test]
+    fn invalid_ssh_overrides_never_fall_back_or_disclose_their_values() {
+        use std::os::unix::{
+            ffi::OsStringExt,
+            fs::{PermissionsExt, symlink},
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::create_dir(cwd.join("bin")).unwrap();
+        symlink(std::env::current_exe().unwrap(), cwd.join("bin/ssh")).unwrap();
+        let nonexecutable = cwd.join("private-nonexecutable");
+        std::fs::write(&nonexecutable, "").unwrap();
+        std::fs::set_permissions(&nonexecutable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for value in [
+            OsString::from(""),
+            OsString::from("private-missing"),
+            OsString::from("private-nonexecutable"),
+            cwd.as_os_str().to_owned(),
+            OsString::from("/private\0ssh"),
+            OsString::from(format!("/private{}", "x".repeat(4096))),
+            OsString::from_vec(b"/private-\xff".to_vec()),
+        ] {
+            for source in ["cli", "env", "file"] {
+                let mut args = cli();
+                args.ssh = (source == "cli").then(|| PathBuf::from(&value));
+                if source == "file" {
+                    let Some(value) = value.to_str() else {
+                        continue;
+                    };
+                    let file = cwd.join("operator.toml");
+                    let text =
+                        toml::to_string(&serde_json::json!({"ssh":{"executable":value}})).unwrap();
+                    std::fs::write(&file, text).unwrap();
+                    args.config = Some(file);
+                }
+                let error = Config::load_with(args, cwd, |key| match key {
+                    "ESTUS_SSH" if source == "env" => Some(value.clone()),
+                    "PATH" => Some("bin".into()),
+                    _ => None,
+                })
+                .err()
+                .expect("invalid selected executable must fail despite valid PATH");
+                assert_eq!(error.field, "ssh.executable", "{source}: {value:?}");
+                assert!(!error.to_string().contains("private"));
+            }
+        }
+        let error = load_text("[automation]\nssh_executable='/private-old-setting'", &[])
+            .err()
+            .unwrap();
+        assert_eq!(error.field, "automation");
+    }
+
+    #[test]
+    fn ssh_path_search_skips_unusable_entries_and_requires_a_match() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        for name in ["nonexecutable", "directory", "selected"] {
+            std::fs::create_dir(cwd.join(name)).unwrap();
+        }
+        std::fs::write(cwd.join("nonexecutable/ssh"), "").unwrap();
+        std::fs::set_permissions(
+            cwd.join("nonexecutable/ssh"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::create_dir(cwd.join("directory/ssh")).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        symlink(&executable, cwd.join("selected/ssh")).unwrap();
+        symlink(&executable, cwd.join("ssh")).unwrap();
+        for (path, expected) in [
+            ("missing:nonexecutable:directory:selected", "selected/ssh"),
+            ("", "ssh"),
+        ] {
+            let mut args = cli();
+            args.ssh = None;
+            let config =
+                Config::load_with(args, cwd, |key| (key == "PATH").then(|| path.into())).unwrap();
+            assert_eq!(config.ssh_executable(), cwd.join(expected));
+        }
+        for path in [None, Some("missing:nonexecutable:directory")] {
+            let mut args = cli();
+            args.ssh = None;
+            let error = Config::load_with(args, cwd, |key| {
+                (key == "PATH").then(|| path.map(OsString::from)).flatten()
+            })
+            .err()
+            .unwrap();
+            assert_eq!(error.field, "ssh.executable");
+        }
+    }
+
+    #[test]
     fn paths_have_correct_bases_and_precedence_without_interpolation() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
@@ -3524,6 +3695,7 @@ programs=['/private/program']
             Cli {
                 config: Some("nested/operator.toml".into()),
                 ssh_config: Some("cli-ssh".into()),
+                ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
             },
             cwd,
@@ -3545,6 +3717,7 @@ programs=['/private/program']
                 Cli {
                     config: Some("missing".into()),
                     ssh_config: None,
+                    ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
                 },
                 dir.path(),
@@ -3557,6 +3730,7 @@ programs=['/private/program']
                 Cli {
                     config: None,
                     ssh_config: Some("missing".into()),
+                    ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
                 },
                 dir.path(),
@@ -3569,6 +3743,7 @@ programs=['/private/program']
                 Cli {
                     config: None,
                     ssh_config: Some(dir.path().into()),
+                    ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
                 },
                 dir.path(),

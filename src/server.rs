@@ -377,6 +377,7 @@ impl Estus {
         }
         let shutdown = CancellationToken::new();
         let pool = Pool::new(
+            config.ssh_executable().to_path_buf(),
             config.ssh_config().map(std::path::Path::to_path_buf),
             Duration::from_secs(config.limits().connect_timeout_secs),
             shutdown.clone(),

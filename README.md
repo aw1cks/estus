@@ -14,6 +14,12 @@ Reimport and review existing automation snapshots before enabling them: helper
 identity and content-hash namespaces have changed, so previous approval digests
 are not reusable. Deploy the reviewed content and update configuration accordingly.
 
+The automation-only `automation.ssh_executable` setting and
+`ESTUS_AUTOMATION_SSH` environment variable have been removed without aliases.
+Move the setting to `[ssh] executable = "/path/to/ssh"` (preserving any existing
+`config_file` in that table), or use the shared `ESTUS_SSH` environment variable.
+The selection now applies to native SSH, doctor and automation alike.
+
 ## Base wheel
 
 Build a platform wheel and source archive with Python 3.14 and Rust 1.88 or newer:
@@ -44,6 +50,30 @@ SSH identity, host-key policy and configuration still apply.
 The base wheel does not depend on Ansible, install packages at startup, or enable
 additional tools. An explicitly selected existing runtime bundle remains usable
 through the native application's configuration.
+
+## Local SSH executable
+
+Estus selects one local OpenSSH executable in this order:
+`--ssh PATH` > `ESTUS_SSH` > `[ssh].executable` > `ssh` found on `PATH`.
+For example:
+
+```toml
+[ssh]
+executable = "/opt/openssh/bin/ssh"
+config_file = "/etc/estus/ssh_config"
+```
+
+The executable is resolved once at configuration load to a validated absolute
+path shared by native SSH, doctor and automation. Explicit relative paths from
+`--ssh` or `ESTUS_SSH` are relative to the launch directory; a relative
+`[ssh].executable` is relative to the TOML file's directory. Explicit selections
+are literal paths, with no tilde or environment-variable interpolation and no
+`PATH` lookup. An invalid override fails configuration loading rather than
+falling back to a lower-priority source.
+
+The native Nix package prefixes `PATH` with its pinned OpenSSH, leaving explicit
+CLI, environment and TOML selections free to override that default. It does not
+set `ESTUS_SSH`; an environment default would incorrectly outrank TOML.
 
 ## Pinned Nix wheel build and acceptance
 
@@ -502,9 +532,9 @@ never regenerate approval or install dependencies.
 Python interpreter independently of native sudo authority. This ordinary authority
 never becomes; named broader authorities below are separate. OpenSSH resolves operator aliases and the replacement SSH
 file. Runner connections do not use the Rust pool: sharing, forwarding, host-key
-updates, password prompts and remote TTY allocation are disabled. OpenSSH is
-selected by `automation.ssh_executable`, then `ESTUS_AUTOMATION_SSH`, then
-`/usr/bin/ssh`; the Nix package supplies its pinned default.
+updates, password prompts and remote TTY allocation are disabled. Automation uses
+the same validated local OpenSSH executable as native SSH and doctor; see
+[Local SSH executable](#local-ssh-executable) for selection and path resolution.
 An existing bounded absolute `SSH_AUTH_SOCK` reference is preserved for an
 out-of-band agent. The product does not load keys, create an agent, prompt for
 credentials or accept key/password contents as tool inputs.

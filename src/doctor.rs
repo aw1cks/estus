@@ -210,6 +210,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
         // One pool per selected target: finalize before advancing, without retaining
         // idle masters or resetting the original whole-run deadline.
         let pool = Pool::diagnostic(
+            config.ssh_executable().to_path_buf(),
             config.ssh_config().map(ToOwned::to_owned),
             Duration::from_secs(config.limits().connect_timeout_secs),
             shutdown.clone(),

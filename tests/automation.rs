@@ -50,8 +50,9 @@ impl Local {
         fs::write(
             &config,
             format!(
-                "[ssh]\nconfig_file = {}\n[targets.allowed]\nssh_host = '{SECRET}'\n{automation}",
-                serde_json::to_string(&ssh.to_string_lossy())?
+                "[ssh]\nconfig_file = {}\nexecutable = {}\n[targets.allowed]\nssh_host = '{SECRET}'\n{automation}",
+                serde_json::to_string(&ssh.to_string_lossy())?,
+                serde_json::to_string(&support::find_program("ssh")?.to_string_lossy())?
             ),
         )?;
         Ok(Self {

@@ -4,6 +4,7 @@ mod support;
 
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
@@ -474,6 +475,82 @@ fn no_commands(fixture: &Fixture, before: &[String]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "native: Nix OpenSSH, non-root POSIX account, private runtime directory, loopback"]
+async fn doctor_native_selected_ssh_executable_is_shared_with_native_tools() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let wrapper = fixture.root.path().join("selected ssh");
+        let launches = fixture.root.path().join("selected-ssh-launches");
+        // This wrapper still runs real OpenSSH and preserves its PID/ownership.
+        // Its marker distinguishes selecting it from merely connecting successfully.
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nprintf 'selected\\n' >> {}\nexec {} \"$@\"\n",
+                support::quote(&launches.to_string_lossy()),
+                support::quote(&fixture.ssh.to_string_lossy()),
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        native_config(&fixture, "[targets.selected]\nssh_host = 'plain'\n")?;
+        let config = fs::read_to_string(&fixture.config)?;
+        fs::write(
+            &fixture.config,
+            config.replacen("[ssh]\n", "[ssh]\nexecutable = 'selected ssh'\n", 1),
+        )?;
+        let empty_path = fixture.root.path().join("empty-path");
+        fs::create_dir(&empty_path)?;
+        let auth = fixture.authentications();
+        let mut diagnostic = command(&fixture.config, &["--target", "selected"])?;
+        // Neither the selected wrapper nor the native master may look up ssh again.
+        diagnostic.env("PATH", &empty_path);
+        let output = Doctor::start(diagnostic)?.finish().await?;
+        let value = report(&output, 0)?;
+        ensure!(value["targets"][0]["ssh"] == json!({"status":"passed"}));
+        ensure!(value["targets"][0]["sftp"] == json!({"status":"passed"}));
+        ensure!(fs::read_to_string(&launches)? == "selected\n");
+        ensure!(cleaned(&output).await? == 1);
+        native_privacy(&output, &fixture)?;
+
+        let mut native = support::server_command(&fixture.config)?;
+        native.env("PATH", &empty_path);
+        let mut server = support::WireServer::start_command(native)?;
+        let connected = async {
+            server.initialize().await?;
+            let reply = server
+                .request(
+                    2,
+                    "tools/call",
+                    json!({"name":"ssh_exec","arguments":{
+                        "host":"selected","command":"printf selected-native"
+                    }}),
+                )
+                .await?;
+            let result = &reply["result"]["structuredContent"];
+            ensure!(
+                result["error"].is_null() && result["data"]["exit_code"] == 0,
+                "native exec failed: {reply}"
+            );
+            ensure!(result["data"]["stdout"] == "selected-native");
+            ensure!(fs::read_to_string(&launches)? == "selected\nselected\n");
+            fixture.await_authentications(auth + 2).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let stopped = server.stop(None).await;
+        connected?;
+        let log = stopped?;
+        let owned = support::masters(&log)?;
+        ensure!(owned.len() == 1);
+        assert_masters_gone(&owned).await
+    }
+    .await;
+    let stopped = fixture.stop().await;
+    scenario?;
+    stopped
 }
 
 #[tokio::test]

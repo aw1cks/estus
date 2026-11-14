@@ -17,11 +17,10 @@ let
   package = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts cargoTestExtraArgs;
     nativeBuildInputs = [ pkgs.makeWrapper ];
-    nativeCheckInputs = controllerTestPrograms;
+    nativeCheckInputs = controllerTestPrograms ++ [ pkgs.openssh ];
     postFixup = ''
       wrapProgram "$out/bin/estus" \
-        --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]} \
-        --set-default ESTUS_AUTOMATION_SSH ${pkgs.openssh}/bin/ssh
+        --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
     '';
   });
   acceptance = import ./ssh-acceptance.nix {
