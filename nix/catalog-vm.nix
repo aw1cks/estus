@@ -215,6 +215,15 @@ let
             ip link add catalog0 type dummy
             ip address add 192.0.2.1/24 dev catalog0
             ip link set catalog0 up
+            ${lib.optionalString lab ''
+              modprobe netdevsim
+              echo '42 1' > /sys/bus/netdevsim/new_device
+              for device in /sys/bus/netdevsim/devices/netdevsim42/net/*; do
+                ip link set "''${device##*/}" name fec0
+              done
+              ip link set fec0 address 52:54:00:12:34:59
+              ethtool --set-fec fec0 encoding off
+            ''}
             # Runtime unit files are in a standard search path, outside /etc;
             # persistent mask/unmask can therefore be exercised honestly.
             mkdir -p /run/systemd/system
