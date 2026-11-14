@@ -592,6 +592,51 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
+## Catalog policy: facts first
+
+The catalog does not maintain a second native/custom collector when maintained
+Ansible facts or a safely fixed query-only status API supply the declared
+observation. Selection, filters and formatting alone are not additional insight.
+Keep distinct collectors only for useful extra data, fidelity or query/sampling semantics.
+
+The audit against Ansible Core2.21.5, ansible.posix2.2.2 and
+community.general13.4.0 makes these **planned entries facts-only**, not new
+registered tools:
+
+| Planned entry | Reused facts | No second collector for |
+|---|---|---|
+| `systemd_unit_get` | [`systemd_service`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/systemd_service_module.html) query-only `status` | Selected per-unit properties in a fixed system/user scope; no mutation arguments |
+| `hardware_system_get` | [`setup`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/setup_module.html) DMI fields | Manufacturer/model, board and BIOS versions |
+| `hardware_identifiers_get` | `setup` DMI fields | Serials, UUIDs and asset tags; retain separate sensitive-read approval |
+| `storage_devices_list`, `storage_device_get` | `setup` device/link facts | Basic block inventory, geometry, partitions and holder/master relationships |
+| `storage_mounts_list` | [`mount_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/mount_facts_module.html) | Dynamic mount inventory and mount capacity/inode data |
+| `packages_list` | [`package_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/package_facts_module.html) | Installed package/version inventory and reported backend metadata |
+| `nic_features_get` | `setup` network feature facts | Reported `ethtool -k` offload states, including fixed-state annotations |
+
+Use opt-in reviewed bindings/roles and closed bounded projections, never a public
+dump-all-facts tool. Fix fact subsets, backend/source choices and timeouts;
+exclude raw event/context/environment data and undeclared identifiers. Setup
+filtering limits returned keys, not every internal probe. Mount facts must select
+current sources rather than silently mixing fstab with live mounts. Package
+prerequisites are preprovisioned: no dependency install or repository refresh.
+These recipes still need their planned real-target qualification before shipping.
+
+For query-only unit status, omit `state`, `enabled` and `masked`, and fix daemon
+reload/reexec flags false. Do not use `enabled=false` or `masked=false` as a
+read-only setting: those request changes. Publish only approved status properties.
+
+The shipped `host_summary`, `cpu_stats` and `memory_stats` remain useful:
+setup does not provide the boot UUID, raw CPU tick counters/two-sample deltas,
+or exact byte gauges plus the selected cumulative VM counters. They are currently
+**Ansible-backed custom collectors**, not native-core implementations; transport
+migration is a separate change.
+
+Keep richer systemd inventory/jobs/relationships, routing/address scope, live counters,
+PCI/DIMM/slot/health data, configured-path filesystem queries and package file
+ownership where they exceed facts. Do not justify a duplicate basic inventory
+getter with speculative future fields. SSH/SFTP execution/transfer primitives
+and their API demonstrations are different capabilities, not fact collectors.
+
 ## Opt-in Linux host summary
 
 [`examples/host_summary.toml`](examples/host_summary.toml) binds the reviewed
