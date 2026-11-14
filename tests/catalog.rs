@@ -37,6 +37,7 @@ mod tools {
     mod host_reboot;
     mod icmp_probe;
     mod kernel_module_get;
+    mod kernel_module_load;
     mod kernel_module_load_plan;
     mod kernel_module_parameter_set;
     mod kernel_module_parameters_get;
