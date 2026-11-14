@@ -46,6 +46,7 @@ mod tools {
     mod icmp_probe;
     mod journal_boots_list;
     mod journal_usage_get;
+    mod kernel_log_read;
     mod kernel_module_get;
     mod kernel_module_load;
     mod kernel_module_load_plan;
