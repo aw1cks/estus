@@ -103,6 +103,7 @@ mod tools {
     mod nic_stats_get;
     mod package_get;
     mod packages_list;
+    mod packages_updates_list;
     mod pci_device_get;
     mod pci_devices_list;
     mod pci_driver_binding_get;
