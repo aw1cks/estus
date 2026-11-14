@@ -28,6 +28,7 @@ mod tools {
     mod boot_clear_oneshot;
     mod boot_entries_list;
     mod boot_entry_get;
+    mod boot_set_default;
     mod boot_set_oneshot;
     mod boot_status;
     mod device_attributes_get;
