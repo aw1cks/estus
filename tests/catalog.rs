@@ -68,6 +68,7 @@ mod tools {
     mod network_sockets_list;
     mod pci_device_get;
     mod pci_devices_list;
+    mod pci_driver_binding_get;
     mod pci_topology_get;
     mod pressure_get;
     mod process_fds_list;
