@@ -34,6 +34,7 @@ mod tools {
     mod cgroup_processes;
     mod cgroup_sample;
     mod cgroup_stats;
+    mod cgroup_tree;
     mod device_attributes_get;
     mod dns_lookup;
     mod filesystem_usage_get;
