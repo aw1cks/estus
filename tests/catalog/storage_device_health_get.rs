@@ -13,8 +13,14 @@ fn counter(value: &Value) -> Result<u128> {
 
 async fn capture_smart(guest: &catalog::Guest, phase: &str) -> Result<()> {
     let raw = guest.shell("/usr/bin/nvme smart-log /dev/nvme0 --raw-binary | /usr/bin/python3 -c 'import sys; data=sys.stdin.buffer.read(513); print(data.hex()) if len(data)==512 else sys.exit(1)'").await?;
-    ensure!(raw.status.success() && raw.stdout.len() == 1025, "bounded SMART capture failed");
-    eprintln!("NVME_{phase}_CAPTURE={}", String::from_utf8(raw.stdout)?.trim());
+    ensure!(
+        raw.status.success() && raw.stdout.len() == 1025,
+        "bounded SMART capture failed"
+    );
+    eprintln!(
+        "NVME_{phase}_CAPTURE={}",
+        String::from_utf8(raw.stdout)?.trim()
+    );
     Ok(())
 }
 
@@ -93,16 +99,31 @@ print(json.dumps(parse_smart_log(data), sort_keys=True))
                 .arg(variant)
                 .output()?;
             if variant == "truncated" {
-                ensure!(!output.status.success() && String::from_utf8_lossy(&output.stderr).contains("unexpected NVMe SMART log length"), "truncated real SMART capture accepted");
+                ensure!(
+                    !output.status.success()
+                        && String::from_utf8_lossy(&output.stderr)
+                            .contains("unexpected NVMe SMART log length"),
+                    "truncated real SMART capture accepted"
+                );
                 continue;
             }
-            ensure!(output.status.success(), "{phase} production parser: {}", String::from_utf8_lossy(&output.stderr));
-            ensure!(output.stdout.len() <= 4096, "SMART parser output exceeds bound");
+            ensure!(
+                output.status.success(),
+                "{phase} production parser: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            ensure!(
+                output.stdout.len() <= 4096,
+                "SMART parser output exceeds bound"
+            );
             let actual: Value = serde_json::from_slice(&output.stdout)?;
-            let expected: Value = serde_json::from_slice(
-                &std::fs::read(fixtures.join(format!("{phase}.expected.json")))?
-            )?;
-            ensure!(actual == expected, "{phase} captured SMART state changed: {actual}");
+            let expected: Value = serde_json::from_slice(&std::fs::read(
+                fixtures.join(format!("{phase}.expected.json")),
+            )?)?;
+            ensure!(
+                actual == expected,
+                "{phase} captured SMART state changed: {actual}"
+            );
         }
     }
     Ok(())

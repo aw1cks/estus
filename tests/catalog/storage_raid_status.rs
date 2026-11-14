@@ -4,8 +4,14 @@ use serde_json::json;
 
 async fn capture_md(guest: &catalog::Guest, phase: &str) -> Result<()> {
     let capture = guest.shell("/usr/bin/python3 - <<'PY'\nimport json, pathlib\nbase = pathlib.Path('/sys/class/block/md0/md')\ndef read(path):\n    with path.open('rb') as source:\n        data = source.read(257)\n    if len(data) > 256:\n        raise ValueError('capture attribute too large')\n    return data.decode('ascii').strip()\nsnapshot = {key: read(base / key) for key in ('level', 'raid_disks', 'degraded', 'array_state', 'sync_action')}\nsnapshot['members'] = []\nfor device in ('vdb', 'vdc'):\n    member = base / ('dev-' + device)\n    if member.is_dir():\n        snapshot['members'].append(dict(device=device, **{key: read(member / key) for key in ('state', 'slot', 'errors')}))\nprint(json.dumps(snapshot, sort_keys=True))\nPY").await?;
-    ensure!(capture.status.success() && capture.stdout.len() <= 4096, "bounded MD capture failed");
-    eprintln!("MD_{phase}_CAPTURE={}", String::from_utf8(capture.stdout)?.trim());
+    ensure!(
+        capture.status.success() && capture.stdout.len() <= 4096,
+        "bounded MD capture failed"
+    );
+    eprintln!(
+        "MD_{phase}_CAPTURE={}",
+        String::from_utf8(capture.stdout)?.trim()
+    );
     Ok(())
 }
 
@@ -78,13 +84,23 @@ print(json.dumps(parse_md_snapshot(snapshot), sort_keys=True))
             .arg(assets.join("roles/storage_raid_status/tasks/main.yml"))
             .arg(fixtures.join(format!("{phase}.json")))
             .output()?;
-        ensure!(output.status.success(), "{phase} production parser: {}", String::from_utf8_lossy(&output.stderr));
-        ensure!(output.stdout.len() <= 4096, "MD parser output exceeds bound");
+        ensure!(
+            output.status.success(),
+            "{phase} production parser: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ensure!(
+            output.stdout.len() <= 4096,
+            "MD parser output exceeds bound"
+        );
         let actual: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        let expected: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(fixtures.join(format!("{phase}.expected.json")))?
-        )?;
-        ensure!(actual == expected, "{phase} captured MD state changed: {actual}");
+        let expected: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            fixtures.join(format!("{phase}.expected.json")),
+        )?)?;
+        ensure!(
+            actual == expected,
+            "{phase} captured MD state changed: {actual}"
+        );
     }
     Ok(())
 }

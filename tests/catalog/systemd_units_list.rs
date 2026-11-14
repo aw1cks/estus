@@ -5,7 +5,9 @@ use serde_json::json;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ESTUS_TEST_CATALOG_VM and pinned Runner runtime"]
 async fn systemd_units_list_real_acceptance() -> Result<()> {
-    let guest = catalog::Guest::start().await.context("BOOT real inventory qualification guest")?;
+    let guest = catalog::Guest::start()
+        .await
+        .context("BOOT real inventory qualification guest")?;
     let result: Result<()> = async {
         let binding = guest.binding("systemd_units_list", json!({})).await.context("IMPORT system-scope inventory binding")?;
         binding.reject(json!({"view": "loaded", "unit_type": "service", "state": "active", "flags": ["--now"]})).await?;
