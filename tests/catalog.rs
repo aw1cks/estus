@@ -69,6 +69,7 @@ mod tools {
     mod pci_device_get;
     mod pci_devices_list;
     mod pci_driver_binding_get;
+    mod pci_iommu_group_get;
     mod pci_topology_get;
     mod pressure_get;
     mod process_fds_list;
