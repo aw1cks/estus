@@ -1,0 +1,44 @@
+# Linux-only opt-in reviewed pressure_get; no implicit installs or escalation.
+# Copy roles/pressure_get to /etc/estus/roles/pressure_get; review all tasks and fixed allowlists.
+# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config pressure_get.toml schema import-role pressure_get --role-path /etc/estus/roles/pressure_get --overlay overlay.json --output /etc/estus/pressure_get.schema.json
+# Review snapshot before activation. Provision /var/lib/estus/runner mode 0700.
+# Requires installed optional automation runtime and /usr/bin/python3 on target.
+profile = "actions-only"
+enabled_tools = ["pressure_get"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.pressure_get]
+description = "Read Linux PSI some/full averages in percent (10/60/300 second windows) and cumulative stall microseconds. Omit unsupported metrics; CPU full may be absent or kernel-defined zero. Procfs view, not cgroup-effective pressure; non-atomic observation."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/pressure_get.schema.json", role_path = "/etc/estus/roles/pressure_get", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 20 }
+[tools.pressure_get.input_schema]
+type = "object"
+required = []
+additionalProperties = false
+properties = {  }
+[tools.pressure_get.result]
+kind = "ansible_projection"
+fields = { "observed_at" = ["mcp_result", "observed_at"], "scope" = ["mcp_result", "scope"], "pressure" = ["mcp_result", "pressure"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+[tools.pressure_get.result.schema]
+type = "object"
+required = ["observed_at", "scope", "pressure"]
+additionalProperties = false
+properties = { "observed_at" = { "type" = "string", "maxLength" = 40 }, "scope" = { "type" = "string", "maxLength" = 32, "const" = "procfs_view" }, "pressure" = { "type" = "array", "maxItems" = 3, "items" = { "type" = "object", "required" = ["resource", "status"], "additionalProperties" = false, "properties" = { "resource" = { "type" = "string", "maxLength" = 6, "enum" = ["cpu", "memory", "io"] }, "status" = { "type" = "string", "maxLength" = 16, "enum" = ["available", "unsupported", "denied"] }, "some" = { "type" = "object", "required" = ["avg10_percent", "avg60_percent", "avg300_percent", "total_microseconds"], "additionalProperties" = false, "properties" = { "avg10_percent" = { "type" = "number", "minimum" = 0, "maximum" = 100 }, "avg60_percent" = { "type" = "number", "minimum" = 0, "maximum" = 100 }, "avg300_percent" = { "type" = "number", "minimum" = 0, "maximum" = 100 }, "total_microseconds" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } } }, "full" = { "type" = "object", "required" = ["avg10_percent", "avg60_percent", "avg300_percent", "total_microseconds"], "additionalProperties" = false, "properties" = { "avg10_percent" = { "type" = "number", "minimum" = 0, "maximum" = 100 }, "avg60_percent" = { "type" = "number", "minimum" = 0, "maximum" = 100 }, "avg300_percent" = { "type" = "number", "minimum" = 0, "maximum" = 100 }, "total_microseconds" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } } } } } } }

@@ -22,3 +22,8 @@ async fn catalog_guest_qualification() -> anyhow::Result<()> {
     result?;
     cleanup
 }
+
+#[path = "catalog"]
+mod tools {
+    mod pressure_get;
+}
