@@ -29,6 +29,7 @@ mod tools {
     mod dns_lookup;
     mod filesystem_usage_get;
     mod icmp_probe;
+    mod network_address_add;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
