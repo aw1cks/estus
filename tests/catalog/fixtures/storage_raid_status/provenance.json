@@ -1,0 +1,14 @@
+{
+  "backend": "genuine Linux MD RAID1 on disposable guest-only /dev/vdb and /dev/vdc",
+  "lab": "/nix/store/71qhmvxbm0sl8jsry1hrvjfvnln7qji0-catalog-lab-guest/bin/catalog-lab-guest",
+  "sut": "/nix/store/qld0nylvanb6s6b8nf4zgjm5iw5hglmi-estus-0.1.0/bin/estus",
+  "runtime": "/nix/store/yd6m5h32dxipglssz21dl2jfdqmk83qj-estus-automation-runtime",
+  "captured_on": "2026-11-14",
+  "preparation": "mdadm --create /dev/md0 --metadata=1.2 --level=1 --raid-devices=2 --run /dev/vdb /dev/vdc; await kernel synchronization idle and degraded=0",
+  "degraded_preparation": "mdadm /dev/md0 --fail /dev/vdc",
+  "raw_capture": "Bounded ASCII sysfs MD attributes: level, raid_disks, degraded, array_state, sync_action; each present reviewed member state, slot, errors. No raw block contents.",
+  "independent_oracles": "mdadm --detail --test exit0 plus /proc/mdstat [UU]; after member failure exit1 plus /proc/mdstat [U_] or [_U]",
+  "expected": "Actual successful MCP typed projections; only collection timestamps removed. No synthesized health states.",
+  "scope": "Reported non-atomic software RAID redundancy, not hardware RAID or physical-media assurance",
+  "reference": "https://docs.kernel.org/admin-guide/md.html"
+}

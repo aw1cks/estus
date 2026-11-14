@@ -121,6 +121,7 @@ mod tools {
     mod storage_device_get;
     mod storage_devices_list;
     mod storage_mounts_list;
+    mod storage_raid_status;
     mod sysctl_config_set;
     mod sysctl_get;
     mod sysctl_set_runtime;

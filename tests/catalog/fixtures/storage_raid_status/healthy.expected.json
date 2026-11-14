@@ -1,0 +1,28 @@
+{
+  "array_state": "clean",
+  "degraded_members": 0,
+  "device": "/dev/md0",
+  "level": "raid1",
+  "members": [
+    {
+      "device": "/dev/vdb",
+      "read_errors": 0,
+      "slot": "0",
+      "states": [
+        "in_sync"
+      ]
+    },
+    {
+      "device": "/dev/vdc",
+      "read_errors": 0,
+      "slot": "1",
+      "states": [
+        "in_sync"
+      ]
+    }
+  ],
+  "raid_disks": 2,
+  "scope": "linux_md_raid1_reported",
+  "source": "linux_sysfs_md",
+  "sync_action": "idle"
+}

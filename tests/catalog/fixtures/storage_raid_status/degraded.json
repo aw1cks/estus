@@ -1,0 +1,21 @@
+{
+  "array_state": "clean",
+  "degraded": "1",
+  "level": "raid1",
+  "members": [
+    {
+      "device": "vdb",
+      "errors": "0",
+      "slot": "0",
+      "state": "in_sync"
+    },
+    {
+      "device": "vdc",
+      "errors": "0",
+      "slot": "none",
+      "state": "faulty"
+    }
+  ],
+  "raid_disks": "2",
+  "sync_action": "idle"
+}
