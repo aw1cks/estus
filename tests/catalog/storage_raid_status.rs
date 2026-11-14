@@ -1,3 +1,5 @@
+use crate::payload;
+
 use crate::catalog;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
@@ -63,42 +65,32 @@ async fn storage_raid_status() -> Result<()> {
 
 #[test]
 fn captured_md_states_use_the_production_parser() -> Result<()> {
-    let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"));
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/catalog/fixtures/storage_raid_status");
-    // Extract only the production pure parser, not collector IO or an alternate backend.
-    let parser = r#"import ast, json, pathlib, re, sys, textwrap
-role = pathlib.Path(sys.argv[1]).read_text()
-source = textwrap.dedent(role.split('      - |\n', 1)[1].split("      - '{{ device }}'", 1)[0])
-tree = ast.parse(source)
-functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'parse_md_snapshot']
-exec(compile(ast.Module(body=functions, type_ignores=[]), '<production MD parser>', 'exec'))
-snapshot = json.loads(pathlib.Path(sys.argv[2]).read_text())
-print(json.dumps(parse_md_snapshot(snapshot), sort_keys=True))
-"#;
     for phase in ["healthy", "degraded"] {
-        let output = std::process::Command::new(crate::support::find_program("python3")?)
-            .args(["-I", "-c", parser])
-            .arg(assets.join("roles/storage_raid_status/tasks/main.yml"))
-            .arg(fixtures.join(format!("{phase}.json")))
-            .output()?;
-        ensure!(
-            output.status.success(),
-            "{phase} production parser: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        ensure!(
-            output.stdout.len() <= 4096,
-            "MD parser output exceeds bound"
-        );
-        let actual: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let mut snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixtures.join(format!("{phase}.json")))?)?;
+        let level = snapshot["level"].as_str().context("captured MD level")?;
+        let attribute = payload::call(
+            "storage_raid_status",
+            "parse_attribute",
+            json!([payload::bytes(level.as_bytes())]),
+        )?;
+        snapshot["level"] = attribute
+            .get("ok")
+            .context("captured MD attribute failed")?
+            .clone();
+        let result = payload::call(
+            "storage_raid_status",
+            "parse_md_snapshot",
+            json!([snapshot]),
+        )?;
+        let actual = result.get("ok").context("captured MD parser failed")?;
         let expected: serde_json::Value = serde_json::from_slice(&std::fs::read(
             fixtures.join(format!("{phase}.expected.json")),
         )?)?;
         ensure!(
-            actual == expected,
+            actual == &expected,
             "{phase} captured MD state changed: {actual}"
         );
     }

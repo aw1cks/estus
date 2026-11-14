@@ -1,3 +1,5 @@
+use crate::payload;
+
 use crate::catalog;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -74,54 +76,40 @@ async fn storage_device_health_get() -> Result<()> {
 
 #[test]
 fn captured_smart_logs_use_the_production_parser() -> Result<()> {
-    let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"));
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/catalog/fixtures/storage_device_health_get");
-    let parser = r#"import ast, json, pathlib, sys, textwrap
-role = pathlib.Path(sys.argv[1]).read_text()
-source = textwrap.dedent(role.split('      - |\n', 1)[1].split("      - '{{ device }}'", 1)[0])
-tree = ast.parse(source)
-functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'parse_smart_log']
-exec(compile(ast.Module(body=functions, type_ignores=[]), '<production SMART parser>', 'exec'))
-data = bytes.fromhex(pathlib.Path(sys.argv[2]).read_text())
-if sys.argv[3] == 'truncated':
-    data = data[:-1]
-print(json.dumps(parse_smart_log(data), sort_keys=True))
-"#;
     for phase in ["before", "after"] {
         for variant in ["captured", "truncated"] {
-            let output = std::process::Command::new(crate::support::find_program("python3")?)
-                .args(["-I", "-c", parser])
-                .arg(assets.join("roles/storage_device_health_get/tasks/main.yml"))
-                .arg(fixtures.join(format!("{phase}.hex")))
-                .arg(variant)
-                .output()?;
+            let hex = std::fs::read_to_string(fixtures.join(format!("{phase}.hex")))?;
+            let mut data = hex
+                .trim()
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
+                .collect::<Result<Vec<_>>>()?;
+            if variant == "truncated" {
+                data.pop();
+            }
+            let result = payload::call(
+                "storage_device_health_get",
+                "parse_smart_log",
+                json!([payload::bytes(&data)]),
+            )?;
             if variant == "truncated" {
                 ensure!(
-                    !output.status.success()
-                        && String::from_utf8_lossy(&output.stderr)
-                            .contains("unexpected NVMe SMART log length"),
+                    result["error"] == "ValueError",
                     "truncated real SMART capture accepted"
                 );
                 continue;
             }
-            ensure!(
-                output.status.success(),
-                "{phase} production parser: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            ensure!(
-                output.stdout.len() <= 4096,
-                "SMART parser output exceeds bound"
-            );
-            let actual: Value = serde_json::from_slice(&output.stdout)?;
+            let actual = result.get("ok").context("captured SMART parser failed")?;
             let expected: Value = serde_json::from_slice(&std::fs::read(
                 fixtures.join(format!("{phase}.expected.json")),
             )?)?;
             ensure!(
-                actual == expected,
+                actual == &expected,
                 "{phase} captured SMART state changed: {actual}"
             );
         }

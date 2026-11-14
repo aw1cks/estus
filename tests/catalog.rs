@@ -2,6 +2,8 @@
 #![allow(dead_code)]
 #[path = "support/catalog.rs"]
 mod catalog;
+#[path = "support/payload.rs"]
+mod payload;
 mod support;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

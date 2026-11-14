@@ -1,0 +1,1166 @@
+{
+  "schema": 1,
+  "version": "1",
+  "presets": {
+    "linux-health": [
+      "cpu_stats",
+      "memory_stats",
+      "pressure_get"
+    ],
+    "network-observe": [
+      "network_links_list",
+      "network_addresses_list",
+      "network_routes_list",
+      "network_route_lookup",
+      "network_rules_list",
+      "network_neighbors_list",
+      "network_interface_stats"
+    ],
+    "network-probes": [
+      "dns_lookup",
+      "icmp_probe",
+      "tcp_connect_probe",
+      "network_path_probe"
+    ],
+    "sensitive-observe": [
+      "processes_list",
+      "process_get",
+      "process_fds_list",
+      "network_sockets_list",
+      "journal_read",
+      "kernel_log_read"
+    ]
+  },
+  "tools": {
+    "boot_clear_oneshot": {
+      "definition": "boot_clear_oneshot.toml",
+      "role": "roles/boot_clear_oneshot",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "boot_entries_list": {
+      "definition": "boot_entries_list.toml",
+      "role": "roles/boot_entries_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "boot_entry_get": {
+      "definition": "boot_entry_get.toml",
+      "role": "roles/boot_entry_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "boot_set_default": {
+      "definition": "boot_set_default.toml",
+      "role": "roles/boot_set_default",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "boot_set_oneshot": {
+      "definition": "boot_set_oneshot.toml",
+      "role": "roles/boot_set_oneshot",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "boot_status": {
+      "definition": "boot_status.toml",
+      "role": "roles/boot_status",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "cgroup_processes": {
+      "definition": "cgroup_processes.toml",
+      "role": "roles/cgroup_processes",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "cgroup_sample": {
+      "definition": "cgroup_sample.toml",
+      "role": "roles/cgroup_sample",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "cgroup_stats": {
+      "definition": "cgroup_stats.toml",
+      "role": "roles/cgroup_stats",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "cgroup_tree": {
+      "definition": "cgroup_tree.toml",
+      "role": "roles/cgroup_tree",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "cpu_stats": {
+      "definition": "cpu_stats.toml",
+      "role": "roles/cpu_stats",
+      "policy_required": false,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "device_attributes_get": {
+      "definition": "device_attributes_get.toml",
+      "role": "roles/device_attributes_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "dns_lookup": {
+      "definition": "dns_lookup.toml",
+      "role": "roles/dns_lookup",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "filesystem_usage_get": {
+      "definition": "filesystem_usage_get.toml",
+      "role": "roles/filesystem_usage_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "hardware_identifiers_get": {
+      "definition": "hardware_identifiers_get.toml",
+      "role": "roles/hardware_identifiers_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "hardware_memory_inventory": {
+      "definition": "hardware_memory_inventory.toml",
+      "role": "roles/hardware_memory_inventory",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "hardware_slots_list": {
+      "definition": "hardware_slots_list.toml",
+      "role": "roles/hardware_slots_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "hardware_system_get": {
+      "definition": "hardware_system_get.toml",
+      "role": "roles/hardware_system_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "host_reboot": {
+      "definition": "host_reboot.toml",
+      "role": "roles/host_reboot",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "host_summary": {
+      "definition": "host_summary.toml",
+      "role": "roles/host_summary",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "icmp_probe": {
+      "definition": "icmp_probe.toml",
+      "role": "roles/icmp_probe",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "journal_boots_list": {
+      "definition": "journal_boots_list.toml",
+      "role": "roles/journal_boots_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "journal_read": {
+      "definition": "journal_read.toml",
+      "role": "roles/journal_read",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "journal_usage_get": {
+      "definition": "journal_usage_get.toml",
+      "role": "roles/journal_usage_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_log_read": {
+      "definition": "kernel_log_read.toml",
+      "role": "roles/kernel_log_read",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_module_get": {
+      "definition": "kernel_module_get.toml",
+      "role": "roles/kernel_module_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_module_load": {
+      "definition": "kernel_module_load.toml",
+      "role": "roles/kernel_module_load",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_module_load_plan": {
+      "definition": "kernel_module_load_plan.toml",
+      "role": "roles/kernel_module_load_plan",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_module_parameter_set": {
+      "definition": "kernel_module_parameter_set.toml",
+      "role": "roles/kernel_module_parameter_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_module_parameters_get": {
+      "definition": "kernel_module_parameters_get.toml",
+      "role": "roles/kernel_module_parameters_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_module_unload": {
+      "definition": "kernel_module_unload.toml",
+      "role": "roles/kernel_module_unload",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_modules_list": {
+      "definition": "kernel_modules_list.toml",
+      "role": "roles/kernel_modules_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "kernel_state_get": {
+      "definition": "kernel_state_get.toml",
+      "role": "roles/kernel_state_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "memory_stats": {
+      "definition": "memory_stats.toml",
+      "role": "roles/memory_stats",
+      "policy_required": false,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_address_add": {
+      "definition": "network_address_add.toml",
+      "role": "roles/network_address_add",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_address_remove": {
+      "definition": "network_address_remove.toml",
+      "role": "roles/network_address_remove",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_addresses_list": {
+      "definition": "network_addresses_list.toml",
+      "role": "roles/network_addresses_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_device_get": {
+      "definition": "network_device_get.toml",
+      "role": "roles/network_device_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_interface_stats": {
+      "definition": "network_interface_stats.toml",
+      "role": "roles/network_interface_stats",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_link_down": {
+      "definition": "network_link_down.toml",
+      "role": "roles/network_link_down",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_link_up": {
+      "definition": "network_link_up.toml",
+      "role": "roles/network_link_up",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_links_list": {
+      "definition": "network_links_list.toml",
+      "role": "roles/network_links_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_namespaces_list": {
+      "definition": "network_namespaces_list.toml",
+      "role": "roles/network_namespaces_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_neighbor_remove": {
+      "definition": "network_neighbor_remove.toml",
+      "role": "roles/network_neighbor_remove",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_neighbors_list": {
+      "definition": "network_neighbors_list.toml",
+      "role": "roles/network_neighbors_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_path_probe": {
+      "definition": "network_path_probe.toml",
+      "role": "roles/network_path_probe",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_route_add": {
+      "definition": "network_route_add.toml",
+      "role": "roles/network_route_add",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_route_lookup": {
+      "definition": "network_route_lookup.toml",
+      "role": "roles/network_route_lookup",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_route_remove": {
+      "definition": "network_route_remove.toml",
+      "role": "roles/network_route_remove",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_routes_list": {
+      "definition": "network_routes_list.toml",
+      "role": "roles/network_routes_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_rules_list": {
+      "definition": "network_rules_list.toml",
+      "role": "roles/network_rules_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "network_sockets_list": {
+      "definition": "network_sockets_list.toml",
+      "role": "roles/network_sockets_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_channels_get": {
+      "definition": "nic_channels_get.toml",
+      "role": "roles/nic_channels_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_channels_set": {
+      "definition": "nic_channels_set.toml",
+      "role": "roles/nic_channels_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_coalesce_get": {
+      "definition": "nic_coalesce_get.toml",
+      "role": "roles/nic_coalesce_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_coalesce_set": {
+      "definition": "nic_coalesce_set.toml",
+      "role": "roles/nic_coalesce_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_features_get": {
+      "definition": "nic_features_get.toml",
+      "role": "roles/nic_features_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_features_set": {
+      "definition": "nic_features_set.toml",
+      "role": "roles/nic_features_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_link_get": {
+      "definition": "nic_link_get.toml",
+      "role": "roles/nic_link_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_pause_get": {
+      "definition": "nic_pause_get.toml",
+      "role": "roles/nic_pause_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_pause_set": {
+      "definition": "nic_pause_set.toml",
+      "role": "roles/nic_pause_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_rings_get": {
+      "definition": "nic_rings_get.toml",
+      "role": "roles/nic_rings_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_rings_set": {
+      "definition": "nic_rings_set.toml",
+      "role": "roles/nic_rings_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_rss_get": {
+      "definition": "nic_rss_get.toml",
+      "role": "roles/nic_rss_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_rss_set": {
+      "definition": "nic_rss_set.toml",
+      "role": "roles/nic_rss_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "nic_stats_get": {
+      "definition": "nic_stats_get.toml",
+      "role": "roles/nic_stats_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "package_get": {
+      "definition": "package_get.toml",
+      "role": "roles/package_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "package_repository_change": {
+      "definition": "package_repository_change.toml",
+      "role": "roles/package_repository_change",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "package_repository_refresh": {
+      "definition": "package_repository_refresh.toml",
+      "role": "roles/package_repository_refresh",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "packages_install": {
+      "definition": "packages_install.toml",
+      "role": "roles/packages_install",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "packages_list": {
+      "definition": "packages_list.toml",
+      "role": "roles/packages_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "packages_remove": {
+      "definition": "packages_remove.toml",
+      "role": "roles/packages_remove",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "packages_updates_list": {
+      "definition": "packages_updates_list.toml",
+      "role": "roles/packages_updates_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "packages_upgrade": {
+      "definition": "packages_upgrade.toml",
+      "role": "roles/packages_upgrade",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "pci_device_get": {
+      "definition": "pci_device_get.toml",
+      "role": "roles/pci_device_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "pci_devices_list": {
+      "definition": "pci_devices_list.toml",
+      "role": "roles/pci_devices_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "pci_driver_binding_get": {
+      "definition": "pci_driver_binding_get.toml",
+      "role": "roles/pci_driver_binding_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "pci_iommu_group_get": {
+      "definition": "pci_iommu_group_get.toml",
+      "role": "roles/pci_iommu_group_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "pci_topology_get": {
+      "definition": "pci_topology_get.toml",
+      "role": "roles/pci_topology_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "pressure_get": {
+      "definition": "pressure_get.toml",
+      "role": "roles/pressure_get",
+      "policy_required": false,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "process_fds_list": {
+      "definition": "process_fds_list.toml",
+      "role": "roles/process_fds_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "process_get": {
+      "definition": "process_get.toml",
+      "role": "roles/process_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "processes_list": {
+      "definition": "processes_list.toml",
+      "role": "roles/processes_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "storage_device_get": {
+      "definition": "storage_device_get.toml",
+      "role": "roles/storage_device_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "storage_device_health_get": {
+      "definition": "storage_device_health_get.toml",
+      "role": "roles/storage_device_health_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "storage_devices_list": {
+      "definition": "storage_devices_list.toml",
+      "role": "roles/storage_devices_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "storage_mounts_list": {
+      "definition": "storage_mounts_list.toml",
+      "role": "roles/storage_mounts_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "storage_raid_status": {
+      "definition": "storage_raid_status.toml",
+      "role": "roles/storage_raid_status",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "sysctl_config_set": {
+      "definition": "sysctl_config_set.toml",
+      "role": "roles/sysctl_config_set",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "sysctl_get": {
+      "definition": "sysctl_get.toml",
+      "role": "roles/sysctl_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "sysctl_set_runtime": {
+      "definition": "sysctl_set_runtime.toml",
+      "role": "roles/sysctl_set_runtime",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_jobs_list": {
+      "definition": "systemd_jobs_list.toml",
+      "role": "roles/systemd_jobs_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_manager_reload": {
+      "definition": "systemd_manager_reload.toml",
+      "role": "roles/systemd_manager_reload",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_sockets_list": {
+      "definition": "systemd_sockets_list.toml",
+      "role": "roles/systemd_sockets_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_timers_list": {
+      "definition": "systemd_timers_list.toml",
+      "role": "roles/systemd_timers_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_config_read": {
+      "definition": "systemd_unit_config_read.toml",
+      "role": "roles/systemd_unit_config_read",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_dependencies": {
+      "definition": "systemd_unit_dependencies.toml",
+      "role": "roles/systemd_unit_dependencies",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_disable": {
+      "definition": "systemd_unit_disable.toml",
+      "role": "roles/systemd_unit_disable",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_enable": {
+      "definition": "systemd_unit_enable.toml",
+      "role": "roles/systemd_unit_enable",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_get": {
+      "definition": "systemd_unit_get.toml",
+      "role": "roles/systemd_unit_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_mask": {
+      "definition": "systemd_unit_mask.toml",
+      "role": "roles/systemd_unit_mask",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_reload": {
+      "definition": "systemd_unit_reload.toml",
+      "role": "roles/systemd_unit_reload",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_reset_failed": {
+      "definition": "systemd_unit_reset_failed.toml",
+      "role": "roles/systemd_unit_reset_failed",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_restart": {
+      "definition": "systemd_unit_restart.toml",
+      "role": "roles/systemd_unit_restart",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_set_runtime_limits": {
+      "definition": "systemd_unit_set_runtime_limits.toml",
+      "role": "roles/systemd_unit_set_runtime_limits",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_signal": {
+      "definition": "systemd_unit_signal.toml",
+      "role": "roles/systemd_unit_signal",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_start": {
+      "definition": "systemd_unit_start.toml",
+      "role": "roles/systemd_unit_start",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_stop": {
+      "definition": "systemd_unit_stop.toml",
+      "role": "roles/systemd_unit_stop",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_try_restart": {
+      "definition": "systemd_unit_try_restart.toml",
+      "role": "roles/systemd_unit_try_restart",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_unit_unmask": {
+      "definition": "systemd_unit_unmask.toml",
+      "role": "roles/systemd_unit_unmask",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "systemd_units_list": {
+      "definition": "systemd_units_list.toml",
+      "role": "roles/systemd_units_list",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "tcp_connect_probe": {
+      "definition": "tcp_connect_probe.toml",
+      "role": "roles/tcp_connect_probe",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    },
+    "time_sync_status": {
+      "definition": "time_sync_status.toml",
+      "role": "roles/time_sync_status",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible"
+      ]
+    }
+  }
+}

@@ -624,6 +624,15 @@ reviewed roles must not use them. Visible async metadata is rejected, including
 loop results, but public `no_log` events can hide it. Completion attests reconciled
 Runner workflow evidence, not remote quiescence, rollback or process confinement.
 
+Shipped catalog Python lives in role-owned `files/collector.py` modules. Imports
+perform no target reads, subprocess execution or mutation; a guarded entry point
+owns IO. Roles load the attested file into the existing isolated Python argv
+invocation, rather than introducing a shell or a second executor. Moving or
+editing a payload changes the reviewed role hash and requires explicit re-import.
+Fast Rust-driven tests import the actual modules and cover parsing, bounds,
+identity/reset calculations and import purity; real guest tests retain transport,
+permission, mutation and postcondition coverage.
+
 ```sh
 nix run .#role-acceptance-msrv
 ```
