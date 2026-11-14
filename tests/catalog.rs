@@ -99,6 +99,7 @@ mod tools {
     mod nic_coalesce_get;
     mod nic_coalesce_set;
     mod nic_features_get;
+    mod nic_features_set;
     mod nic_link_get;
     mod nic_pause_get;
     mod nic_pause_set;

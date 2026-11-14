@@ -628,29 +628,71 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
-## Operational catalog qualification fixture
+## Operational catalog definitions
 
-`nix build .#catalog-vm .#catalog-lab-vm` builds concrete preprovisioned EFI
-Linux guests. Every Rust acceptance scenario owns fresh private keys, writable
-disk overlays and EFI state; no workstation services, interfaces, modules,
-bootloader, host sudo policy or physical devices are changed.
+Catalog entries are individually reviewed, opt-in definitions, not automatically
+registered builtins. Each `examples/<tool>.toml` selects one role under
+`examples/roles/<tool>`, one closed input contract and one bounded typed result.
+Installing or copying the catalog never enables every tool.
 
-The main guest includes ordinary/admin identities, a real system manager with
-mutable unit-file directories, cgroups, isolated network interfaces, controlled
-boot entries, a harmless signed module and a prebuilt signed local apt repository.
-Unit directories retain operator-created links across reboot. The public test-only
-repository signing key is not a production trust root.
-Injected SSH host keys have one writer: OS key generation is disabled.
-Key-install errors go to the private guest console, never MCP output.
+| Family | Example starting points |
+|---|---|
+| Processes, pressure and approved kernel/filesystem reads | `pressure_get`, `processes_list`, `process_get`, `process_fds_list`, `sysctl_get`, `device_attributes_get`, `filesystem_usage_get` |
+| Systemd, journal and cgroups | `systemd_unit_get`, `systemd_units_list`, `journal_read`, `cgroup_stats`, `cgroup_sample` |
+| Passive networking and explicitly active probes | `network_links_list`, `network_route_lookup`, `network_sockets_list`, `dns_lookup`, `tcp_connect_probe`, `icmp_probe`, `network_path_probe` |
+| Inventory and supported NIC observations | `hardware_system_get`, `storage_devices_list`, `storage_mounts_list`, `pci_devices_list`, `nic_features_get`, `nic_stats_get` |
+| Boot and module maintenance | `boot_status`, `boot_set_oneshot`, `host_reboot`, `kernel_module_load_plan`, `kernel_module_parameter_set` |
+| Reviewed virtual-device tuning and reported health | `nic_features_set`, `nic_rings_set`, `nic_channels_set`, `nic_coalesce_set`, `nic_rss_set`, `nic_pause_get`, `nic_pause_set`, `storage_raid_status`, `storage_device_health_get` |
+| Apt convergence and repository procedures | `packages_list`, `package_get`, `packages_install`, `packages_remove`, `packages_upgrade`, `package_repository_refresh`, `package_repository_change` |
 
-The device lab has an independent management interface, isolated Virtio/e1000e
-NICs, two guest-only MD candidate disks and a virtual NVMe controller. These are
-prerequisites for explicitly scoped software-device tests, not physical-media,
-FEC/EEE, optics or arbitrary-driver qualification.
+Review the selected example and every role file before import. Provision the
+controller runtime, target Python/utilities and a private mode0700 runner root.
+Copy the role to its configured absolute path, export that tool's
+`input_schema`, `fixed_args` and `input_map` as an overlay, then run the exact
+offline `schema import-role` command in the example header. Review the snapshot
+before enabling the tool; invoke it with a logical `host` and nested `inputs`.
+
+Example unit names, interfaces, paths, module parameters, package names and
+repository identities are **reviewed fixture policies**, not production defaults.
+Adapt the closed input enums and fixed policy together. Policy fixed in role
+content also requires a content review and fresh snapshot; callers cannot replace
+it with flags, paths, environment, inventory or privilege selectors.
+
+Privileged and intentionally sensitive entries require the separately configured
+`automation:catalog` authority, never an inferred native sudo grant. Sensitive
+typed reads deliberately use `no_log=false`: binding-wide censorship would hide
+their requested projection. Approve those names independently and protect their
+private scratch; ordinary discovery/audit still excludes raw arguments/results.
+
+Unit-file enable/disable/mask/unmask use `--no-reload`: persistent links and
+manager activation are distinct effects. Use the separately approved
+`systemd_manager_reload` when intended. Runtime sysctl/network/limit changes do
+not imply persistence. Reboot scheduling is not confirmed reboot completion;
+reconcile the boot ID independently. Interrupted mutations are never replayed
+automatically and do not imply rollback.
+
+The opt-in acceptance entry point builds preprovisioned EFI guests; every
+scenario gets a fresh private disk, keys and EFI state. The signed local apt
+repository and initial database are built beforehand, not installed at boot.
+Its public test-only signing key is not a production trust root. No workstation
+interfaces, services, sysctls, modules or bootloader are changed. Only the
+fixture's key service writes injected SSH host keys; OS generation is disabled.
+Key-install errors go to the private guest console, not MCP output.
 
 ```sh
 nix run .#catalog-acceptance-msrv
+nix run .#catalog-acceptance-msrv -- tools::pressure_get::pressure_get --exact
 ```
+
+Network-free capture regressions use stdlib Python from Nix check inputs; they
+load no Ansible runtime.
+
+The isolated device lab qualifies specific software interfaces: Virtio GRO,
+RX rings, TX NAPI coalescing and reviewed Toeplitz key presets; veth RX queue
+counts; e1000e-reported pause controls; Linux MD RAID1 state; and NVMe-reported
+SMART telemetry. These are not arbitrary-driver tuning or physical-media tests.
+Physical NIC FEC/EEE, transceivers and site-specific deployment procedures remain
+unqualified and are not shipped as always-unsupported placeholders.
 
 ## Catalog policy: facts first
 
@@ -660,10 +702,10 @@ observation. Selection, filters and formatting alone are not additional insight.
 Keep distinct collectors only for useful extra data, fidelity or query/sampling semantics.
 
 The audit against Ansible Core2.21.5, ansible.posix2.2.2 and
-community.general13.4.0 makes these **planned entries facts-only**, not new
-registered tools:
+community.general13.4.0 makes these opt-in definitions facts-backed, without
+introducing second collectors:
 
-| Planned entry | Reused facts | No second collector for |
+| Binding | Reused facts | No second collector for |
 |---|---|---|
 | `systemd_unit_get` | [`systemd_service`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/systemd_service_module.html) query-only `status` | Selected per-unit properties in a fixed system/user scope; no mutation arguments |
 | `hardware_system_get` | [`setup`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/setup_module.html) DMI fields | Manufacturer/model, board and BIOS versions |
@@ -679,7 +721,7 @@ exclude raw event/context/environment data and undeclared identifiers. Setup
 filtering limits returned keys, not every internal probe. Mount facts must select
 current sources rather than silently mixing fstab with live mounts. Package
 prerequisites are preprovisioned: no dependency install or repository refresh.
-These recipes still need their planned real-target qualification before shipping.
+The catalog acceptance suite exercises these bindings against real guest state.
 
 For query-only unit status, omit `state`, `enabled` and `masked`, and fix daemon
 reload/reexec flags false. Do not use `enabled=false` or `masked=false` as a
