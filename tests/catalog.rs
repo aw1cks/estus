@@ -31,6 +31,7 @@ mod tools {
     mod icmp_probe;
     mod network_address_add;
     mod network_address_remove;
+    mod network_addresses_list;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
