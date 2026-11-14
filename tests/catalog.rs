@@ -102,6 +102,7 @@ mod tools {
     mod nic_rss_get;
     mod nic_stats_get;
     mod package_get;
+    mod packages_install;
     mod packages_list;
     mod packages_updates_list;
     mod pci_device_get;

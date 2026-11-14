@@ -1,0 +1,18 @@
+---
+argument_specs:
+  main:
+    short_description: Single-package install with exact version, hold checks, closed dependency plan and independent postcondition; interrupted execution is never replayed.
+    options:
+      target_python:
+        type: path
+        required: true
+      approved_packages:
+        type: list
+        required: true
+        elements: str
+      package:
+        type: str
+        required: true
+      version:
+        type: str
+        required: true
