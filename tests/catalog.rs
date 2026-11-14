@@ -106,6 +106,7 @@ mod tools {
     mod packages_list;
     mod packages_remove;
     mod packages_updates_list;
+    mod packages_upgrade;
     mod pci_device_get;
     mod pci_devices_list;
     mod pci_driver_binding_get;
