@@ -1,0 +1,11 @@
+---
+argument_specs:
+  main:
+    short_description: cgroup_stats reviewed bounded operation
+    options:
+      target_python:
+        type: path
+        required: true
+      approved_root:
+        type: str
+        required: true
