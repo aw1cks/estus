@@ -142,6 +142,7 @@ mod tools {
     mod systemd_unit_start;
     mod systemd_unit_stop;
     mod systemd_unit_try_restart;
+    mod systemd_unit_unmask;
     mod tcp_connect_probe;
     mod time_sync_status;
 }
