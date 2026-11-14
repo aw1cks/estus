@@ -1,0 +1,19 @@
+---
+argument_specs:
+  main:
+    short_description: Observe bounded Linux CPU counters and raw topology identifiers
+    options:
+      target_python:
+        type: path
+        required: true
+        description: Operator-fixed absolute target Python interpreter; never caller-selected.
+      limit:
+        type: int
+        required: false
+        default: 8
+        description: Maximum topology rows, from 1 through 16; does not limit the observed CPU count.
+      sample_ms:
+        type: int
+        required: false
+        default: 0
+        description: Requested sampling delay from 0 through 2000 milliseconds; zero reads counters once.

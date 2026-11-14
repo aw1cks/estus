@@ -657,6 +657,101 @@ fixture. Set `ESTUS_TEST_FIXTURE` to the three-file
 `ssh-automation-fixture-image` artifact and `DOCKER_HOST` to the explicit
 Docker-compatible backend. No host account, service or sudo policy is changed.
 
+## Opt-in Linux CPU counters and topology
+
+[`examples/cpu_stats.toml`](examples/cpu_stats.toml) enables only the reviewed
+[`cpu_stats` role](examples/roles/cpu_stats), using the existing ordinary Ansible
+automation authority and actions-only profile. It is not enabled by default.
+Install the wheel's `ansible` extra or provision the Nix automation runtime, and
+install `/usr/bin/python3` on the Linux target. No packages are installed by the
+tool, and no sudo, service, sysctl or CPU hotplug operations are performed.
+
+Deploy the reviewed role to `/etc/estus/roles/cpu_stats`, configure the
+`server-ordinary` SSH alias, identity and host-key policy, and provision
+`/var/lib/estus/runner` mode0700 owned by the MCP account. Both automation Python
+and the isolated collector are operator-fixed to `/usr/bin/python3`; change both
+settings together if necessary. For native/Nix commands, set
+`ESTUS_ANSIBLE_RUNTIME` to the provisioned automation runtime directory; the wheel
+launcher can select its already-provisioned `ansible` environment.
+Import the exact overlay offline, then review the generated snapshot before
+enabling the tool (no preapproved snapshot is shipped):
+
+```sh
+cat > cpu_stats.overlay.json <<'JSON'
+{"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{"limit":{"type":"integer","minimum":1,"maximum":16},"sample_ms":{"type":"integer","minimum":0,"maximum":2000}}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{"limit":"limit","sample_ms":"sample_ms"}}
+JSON
+estus schema import-role cpu_stats \
+  --role-path /etc/estus/roles/cpu_stats \
+  --overlay cpu_stats.overlay.json \
+  --output /etc/estus/cpu_stats.schema.json
+estus --config examples/cpu_stats.toml
+```
+
+The example permits only `server`, read effects and a20-second execution budget.
+The closed caller domain accepts optional `limit` (1–16 topology rows) and
+`sample_ms` (0–2000 milliseconds). Omission is resolved by the role to8 and0,
+not by injecting JSON-schema defaults. Empty input reads counters once; sampling
+is explicit:
+
+```json
+{"host":"server","inputs":{}}
+{"host":"server","inputs":{"limit":2,"sample_ms":100}}
+```
+
+The typed result contains `system="Linux"`, `scope="procfs_sysfs_view"`,
+`observed_at`, `clock_ticks_per_second`, `online_cpu_count`, `counters`,
+`topology`, `topology_truncated` and `unavailable`, with optional `boot_id`.
+The ten aggregate counters are raw Linux USER_HZ clock ticks: `user`, `nice`,
+`system`, `idle`, `iowait`, `irq`, `softirq`, `steal`, `guest`, `guest_nice`.
+`clock_ticks_per_second` is the target's actual `SC_CLK_TCK`, not an assumed100.
+Guest time is already included in user time, and guest_nice in nice; adding these
+again double-counts it. No utilization, percentages, rates or load are invented.
+All numeric observations are checked bounded integers. Unsupported/incomplete
+aggregate fields and malformed readable data fail, rather than becoming zero.
+
+With positive `sample_ms`, exactly two counter observations and one sleep produce
+`counters` (first), `counters_end` (second), actual `sample_elapsed_ns`,
+`counter_decrease` and `identity_changed`. Elapsed monotonic time is measured at
+the observations, not copied from the requested delay; scheduling can extend it.
+`delta` is emitted only if both boot IDs are known and equal, CPU-ID sets match,
+and all ten counters are nondecreasing. Otherwise it is omitted and named in
+`unavailable`; negative differences are never clamped. Linux `iowait` can
+legitimately decrease, so a decrease is not proof of reboot/reset.
+`identity_changed` means the CPU-ID set changed or two known boot IDs differ;
+a missing boot ID is unavailable, not proof of identity change. `boot_id`
+describes the final observation when available; `unavailable` names `boot_id`
+if the final boot-ID read was unavailable. An unsampled result has none of
+the elapsed/end/delta/decrease/identity fields.
+
+Topology uses sorted logical CPU IDs from the final `/proc/stat` observation,
+bounded by `limit`; `online_cpu_count` counts that whole view, not just returned
+rows. Rows contain `cpu_id`, optional raw sysfs `package_id` and `core_id`, and
+`unavailable`. Unreadable or negative kernel sentinel IDs are omitted and named
+there. Kernel IDs/defaults are not asserted physical socket/core counts.
+The collector bounds each proc CPU line to4096 bytes, the CPU prefix to262144
+bytes and CPU rows to4096 (IDs at most262143), stopping before parsing non-CPU rows such as interrupts.
+Boot-ID and individual topology reads are each bounded to128 bytes.
+
+`observed_at` is UTC at the final counter observation, not an atomic snapshot
+with boot ID or later topology reads. Procfs/sysfs may expose host/global CPUs
+even when the process/container is constrained: these are not affinity, cpuset,
+quota, available-capacity or isolation measurements. Missing values remain
+unknown; no caller paths, code, environment, runtime or privilege controls exist.
+The projection exposes no raw command output, proc contents, interpreter or
+private paths, and retains normal execution/change/completion/cleanup evidence.
+It is bounded to4096 bytes,256 items and depth5. `topology_truncated` describes
+only the requested row limit; the projection status is authoritative if its
+aggregate byte/item budget truncates output. The logical IDs/global count still
+describe the observed view, not an effective CPU allowance.
+The role reports no persistent changes; normal transient target work and private
+controller scratch still follow the automation cleanup contract.
+
+`nix run .#cpu-stats-acceptance-msrv` exercises both observation modes against
+the explicit Linux automation fixture (`ESTUS_TEST_FIXTURE`, `DOCKER_HOST`).
+Accounting and topology semantics follow the kernel's
+[/proc documentation](https://docs.kernel.org/filesystems/proc.html) and
+[CPU topology ABI](https://docs.kernel.org/admin-guide/cputopology.html).
+
 ## Fixed ordinary Ansible playbooks
 
 Review a deployed project without parsing or executing its YAML:

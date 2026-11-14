@@ -1867,6 +1867,781 @@ async fn real_host_summary_acceptance() -> Result<()> {
     cleanup
 }
 
+const CPU_FIELDS: [&str; 10] = [
+    "user",
+    "nice",
+    "system",
+    "idle",
+    "iowait",
+    "irq",
+    "softirq",
+    "steal",
+    "guest",
+    "guest_nice",
+];
+const CPU_JSON_MAX: u64 = 9_007_199_254_740_991;
+
+struct CpuObservation {
+    counters: Vec<u64>,
+    ids: Vec<u64>,
+    hz: u64,
+    boot: Option<String>,
+    utc: String,
+    topology: std::collections::BTreeMap<u64, [Option<u64>; 2]>,
+}
+
+// Direct SSH returns raw kernel text. Parsing and all comparisons happen here,
+// independently of Ansible and the shipped Python collector.
+async fn observe_cpu_stats(fixture: &isolated::Fixture) -> Result<CpuObservation> {
+    // The fixture already supplies target Python, but not awk/getconf. This
+    // independent observer returns raw file text; Rust parses the observations.
+    let script = r#"
+import datetime, os, sys
+print('UTC')
+print(datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+print('UID')
+print(os.geteuid())
+print('HZ')
+print(os.sysconf('SC_CLK_TCK'))
+print('BOOT')
+try:
+    with open('/proc/sys/kernel/random/boot_id') as source:
+        print(source.read(128).strip())
+except OSError:
+    print()
+print('\nSTAT')
+labels = []
+with open('/proc/stat') as source:
+    for line in source:
+        if not line.startswith('cpu'):
+            break
+        sys.stdout.write(line)
+        label = line.split()[0]
+        if label != 'cpu':
+            labels.append(label[3:])
+print('TOPOLOGY')
+for label in labels[:16]:
+    for field in ('physical_package_id', 'core_id'):
+        print(label, end=' ')
+        try:
+            with open('/sys/devices/system/cpu/cpu%s/topology/%s' % (label, field)) as source:
+                print(source.read(128).strip())
+        except OSError:
+            print('missing')
+"#;
+    let output = fixture
+        .direct(
+            "plain",
+            &format!("/usr/bin/python3 -I -c {}", support::quote(script),),
+        )
+        .await?;
+    ensure!(
+        output.status.success(),
+        "independent CPU SSH observation failed"
+    );
+    let raw = std::str::from_utf8(&output.stdout)?;
+    let (header, rest) = raw.split_once("\nSTAT\n").context("raw proc/stat marker")?;
+    let (stat, topology) = rest.split_once("TOPOLOGY\n").context("raw sysfs marker")?;
+    let mut header = header.lines();
+    ensure!(header.next() == Some("UTC"), "raw UTC marker");
+    let utc = header.next().context("raw UTC")?.to_owned();
+    ensure!(
+        header.next() == Some("UID") && header.next() == Some("1000"),
+        "CPU observer did not use ordinary SSH authority"
+    );
+    ensure!(header.next() == Some("HZ"), "raw HZ marker");
+    let hz: u64 = header.next().context("raw HZ")?.parse()?;
+    ensure!(
+        (1..=1_000_000).contains(&hz),
+        "independent HZ outside bounds"
+    );
+    ensure!(header.next() == Some("BOOT"), "raw boot marker");
+    let boot = header
+        .next()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned);
+    if let Some(boot) = &boot {
+        ensure!(
+            boot.len() == 36
+                && boot.bytes().enumerate().all(|(index, byte)| {
+                    if [8, 13, 18, 23].contains(&index) {
+                        byte == b'-'
+                    } else {
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                    }
+                }),
+            "independent boot ID is not canonical"
+        );
+    }
+    let mut lines = stat.lines();
+    let mut aggregate = lines
+        .next()
+        .context("raw aggregate CPU row")?
+        .split_whitespace();
+    ensure!(aggregate.next() == Some("cpu"), "raw aggregate CPU label");
+    let counters = aggregate
+        .map(str::parse::<u64>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(
+        counters.len() == 10 && counters.iter().all(|n| *n <= CPU_JSON_MAX),
+        "independent aggregate counters are incomplete or unbounded"
+    );
+    let mut ids = Vec::new();
+    for row in lines {
+        let label = row.split_whitespace().next().context("raw CPU row label")?;
+        ids.push(
+            label
+                .strip_prefix("cpu")
+                .context("raw CPU prefix")?
+                .parse::<u64>()?,
+        );
+    }
+    ids.sort_unstable();
+    ensure!(
+        !ids.is_empty()
+            && ids.len() <= 4096
+            && ids.iter().all(|id| *id <= 262143)
+            && ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "raw CPU IDs are invalid"
+    );
+    let rows: Vec<&str> = topology.lines().collect();
+    ensure!(
+        rows.len() == ids.len().min(16) * 2,
+        "raw topology rows missing"
+    );
+    let mut topology = std::collections::BTreeMap::new();
+    for (id, rows) in ids.iter().take(16).zip(rows.as_chunks::<2>().0) {
+        let mut fields = [None, None];
+        for (index, row) in rows.iter().enumerate() {
+            let (label, value) = row.split_once(' ').context("raw topology delimiter")?;
+            ensure!(label.parse::<u64>()? == *id, "raw topology CPU mismatch");
+            if value != "missing" {
+                let value: i64 = value.trim().parse()?;
+                if value >= 0 {
+                    ensure!(value <= 2_147_483_647, "raw topology ID outside bounds");
+                    fields[index] = Some(value as u64);
+                }
+            }
+        }
+        topology.insert(*id, fields);
+    }
+    Ok(CpuObservation {
+        counters,
+        ids,
+        hz,
+        boot,
+        utc,
+        topology,
+    })
+}
+
+fn cpu_counters(value: &Value) -> Result<Vec<u64>> {
+    let object = value.as_object().context("typed CPU counters object")?;
+    ensure!(
+        object.len() == CPU_FIELDS.len(),
+        "CPU counters added rates or omitted raw fields"
+    );
+    CPU_FIELDS
+        .iter()
+        .map(|field| {
+            let counter = object
+                .get(*field)
+                .and_then(Value::as_u64)
+                .context("integer CPU counter")?;
+            ensure!(
+                counter <= CPU_JSON_MAX,
+                "CPU counter exceeds JSON-safe bound"
+            );
+            Ok(counter)
+        })
+        .collect()
+}
+
+fn assert_cpu_stats(
+    value: &Value,
+    before: &CpuObservation,
+    after: &CpuObservation,
+    sample_ms: u64,
+    limit: usize,
+) -> Result<()> {
+    let object = value.as_object().context("CPU projection object")?;
+    ensure!(
+        object.values().all(|v| !v.is_null()) && serde_json::to_vec(value)?.len() <= 4096,
+        "CPU projection contains nulls or exceeds byte bound"
+    );
+    let required = [
+        "system",
+        "scope",
+        "observed_at",
+        "clock_ticks_per_second",
+        "online_cpu_count",
+        "counters",
+        "topology",
+        "topology_truncated",
+        "unavailable",
+    ];
+    let optional = [
+        "boot_id",
+        "sample_elapsed_ns",
+        "counters_end",
+        "delta",
+        "counter_decrease",
+        "identity_changed",
+    ];
+    ensure!(
+        required.iter().all(|key| object.contains_key(*key))
+            && object
+                .keys()
+                .all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str())),
+        "CPU projection fields differ from the observation contract"
+    );
+    ensure!(
+        value["system"] == "Linux" && value["scope"] == "procfs_sysfs_view",
+        "CPU view was misrepresented as host isolation or utilization"
+    );
+    ensure!(
+        before.ids == after.ids && before.boot == after.boot && before.hz == after.hz,
+        "independent CPU identities changed during acceptance"
+    );
+    ensure!(
+        value["clock_ticks_per_second"] == before.hz
+            && value["online_cpu_count"] == before.ids.len()
+            && value.get("boot_id").and_then(Value::as_str) == before.boot.as_deref(),
+        "CPU HZ, boot identity, or global logical count disagrees with independent SSH"
+    );
+    let observed = value["observed_at"].as_str().context("CPU UTC timestamp")?;
+    ensure!(
+        observed.is_ascii()
+            && observed.len() >= 20
+            && observed.len() <= 32
+            && observed.ends_with('Z')
+            && observed.as_bytes().get(10) == Some(&b'T')
+            && before.utc[..19] <= observed[..19]
+            && observed[..19] <= after.utc[..19],
+        "CPU observation timestamp falls outside independent UTC bounds"
+    );
+    let start = cpu_counters(&value["counters"])?;
+    if sample_ms == 0 {
+        for field in [
+            "sample_elapsed_ns",
+            "counters_end",
+            "delta",
+            "counter_decrease",
+            "identity_changed",
+        ] {
+            ensure!(
+                !object.contains_key(field),
+                "default CPU observation unexpectedly sampled: {field}"
+            );
+        }
+    } else {
+        let elapsed = value["sample_elapsed_ns"]
+            .as_u64()
+            .context("actual CPU sample elapsed")?;
+        ensure!(
+            (sample_ms * 1_000_000..=CPU_JSON_MAX).contains(&elapsed),
+            "CPU sampling used requested duration instead of actual elapsed time"
+        );
+    }
+    let finish = if sample_ms > 0 {
+        Some(cpu_counters(&value["counters_end"])?)
+    } else {
+        None
+    };
+    for counters in [Some(&start), finish.as_ref()].into_iter().flatten() {
+        for (index, field) in CPU_FIELDS.iter().enumerate() {
+            // Linux explicitly allows iowait to decrease; never treat it as a reset.
+            if *field != "iowait" {
+                ensure!(
+                    before.counters[index] <= counters[index]
+                        && counters[index] <= after.counters[index],
+                    "raw {field} counter is outside independent before/after bounds"
+                );
+            }
+        }
+    }
+    let mut missing = BTreeSet::new();
+    if before.boot.is_none() {
+        missing.insert("boot_id");
+    }
+    if let Some(finish) = finish {
+        let decrease = start.iter().zip(&finish).any(|(a, b)| b < a);
+        ensure!(
+            value["counter_decrease"] == decrease && value["identity_changed"] == false,
+            "CPU decrease was clamped or confused with a confirmed identity change"
+        );
+        if !decrease && before.boot.is_some() {
+            let delta = cpu_counters(&value["delta"])?;
+            for (index, field) in CPU_FIELDS.iter().enumerate() {
+                ensure!(
+                    delta[index] == finish[index] - start[index],
+                    "raw {field} delta differs from the two published observations"
+                );
+            }
+        } else {
+            ensure!(
+                !object.contains_key("delta"),
+                "CPU delta survived unknown identity or counter decrease"
+            );
+            missing.insert("delta");
+        }
+    }
+    let unavailable = value["unavailable"]
+        .as_array()
+        .context("CPU unavailable fields")?;
+    let actual: BTreeSet<&str> = unavailable
+        .iter()
+        .map(|v| v.as_str().context("CPU unavailable name"))
+        .collect::<Result<_>>()?;
+    ensure!(
+        actual == missing && actual.len() == unavailable.len() && actual.len() <= 2,
+        "CPU unavailable/omission semantics disagree"
+    );
+    let rows = value["topology"].as_array().context("CPU topology array")?;
+    ensure!(
+        rows.len() == before.ids.len().min(limit)
+            && rows.len() <= 16
+            && value["topology_truncated"] == (before.ids.len() > limit),
+        "CPU topology limit or truncation is incorrect"
+    );
+    for (row, id) in rows.iter().zip(&before.ids) {
+        let row_object = row.as_object().context("CPU topology object")?;
+        ensure!(
+            row["cpu_id"] == *id
+                && row_object
+                    .keys()
+                    .all(|key| ["cpu_id", "package_id", "core_id", "unavailable"]
+                        .contains(&key.as_str())),
+            "CPU topology is not the sorted logical-ID prefix"
+        );
+        let raw = before
+            .topology
+            .get(id)
+            .context("independent topology CPU")?;
+        ensure!(
+            after.topology.get(id) == Some(raw),
+            "independent topology changed"
+        );
+        let mut missing = BTreeSet::new();
+        for (index, field) in ["package_id", "core_id"].iter().enumerate() {
+            ensure!(
+                row.get(*field).and_then(Value::as_u64) == raw[index],
+                "raw sysfs {field} was reinterpreted or omitted"
+            );
+            if raw[index].is_none() {
+                ensure!(
+                    row.get(*field).is_none(),
+                    "unavailable topology ID was not omitted"
+                );
+                missing.insert(*field);
+            }
+        }
+        let unavailable = row["unavailable"]
+            .as_array()
+            .context("topology unavailable array")?;
+        let actual: BTreeSet<&str> = unavailable
+            .iter()
+            .map(|v| v.as_str().context("topology unavailable name"))
+            .collect::<Result<_>>()?;
+        ensure!(
+            actual == missing && actual.len() == unavailable.len() && actual.len() <= 2,
+            "topology unavailable semantics disagree"
+        );
+    }
+    Ok(())
+}
+
+async fn cpu_stats_session(
+    fixture: &isolated::Fixture,
+    workspace: &Path,
+    secrets: &[String],
+    enabled: bool,
+) -> Result<()> {
+    let mut server = WireServer::start(&fixture.config)?;
+    let result: Result<()> = async {
+        server.initialize().await?;
+        let listed = server.request(2, "tools/list", json!({})).await?;
+        host_summary_private(&listed.to_string(), secrets)?;
+        let tools = listed["result"]["tools"]
+            .as_array()
+            .context("CPU tool discovery")?;
+        let tool = tools.iter().find(|tool| tool["name"] == "cpu_stats");
+        if !enabled {
+            ensure!(tool.is_none(), "CPU tool enabled without opt-in");
+            let auth = fixture.authentication_count().await?;
+            let reply = server
+                .request(
+                    3,
+                    "tools/call",
+                    json!({
+                        "name":"cpu_stats","arguments":{"host":"plain","inputs":{}}
+                    }),
+                )
+                .await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            ensure!(
+                !reply["error"].is_null()
+                    || !reply["result"]["structuredContent"]["error"].is_null(),
+                "disabled CPU tool executed"
+            );
+            ensure!(
+                fixture.authentication_count().await? == auth
+                    && fs::read_dir(workspace)?.next().is_none(),
+                "disabled CPU tool reached SSH or scratch"
+            );
+            return Ok(());
+        }
+        let tool = tool.context("opted-in CPU tool")?;
+        let inputs = &tool["inputSchema"]["properties"]["inputs"];
+        for (name, min, max) in [("limit", 1, 16), ("sample_ms", 0, 2000)] {
+            let field = &inputs["properties"][name];
+            ensure!(
+                field["type"] == "integer" && field["minimum"] == min && field["maximum"] == max,
+                "CPU advertised {name} bounds are missing"
+            );
+        }
+        ensure!(
+            inputs["additionalProperties"] == false,
+            "CPU inputs allow undeclared controls"
+        );
+        let mut schemas = Vec::new();
+        projection_value_schemas(&tool["outputSchema"], &mut schemas);
+        ensure!(!schemas.is_empty(), "CPU output discovery is untyped");
+        for schema in schemas {
+            let fields = &schema["properties"];
+            ensure!(
+                schema["type"] == "object" && schema["additionalProperties"] == false,
+                "CPU output discovery is not a closed object"
+            );
+            for (name, min, max) in [
+                ("clock_ticks_per_second", 1, 1_000_000),
+                ("online_cpu_count", 1, 4096),
+                ("sample_elapsed_ns", 1, CPU_JSON_MAX),
+            ] {
+                ensure!(
+                    fields[name]["type"] == "integer"
+                        && fields[name]["minimum"] == min
+                        && fields[name]["maximum"] == max,
+                    "CPU advertised {name} bound is missing"
+                );
+            }
+            for (name, max) in [
+                ("system", 64),
+                ("scope", 32),
+                ("observed_at", 32),
+                ("boot_id", 36),
+            ] {
+                ensure!(
+                    fields[name]["type"] == "string" && fields[name]["maxLength"] == max,
+                    "CPU advertised {name} string bound is missing"
+                );
+            }
+            ensure!(
+                fields["boot_id"]["minLength"] == 36,
+                "CPU boot identity is unbounded"
+            );
+            for name in ["topology_truncated", "counter_decrease", "identity_changed"] {
+                ensure!(
+                    fields[name]["type"] == "boolean",
+                    "CPU advertised {name} flag is untyped"
+                );
+            }
+            for name in ["counters", "counters_end", "delta"] {
+                let counters = &fields[name];
+                ensure!(
+                    counters["type"] == "object" && counters["additionalProperties"] == false,
+                    "CPU advertised {name} is not a closed counter object"
+                );
+                let required = counters["required"]
+                    .as_array()
+                    .context("required raw CPU fields")?;
+                for field in CPU_FIELDS {
+                    ensure!(
+                        counters["properties"][field]["type"] == "integer"
+                            && counters["properties"][field]["minimum"] == 0
+                            && counters["properties"][field]["maximum"] == CPU_JSON_MAX
+                            && required.contains(&json!(field)),
+                        "CPU advertised {name}.{field} bounds are missing"
+                    );
+                }
+            }
+            let topology = &fields["topology"];
+            let row = &topology["items"];
+            ensure!(
+                topology["type"] == "array"
+                    && topology["maxItems"] == 16
+                    && row["type"] == "object"
+                    && row["additionalProperties"] == false,
+                "CPU advertised topology is not bounded and typed"
+            );
+            for (name, max) in [
+                ("cpu_id", 262143),
+                ("package_id", 2_147_483_647),
+                ("core_id", 2_147_483_647),
+            ] {
+                ensure!(
+                    row["properties"][name]["type"] == "integer"
+                        && row["properties"][name]["minimum"] == 0
+                        && row["properties"][name]["maximum"] == max,
+                    "CPU advertised topology {name} bound is missing"
+                );
+            }
+            for unavailable in [&fields["unavailable"], &row["properties"]["unavailable"]] {
+                ensure!(
+                    unavailable["type"] == "array"
+                        && unavailable["maxItems"] == 2
+                        && unavailable["uniqueItems"] == true
+                        && unavailable["items"]["type"] == "string"
+                        && unavailable["items"]["maxLength"] == 16,
+                    "CPU advertised unavailable fields are unbounded"
+                );
+            }
+        }
+        let auth = fixture.authentication_count().await?;
+        let mut invalid = Vec::new();
+        for inputs in [
+            json!([]),
+            json!({"limit":0}),
+            json!({"limit":17}),
+            json!({"limit":1.5}),
+            json!({"limit":"2"}),
+            json!({"limit":true}),
+            json!({"limit":null}),
+            json!({"sample_ms":-1}),
+            json!({"sample_ms":2001}),
+            json!({"sample_ms":0.5}),
+            json!({"sample_ms":"100"}),
+            json!({"sample_ms":false}),
+            json!({"sample_ms":null}),
+            json!({"target_python":"/tmp/CPU_PRIVATE_OVERRIDE_1d37"}),
+            json!({"extra_vars":{"ansible_connection":"local"}}),
+            json!({"ansible_ssh_common_args":"CPU_PRIVATE_OVERRIDE_1d37"}),
+            json!({"transport":{"destination":"CPU_UNDECLARED_TARGET_5e61"}}),
+            json!({"retain_output":true}),
+            json!({"environment":{"CPU_PRIVATE_OVERRIDE_1d37":"1"}}),
+        ] {
+            invalid.push(json!({"host":"plain","inputs":inputs}));
+        }
+        for extra in [
+            json!({"authority":"automation:ops"}),
+            json!({"become":true}),
+            json!({"retention":"keep"}),
+            json!({"retain_workspace":true}),
+            json!({"retain_output":true}),
+            json!({"extra_vars":{"ansible_connection":"local"}}),
+            json!({"role_path":"/tmp/CPU_PRIVATE_OVERRIDE_1d37"}),
+            json!({"transport":{"destination":"CPU_UNDECLARED_TARGET_5e61"}}),
+            json!({"runtime":"/tmp/CPU_PRIVATE_OVERRIDE_1d37"}),
+        ] {
+            let mut arguments = json!({"host":"plain","inputs":{}});
+            arguments
+                .as_object_mut()
+                .context("CPU rejected controls")?
+                .extend(extra.as_object().context("CPU extra controls")?.clone());
+            invalid.push(arguments);
+        }
+        for host in ["nosftp", "CPU_UNDECLARED_TARGET_5e61"] {
+            invalid.push(json!({"host":host,"inputs":{}}));
+        }
+        for (index, arguments) in invalid.into_iter().enumerate() {
+            let reply = server
+                .request(
+                    10 + index as u64,
+                    "tools/call",
+                    json!({"name":"cpu_stats","arguments":arguments}),
+                )
+                .await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            let error = &reply["result"]["structuredContent"]["error"];
+            ensure!(
+                reply["error"]["code"] == -32602
+                    || (!error.is_null() && error["remote_state_unknown"] == false),
+                "invalid CPU controls or target reached execution: {reply}"
+            );
+            ensure!(
+                fs::read_dir(workspace)?.next().is_none(),
+                "invalid CPU call created scratch"
+            );
+        }
+        ensure!(
+            fixture.authentication_count().await? == auth,
+            "invalid CPU call reached SSH"
+        );
+        for (id, inputs, sample_ms, limit) in [
+            (100, json!({}), 0, 8),
+            (101, json!({"sample_ms":100,"limit":2}), 100, 2),
+        ] {
+            let before = observe_cpu_stats(fixture).await?;
+            let reply = server
+                .request(
+                    id,
+                    "tools/call",
+                    json!({"name":"cpu_stats","arguments":{"host":"plain","inputs":inputs}}),
+                )
+                .await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            ensure!(reply["error"].is_null(), "CPU MCP call rejected: {reply}");
+            let envelope = &reply["result"]["structuredContent"];
+            verified_role(envelope, "successful", json!(false))?;
+            ensure!(
+                envelope["error"].is_null()
+                    && envelope["data"]["runner_rc"] == 0
+                    && envelope["data"]["tasks"]["failed"] == 0
+                    && envelope["data"]["tasks"]["unreachable"] == 0
+                    && envelope["data"]["host"] == "plain"
+                    && envelope["data"]["projection"]["status"] == "complete",
+                "ordinary CPU observation lost completion/change/cleanup evidence: {reply}"
+            );
+            ensure!(
+                envelope["data"].get("stdout").is_none()
+                    && envelope["data"].get("stderr").is_none(),
+                "CPU observation exposed raw command streams"
+            );
+            ensure!(
+                fs::read_dir(workspace)?.next().is_none(),
+                "CPU workspace survived completion"
+            );
+            let after = observe_cpu_stats(fixture).await?;
+            let value = &envelope["data"]["projection"]["value"];
+            projection_safe_keys(value)?;
+            assert_cpu_stats(value, &before, &after, sample_ms, limit)?;
+        }
+        Ok(())
+    }
+    .await;
+    // Drain audit and await the owned process group even when an assertion fails.
+    let stopped = server.stop(None).await;
+    let log = stopped?;
+    host_summary_private(&log.text(), secrets)?;
+    ensure!(
+        fs::read_dir(workspace)?.next().is_none(),
+        "CPU workspace survived shutdown"
+    );
+    result
+}
+
+/// cargo test --test automation_exec real_cpu_stats_acceptance -- --ignored --exact --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Automation Nix fixture artifact, explicit DOCKER_HOST and pinned Runner runtime"]
+async fn real_cpu_stats_acceptance() -> Result<()> {
+    let runtime = fs::canonicalize(
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
+    )?;
+    let private = tempfile::Builder::new()
+        .prefix("cpu-stats-private-")
+        .tempdir()?;
+    fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))?;
+    let workspace = private.path().join("workspaces");
+    fs::create_dir(&workspace)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
+    let result: Result<()> = async {
+        let mut example: toml::Value = toml::from_str(include_str!("../examples/cpu_stats.toml"))?;
+        let role = private.path().join("roles/cpu_stats");
+        for (file, source) in [
+            (
+                "meta/argument_specs.yml",
+                include_str!("../examples/roles/cpu_stats/meta/argument_specs.yml"),
+            ),
+            (
+                "tasks/main.yml",
+                include_str!("../examples/roles/cpu_stats/tasks/main.yml"),
+            ),
+        ] {
+            let path = role.join(file);
+            fs::create_dir_all(path.parent().context("CPU role asset parent")?)?;
+            fs::write(path, source)?;
+        }
+        let snapshot = private.path().join("cpu_stats.schema.json");
+        let mut overlay = json!({});
+        for key in ["input_schema", "fixed_args", "input_map"] {
+            overlay[key] = serde_json::to_value(&example["tools"]["cpu_stats"][key])?;
+        }
+        let overlay_path = private.path().join("cpu_stats.overlay.json");
+        fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+        config.insert(
+            "automation".into(),
+            table(json!({"runtime":text(&runtime)?}))?,
+        );
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut import = support::server_command(&fixture.config)?;
+        import
+            .args(["schema", "import-role", "cpu_stats"])
+            .arg("--role-path")
+            .arg(&role)
+            .arg("--output")
+            .arg(&snapshot)
+            .arg("--overlay")
+            .arg(&overlay_path);
+        let imported = support::run(&mut import).await?;
+        ensure!(
+            imported.status.success(),
+            "installed CPU importer failed: {}",
+            String::from_utf8_lossy(&imported.stdout)
+        );
+        let report: Value = serde_json::from_slice(&imported.stdout)?;
+        ensure!(
+            report["binding_validated"] == true,
+            "CPU role overlay was not reviewed"
+        );
+        let tool = example["tools"]["cpu_stats"]
+            .as_table_mut()
+            .context("CPU binding table")?;
+        let execution = tool
+            .get_mut("execution")
+            .and_then(toml::Value::as_table_mut)
+            .context("CPU execution table")?;
+        execution.insert("snapshot".into(), text(&snapshot)?.into());
+        execution.insert("role_path".into(), text(&role)?.into());
+        tool.insert("targets".into(), table(json!(["plain"]))?);
+        config.insert("tools".into(), example["tools"].clone());
+        let mut automation = example["automation"]
+            .as_table()
+            .context("CPU automation table")?
+            .clone();
+        automation.insert("runtime".into(), text(&runtime)?.into());
+        automation.insert("workspace_root".into(), text(&workspace)?.into());
+        automation.insert("ssh_executable".into(), text(&fixture.ssh)?.into());
+        automation.insert(
+            "targets".into(),
+            table(json!({
+                "plain":{"destination":"plain","python":"/usr/bin/python3"}
+            }))?,
+        );
+        config.insert("automation".into(), toml::Value::Table(automation));
+        config.insert("profile".into(), example["profile"].clone());
+        config.insert("enabled_tools".into(), table(json!([]))?);
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut secrets = fixture.credential_markers()?;
+        secrets.extend([
+            text(private.path())?,
+            text(&runtime)?,
+            PRIVATE.into(),
+            "/usr/bin/python3".into(),
+            "target_python".into(),
+            "/proc/stat".into(),
+            "/sys/devices/system/cpu".into(),
+            "/proc/sys/kernel/random/boot_id".into(),
+            "SC_CLK_TCK".into(),
+            "CPU_PRIVATE_OVERRIDE_1d37".into(),
+            "CPU_UNDECLARED_TARGET_5e61".into(),
+            "event_data".into(),
+            "Traceback".into(),
+        ]);
+        cpu_stats_session(&fixture, &workspace, &secrets, false).await?;
+        config.insert("enabled_tools".into(), example["enabled_tools"].clone());
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        cpu_stats_session(&fixture, &workspace, &secrets, true).await
+    }
+    .await;
+    // Container removal is awaited after import, MCP, and assertion failures too.
+    let cleanup = fixture.stop().await;
+    result?;
+    cleanup
+}
+
 /// Real broader authority, using only the public import and MCP protocol.
 /// cargo test --test automation_exec real_runner_authority_acceptance -- --ignored --exact --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
