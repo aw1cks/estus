@@ -91,6 +91,7 @@ mod tools {
     mod systemd_unit_dependencies;
     mod systemd_unit_get;
     mod systemd_unit_reset_failed;
+    mod systemd_unit_restart;
     mod tcp_connect_probe;
     mod time_sync_status;
 }
