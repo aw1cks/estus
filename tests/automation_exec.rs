@@ -1473,6 +1473,400 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
     cleanup
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostSummary {
+    system: String,
+    distribution: Option<String>,
+    distribution_version: Option<String>,
+    kernel: String,
+    architecture: String,
+    boot_id: Option<String>,
+    uptime_seconds: Option<u64>,
+    observed_at: String,
+    scope: String,
+    virtualization_type: Option<String>,
+    virtualization_role: Option<String>,
+    unavailable: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostSummaryObservation {
+    system: String,
+    kernel: String,
+    architecture: String,
+    boot_id: String,
+    uptime: f64,
+    observed_at: String,
+    os_release: Option<std::collections::BTreeMap<String, String>>,
+    local_fact_ran: bool,
+    uid: u32,
+}
+
+// Independent target observations, not Ansible facts or the role's proc parser.
+// No caller-controlled script, fact, or path is supplied to the reviewed role.
+async fn observe_host_summary(fixture: &isolated::Fixture) -> Result<HostSummaryObservation> {
+    let script = r#"
+import datetime, json, os, platform
+try:
+    release = platform.freedesktop_os_release()
+except OSError:
+    release = None
+uname = os.uname()
+with open('/proc/sys/kernel/random/boot_id') as source:
+    boot_id = source.read().strip()
+with open('/proc/uptime') as source:
+    uptime = float(source.read().split()[0])
+print(json.dumps(dict(system=uname.sysname, kernel=uname.release,
+    architecture=uname.machine, boot_id=boot_id, uptime=uptime,
+    observed_at=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    os_release=release, local_fact_ran=os.path.exists('/tmp/estus-host-summary-local-ran'),
+    uid=os.geteuid())))
+"#;
+    let output = fixture
+        .direct(
+            "plain",
+            &format!("/usr/bin/python3 -I -c {}", support::quote(script)),
+        )
+        .await?;
+    ensure!(
+        output.status.success(),
+        "independent host observation failed"
+    );
+    let observed: HostSummaryObservation = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        observed.system == "Linux"
+            && observed.uid == 1000
+            && observed.uptime.is_finite()
+            && observed.uptime > 0.0
+            && observed.uptime <= 9_007_199_254_740_991.0
+            && !observed.local_fact_ran,
+        "ordinary Linux observer/procfs or !local sentinel evidence failed"
+    );
+    Ok(observed)
+}
+
+fn host_summary_schema() -> Value {
+    json!({
+        "type":"object",
+        "properties":{
+            "system":{"type":"string","maxLength":64},
+            "distribution":{"type":"string","maxLength":128},
+            "distribution_version":{"type":"string","maxLength":128},
+            "kernel":{"type":"string","maxLength":256},
+            "architecture":{"type":"string","maxLength":64},
+            "boot_id":{"type":"string","minLength":36,"maxLength":36},
+            "uptime_seconds":{"type":"integer","minimum":0,"maximum":9007199254740991_u64},
+            "observed_at":{"type":"string","maxLength":32},
+            "scope":{"type":"string","const":"ssh_process_view","maxLength":32},
+            "virtualization_type":{"type":"string","maxLength":64},
+            "virtualization_role":{"type":"string","maxLength":5,"enum":["guest","host"]},
+            "unavailable":{"type":"array","maxItems":6,"uniqueItems":true,"items":{"type":"string","maxLength":32,"enum":[
+                "distribution","distribution_version","boot_id","uptime_seconds",
+                "virtualization_type","virtualization_role"]}}
+        },
+        "required":["system","kernel","architecture","observed_at","scope","unavailable"],
+        "additionalProperties":false
+    })
+}
+
+fn host_summary_private(bytes: &str, secrets: &[String]) -> Result<()> {
+    for secret in secrets {
+        ensure!(
+            !bytes.contains(secret),
+            "host summary discovery/reply/audit disclosed private execution data"
+        );
+    }
+    Ok(())
+}
+
+async fn host_summary_session(
+    fixture: &isolated::Fixture,
+    workspace: &Path,
+    secrets: &[String],
+    enabled: bool,
+) -> Result<()> {
+    let mut server = WireServer::start(&fixture.config)?;
+    let result: Result<()> = async {
+        server.initialize().await?;
+        let listed = server.request(2, "tools/list", json!({})).await?;
+        host_summary_private(&listed.to_string(), secrets)?;
+        let tools = listed["result"]["tools"].as_array().context("host summary tool list")?;
+        let tool = tools.iter().find(|tool| tool["name"] == "host_summary");
+        if !enabled {
+            ensure!(tool.is_none(), "host_summary was enabled without operator opt-in");
+            let authentications = fixture.authentication_count().await?;
+            let denied = server.request(3, "tools/call", json!({
+                "name":"host_summary","arguments":{"host":"plain","inputs":{}}
+            })).await?;
+            host_summary_private(&denied.to_string(), secrets)?;
+            ensure!(
+                !denied["error"].is_null()
+                    || !denied["result"]["structuredContent"]["error"].is_null(),
+                "disabled host_summary executed"
+            );
+            ensure!(
+                fixture.authentication_count().await? == authentications,
+                "disabled host_summary reached SSH"
+            );
+            return Ok(());
+        }
+        let tool = tool.context("opted-in host_summary discovery")?;
+        ensure!(
+            tool["inputSchema"]["properties"]["inputs"] == json!({
+                "type":"object","properties":{},"required":[],"additionalProperties":false
+            }),
+            "host_summary exposed caller role parameters: {tool}"
+        );
+        let mut schemas = Vec::new();
+        projection_value_schemas(&tool["outputSchema"], &mut schemas);
+        let expected_schema = host_summary_schema();
+        ensure!(
+            schemas.len() == 2 && schemas.iter().all(|schema| **schema == expected_schema),
+            "host_summary did not publish the exact bounded typed output contract: {tool}"
+        );
+        let authentications = fixture.authentication_count().await?;
+        for (index, arguments) in [
+            json!({"host":"plain","inputs":[]}),
+            json!({"host":"plain","inputs":{"target_python":"/tmp/host-summary-private-override"}}),
+            json!({"host":"plain","inputs":{"payload":"HOST_SUMMARY_PRIVATE_OVERRIDE_6b31"}}),
+            json!({"host":"plain","inputs":{"gather_subset":["all"]}}),
+            json!({"host":"plain","inputs":{"fact_path":"/tmp/host-summary-private-override"}}),
+            json!({"host":"plain","inputs":{},"authority":"automation:ops"}),
+            json!({"host":"plain","inputs":{},"become":true}),
+            json!({"host":"plain","inputs":{},"role_path":"/tmp/host-summary-private-override"}),
+            json!({"host":"plain","inputs":{},"target_python":"/tmp/host-summary-private-override"}),
+            json!({"host":"plain","inputs":{},"fixed_args":{"target_python":"/tmp/host-summary-private-override"}}),
+            json!({"host":"plain","inputs":{},"input_map":{"payload":"target_python"}}),
+            json!({"host":"plain","inputs":{},"extra_vars":{"ansible_connection":"local"}}),
+            json!({"host":"plain","inputs":{},"ansible_connection":"local"}),
+            json!({"host":"plain","inputs":{},"argv":["/tmp/host-summary-private-override"]}),
+        ].into_iter().enumerate() {
+            let reply = server.request(10 + index as u64, "tools/call", json!({
+                "name":"host_summary","arguments":arguments
+            })).await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            ensure!(
+                reply["error"]["code"] == -32602
+                    || (reply["result"]["structuredContent"]["error"]["code"] == "invalid_argument"
+                        && reply["result"]["structuredContent"]["error"]["remote_state_unknown"] == false),
+                "malformed host_summary control reached execution: {reply}"
+            );
+            ensure!(fs::read_dir(workspace)?.next().is_none(), "rejected call created scratch");
+        }
+        for host in ["nosftp", "HOST_SUMMARY_UNDECLARED_TARGET_12b8"] {
+            let reply = server.request(30 + u64::from(host == "nosftp"), "tools/call", json!({
+                "name":"host_summary","arguments":{"host":host,"inputs":{}}
+            })).await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            let error = &reply["result"]["structuredContent"]["error"];
+            ensure!(
+                reply["error"]["code"] == -32602
+                    || (!error.is_null() && error["remote_state_unknown"] == false),
+                "undeclared host_summary target reached execution: {reply}"
+            );
+        }
+        ensure!(
+            fixture.authentication_count().await? == authentications,
+            "invalid controls or undeclared targets reached SSH"
+        );
+        let before = observe_host_summary(fixture).await?;
+        let response = server.request(40, "tools/call", json!({
+            "name":"host_summary","arguments":{"host":"plain","inputs":{}}
+        })).await?;
+        host_summary_private(&response.to_string(), secrets)?;
+        ensure!(response["error"].is_null(), "host_summary MCP rejection: {response}");
+        let envelope = &response["result"]["structuredContent"];
+        verified_role(envelope, "successful", json!(false))?;
+        ensure!(
+            envelope["error"].is_null()
+                && envelope["data"]["runner_rc"] == 0
+                && envelope["data"]["tasks"]["failed"] == 0
+                && envelope["data"]["tasks"]["unreachable"] == 0
+                && envelope["data"]["host"] == "plain"
+                && envelope["data"]["projection"]["status"] == "complete",
+            "host_summary lost completion/change/cleanup evidence: {response}"
+        );
+        ensure!(fs::read_dir(workspace)?.next().is_none(), "workspace survived reply");
+        let after = observe_host_summary(fixture).await?;
+        let value = &envelope["data"]["projection"]["value"];
+        projection_safe_keys(value)?;
+        ensure!(
+            value.as_object().context("flat host_summary value")?.values().all(|value| !value.is_null())
+                && serde_json::to_vec(value)?.len() <= 4096,
+            "host_summary projection was not exact and bounded"
+        );
+        let summary: HostSummary = serde_json::from_value(value.clone())?;
+        let missing: BTreeSet<&str> = [
+            "distribution", "distribution_version", "boot_id", "uptime_seconds",
+            "virtualization_type", "virtualization_role",
+        ].into_iter().filter(|field| value.get(*field).is_none()).collect();
+        let unavailable: BTreeSet<&str> = summary.unavailable.iter().map(String::as_str).collect();
+        ensure!(
+            unavailable == missing && unavailable.len() == summary.unavailable.len()
+                && summary.unavailable.len() <= 6
+                && value.as_object().context("host summary fields")?.len() == 12 - missing.len(),
+            "unknown host fields were not omitted and accounted for exactly once"
+        );
+        ensure!(
+            summary.system == before.system && summary.system == after.system
+                && summary.kernel == before.kernel && summary.kernel == after.kernel
+                && summary.architecture == before.architecture && summary.architecture == after.architecture
+                && summary.boot_id.as_deref() == Some(before.boot_id.as_str())
+                && before.boot_id == after.boot_id
+                && summary.scope == "ssh_process_view",
+            "summary disagrees with independent SSH uname/procfs observations"
+        );
+        let boot_id = summary.boot_id.as_deref().context("real positive boot ID")?;
+        ensure!(
+            boot_id.len() == 36 && boot_id.bytes().enumerate().all(|(index, byte)| {
+                if [8, 13, 18, 23].contains(&index) { byte == b'-' }
+                else { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) }
+            }),
+            "boot ID is not canonical"
+        );
+        let uptime = summary.uptime_seconds.context("real positive proc uptime")?;
+        ensure!(
+            uptime > 0 && uptime <= 9_007_199_254_740_991
+                && before.uptime.floor() as u64 <= uptime
+                && uptime <= after.uptime.floor() as u64,
+            "summary uptime is outside independent finite SSH observation bounds"
+        );
+        ensure!(
+            summary.observed_at.len() == 20
+                && summary.observed_at.ends_with('Z')
+                && before.observed_at <= summary.observed_at
+                && summary.observed_at <= after.observed_at,
+            "collection timestamp is outside target UTC observation bounds"
+        );
+        if let Some(release) = &before.os_release {
+            ensure!(after.os_release.as_ref() == Some(release), "target OS identity changed");
+            if let Some(name) = release.get("NAME") {
+                ensure!(summary.distribution.as_deref() == Some(name.as_str()),
+                    "distribution disagrees with independent os-release NAME");
+            }
+            if let Some(version) = release.get("VERSION_ID") {
+                ensure!(summary.distribution_version.as_deref() == Some(version.as_str()),
+                    "distribution version disagrees with independent os-release VERSION_ID");
+            }
+        }
+        for (value, max) in [
+            (Some(&summary.system), 64), (summary.distribution.as_ref(), 128),
+            (summary.distribution_version.as_ref(), 128), (Some(&summary.kernel), 256),
+            (Some(&summary.architecture), 64), (summary.virtualization_type.as_ref(), 64),
+        ] {
+            ensure!(value.is_none_or(|value| !value.is_empty() && value.chars().count() <= max),
+                "host_summary text violates its field bound");
+        }
+        // Virtualization is an optional setup hint, never an isolation assertion.
+        ensure!(
+            summary.virtualization_type.as_deref() != Some("NA")
+                && matches!(summary.virtualization_role.as_deref(), None | Some("guest" | "host")),
+            "unavailable virtualization hint was presented as an attestation"
+        );
+        Ok(())
+    }.await;
+    // EOF and awaited shutdown/audit draining also happen on any failed assertion.
+    let stopped = server.stop(None).await;
+    let log = stopped?;
+    host_summary_private(&log.text(), secrets)?;
+    ensure!(
+        fs::read_dir(workspace)?.next().is_none(),
+        "workspace survived shutdown"
+    );
+    result
+}
+
+/// cargo test --test automation_exec real_host_summary_acceptance -- --ignored --exact --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Automation Nix fixture artifact, explicit DOCKER_HOST and pinned Runner runtime"]
+async fn real_host_summary_acceptance() -> Result<()> {
+    let runtime = fs::canonicalize(
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
+    )?;
+    let private = tempfile::Builder::new()
+        .prefix("host-summary-private-")
+        .tempdir()?;
+    fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))?;
+    let workspace = private.path().join("workspaces");
+    fs::create_dir(&workspace)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
+    let result: Result<()> = async {
+        // Deploy the shipped role unchanged; only operator-private config paths,
+        // selected controller runtime and target alias mapping are adapted.
+        let mut example: toml::Value = toml::from_str(include_str!("../examples/host_summary.toml"))?;
+        let role = private.path().join("roles/host_summary");
+        for (file, source) in [
+            ("meta/argument_specs.yml", include_str!("../examples/roles/host_summary/meta/argument_specs.yml")),
+            ("tasks/main.yml", include_str!("../examples/roles/host_summary/tasks/main.yml")),
+        ] {
+            let path = role.join(file);
+            fs::create_dir_all(path.parent().context("role asset parent")?)?;
+            fs::write(path, source)?;
+        }
+        let snapshot = private.path().join("host_summary.schema.json");
+        let mut overlay = json!({});
+        for key in ["input_schema", "fixed_args", "input_map"] {
+            overlay[key] = serde_json::to_value(&example["tools"]["host_summary"][key])?;
+        }
+        let overlay_path = private.path().join("host_summary.overlay.json");
+        fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+        config.insert("automation".into(), table(json!({"runtime":text(&runtime)?}))?);
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut import = support::server_command(&fixture.config)?;
+        import.args(["schema", "import-role", "host_summary"])
+            .arg("--role-path").arg(&role)
+            .arg("--output").arg(&snapshot)
+            .arg("--overlay").arg(&overlay_path);
+        let imported = support::run(&mut import).await?;
+        ensure!(imported.status.success(), "installed host_summary importer failed: {}",
+            String::from_utf8_lossy(&imported.stdout));
+        let report: Value = serde_json::from_slice(&imported.stdout)?;
+        ensure!(report["binding_validated"] == true, "host_summary overlay was not reviewed");
+        example["tools"]["host_summary"]["execution"]["snapshot"] = text(&snapshot)?.into();
+        example["tools"]["host_summary"]["execution"]["role_path"] = text(&role)?.into();
+        example["tools"]["host_summary"]["targets"] = table(json!(["plain"]))?;
+        config.insert("tools".into(), example["tools"].clone());
+        let mut automation = example["automation"].as_table().context("example automation table")?.clone();
+        automation.insert("runtime".into(), text(&runtime)?.into());
+        automation.insert("workspace_root".into(), text(&workspace)?.into());
+        automation.insert("ssh_executable".into(), text(&fixture.ssh)?.into());
+        automation.insert("targets".into(), table(json!({
+            "plain":{"destination":"plain","python":"/usr/bin/python3"}
+        }))?);
+        config.insert("automation".into(), toml::Value::Table(automation));
+        config.insert("profile".into(), example["profile"].clone());
+        config.insert("enabled_tools".into(), table(json!([]))?);
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        // A real executable custom fact would leave an effect if !local regressed.
+        fixture.primary_exec(
+            "mkdir -p /etc/ansible/facts.d\ncat > /etc/ansible/facts.d/host_summary_private.fact <<'FACT'\n#!/usr/bin/python3\nfrom pathlib import Path\nPath('/tmp/estus-host-summary-local-ran').touch()\nprint('{\"private\":\"HOST_SUMMARY_LOCAL_FACT_PRIVATE_2c70\"}')\nFACT\nchmod 755 /etc/ansible/facts.d/host_summary_private.fact"
+        ).await?;
+        let mut secrets = fixture.credential_markers()?;
+        secrets.extend([
+            text(private.path())?, text(&runtime)?, PRIVATE.into(),
+            "/usr/bin/python3".into(), "target_python".into(),
+            "/tmp/host-summary-private-override".into(),
+            "HOST_SUMMARY_PRIVATE_OVERRIDE_6b31".into(),
+            "HOST_SUMMARY_UNDECLARED_TARGET_12b8".into(),
+            "HOST_SUMMARY_LOCAL_FACT_PRIVATE_2c70".into(),
+            "ansible_facts".into(), "event_data".into(), "Traceback".into(),
+        ]);
+        host_summary_session(&fixture, &workspace, &secrets, false).await?;
+        config.insert("enabled_tools".into(), example["enabled_tools"].clone());
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        host_summary_session(&fixture, &workspace, &secrets, true).await
+    }.await;
+    // Always await both container removals, including import/protocol/assertion failures.
+    let cleanup = fixture.stop().await;
+    result?;
+    cleanup
+}
+
 /// Real broader authority, using only the public import and MCP protocol.
 /// cargo test --test automation_exec real_runner_authority_acceptance -- --ignored --exact --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

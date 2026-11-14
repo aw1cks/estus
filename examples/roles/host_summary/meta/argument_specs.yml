@@ -1,0 +1,9 @@
+---
+argument_specs:
+  main:
+    short_description: Observe selected Linux facts through the ordinary SSH process view
+    options:
+      target_python:
+        type: path
+        required: true
+        description: Operator-fixed absolute target Python interpreter; never caller-selected.

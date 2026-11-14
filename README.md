@@ -592,6 +592,71 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
+## Opt-in Linux host summary
+
+[`examples/host_summary.toml`](examples/host_summary.toml) binds the reviewed
+[`host_summary` role](examples/roles/host_summary) to one ordinary SSH target.
+It is not enabled by default. This is an optional Ansible automation tool, not a
+native-only observer: install the wheel's `ansible` extra or select the Nix
+automation runtime, and provision `/usr/bin/python3` on the Linux target.
+No packages are installed automatically and no privilege escalation is used.
+
+Deploy the reviewed role at `/etc/estus/roles/host_summary`, provision
+`/var/lib/estus/runner` as a private mode0700 directory owned by the MCP account,
+and configure the `server-ordinary` SSH alias, identity and host-key policy.
+The example fixes both automation Python and the proc reader to
+`/usr/bin/python3`; change both operator settings together if needed.
+For native/Nix use, set `ESTUS_ANSIBLE_RUNTIME` to the provisioned automation
+runtime directory for both commands below. The installed wheel launcher can
+instead select its already-provisioned `ansible` environment.
+Import the exact binding overlay offline before enabling the example:
+
+```sh
+cat > host_summary.overlay.json <<'JSON'
+{"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}}
+JSON
+estus schema import-role host_summary \
+  --role-path /etc/estus/roles/host_summary \
+  --overlay host_summary.overlay.json \
+  --output /etc/estus/host_summary.schema.json
+estus --config examples/host_summary.toml
+```
+
+Import does not execute the role. Review the generated snapshot; no preapproved
+snapshot is shipped. The example explicitly selects only `host_summary` in an
+actions-only profile, restricts it to `server`, and caps execution at 30 seconds.
+Its only domain input is the empty object:
+
+```json
+{"host":"server","inputs":{}}
+```
+
+The closed typed projection returns `system`, `distribution`,
+`distribution_version`, `kernel`, `architecture`, `boot_id`, `uptime_seconds`,
+`observed_at`, `scope`, `virtualization_type`, `virtualization_role` and `unavailable`, alongside
+normal execution/change/completion/cleanup evidence. There are no caller-selected
+paths, Python programs, role arguments or payload. Selective registered setup
+facts exclude local facts, environment, network and device collectors; the fixed
+isolated Python reader reads at most128 bytes from each of the two proc files.
+Unavailable optional observations are omitted and named in `unavailable`; malformed readable proc contents fail
+instead of becoming invented zeroes. Results are bounded to4096 bytes,64 items
+and depth4, and do not expose raw facts, command output or private scratch paths.
+
+`observed_at` is the setup collector's UTC timestamp, not an atomic snapshot.
+`scope="ssh_process_view"` means what the SSH process can observe: boot ID and
+uptime may be shared with a host or affected by procfs/time namespaces.
+Ansible virtualization values are heuristic hints, not complete layering or
+isolation attestation; absent/`NA` hints are unavailable, not proof of bare metal.
+Linux is required before proc reads; no other operating system is supported.
+The role reports no persistent changes, but Ansible still creates transient
+target work and private controller scratch under the normal cleanup contract.
+
+`nix run .#host-summary-acceptance-msrv` exercises the shipped role through the
+installed importer and MCP endpoint against the disposable Linux automation
+fixture. Set `ESTUS_TEST_FIXTURE` to the three-file
+`ssh-automation-fixture-image` artifact and `DOCKER_HOST` to the explicit
+Docker-compatible backend. No host account, service or sudo policy is changed.
+
 ## Fixed ordinary Ansible playbooks
 
 Review a deployed project without parsing or executing its YAML:

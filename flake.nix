@@ -42,7 +42,9 @@
                 || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
                   && pkgs.lib.hasSuffix ".py" path)
                 || path == "${toString ./.}/examples/app_config.toml"
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/app_config/" path);
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/app_config/" path
+                || path == "${toString ./.}/examples/host_summary.toml"
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/host_summary/" path);
           };
           strictDeps = true;
           doCheck = true;
@@ -121,6 +123,7 @@
               { name = "playbook-acceptance"; scenario = "real_runner_playbook_acceptance"; }
               { name = "authority-acceptance"; scenario = "real_runner_authority_acceptance"; isolated = true; }
               { name = "progress-acceptance"; scenario = "real_runner_progress_setup_acceptance"; }
+              { name = "host-summary-acceptance"; scenario = "real_host_summary_acceptance"; isolated = true; }
             ]}
           '';
       in
@@ -288,6 +291,14 @@
         apps.runner-progress-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/progress-acceptance";
+        };
+        apps.host-summary-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/host-summary-acceptance";
+        };
+        apps.host-summary-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/host-summary-acceptance";
         };
         apps.controller-scripts = {
           type = "app";
