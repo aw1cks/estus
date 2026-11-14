@@ -51,4 +51,5 @@ mod tools {
     mod process_fds_list;
     mod process_get;
     mod sysctl_get;
+    mod tcp_connect_probe;
 }
