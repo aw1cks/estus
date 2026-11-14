@@ -67,6 +67,7 @@ mod tools {
     mod network_rules_list;
     mod network_sockets_list;
     mod nic_features_get;
+    mod nic_link_get;
     mod pci_device_get;
     mod pci_devices_list;
     mod pci_driver_binding_get;
