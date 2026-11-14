@@ -30,6 +30,7 @@ mod tools {
     mod filesystem_usage_get;
     mod icmp_probe;
     mod network_address_add;
+    mod network_address_remove;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
