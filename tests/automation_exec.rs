@@ -2642,6 +2642,755 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
     cleanup
 }
 
+const MEMORY_FIELDS: [(&str, &str); 12] = [
+    ("mem_total_bytes", "MemTotal"),
+    ("mem_free_bytes", "MemFree"),
+    ("mem_available_bytes", "MemAvailable"),
+    ("buffers_bytes", "Buffers"),
+    ("cached_bytes", "Cached"),
+    ("swap_total_bytes", "SwapTotal"),
+    ("swap_free_bytes", "SwapFree"),
+    ("dirty_bytes", "Dirty"),
+    ("writeback_bytes", "Writeback"),
+    ("slab_bytes", "Slab"),
+    ("sreclaimable_bytes", "SReclaimable"),
+    ("sunreclaim_bytes", "SUnreclaim"),
+];
+const MEMORY_VM_FIELDS: [(&str, &str); 7] = [
+    ("page_faults", "pgfault"),
+    ("major_page_faults", "pgmajfault"),
+    ("swap_in_pages", "pswpin"),
+    ("swap_out_pages", "pswpout"),
+    ("oom_kill_events", "oom_kill"),
+    ("kswapd_scan_pages", "pgscan_kswapd"),
+    ("direct_scan_pages", "pgscan_direct"),
+];
+const MEMORY_JSON_MAX: u64 = 9_007_199_254_740_991;
+
+struct MemoryObservation {
+    memory_kib: std::collections::BTreeMap<String, u64>,
+    vm: std::collections::BTreeMap<String, u64>,
+    page_size: u64,
+    physical_pages: u64,
+    boot: Option<String>,
+    utc: String,
+}
+
+// This ordinary SSH observer only transports raw files and OS API results.
+// The oracle parses kernel text in Rust, not through the production collector.
+async fn observe_memory_stats(fixture: &isolated::Fixture) -> Result<MemoryObservation> {
+    let script = r#"
+import datetime, json, os
+def raw(path):
+    try:
+        with open(path, 'r', encoding='ascii') as source:
+            return source.read()
+    except OSError:
+        return None
+print(json.dumps({
+    'meminfo': raw('/proc/meminfo'),
+    'vmstat': raw('/proc/vmstat'),
+    'boot': raw('/proc/sys/kernel/random/boot_id'),
+    'page_size': os.sysconf('SC_PAGE_SIZE'),
+    'physical_pages': os.sysconf('SC_PHYS_PAGES'),
+    'uid': os.geteuid(),
+    'utc': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+}))
+"#;
+    let output = fixture
+        .direct(
+            "plain",
+            &format!("/usr/bin/python3 -I -c {}", support::quote(script)),
+        )
+        .await?;
+    ensure!(
+        output.status.success(),
+        "independent memory SSH observer failed"
+    );
+    let raw: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        raw["uid"] == 1000,
+        "memory observer used non-ordinary authority"
+    );
+    let page_size = raw["page_size"].as_u64().context("independent page size")?;
+    ensure!(
+        (1..=1_048_576).contains(&page_size),
+        "independent page size outside bounds"
+    );
+    let physical_pages = raw["physical_pages"]
+        .as_u64()
+        .context("independent physical-page count")?;
+    ensure!(
+        physical_pages > 0,
+        "independent physical-page count must be positive"
+    );
+    let boot = raw["boot"].as_str().map(|s| s.trim().to_owned());
+    if let Some(boot) = &boot {
+        ensure!(
+            boot.len() == 36
+                && boot.bytes().enumerate().all(|(i, b)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+                    }
+                }),
+            "independent memory boot identity is not canonical"
+        );
+    }
+    let meminfo = raw["meminfo"].as_str().context("independent raw meminfo")?;
+    ensure!(
+        meminfo.len() <= 131_072 && meminfo.lines().count() <= 4096,
+        "raw meminfo bounds"
+    );
+    let mut memory_kib = std::collections::BTreeMap::new();
+    for line in meminfo.lines() {
+        let Some((key, rest)) = line.split_once(':') else {
+            continue;
+        };
+        if let Some((alias, _)) = MEMORY_FIELDS.iter().find(|(_, source)| *source == key) {
+            let tokens: Vec<_> = rest.split_ascii_whitespace().collect();
+            ensure!(
+                line.len() <= 4096
+                    && tokens.len() == 2
+                    && tokens[1] == "kB"
+                    && !tokens[0].is_empty()
+                    && tokens[0].bytes().all(|b| b.is_ascii_digit()),
+                "independent selected meminfo field has invalid units or shape: {key}"
+            );
+            let kib: u64 = tokens[0].parse()?;
+            ensure!(
+                kib <= MEMORY_JSON_MAX / 1024,
+                "independent memory integer bound"
+            );
+            ensure!(
+                memory_kib.insert((*alias).to_owned(), kib).is_none(),
+                "duplicate raw memory field"
+            );
+        }
+    }
+    ensure!(
+        memory_kib.get("mem_total_bytes").is_some_and(|n| *n > 0)
+            && memory_kib.contains_key("mem_free_bytes"),
+        "independent required memory fields absent"
+    );
+    let mut vm = std::collections::BTreeMap::new();
+    if let Some(vmstat) = raw["vmstat"].as_str() {
+        ensure!(
+            vmstat.len() <= 262_144 && vmstat.lines().count() <= 4096,
+            "raw vmstat bounds"
+        );
+        for line in vmstat.lines() {
+            let mut tokens = line.split_ascii_whitespace();
+            let Some(key) = tokens.next() else { continue };
+            if let Some((alias, _)) = MEMORY_VM_FIELDS.iter().find(|(_, source)| *source == key) {
+                let digits = tokens.next().context("independent VM counter digits")?;
+                ensure!(
+                    line.len() <= 4096
+                        && tokens.next().is_none()
+                        && digits.bytes().all(|b| b.is_ascii_digit()),
+                    "independent VM counter shape"
+                );
+                let count: u64 = digits.parse()?;
+                ensure!(count <= MEMORY_JSON_MAX, "independent VM counter bound");
+                ensure!(
+                    vm.insert((*alias).to_owned(), count).is_none(),
+                    "duplicate raw VM counter"
+                );
+            }
+        }
+    }
+    Ok(MemoryObservation {
+        memory_kib,
+        vm,
+        page_size,
+        physical_pages,
+        boot,
+        utc: raw["utc"]
+            .as_str()
+            .context("independent memory UTC")?
+            .to_owned(),
+    })
+}
+
+fn assert_memory_stats(
+    value: &Value,
+    before: &MemoryObservation,
+    after: &MemoryObservation,
+) -> Result<()> {
+    let object = value.as_object().context("typed memory observation")?;
+    let required = [
+        "system",
+        "scope",
+        "observed_at",
+        "page_size_bytes",
+        "memory_bytes",
+        "vm_counters",
+        "unavailable",
+    ];
+    ensure!(
+        required.iter().all(|key| object.contains_key(*key))
+            && object
+                .keys()
+                .all(|key| required.contains(&key.as_str()) || key == "boot_id")
+            && object.values().all(|v| !v.is_null())
+            && serde_json::to_vec(value)?.len() <= 4096,
+        "memory root is incomplete, unbounded, or contains undeclared fields"
+    );
+    ensure!(
+        value["system"] == "Linux" && value["scope"] == "procfs_view",
+        "memory observation misrepresents non-atomic procfs gauges as effective container allowance"
+    );
+    ensure!(
+        before.page_size == after.page_size && before.boot == after.boot,
+        "independent page size or boot changed"
+    );
+    ensure!(
+        before.physical_pages == after.physical_pages,
+        "independent physical-page count changed during acceptance"
+    );
+    // This fixture exposes normal procfs, not a virtualized production memory
+    // view. A distinct OS API independently establishes the byte-unit oracle.
+    let physical_bytes = before
+        .physical_pages
+        .checked_mul(before.page_size)
+        .context("independent physical memory byte product overflow")?;
+    ensure!(
+        before
+            .memory_kib
+            .get("mem_total_bytes")
+            .and_then(|kib| kib.checked_mul(1024))
+            == Some(physical_bytes)
+            && after
+                .memory_kib
+                .get("mem_total_bytes")
+                .and_then(|kib| kib.checked_mul(1024))
+                == Some(physical_bytes)
+            && value["memory_bytes"]["mem_total_bytes"].as_u64() == Some(physical_bytes),
+        "stable MemTotal bytes disagree with independent physical pages times page size"
+    );
+    ensure!(
+        value["page_size_bytes"].as_u64() == Some(before.page_size)
+            && value.get("boot_id").and_then(Value::as_str) == before.boot.as_deref(),
+        "memory page size or boot differs from independent OS APIs"
+    );
+    if before.boot.is_none() {
+        ensure!(
+            value.get("boot_id").is_none(),
+            "unknown memory boot was not omitted"
+        );
+    }
+    let observed = value["observed_at"].as_str().context("memory timestamp")?;
+    ensure!(
+        observed.is_ascii()
+            && (20..=32).contains(&observed.len())
+            && observed.ends_with('Z')
+            && observed.as_bytes().get(10) == Some(&b'T')
+            && before.utc[..19] <= observed[..19]
+            && observed[..19] <= after.utc[..19],
+        "memory collection-end UTC outside independent observations"
+    );
+    let mut missing = BTreeSet::new();
+    for (group, fields, start, end) in [
+        (
+            "memory_bytes",
+            MEMORY_FIELDS.as_slice(),
+            &before.memory_kib,
+            &after.memory_kib,
+        ),
+        (
+            "vm_counters",
+            MEMORY_VM_FIELDS.as_slice(),
+            &before.vm,
+            &after.vm,
+        ),
+    ] {
+        let actual = value[group].as_object().context("memory integer object")?;
+        ensure!(
+            actual
+                .keys()
+                .all(|key| fields.iter().any(|(alias, _)| key.as_str() == *alias)),
+            "memory object added derived gauges or fallback counters"
+        );
+        for (alias, _) in fields {
+            ensure!(
+                start.contains_key(*alias) == end.contains_key(*alias),
+                "raw memory availability changed: {alias}"
+            );
+            if let Some(first) = start.get(*alias) {
+                let n = actual
+                    .get(*alias)
+                    .and_then(Value::as_u64)
+                    .context("exposed kernel field omitted or not an integer")?;
+                ensure!(
+                    n <= MEMORY_JSON_MAX,
+                    "memory integer exceeds JSON-safe bound"
+                );
+                if group == "memory_bytes" {
+                    ensure!(
+                        n % 1024 == 0,
+                        "memory byte gauge lost its kernel kB unit: {alias}"
+                    );
+                }
+                let last = end.get(*alias).context("independent ending memory field")?;
+                if group == "vm_counters" {
+                    // Only cumulative events/base-page counts admit endpoint bounds,
+                    // and only when independent boot identity is known and unchanged.
+                    if before.boot.is_some() {
+                        ensure!(
+                            *first <= n && n <= *last,
+                            "VM counter outside independent same-boot bounds: {alias}"
+                        );
+                    }
+                } else if ["mem_total_bytes", "swap_total_bytes"].contains(alias) {
+                    ensure!(
+                        first == last,
+                        "stable memory total changed during acceptance"
+                    );
+                    ensure!(
+                        n == first * 1024,
+                        "memory kB must normalize by 1024, not 1000: {alias}"
+                    );
+                } else if *alias == "swap_free_bytes"
+                    && before.memory_kib.get("swap_total_bytes") == Some(&0)
+                    && after.memory_kib.get("swap_total_bytes") == Some(&0)
+                {
+                    ensure!(n == 0, "real zero swap must remain available zero");
+                }
+                // All other memory fields are volatile non-atomic gauges. Their
+                // presence, integer type, and bounds matter, not endpoint ordering.
+            } else {
+                ensure!(
+                    !actual.contains_key(*alias),
+                    "unknown memory value was invented"
+                );
+                missing.insert(format!("{group}.{alias}"));
+            }
+        }
+    }
+    if before.boot.is_none() {
+        missing.insert("boot_id".to_owned());
+    }
+    let unavailable = value["unavailable"]
+        .as_array()
+        .context("memory unavailable array")?;
+    let actual: BTreeSet<String> = unavailable
+        .iter()
+        .map(|v| {
+            let path = v.as_str().context("memory unavailable path")?;
+            ensure!(path.len() <= 64, "memory unavailable path unbounded");
+            Ok(path.to_owned())
+        })
+        .collect::<Result<_>>()?;
+    ensure!(
+        actual == missing && actual.len() == unavailable.len() && actual.len() <= 18,
+        "memory unknown/zero/omission semantics disagree with independent procfs"
+    );
+    Ok(())
+}
+
+async fn memory_stats_session(
+    fixture: &isolated::Fixture,
+    workspace: &Path,
+    secrets: &[String],
+    enabled: bool,
+) -> Result<()> {
+    let mut server = WireServer::start(&fixture.config)?;
+    let result: Result<()> = async {
+        server.initialize().await?;
+        let listed = server.request(2, "tools/list", json!({})).await?;
+        host_summary_private(&listed.to_string(), secrets)?;
+        let tools = listed["result"]["tools"]
+            .as_array()
+            .context("memory discovery")?;
+        let tool = tools.iter().find(|tool| tool["name"] == "memory_stats");
+        if !enabled {
+            ensure!(tool.is_none(), "memory observation enabled without opt-in");
+            let auth = fixture.authentication_count().await?;
+            let reply = server
+                .request(
+                    3,
+                    "tools/call",
+                    json!({
+                        "name":"memory_stats","arguments":{"host":"plain","inputs":{}}
+                    }),
+                )
+                .await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            ensure!(
+                !reply["error"].is_null()
+                    || !reply["result"]["structuredContent"]["error"].is_null(),
+                "disabled memory tool executed"
+            );
+            ensure!(
+                fixture.authentication_count().await? == auth
+                    && fs::read_dir(workspace)?.next().is_none(),
+                "disabled memory tool reached SSH or scratch"
+            );
+            return Ok(());
+        }
+        let tool = tool.context("opted-in memory tool")?;
+        let inputs = &tool["inputSchema"]["properties"]["inputs"];
+        ensure!(
+            inputs["type"] == "object"
+                && inputs["additionalProperties"] == false
+                && inputs["properties"]
+                    .as_object()
+                    .is_some_and(|p| p.is_empty())
+                && inputs["required"].as_array().is_some_and(|r| r.is_empty()),
+            "memory input discovery allows caller controls"
+        );
+        let mut schemas = Vec::new();
+        projection_value_schemas(&tool["outputSchema"], &mut schemas);
+        ensure!(!schemas.is_empty(), "memory output discovery is untyped");
+        for schema in schemas {
+            let fields = &schema["properties"];
+            let required = [
+                "system",
+                "scope",
+                "observed_at",
+                "page_size_bytes",
+                "memory_bytes",
+                "vm_counters",
+                "unavailable",
+            ];
+            ensure!(
+                schema["type"] == "object"
+                    && schema["additionalProperties"] == false
+                    && fields.as_object().is_some_and(|p| p.len() == 8)
+                    && schema["required"].as_array().is_some_and(|r| {
+                        r.len() == required.len()
+                            && required.iter().all(|name| r.contains(&json!(name)))
+                    }),
+                "memory discovery root is not exactly closed and required"
+            );
+            for (name, max) in [
+                ("system", 64),
+                ("scope", 32),
+                ("observed_at", 32),
+                ("boot_id", 36),
+            ] {
+                ensure!(
+                    fields[name]["type"] == "string" && fields[name]["maxLength"] == max,
+                    "memory discovery string bound: {name}"
+                );
+            }
+            ensure!(
+                fields["system"]["const"] == "Linux"
+                    && fields["scope"]["const"] == "procfs_view"
+                    && fields["boot_id"]["minLength"] == 36
+                    && fields["page_size_bytes"]["type"] == "integer"
+                    && fields["page_size_bytes"]["minimum"] == 1
+                    && fields["page_size_bytes"]["maximum"] == 1_048_576,
+                "memory discovery identity/page-size contract"
+            );
+            for (group, selected, mandatory) in [
+                (
+                    "memory_bytes",
+                    MEMORY_FIELDS.as_slice(),
+                    vec!["mem_total_bytes", "mem_free_bytes"],
+                ),
+                ("vm_counters", MEMORY_VM_FIELDS.as_slice(), vec![]),
+            ] {
+                let child = &fields[group];
+                ensure!(
+                    child["type"] == "object"
+                        && child["additionalProperties"] == false
+                        && child["properties"]
+                            .as_object()
+                            .is_some_and(|p| p.len() == selected.len())
+                        && child["required"].as_array().is_some_and(|r| {
+                            r.len() == mandatory.len()
+                                && mandatory.iter().all(|name| r.contains(&json!(name)))
+                        }),
+                    "memory discovery nested object contract: {group}"
+                );
+                for (alias, _) in selected {
+                    ensure!(
+                        child["properties"][*alias]["type"] == "integer"
+                            && child["properties"][*alias]["minimum"] == 0
+                            && child["properties"][*alias]["maximum"] == MEMORY_JSON_MAX,
+                        "memory discovery integer bound: {group}.{alias}"
+                    );
+                }
+            }
+            let unavailable = &fields["unavailable"];
+            let mut expected = BTreeSet::from(["boot_id".to_owned()]);
+            expected.extend(
+                MEMORY_FIELDS
+                    .iter()
+                    .skip(2)
+                    .map(|(alias, _)| format!("memory_bytes.{alias}")),
+            );
+            expected.extend(
+                MEMORY_VM_FIELDS
+                    .iter()
+                    .map(|(alias, _)| format!("vm_counters.{alias}")),
+            );
+            let names = unavailable["items"]["enum"]
+                .as_array()
+                .context("memory unavailable discovery enum")?;
+            let actual: BTreeSet<_> = names
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .context("unavailable enum string")
+                        .map(str::to_owned)
+                })
+                .collect::<Result<_>>()?;
+            ensure!(
+                unavailable["type"] == "array"
+                    && unavailable["maxItems"] == 18
+                    && unavailable["uniqueItems"] == true
+                    && unavailable["items"]["type"] == "string"
+                    && unavailable["items"]["maxLength"] == 64
+                    && actual == expected
+                    && names.len() == expected.len(),
+                "memory discovery unknown paths not exactly bounded"
+            );
+        }
+        let auth = fixture.authentication_count().await?;
+        let mut invalid = Vec::new();
+        for inputs in [
+            json!([]),
+            json!(null),
+            json!({"target_python":"/tmp/MEMORY_PRIVATE_OVERRIDE_8b24"}),
+            json!({"path":"/proc/meminfo"}),
+            json!({"sample_ms":1}),
+            json!({"limit":1}),
+            json!({"extra_vars":{"ansible_connection":"local"}}),
+            json!({"ansible_ssh_common_args":"MEMORY_PRIVATE_OVERRIDE_8b24"}),
+            json!({"transport":{"destination":"MEMORY_UNKNOWN_TARGET_6e39"}}),
+            json!({"retain_output":true}),
+            json!({"environment":{"MEMORY_PRIVATE_OVERRIDE_8b24":"1"}}),
+        ] {
+            invalid.push(json!({"host":"plain","inputs":inputs}));
+        }
+        for extra in [
+            json!({"authority":"automation:ops"}),
+            json!({"become":true}),
+            json!({"retention":"keep"}),
+            json!({"retain_workspace":true}),
+            json!({"retain_output":true}),
+            json!({"extra_vars":{"ansible_connection":"local"}}),
+            json!({"role_path":"/tmp/MEMORY_PRIVATE_OVERRIDE_8b24"}),
+            json!({"snapshot":"/tmp/MEMORY_PRIVATE_OVERRIDE_8b24"}),
+            json!({"transport":{"destination":"MEMORY_UNKNOWN_TARGET_6e39"}}),
+            json!({"runtime":"/tmp/MEMORY_PRIVATE_OVERRIDE_8b24"}),
+        ] {
+            let mut arguments = json!({"host":"plain","inputs":{}});
+            arguments
+                .as_object_mut()
+                .context("memory controls")?
+                .extend(extra.as_object().context("memory extra controls")?.clone());
+            invalid.push(arguments);
+        }
+        for host in [
+            "nosftp",
+            "MEMORY_UNKNOWN_TARGET_6e39",
+            "/tmp/MEMORY_PRIVATE_OVERRIDE_8b24",
+        ] {
+            invalid.push(json!({"host":host,"inputs":{}}));
+        }
+        for (index, arguments) in invalid.into_iter().enumerate() {
+            let reply = server
+                .request(
+                    10 + index as u64,
+                    "tools/call",
+                    json!({"name":"memory_stats","arguments":arguments}),
+                )
+                .await?;
+            host_summary_private(&reply.to_string(), secrets)?;
+            let error = &reply["result"]["structuredContent"]["error"];
+            ensure!(
+                reply["error"]["code"] == -32602
+                    || (!error.is_null() && error["remote_state_unknown"] == false),
+                "invalid memory control or target reached execution: {reply}"
+            );
+            ensure!(
+                fs::read_dir(workspace)?.next().is_none(),
+                "invalid memory call created scratch"
+            );
+        }
+        ensure!(
+            fixture.authentication_count().await? == auth,
+            "rejected memory calls reached SSH"
+        );
+        let before = observe_memory_stats(fixture).await?;
+        let reply = server
+            .request(
+                100,
+                "tools/call",
+                json!({
+                    "name":"memory_stats","arguments":{"host":"plain","inputs":{}}
+                }),
+            )
+            .await?;
+        host_summary_private(&reply.to_string(), secrets)?;
+        ensure!(
+            reply["error"].is_null(),
+            "memory MCP call rejected: {reply}"
+        );
+        let envelope = &reply["result"]["structuredContent"];
+        verified_role(envelope, "successful", json!(false))?;
+        ensure!(
+            envelope["error"].is_null()
+                && envelope["data"]["runner_rc"] == 0
+                && envelope["data"]["tasks"]["failed"] == 0
+                && envelope["data"]["tasks"]["unreachable"] == 0
+                && envelope["data"]["host"] == "plain"
+                && envelope["data"]["projection"]["status"] == "complete",
+            "memory observation lost successful no-change completion/cleanup evidence: {reply}"
+        );
+        ensure!(
+            envelope["data"].get("stdout").is_none()
+                && envelope["data"].get("stderr").is_none()
+                && fs::read_dir(workspace)?.next().is_none(),
+            "memory observation leaked command streams or retained workspace"
+        );
+        let after = observe_memory_stats(fixture).await?;
+        let value = &envelope["data"]["projection"]["value"];
+        projection_safe_keys(value)?;
+        assert_memory_stats(value, &before, &after)?;
+        Ok(())
+    }
+    .await;
+    // Stop/drain before propagating assertions, including protocol failures.
+    let stopped = server.stop(None).await;
+    let log = stopped?;
+    host_summary_private(&log.text(), secrets)?;
+    ensure!(
+        fs::read_dir(workspace)?.next().is_none(),
+        "memory workspace survived shutdown"
+    );
+    result
+}
+
+/// cargo test --test automation_exec real_memory_stats_acceptance -- --ignored --exact --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Automation Nix fixture artifact, explicit DOCKER_HOST and pinned Runner runtime"]
+async fn real_memory_stats_acceptance() -> Result<()> {
+    let runtime = fs::canonicalize(
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
+    )?;
+    let private = tempfile::Builder::new()
+        .prefix("memory-stats-private-")
+        .tempdir()?;
+    fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))?;
+    let workspace = private.path().join("workspaces");
+    fs::create_dir(&workspace)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
+    let result: Result<()> = async {
+        // Shipped assets stay unchanged; only private operator bindings adapt.
+        let mut example: toml::Value =
+            toml::from_str(include_str!("../examples/memory_stats.toml"))?;
+        let role = private.path().join("roles/memory_stats");
+        for (file, source) in [
+            (
+                "meta/argument_specs.yml",
+                include_str!("../examples/roles/memory_stats/meta/argument_specs.yml"),
+            ),
+            (
+                "tasks/main.yml",
+                include_str!("../examples/roles/memory_stats/tasks/main.yml"),
+            ),
+        ] {
+            let path = role.join(file);
+            fs::create_dir_all(path.parent().context("memory role asset parent")?)?;
+            fs::write(path, source)?;
+        }
+        let snapshot = private.path().join("memory_stats.schema.json");
+        let mut overlay = json!({});
+        for key in ["input_schema", "fixed_args", "input_map"] {
+            overlay[key] = serde_json::to_value(&example["tools"]["memory_stats"][key])?;
+        }
+        let overlay_path = private.path().join("memory_stats.overlay.json");
+        fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+        config.insert(
+            "automation".into(),
+            table(json!({"runtime":text(&runtime)?}))?,
+        );
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut import = support::server_command(&fixture.config)?;
+        import
+            .args(["schema", "import-role", "memory_stats"])
+            .arg("--role-path")
+            .arg(&role)
+            .arg("--output")
+            .arg(&snapshot)
+            .arg("--overlay")
+            .arg(&overlay_path);
+        let imported = support::run(&mut import).await?;
+        ensure!(
+            imported.status.success(),
+            "installed memory importer failed: {}",
+            String::from_utf8_lossy(&imported.stdout)
+        );
+        let report: Value = serde_json::from_slice(&imported.stdout)?;
+        ensure!(
+            report["binding_validated"] == true,
+            "memory overlay was not reviewed"
+        );
+        let tool = example["tools"]["memory_stats"]
+            .as_table_mut()
+            .context("memory binding table")?;
+        let execution = tool
+            .get_mut("execution")
+            .and_then(toml::Value::as_table_mut)
+            .context("memory execution table")?;
+        execution.insert("snapshot".into(), text(&snapshot)?.into());
+        execution.insert("role_path".into(), text(&role)?.into());
+        tool.insert("targets".into(), table(json!(["plain"]))?);
+        config.insert("tools".into(), example["tools"].clone());
+        let mut automation = example["automation"]
+            .as_table()
+            .context("memory automation table")?
+            .clone();
+        automation.insert("runtime".into(), text(&runtime)?.into());
+        automation.insert("workspace_root".into(), text(&workspace)?.into());
+        automation.insert("ssh_executable".into(), text(&fixture.ssh)?.into());
+        automation.insert(
+            "targets".into(),
+            table(json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}))?,
+        );
+        config.insert("automation".into(), toml::Value::Table(automation));
+        config.insert("profile".into(), example["profile"].clone());
+        config.insert("enabled_tools".into(), table(json!([]))?);
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        let mut secrets = fixture.credential_markers()?;
+        secrets.extend([
+            text(private.path())?,
+            text(&runtime)?,
+            PRIVATE.into(),
+            "/usr/bin/python3".into(),
+            "target_python".into(),
+            "/proc/meminfo".into(),
+            "/proc/vmstat".into(),
+            "/proc/sys/kernel/random/boot_id".into(),
+            "SC_PAGE_SIZE".into(),
+            "MemTotal:".into(),
+            "MemFree:".into(),
+            "pgfault ".into(),
+            "MEMORY_PRIVATE_OVERRIDE_8b24".into(),
+            "MEMORY_UNKNOWN_TARGET_6e39".into(),
+            "event_data".into(),
+            "Traceback".into(),
+        ]);
+        memory_stats_session(&fixture, &workspace, &secrets, false).await?;
+        config.insert("enabled_tools".into(), example["enabled_tools"].clone());
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+        memory_stats_session(&fixture, &workspace, &secrets, true).await
+    }
+    .await;
+    // Await both container removals even after importer, protocol, or oracle errors.
+    let cleanup = fixture.stop().await;
+    result?;
+    cleanup
+}
+
 /// Real broader authority, using only the public import and MCP protocol.
 /// cargo test --test automation_exec real_runner_authority_acceptance -- --ignored --exact --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

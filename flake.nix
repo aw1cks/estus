@@ -46,7 +46,9 @@
                 || path == "${toString ./.}/examples/host_summary.toml"
                 || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/host_summary/" path
                 || path == "${toString ./.}/examples/cpu_stats.toml"
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/cpu_stats/" path);
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/cpu_stats/" path
+                || path == "${toString ./.}/examples/memory_stats.toml"
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/memory_stats/" path);
           };
           strictDeps = true;
           doCheck = true;
@@ -127,6 +129,7 @@
               { name = "progress-acceptance"; scenario = "real_runner_progress_setup_acceptance"; }
               { name = "host-summary-acceptance"; scenario = "real_host_summary_acceptance"; isolated = true; }
               { name = "cpu-stats-acceptance"; scenario = "real_cpu_stats_acceptance"; isolated = true; }
+              { name = "memory-stats-acceptance"; scenario = "real_memory_stats_acceptance"; isolated = true; }
             ]}
           '';
       in
@@ -310,6 +313,14 @@
         apps.cpu-stats-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/cpu-stats-acceptance";
+        };
+        apps.memory-stats-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/memory-stats-acceptance";
+        };
+        apps.memory-stats-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/memory-stats-acceptance";
         };
         apps.controller-scripts = {
           type = "app";

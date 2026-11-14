@@ -752,6 +752,97 @@ Accounting and topology semantics follow the kernel's
 [/proc documentation](https://docs.kernel.org/filesystems/proc.html) and
 [CPU topology ABI](https://docs.kernel.org/admin-guide/cputopology.html).
 
+## Opt-in Linux memory gauges and VM counters
+
+[`examples/memory_stats.toml`](examples/memory_stats.toml) enables only the
+reviewed [`memory_stats` role](examples/roles/memory_stats), through the existing
+ordinary Ansible automation authority and actions-only profile. It is disabled
+by default. Install the wheel's `ansible` extra or provision the Nix automation
+runtime, and provision `/usr/bin/python3` on the Linux target. The tool installs
+nothing and uses no sudo, service changes or sysctl writes.
+
+Deploy the reviewed role at `/etc/estus/roles/memory_stats`, configure the
+`server-ordinary` SSH alias, identity and host-key policy, and provision
+`/var/lib/estus/runner` mode0700 owned by the MCP account. Automation Python and
+the isolated collector are both operator-fixed to `/usr/bin/python3`; change
+both settings together if necessary. For native/Nix commands, set
+`ESTUS_ANSIBLE_RUNTIME` to the provisioned automation runtime directory; the
+wheel launcher can select its already-provisioned `ansible` environment.
+Import the exact overlay offline and review the generated snapshot before
+enabling the tool; no preapproved snapshot is shipped:
+
+```sh
+cat > memory_stats.overlay.json <<'JSON'
+{"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}}
+JSON
+estus schema import-role memory_stats \
+  --role-path /etc/estus/roles/memory_stats \
+  --overlay memory_stats.overlay.json \
+  --output /etc/estus/memory_stats.schema.json
+estus --config examples/memory_stats.toml
+```
+
+Import does not execute tasks. The example permits only `server`, read effects
+and a20-second execution budget. Its closed caller domain is empty:
+
+```json
+{"host":"server","inputs":{}}
+```
+
+The typed result returns `system="Linux"`, `scope="procfs_view"`, `observed_at`,
+`page_size_bytes`, `memory_bytes`, `vm_counters`, `unavailable` and optional
+`boot_id`, alongside normal execution/change/completion/cleanup evidence.
+`memory_bytes` contains required `mem_total_bytes` and `mem_free_bytes`, plus
+available selected `mem_available_bytes`, `buffers_bytes`, `cached_bytes`,
+`swap_total_bytes`, `swap_free_bytes`, `dirty_bytes`, `writeback_bytes`,
+`slab_bytes`, `sreclaimable_bytes` and `sunreclaim_bytes`. These are the matching
+`/proc/meminfo` gauges normalized from exact `kB` units by multiplying by1024,
+not1000. `MemAvailable` is a kernel estimate, not effective cgroup headroom.
+No used-memory/cache totals, percentages, swap estimates or synthetic
+`MemAvailable` fallback are derived; gauge/slab identities are not asserted
+atomic.
+
+`vm_counters` selects `page_faults` (`pgfault`), `major_page_faults`
+(`pgmajfault`), `swap_in_pages` (`pswpin`), `swap_out_pages` (`pswpout`),
+`oom_kill_events` (`oom_kill`), `kswapd_scan_pages` (`pgscan_kswapd`) and
+`direct_scan_pages` (`pgscan_direct`) from `/proc/vmstat`. These are cumulative
+events or base pages as named, not gauges, rates or kB. The reported
+`page_size_bytes` is the target's actual `SC_PAGE_SIZE`, never an assumed4096;
+page counters remain in pages. Missing aggregate keys are not reconstructed by
+summing per-zone variants.
+
+Real zeroes, including zero swap and counters, remain zero. Missing optional
+gauges/counters and unreadable optional boot ID are omitted and identified by
+their exact dotted paths (or `boot_id`) in `unavailable`. An absent or denied
+`/proc/vmstat` yields an empty `vm_counters` and all seven unavailable paths.
+Malformed readable selected fields, duplicate selected keys, missing required
+gauges, noncanonical boot IDs and values outside0–9007199254740991 fail rather
+than becoming invented zeroes. Unrelated proc keys, including unitless hugepage
+counts, are ignored.
+
+The fixed shell-free isolated Python command reads complete `/proc/meminfo`
+and `/proc/vmstat` with respective131072- and262144-byte caps, detects oversize
+with one extra byte, and limits each source to4096 lines and each selected line
+to4096 bytes. Boot-ID reads are bounded to128 bytes. The closed projection is
+bounded to4096 bytes,128 items and depth4. No caller paths, code, environment,
+runtime or privilege controls exist; public output/audit exposes no raw proc
+contents, command stdout or private paths.
+
+`observed_at` is target UTC at collection end, not an atomic snapshot across
+proc sources. Procfs may expose host/global memory even inside a container;
+these values are not effective cgroup, NUMA, cpuset or quota allowance.
+There is no sampling or derived delta. The role reports no persistent changes;
+normal transient target work and private controller scratch still follow the
+automation cleanup contract.
+
+`nix run .#memory-stats-acceptance-msrv` (or
+`nix run .#memory-stats-acceptance`) exercises the shipped assets against the
+explicit Linux automation fixture (`ESTUS_TEST_FIXTURE`, `DOCKER_HOST`).
+Field semantics follow the kernel's
+[/proc documentation](https://docs.kernel.org/filesystems/proc.html),
+[`proc_meminfo(5)`](https://man7.org/linux/man-pages/man5/proc_meminfo.5.html)
+and [`proc_vmstat(5)`](https://man7.org/linux/man-pages/man5/proc_vmstat.5.html).
+
 ## Fixed ordinary Ansible playbooks
 
 Review a deployed project without parsing or executing its YAML:
