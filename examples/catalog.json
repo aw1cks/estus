@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "2",
+  "version": "3",
   "presets": {
     "linux-health": [
       "cpu_stats",
@@ -615,6 +615,18 @@
     "nic_fec_get": {
       "definition": "nic_fec_get.toml",
       "role": "roles/nic_fec_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible",
+        "ethtool",
+        "netdevsim"
+      ]
+    },
+    "nic_fec_set": {
+      "definition": "nic_fec_set.toml",
+      "role": "roles/nic_fec_set",
       "policy_required": true,
       "requires": [
         "linux",

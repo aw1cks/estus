@@ -668,9 +668,11 @@ fails rather than silently selecting another catalog.
 There is no `all` or `admin` preset. Reboot, module/package/repository mutation,
 NIC tuning and other maintenance remain individual opt-ins.
 
-`nic_fec_get` is individually opt-in and reads configured/active FEC encoding
-from the isolated Linux `netdevsim` interface `fec0`. This is driver-reported
-virtual configuration, not physical FEC proof or permission to tune the NIC.
+FEC tools are individually opt-in: `nic_fec_get` reads the configured/active
+encoding, and `nic_fec_set` changes the reviewed runtime mode (`off` or `rs`)
+with driver readback and an honest no-op receipt. The lab uses Linux
+`netdevsim` as `fec0`, separate from its management interface. These tools
+qualify virtual-driver configuration, not physical error correction.
 
 ### Review and prepare a site configuration
 
@@ -690,7 +692,7 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "2"
+version = "3"
 
 [targets.server]
 ssh_host = "server-ordinary"
@@ -739,9 +741,11 @@ explicit empty selection denies, and global disable always wins. Unknown or
 duplicate names fail. Catalog templates are inert until reviewed definitions
 are supplied; they do not consume the existing32-definition bound.
 
-Presets require an explicit catalog version. Changed membership must be reviewed,
-not adopted silently on upgrade. Source/runtime/overlay drift still invalidates
-snapshots; startup never refreshes approval.
+Presets require an explicit catalog version; use the version reported by
+`estus catalog list --json` after reviewing the installed inventory. Catalog
+inventory changes advance that version (the FEC additions advance 1 to 3).
+Review existing pins rather than silently adopting an upgrade. Source/runtime/
+overlay drift still invalidates snapshots; startup never refreshes approval.
 
 Existing `profile` remains the exposure ceiling, **not** a task preset:
 `actions-only` permits named tools without generic native execution;
@@ -774,10 +778,13 @@ bootloader or physical devices are changed. Injected SSH keys have one writer;
 OS key generation is disabled and installation errors go to the private console.
 Fast parser tests use stdlib Python from Nix check inputs, not Ansible.
 
-The isolated lab qualifies selected Virtio/veth/e1000e controls, Linux MD RAID1
-and virtual NVMe-reported telemetry. It does not qualify arbitrary drivers,
-physical media or wire-level pause behavior. Physical FEC/EEE, transceivers and
-site-specific deployment procedures remain unqualified, without placeholders.
+The isolated lab qualifies selected Virtio/veth/e1000e controls, Linux
+`netdevsim` FEC configuration, Linux MD RAID1 and virtual NVMe-reported telemetry.
+It does not qualify arbitrary drivers, physical media, wire-level pause behavior
+or physical FEC. EEE and transceiver observations remain unavailable on the
+current virtual devices; physical confirmation is not required for supported
+virtual setting/readback paths. Site-specific deployment procedures remain
+unqualified, without placeholders.
 
 ## Catalog policy: facts first
 

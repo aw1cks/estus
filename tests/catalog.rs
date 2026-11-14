@@ -103,6 +103,7 @@ mod tools {
     mod nic_features_get;
     mod nic_features_set;
     mod nic_fec_get;
+    mod nic_fec_set;
     mod nic_link_get;
     mod nic_pause_get;
     mod nic_pause_set;
