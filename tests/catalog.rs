@@ -72,6 +72,7 @@ mod tools {
     mod processes_list;
     mod storage_device_get;
     mod storage_devices_list;
+    mod storage_mounts_list;
     mod sysctl_get;
     mod tcp_connect_probe;
 }
