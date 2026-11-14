@@ -67,6 +67,7 @@ mod tools {
     mod network_rules_list;
     mod network_sockets_list;
     mod nic_channels_get;
+    mod nic_coalesce_get;
     mod nic_features_get;
     mod nic_link_get;
     mod nic_rings_get;
