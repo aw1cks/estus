@@ -43,6 +43,7 @@ mod tools {
     mod network_path_probe;
     mod network_route_add;
     mod network_route_lookup;
+    mod network_route_remove;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;

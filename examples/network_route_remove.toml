@@ -1,0 +1,43 @@
+# Opt-in Linux network_route_remove; reviewed role and separately imported snapshot required.
+# Copy roles/network_route_remove to /etc/estus/roles/network_route_remove; export input_schema/fixed_args/input_map as overlay.json.
+# estus --config network_route_remove.toml schema import-role network_route_remove --role-path /etc/estus/roles/network_route_remove --overlay overlay.json --output /etc/estus/network_route_remove.schema.json
+# Offline import never runs tasks; review snapshot before enabling. Provision runner root mode 0700.
+# Requires pinned /usr/bin/python3 and fixed iproute2 utilities; probes additionally ping/traceroute as applicable.
+# Operator policy is fixed_args only: callers cannot replace it. No persistent manager changes or flush/batch.
+# Independent root-control recovery must survive catalog0 changes; NEVER target management interfaces.
+profile = "actions-only"
+enabled_tools = ["network_route_remove"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.network_route_remove]
+description = "network route remove. One runtime-only mutation with readback; independent surviving root-control recovery REQUIRED, no persistence or automatic replay."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["runtime_write", "availability", "read"]
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/network_route_remove.schema.json", "role_path" = "/etc/estus/roles/network_route_remove", "no_log" = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+input_map = { "interface" = "interface", "destination" = "destination" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "enum" = ["catalog0"], "maxLength" = 256 }, "destination" = { "type" = "string", "enum" = ["198.51.100.0/24"], "maxLength" = 256 } }, "required" = ["interface", "destination"], "additionalProperties" = false }
+[tools.network_route_remove.result]
+kind = "ansible_projection"
+fields = { "interface" = ["mcp_result", "interface"], "operation" = ["mcp_result", "operation"], "verified" = ["mcp_result", "verified"], "persistence" = ["mcp_result", "persistence"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "maxLength" = 15 }, "operation" = { "type" = "string", "maxLength" = 64 }, "verified" = { "type" = "boolean", "const" = true }, "persistence" = { "type" = "string", "const" = "runtime_only", "maxLength" = 32 } }, "required" = ["interface", "operation", "verified", "persistence"], "additionalProperties" = false }
