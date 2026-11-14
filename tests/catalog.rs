@@ -45,6 +45,7 @@ mod tools {
     mod host_reboot;
     mod icmp_probe;
     mod journal_boots_list;
+    mod journal_read;
     mod journal_usage_get;
     mod kernel_log_read;
     mod kernel_module_get;
