@@ -131,6 +131,7 @@ mod tools {
     mod systemd_unit_config_read;
     mod systemd_unit_dependencies;
     mod systemd_unit_disable;
+    mod systemd_unit_enable;
     mod systemd_unit_get;
     mod systemd_unit_reload;
     mod systemd_unit_reset_failed;
