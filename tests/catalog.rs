@@ -87,4 +87,5 @@ mod tools {
     mod storage_mounts_list;
     mod sysctl_get;
     mod tcp_connect_probe;
+    mod time_sync_status;
 }

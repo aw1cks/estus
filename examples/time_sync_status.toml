@@ -1,0 +1,35 @@
+# Opt-in: copy roles/time_sync_status to /etc/estus/roles/time_sync_status; export input_schema,
+# fixed_args and input_map as overlay.json. Review the offline imported snapshot:
+# estus --config time_sync_status.toml schema import-role time_sync_status --role-path /etc/estus/roles/time_sync_status --overlay overlay.json --output /etc/estus/time_sync_status.schema.json
+# Provision mode0700 /var/lib/estus/runner, Python3 and declared inspection utilities.
+# Observable manager synchronization state; unknown never means synchronized or NTP enabled. Source/offset/failure explicitly unavailable when not reported; no clock adjustment.
+profile = "actions-only"
+enabled_tools = ["time_sync_status"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.time_sync_status]
+description = "Observable manager synchronization state; unknown never means synchronized or NTP enabled. Source/offset/failure explicitly unavailable when not reported; no clock adjustment."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/time_sync_status.schema.json", role_path = "/etc/estus/roles/time_sync_status", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+[tools.time_sync_status.result]
+kind = "ansible_projection"
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "status" = ["mcp_result", "status"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { type = "object", additionalProperties = false, required = ["source", "observed_at", "unavailable", "status"], properties = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, source = { type = "string", maxLength = 256 }, observed_at = { type = "string", maxLength = 64 }, unavailable = { type = "array", maxItems = 256, items = { type = "string", maxLength = 128 } }, status = { type = "object", additionalProperties = false, required = ["synchronization"], properties = { synchronization = { type = "string", maxLength = 16, enum = ["synchronized", "unsynchronized", "unknown"] }, ntp_enabled = { type = "boolean" }, ntp_capable = { type = "boolean" }, local_rtc = { type = "boolean" }, timezone = { type = "string", maxLength = 4096 }, synchronization_source = { type = "string", maxLength = 4096 }, offset = { type = "string", maxLength = 4096 }, leap = { type = "string", maxLength = 4096 }, stratum = { type = "string", maxLength = 4096 }, root_distance = { type = "string", maxLength = 4096 }, delay = { type = "string", maxLength = 4096 }, jitter = { type = "string", maxLength = 4096 }, packet_count = { type = "string", maxLength = 4096 }, frequency = { type = "string", maxLength = 4096 } } } } }
