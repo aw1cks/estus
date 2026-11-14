@@ -44,6 +44,7 @@ mod tools {
     mod hardware_system_get;
     mod host_reboot;
     mod icmp_probe;
+    mod journal_usage_get;
     mod kernel_module_get;
     mod kernel_module_load;
     mod kernel_module_load_plan;

@@ -1,0 +1,43 @@
+# Reviewed Linux-only journal_usage_get; logs can contain secrets; no arbitrary paths/code/flags.
+# Copy roles/journal_usage_get to /etc/estus/roles/journal_usage_get, review all tasks, export
+# input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config journal_usage_get.toml schema import-role journal_usage_get --role-path /etc/estus/roles/journal_usage_get --overlay overlay.json --output /etc/estus/journal_usage_get.schema.json
+# Review snapshot before activation; provision /var/lib/estus/runner mode 0700.
+# Install pinned Python3 and the fixed utilities used below; no auto-install.
+profile = "actions-only"
+enabled_tools = ["journal_usage_get"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+# Separate reviewed root automation identity; independent of native sudo allowlists.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.journal_usage_get]
+description = "Observe journal disk-usage text and selected configured retention assignments with exact sources. Configuration is not proof of running journald settings; no reload or retention mutation."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/journal_usage_get.schema.json", role_path = "/etc/estus/roles/journal_usage_get", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 40 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+[tools.journal_usage_get.result]
+kind = "ansible_projection"
+fields = { "disk_usage_text" = ["mcp_result", "disk_usage_text"], "retention_assignments" = ["mcp_result", "retention_assignments"], "runtime_retention_known" = ["mcp_result", "runtime_retention_known"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "disk_usage_text" = { "type" = "string", "maxLength" = 1024 }, "retention_assignments" = { "type" = "array", "items" = { "type" = "object", "properties" = { "path" = { "type" = "string", "maxLength" = 512 }, "key" = { "type" = "string", "maxLength" = 64 }, "value" = { "type" = "string", "maxLength" = 256 } }, "required" = ["path", "key", "value"], "additionalProperties" = false }, "maxItems" = 256 }, "runtime_retention_known" = { "type" = "boolean", "const" = false } }, "required" = ["disk_usage_text", "retention_assignments", "runtime_retention_known"], "additionalProperties" = false }
