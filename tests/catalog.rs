@@ -45,6 +45,7 @@ mod tools {
     mod network_route_lookup;
     mod network_route_remove;
     mod network_routes_list;
+    mod network_rules_list;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
