@@ -41,6 +41,7 @@ mod tools {
     mod kernel_module_load_plan;
     mod kernel_module_parameter_set;
     mod kernel_module_parameters_get;
+    mod kernel_module_unload;
     mod kernel_modules_list;
     mod kernel_state_get;
     mod network_address_add;
