@@ -1,0 +1,44 @@
+# Linux-only opt-in reviewed filesystem_usage_get; no implicit installs or escalation.
+# Copy roles/filesystem_usage_get to /etc/estus/roles/filesystem_usage_get; review all tasks and fixed allowlists.
+# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config filesystem_usage_get.toml schema import-role filesystem_usage_get --role-path /etc/estus/roles/filesystem_usage_get --overlay overlay.json --output /etc/estus/filesystem_usage_get.schema.json
+# Review snapshot before activation. Provision /var/lib/estus/runner mode 0700.
+# Requires installed optional automation runtime and /usr/bin/python3 on target.
+profile = "actions-only"
+enabled_tools = ["filesystem_usage_get"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.filesystem_usage_get]
+description = "Resolve one operator-configured logical path and statvfs its actual filesystem, beyond mount inventory. Report capacity/available bytes and inode counts; available may exclude reserved blocks. Resolution is observed, not atomic against rename/mount changes. No caller paths or device mutation."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/filesystem_usage_get.schema.json", role_path = "/etc/estus/roles/filesystem_usage_get", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "configured_paths" = { "data" = "/var/lib/estus-catalog" } }
+input_map = { "path_id" = "path_id" }
+limits = { timeout_secs = 20 }
+[tools.filesystem_usage_get.input_schema]
+type = "object"
+required = ["path_id"]
+additionalProperties = false
+properties = { "path_id" = { "type" = "string", "maxLength" = 32, "enum" = ["data"] } }
+[tools.filesystem_usage_get.result]
+kind = "ansible_projection"
+fields = { "observed_at" = ["mcp_result", "observed_at"], "path_id" = ["mcp_result", "path_id"], "configured_path" = ["mcp_result", "configured_path"], "resolved_path" = ["mcp_result", "resolved_path"], "status" = ["mcp_result", "status"], "device_id" = ["mcp_result", "device_id"], "fragment_size_bytes" = ["mcp_result", "fragment_size_bytes"], "total_bytes" = ["mcp_result", "total_bytes"], "free_bytes" = ["mcp_result", "free_bytes"], "available_bytes" = ["mcp_result", "available_bytes"], "inodes_total" = ["mcp_result", "inodes_total"], "inodes_free" = ["mcp_result", "inodes_free"], "inodes_available" = ["mcp_result", "inodes_available"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+[tools.filesystem_usage_get.result.schema]
+type = "object"
+required = ["observed_at", "path_id", "configured_path", "resolved_path", "status"]
+additionalProperties = false
+properties = { "observed_at" = { "type" = "string", "maxLength" = 40 }, "path_id" = { "type" = "string", "maxLength" = 32 }, "configured_path" = { "type" = "string", "maxLength" = 1024 }, "resolved_path" = { "type" = "string", "maxLength" = 1024 }, "status" = { "type" = "string", "maxLength" = 16, "enum" = ["available", "missing", "denied"] }, "device_id" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "fragment_size_bytes" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "total_bytes" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "free_bytes" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "available_bytes" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "inodes_total" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "inodes_free" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "inodes_available" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } }
