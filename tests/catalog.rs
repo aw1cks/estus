@@ -104,6 +104,7 @@ mod tools {
     mod package_get;
     mod packages_install;
     mod packages_list;
+    mod packages_remove;
     mod packages_updates_list;
     mod pci_device_get;
     mod pci_devices_list;
