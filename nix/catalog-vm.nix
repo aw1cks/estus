@@ -145,6 +145,8 @@ let
         };
         services.openssh = {
           enable = true;
+          # The controller supplies this identity; the OS must not race its copy.
+          generateHostKeys = false;
           hostKeys = [{ path = "/etc/ssh/catalog-host"; type = "ed25519"; }];
           settings = {
             PasswordAuthentication = false;
@@ -160,7 +162,10 @@ let
         systemd.services.estus-catalog-keys = {
           before = [ "sshd.service" ];
           unitConfig.RequiresMountsFor = "/run/catalog-keys";
-          serviceConfig.Type = "oneshot";
+          serviceConfig = {
+            Type = "oneshot";
+            StandardError = "journal+console";
+          };
           script = ''
             install -d -m755 /etc/ssh/authorized_keys.d
             for user in mcp mcp-admin root; do

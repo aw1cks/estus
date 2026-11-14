@@ -640,6 +640,8 @@ mutable unit-file directories, cgroups, isolated network interfaces, controlled
 boot entries, a harmless signed module and a prebuilt signed local apt repository.
 Unit directories retain operator-created links across reboot. The public test-only
 repository signing key is not a production trust root.
+Injected SSH host keys have one writer: OS key generation is disabled.
+Key-install errors go to the private guest console, never MCP output.
 
 The device lab has an independent management interface, isolated Virtio/e1000e
 NICs, two guest-only MD candidate disks and a virtual NVMe controller. These are
