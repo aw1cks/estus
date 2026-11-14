@@ -70,6 +70,7 @@ mod tools {
     mod process_fds_list;
     mod process_get;
     mod processes_list;
+    mod storage_devices_list;
     mod sysctl_get;
     mod tcp_connect_probe;
 }
