@@ -27,6 +27,7 @@ async fn catalog_guest_qualification() -> anyhow::Result<()> {
 mod tools {
     mod boot_entries_list;
     mod boot_entry_get;
+    mod boot_set_oneshot;
     mod boot_status;
     mod device_attributes_get;
     mod dns_lookup;
