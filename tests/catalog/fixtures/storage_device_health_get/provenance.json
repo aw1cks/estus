@@ -1,0 +1,15 @@
+{
+  "backend": "QEMU NVMe Ctrl, serial ESTUS-LAB-NVME, /dev/nvme0 with guest-only /dev/nvme0n1",
+  "lab": "/nix/store/71qhmvxbm0sl8jsry1hrvjfvnln7qji0-catalog-lab-guest/bin/catalog-lab-guest",
+  "sut": "/nix/store/qld0nylvanb6s6b8nf4zgjm5iw5hglmi-estus-0.1.0/bin/estus",
+  "runtime": "/nix/store/yd6m5h32dxipglssz21dl2jfdqmk83qj-estus-automation-runtime",
+  "captured_on": "2026-11-14",
+  "raw_capture": "nvme smart-log /dev/nvme0 --raw-binary; exactly 512 genuine bytes stored as lowercase hexadecimal",
+  "preparation": "dd if=/dev/zero of=/dev/nvme0n1 bs=4096 count=256 oflag=direct conv=fsync; dd if=/dev/nvme0n1 of=/dev/null bs=4096 count=256 iflag=direct",
+  "independent_oracle": "nvme smart-log /dev/nvme0 --output-format=json, retained as after.nvme-cli.json",
+  "expected": "Actual successful MCP typed telemetry projections; only controller identity/state/scope/source and collection timestamp excluded from pure SMART-parser expectations",
+  "observed_change": "host_read_commands 83 to 412; host_write_commands 0 to 256; data_units_read 4 to 9; data_units_written 0 to 3",
+  "scope": "Virtual/reported controller telemetry only. Warning0, Kelvin323, spare0 and use0 are actual device reports, not physical-media guarantees or invented healthy status.",
+  "sanitization": "No media payloads, host device data, keys, credentials or physical serials captured; controlled lab serial only",
+  "reference": "https://www.mankier.com/1/nvme-smart-log"
+}

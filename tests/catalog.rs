@@ -119,6 +119,7 @@ mod tools {
     mod process_get;
     mod processes_list;
     mod storage_device_get;
+    mod storage_device_health_get;
     mod storage_devices_list;
     mod storage_mounts_list;
     mod storage_raid_status;

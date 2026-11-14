@@ -1,0 +1,20 @@
+{
+  "available_spare_percent": 0,
+  "counters": {
+    "controller_busy_minutes": "0",
+    "data_units_read": "4",
+    "data_units_written": "0",
+    "error_log_entries": "0",
+    "host_read_commands": "83",
+    "host_write_commands": "0",
+    "media_errors": "0",
+    "power_cycles": "0",
+    "power_on_hours": "0",
+    "unsafe_shutdowns": "0"
+  },
+  "critical_warning": 0,
+  "percentage_used": 0,
+  "spare_threshold_percent": 0,
+  "temperature_kelvin": 323,
+  "unavailable": []
+}
