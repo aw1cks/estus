@@ -165,8 +165,12 @@ fn test_binary() -> std::ffi::OsString {
 fn inspect_honors_explicit_catalog_root_without_ambient_configuration() -> Result<()> {
     let root = tempfile::tempdir()?;
     let site = root.path().join("site.toml");
-    let mut text = String::from(
-        "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nversion='1'\n[targets.one]\nssh_host='private-alias'\n",
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(assets().join("catalog.json"))?)?;
+    let pin = serde_json::to_string(&manifest["version"])?;
+    let mut text = format!(
+        "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n",
+        pin
     );
     for name in ["cpu_stats", "memory_stats", "pressure_get"] {
         text.push_str(&format!(
@@ -183,7 +187,7 @@ result={{kind="command"}}
 "#
         ));
     }
-    std::fs::write(&site, text)?;
+    std::fs::write(&site, &text)?;
     let output = Command::new(test_binary())
         .args(["catalog", "--root"])
         .arg(assets())
@@ -210,6 +214,21 @@ result={{kind="command"}}
             .iter()
             .all(|v| v["enabled"] == true && v["targets"][0]["permitted"] == true),
         "inspect did not resolve the requested preset"
+    );
+    let outdated = text.replacen(&format!("\nversion={pin}\n"), "\nversion=\"1\"\n", 1);
+    std::fs::write(&site, outdated)?;
+    let rejected = Command::new(test_binary())
+        .args(["catalog", "--root"])
+        .arg(assets())
+        .args(["inspect", "--site"])
+        .arg(&site)
+        .env_remove("ESTUS_CATALOG_ROOT")
+        .env_remove("ESTUS_CONFIG")
+        .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"))
+        .output()?;
+    ensure!(
+        !rejected.status.success(),
+        "a previous catalog version pin silently adopted the new inventory"
     );
     Ok(())
 }

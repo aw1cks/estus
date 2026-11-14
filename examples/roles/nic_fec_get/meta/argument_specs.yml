@@ -1,0 +1,26 @@
+---
+argument_specs:
+  main:
+    short_description: Read reviewed driver-reported FEC configuration and active encoding
+    options:
+      target_python:
+        type: path
+        required: true
+      operator_policy:
+        type: dict
+        required: true
+        options:
+          interface:
+            type: str
+            required: true
+          mac:
+            type: str
+            required: true
+          driver:
+            type: str
+            required: true
+      interface:
+        type: str
+        required: true
+        choices:
+          - fec0

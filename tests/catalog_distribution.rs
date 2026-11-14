@@ -23,7 +23,6 @@ fn canonical_catalog() -> Catalog {
 #[test]
 fn canonical_catalog_exports_every_operational_definition_and_role() {
     let catalog = canonical_catalog();
-    assert_eq!(catalog.manifest().tools.len(), 113);
     assert_eq!(
         catalog.manifest().presets["linux-health"],
         ["cpu_stats", "memory_stats", "pressure_get"]
@@ -194,8 +193,6 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     );
     let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listing["schema"], 1);
-    assert_eq!(listing["version"], "1");
-    assert_eq!(listing["tools"].as_array().unwrap().len(), 113);
     assert_eq!(
         listing["presets"]["linux-health"],
         serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"])

@@ -1,0 +1,35 @@
+# Independently opt-in nic_fec_get; import and review this role snapshot before activation.
+# Requires /usr/bin/python3, /usr/bin/ethtool and reviewed netdevsim FEC capability.
+# Operator pins isolated interface/MAC/sysfs driver. Never target management0.
+# Driver-reported configuration/active encoding only, not physical or wire-level proof.
+# Import: estus --config nic_fec_get.toml schema import-role nic_fec_get --role-path /etc/estus/roles/nic_fec_get --overlay overlay.json --output /etc/estus/nic_fec_get.schema.json
+profile = "actions-only"
+enabled_tools = ["nic_fec_get"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.nic_fec_get]
+description = "nic_fec_get: driver-reported FEC configuration and active encoding; no physical proof or tuning permission."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_fec_get.schema.json", "role_path" = "/etc/estus/roles/nic_fec_get", "no_log" = false }
+fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "fec0","mac" = "52:54:00:12:34:59","driver" = "netdevsim"}}
+input_map = {"interface" = "interface"}
+limits = { timeout_secs = 40 }
+input_schema = {"type" = "object","properties" = {"interface" = {"type" = "string","enum" = ["fec0"],"maxLength" = 15}},"required" = ["interface"],"additionalProperties" = false}
+[tools.nic_fec_get.result]
+kind = "ansible_projection"
+fields = {"interface" = ["mcp_result","interface"],"driver" = ["mcp_result","driver"],"configured" = ["mcp_result","configured"],"active" = ["mcp_result","active"],"source" = ["mcp_result","source"]}
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = {"type" = "object","properties" = {"interface" = {"type" = "string","enum" = ["fec0"],"maxLength" = 15},"driver" = {"type" = "string","enum" = ["netdevsim"],"maxLength" = 32},"configured" = {"type" = "array","maxItems" = 6,"items" = {"type" = "string","enum" = ["none","off","auto","rs","baser","llrs"],"maxLength" = 5}},"active" = {"type" = "string","enum" = ["none","off","auto","rs","baser","llrs"],"maxLength" = 5},"source" = {"type" = "string","maxLength" = 128}},"required" = ["interface","driver","configured","active","source"],"additionalProperties" = false}

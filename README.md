@@ -668,6 +668,10 @@ fails rather than silently selecting another catalog.
 There is no `all` or `admin` preset. Reboot, module/package/repository mutation,
 NIC tuning and other maintenance remain individual opt-ins.
 
+`nic_fec_get` is individually opt-in and reads configured/active FEC encoding
+from the isolated Linux `netdevsim` interface `fec0`. This is driver-reported
+virtual configuration, not physical FEC proof or permission to tune the NIC.
+
 ### Review and prepare a site configuration
 
 Export creates private **inert** `tools.toml`, role sources and exact JSON
@@ -686,7 +690,7 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "1"
+version = "2"
 
 [targets.server]
 ssh_host = "server-ordinary"

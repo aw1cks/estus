@@ -144,7 +144,7 @@ impl Catalog {
         )?;
         let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
         if manifest.schema != 1
-            || manifest.version != "1"
+            || !name_valid(&manifest.version)
             || manifest.tools.is_empty()
             || manifest.tools.len() > 1024
             || manifest.presets.len() > 64
