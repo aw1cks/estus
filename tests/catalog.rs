@@ -38,6 +38,7 @@ mod tools {
     mod network_link_up;
     mod network_links_list;
     mod network_namespaces_list;
+    mod network_neighbor_remove;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;

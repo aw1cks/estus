@@ -1,0 +1,61 @@
+---
+argument_specs:
+  main:
+    short_description: Fixed bounded semantic network operation
+    options:
+      target_python:
+        type: path
+        required: true
+        description: Operator-fixed Python interpreter
+      operator_policy:
+        type: dict
+        required: true
+        description: Fixed reviewed destination and interface policy, never caller supplied
+        options:
+          interface:
+            type: str
+            required: true
+          interfaces:
+            type: list
+            elements: str
+            required: true
+          destinations:
+            type: list
+            elements: str
+            required: true
+          ports:
+            type: list
+            elements: int
+            required: false
+          addresses:
+            type: list
+            elements: str
+            required: false
+          routes:
+            type: list
+            elements: str
+            required: false
+          neighbors:
+            type: list
+            elements: str
+            required: true
+          namespaces:
+            type: list
+            elements: str
+            required: false
+          dns_names:
+            type: list
+            elements: str
+            required: false
+          resolver:
+            type: str
+            required: false
+          dns_port:
+            type: int
+            required: false
+      interface:
+        type: str
+        required: true
+      destination:
+        type: str
+        required: true
