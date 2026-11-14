@@ -1,0 +1,47 @@
+# Explicit standalone opt-in. Observe actual EFI loader identity, raw loader current/default/one-shot selections and Secure Boot/SetupMode. Missing variables are unknown, not disabled. A missing default EFI override does not imply no loader.conf default.
+# Copy roles/boot_status to /etc/estus/roles/boot_status; review every file.
+# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
+# estus --config boot_status.toml schema import-role boot_status --role-path /etc/estus/roles/boot_status --overlay overlay.json --output /etc/estus/boot_status.schema.json
+# Import is offline; review snapshot before startup activation. No implicit install/escalation.
+# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
+# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
+# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
+# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
+# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+profile = "actions-only"
+enabled_tools = ["boot_status"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+# Separate reviewed SSH identity and sudo policy; ordinary observation grants no mutation authority.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.boot_status]
+description = "Observe actual EFI loader identity, raw loader current/default/one-shot selections and Secure Boot/SetupMode. Missing variables are unknown, not disabled. A missing default EFI override does not imply no loader.conf default."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_status.schema.json", role_path = "/etc/estus/roles/boot_status", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "firmware_mode" = ["mcp_result", "firmware_mode"], "loader" = ["mcp_result", "loader"], "selection_source" = ["mcp_result", "selection_source"], "security_source" = ["mcp_result", "security_source"], "current_entry" = ["mcp_result", "current_entry"], "default_entry" = ["mcp_result", "default_entry"], "oneshot_entry" = ["mcp_result", "oneshot_entry"], "secure_boot" = ["mcp_result", "secure_boot"], "setup_mode" = ["mcp_result", "setup_mode"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "firmware_mode" = { "type" = "string", "maxLength" = 16 }, "loader" = { "type" = "string", "maxLength" = 2048 }, "selection_source" = { "type" = "string", "maxLength" = 128 }, "security_source" = { "type" = "string", "maxLength" = 128 }, "current_entry" = { "type" = "string", "maxLength" = 2048 }, "default_entry" = { "type" = "string", "maxLength" = 2048 }, "oneshot_entry" = { "type" = "string", "maxLength" = 2048 }, "secure_boot" = { "type" = "string", "maxLength" = 16 }, "setup_mode" = { "type" = "string", "maxLength" = 16 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "firmware_mode", "loader", "selection_source", "security_source", "secure_boot", "setup_mode"], "additionalProperties" = false } }
