@@ -1,0 +1,47 @@
+# Explicit standalone opt-in. Write one approved bounded integer to the fixture-reviewed estus_catalog value sysfs parameter and read back. Unsupported writable capability is explicit; no arbitrary parameter names or persistence.
+# Copy roles/kernel_module_parameter_set to /etc/estus/roles/kernel_module_parameter_set; review every file.
+# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
+# estus --config kernel_module_parameter_set.toml schema import-role kernel_module_parameter_set --role-path /etc/estus/roles/kernel_module_parameter_set --overlay overlay.json --output /etc/estus/kernel_module_parameter_set.schema.json
+# Import is offline; review snapshot before startup activation. No implicit install/escalation.
+# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
+# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
+# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
+# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
+# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+profile = "actions-only"
+enabled_tools = ["kernel_module_parameter_set"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+# Separate reviewed SSH identity and sudo policy; ordinary observation grants no mutation authority.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.kernel_module_parameter_set]
+description = "Write one approved bounded integer to the fixture-reviewed estus_catalog value sysfs parameter and read back. Unsupported writable capability is explicit; no arbitrary parameter names or persistence."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read", "runtime_write"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/kernel_module_parameter_set.schema.json", role_path = "/etc/estus/roles/kernel_module_parameter_set", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = { "name" = "name", "parameter" = "parameter", "value" = "value" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "enum" = ["estus_catalog"], "minLength" = 1, "maxLength" = 64 }, "parameter" = { "type" = "string", "enum" = ["value"], "minLength" = 1, "maxLength" = 64 }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 1024 } }, "required" = ["name", "parameter", "value"], "additionalProperties" = false }
+result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "name" = ["mcp_result", "name"], "parameter" = ["mcp_result", "parameter"], "requested_value" = ["mcp_result", "requested_value"], "quiescence_proven" = ["mcp_result", "quiescence_proven"], "outcome" = ["mcp_result", "outcome"], "postcondition_verified" = ["mcp_result", "postcondition_verified"], "previous_value" = ["mcp_result", "previous_value"], "observed_value" = ["mcp_result", "observed_value"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "name" = { "type" = "string", "maxLength" = 64 }, "parameter" = { "type" = "string", "maxLength" = 64 }, "requested_value" = { "type" = "integer", "minimum" = 0, "maximum" = 1024 }, "quiescence_proven" = { "type" = "boolean" }, "outcome" = { "type" = "string", "maxLength" = 32 }, "postcondition_verified" = { "type" = "boolean" }, "previous_value" = { "type" = "string", "maxLength" = 4096 }, "observed_value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "name", "parameter", "requested_value", "quiescence_proven", "outcome", "postcondition_verified"], "additionalProperties" = false } }
