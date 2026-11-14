@@ -25,6 +25,7 @@ async fn catalog_guest_qualification() -> anyhow::Result<()> {
 
 #[path = "catalog"]
 mod tools {
+    mod boot_clear_oneshot;
     mod boot_entries_list;
     mod boot_entry_get;
     mod boot_set_oneshot;

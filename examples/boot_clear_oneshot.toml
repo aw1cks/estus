@@ -1,0 +1,47 @@
+# Explicit standalone opt-in. Clear systemd-boot EFI next-boot override and verify absence. Does not clear persistent defaults or reboot.
+# Copy roles/boot_clear_oneshot to /etc/estus/roles/boot_clear_oneshot; review every file.
+# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
+# estus --config boot_clear_oneshot.toml schema import-role boot_clear_oneshot --role-path /etc/estus/roles/boot_clear_oneshot --overlay overlay.json --output /etc/estus/boot_clear_oneshot.schema.json
+# Import is offline; review snapshot before startup activation. No implicit install/escalation.
+# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
+# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
+# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
+# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
+# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+profile = "actions-only"
+enabled_tools = ["boot_clear_oneshot"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+# Separate reviewed SSH identity and sudo policy; ordinary observation grants no mutation authority.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.boot_clear_oneshot]
+description = "Clear systemd-boot EFI next-boot override and verify absence. Does not clear persistent defaults or reboot."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read", "runtime_write"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_clear_oneshot.schema.json", role_path = "/etc/estus/roles/boot_clear_oneshot", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "entry_id" = ["mcp_result", "entry_id"], "selection_variable" = ["mcp_result", "selection_variable"], "previous_selection" = ["mcp_result", "previous_selection"], "observed_selection" = ["mcp_result", "observed_selection"], "reboot_requested" = ["mcp_result", "reboot_requested"], "outcome" = ["mcp_result", "outcome"], "command_returncode" = ["mcp_result", "command_returncode"], "postcondition_verified" = ["mcp_result", "postcondition_verified"], "persistent" = ["mcp_result", "persistent"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "entry_id" = { "type" = "string", "maxLength" = 255 }, "selection_variable" = { "type" = "string", "maxLength" = 64 }, "previous_selection" = { "type" = "string", "maxLength" = 2048 }, "observed_selection" = { "type" = "string", "maxLength" = 2048 }, "reboot_requested" = { "type" = "boolean" }, "outcome" = { "type" = "string", "maxLength" = 32 }, "command_returncode" = { "type" = "integer", "minimum" = -255, "maximum" = 255 }, "postcondition_verified" = { "type" = "boolean" }, "persistent" = { "type" = "boolean" } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "entry_id", "selection_variable", "previous_selection", "observed_selection", "reboot_requested", "outcome", "command_returncode", "postcondition_verified", "persistent"], "additionalProperties" = false } }
