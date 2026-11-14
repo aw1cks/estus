@@ -34,6 +34,7 @@ mod tools {
     mod device_attributes_get;
     mod dns_lookup;
     mod filesystem_usage_get;
+    mod hardware_memory_inventory;
     mod hardware_system_get;
     mod host_reboot;
     mod icmp_probe;
