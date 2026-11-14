@@ -1187,6 +1187,7 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
                     "ordinary_identity",
                     "root_identity",
                     "root_literal",
+                    "ssh_read_output",
                     "ssh_targets"
                 ],
             "actions-only exposed an unrestricted tool: {names:?}"
