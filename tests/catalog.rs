@@ -29,4 +29,5 @@ mod tools {
     mod filesystem_usage_get;
     mod pressure_get;
     mod process_fds_list;
+    mod process_get;
 }
