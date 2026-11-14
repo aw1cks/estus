@@ -4480,7 +4480,12 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
         verified_role(&censored, "successful", Value::Null)?;
         ensure!(censored["error"].is_null() && censored["data"]["censored"] == true
             && censored["data"]["projection"] == json!({"status":"censored"}));
-        fs::write(roles.join("drift/tasks/main.yml"), "---\n- ansible.builtin.fail:\n    msg: tampered\n")?;
+        // Keep the marker-writing workload executable: running drifted content
+        // must fail this test, not look like a pre-dispatch refusal.
+        let source = roles.join("drift/tasks/main.yml");
+        let mut changed = fs::read(&source)?;
+        changed.extend_from_slice(b"\n# post-startup source drift\n");
+        fs::write(&source, changed)?;
         let response = server.request(236,"tools/call",json!({"name":"drift",
             "arguments":{"host":"plain","inputs":{}}})).await?;
         ensure!(response["error"].is_null());
