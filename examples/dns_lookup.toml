@@ -1,0 +1,36 @@
+# Opt-in Linux dns_lookup; reviewed role and separately imported snapshot required.
+# Copy roles/dns_lookup to /etc/estus/roles/dns_lookup; export input_schema/fixed_args/input_map as overlay.json.
+# estus --config dns_lookup.toml schema import-role dns_lookup --role-path /etc/estus/roles/dns_lookup --overlay overlay.json --output /etc/estus/dns_lookup.schema.json
+# Offline import never runs tasks; review snapshot before enabling. Provision runner root mode 0700.
+# Requires pinned /usr/bin/python3 and fixed iproute2 utilities; probes additionally ping/traceroute as applicable.
+# Operator policy is fixed_args only: callers cannot replace it. No persistent manager changes or flush/batch.
+profile = "actions-only"
+enabled_tools = ["dns_lookup"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.dns_lookup]
+description = "dns lookup. Active bounded diagnostics; only operator-approved fixture destinations; no application payload."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["probe"]
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/dns_lookup.schema.json", "role_path" = "/etc/estus/roles/dns_lookup", "no_log" = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+input_map = { "name" = "name", "type" = "type", "resolver" = "resolver" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "enum" = ["catalog.test"], "maxLength" = 256 }, "type" = { "type" = "string", "enum" = ["A", "AAAA"], "maxLength" = 256 }, "resolver" = { "type" = "string", "enum" = ["127.0.0.1"], "maxLength" = 256 } }, "required" = ["name", "type"], "additionalProperties" = false }
+[tools.dns_lookup.result]
+kind = "ansible_projection"
+fields = { "name" = ["mcp_result", "name"], "type" = ["mcp_result", "type"], "resolver" = ["mcp_result", "resolver"], "rcode" = ["mcp_result", "rcode"], "addresses" = ["mcp_result", "addresses"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 253 }, "type" = { "type" = "string", "enum" = ["A", "AAAA"], "maxLength" = 256 }, "resolver" = { "type" = "string", "maxLength" = 64 }, "rcode" = { "type" = "integer", "minimum" = 0, "maximum" = 15 }, "addresses" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 } }, "required" = ["name", "type", "resolver", "rcode", "addresses"], "additionalProperties" = false }
