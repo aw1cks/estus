@@ -32,6 +32,7 @@ mod tools {
     mod boot_set_oneshot;
     mod boot_status;
     mod cgroup_processes;
+    mod cgroup_sample;
     mod device_attributes_get;
     mod dns_lookup;
     mod filesystem_usage_get;
