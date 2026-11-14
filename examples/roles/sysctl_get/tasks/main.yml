@@ -1,0 +1,57 @@
+---
+- name: Collect bounded reviewed Linux observation
+  ansible.builtin.command:
+    argv:
+      - '{{ target_python }}'
+      - -I
+      - -c
+      - |
+        import os, sys, json, re, time, signal, platform, datetime, errno
+        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('observation deadline')))
+        signal.alarm(12)
+        if platform.system() != 'Linux':
+            raise ValueError('Linux required')
+        args = json.loads(sys.argv[1])
+        MAX = 9007199254740991
+        def number(value):
+            value = int(value)
+            if not 0 <= value <= MAX: raise ValueError('integer outside projection bound')
+            return value
+        def read(path, bound=65536, directory=None):
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
+            with os.fdopen(fd, 'rb') as stream: data = stream.read(bound + 1)
+            if len(data) > bound: raise ValueError('source exceeds read bound')
+            return data.decode('utf-8', 'strict')
+        def bounded(value, maximum=256):
+            if len(value) > maximum: raise ValueError('string exceeds projection bound')
+            return value
+        def emit(value):
+            value['observed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds')
+            data = json.dumps(value, separators=(',', ':'), allow_nan=False)
+            if len(data.encode()) > 4096: raise ValueError('output exceeds bound')
+            print(data)
+
+        reviewed={'vm.swappiness':'vm/swappiness','net.ipv4.ip_forward':'net/ipv4/ip_forward','kernel.pid_max':'kernel/pid_max'}
+        if not args['keys'] or len(set(args['keys']))!=len(args['keys']): raise ValueError('select one to three unique keys')
+        if not set(args['approved_keys']) <= set(reviewed): raise ValueError('operator key outside reviewed safe set')
+        rows=[]
+        for key in args['keys']:
+            if key not in reviewed or key not in args['approved_keys']: raise ValueError('key not operator approved')
+            row={'key':key}
+            try: value=read('/proc/sys/'+reviewed[key],4096).strip()
+            except FileNotFoundError: row['status']='missing'
+            except PermissionError: row['status']='denied'
+            else:
+                if not re.fullmatch(r'[0-9]+',value): raise ValueError('invalid reviewed integer sysctl')
+                row.update(status='available',value=number(value))
+            rows.append(row)
+        emit({'values':rows})
+
+      - "{{ {'keys': keys, 'approved_keys': approved_keys} | to_json }}"
+    expand_argument_vars: false
+  register: observation
+  changed_when: false
+
+- name: Publish typed observation only
+  ansible.builtin.set_fact:
+    mcp_result: '{{ observation.stdout | from_json }}'

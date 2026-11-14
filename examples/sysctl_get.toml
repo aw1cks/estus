@@ -1,0 +1,44 @@
+# Linux-only opt-in reviewed sysctl_get; no implicit installs or escalation.
+# Copy roles/sysctl_get to /etc/estus/roles/sysctl_get; review all tasks and fixed allowlists.
+# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config sysctl_get.toml schema import-role sysctl_get --role-path /etc/estus/roles/sysctl_get --overlay overlay.json --output /etc/estus/sysctl_get.schema.json
+# Review snapshot before activation. Provision /var/lib/estus/runner mode 0700.
+# Requires installed optional automation runtime and /usr/bin/python3 on target.
+profile = "actions-only"
+enabled_tools = ["sysctl_get"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.sysctl_get]
+description = "Read exact reviewed side-effect-free sysctl keys, never enumerate /proc/sys. Operator approved_keys is intersected with the implemented reviewed safe key set. Missing and denied are explicit; no writes, cache drops, SysRq or arbitrary paths."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/sysctl_get.schema.json", role_path = "/etc/estus/roles/sysctl_get", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_keys" = ["vm.swappiness", "net.ipv4.ip_forward", "kernel.pid_max"] }
+input_map = { "keys" = "keys" }
+limits = { timeout_secs = 20 }
+[tools.sysctl_get.input_schema]
+type = "object"
+required = ["keys"]
+additionalProperties = false
+properties = { "keys" = { "type" = "array", "maxItems" = 3, "items" = { "type" = "string", "maxLength" = 64, "enum" = ["vm.swappiness", "net.ipv4.ip_forward", "kernel.pid_max"] } } }
+[tools.sysctl_get.result]
+kind = "ansible_projection"
+fields = { "observed_at" = ["mcp_result", "observed_at"], "values" = ["mcp_result", "values"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+[tools.sysctl_get.result.schema]
+type = "object"
+required = ["observed_at", "values"]
+additionalProperties = false
+properties = { "observed_at" = { "type" = "string", "maxLength" = 40 }, "values" = { "type" = "array", "maxItems" = 3, "items" = { "type" = "object", "required" = ["key", "status"], "additionalProperties" = false, "properties" = { "key" = { "type" = "string", "maxLength" = 64 }, "status" = { "type" = "string", "maxLength" = 16, "enum" = ["available", "missing", "denied"] }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } } } } }

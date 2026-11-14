@@ -30,4 +30,5 @@ mod tools {
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
+    mod sysctl_get;
 }
