@@ -626,6 +626,23 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
+## Catalog qualification target
+
+The optional catalog acceptance target uses a preprovisioned Linux EFI guest.
+Rust creates fresh private SSH keys, a writable disk overlay and EFI state for
+each scenario, then kills/reaps the owned guest and removes its private files.
+Systemd, isolated networking, a harmless signed test module, two actual boot
+entries, and a signed local apt repository/database are built beforehand.
+No workstation service, interface, sysctl, module or bootloader is modified.
+
+```sh
+nix run .#catalog-acceptance-msrv -- catalog_guest_qualification --exact
+```
+
+The fixture check proves ordinary/admin principals and real noninteractive sudo,
+EFI/systemd/module/network prerequisites and genuine initial package state.
+It does not qualify physical devices or imply transactional operation effects.
+
 ## Catalog policy: facts first
 
 The catalog does not maintain a second native/custom collector when maintained

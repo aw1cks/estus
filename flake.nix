@@ -41,14 +41,7 @@
               && (craneLib.filterCargoSources path type
                 || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
                   && pkgs.lib.hasSuffix ".py" path)
-                || path == "${toString ./.}/examples/app_config.toml"
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/app_config/" path
-                || path == "${toString ./.}/examples/host_summary.toml"
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/host_summary/" path
-                || path == "${toString ./.}/examples/cpu_stats.toml"
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/cpu_stats/" path
-                || path == "${toString ./.}/examples/memory_stats.toml"
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/roles/memory_stats/" path);
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/" path);
           };
           strictDeps = true;
           doCheck = true;
@@ -134,6 +127,19 @@
               { name = "memory-stats-acceptance"; scenario = "real_memory_stats_acceptance"; isolated = true; }
             ]}
           '';
+        catalogVm = import ./nix/catalog-vm.nix { inherit inputs; hostPkgs = pkgs; };
+        catalogAcceptance = native: harness: pkgs.runCommand "estus-catalog-acceptance" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p "$out/bin"
+          makeWrapper ${harness}/libexec/catalog "$out/bin/catalog-acceptance" \
+            --set ESTUS_TEST_BINARY ${native}/bin/estus \
+            --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+            --set ESTUS_TEST_CATALOG_ASSETS ${commonArgs.src}/examples \
+            --set ESTUS_TEST_CATALOG_VM ${catalogVm}/bin/catalog-guest \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
+            --add-flags '--ignored --nocapture --test-threads=2'
+        '';
       in
       {
         packages = {
@@ -144,6 +150,9 @@
           automation-runtime = automationRuntime;
           inherit automation;
           inherit wheel;
+          catalog-vm = catalogVm;
+          catalog-acceptance = catalogAcceptance package acceptance;
+          catalog-acceptance-msrv = catalogAcceptance msrvBuild.package msrvBuild.acceptance;
           automation-msrv = automationMsrv;
           automation-acceptance = automationAcceptance package acceptance automation;
           automation-acceptance-msrv = automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv;
@@ -155,6 +164,14 @@
             inherit pkgs;
             automation = true;
           };
+        };
+        apps.catalog-acceptance = {
+          type = "app";
+          program = "${catalogAcceptance package acceptance}/bin/catalog-acceptance";
+        };
+        apps.catalog-acceptance-msrv = {
+          type = "app";
+          program = "${catalogAcceptance msrvBuild.package msrvBuild.acceptance}/bin/catalog-acceptance";
         };
         apps.default = {
           type = "app";
