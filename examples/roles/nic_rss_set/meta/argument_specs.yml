@@ -1,0 +1,30 @@
+---
+argument_specs:
+  main:
+    short_description: Reviewed bounded NIC operation
+    options:
+      target_python:
+        type: path
+        required: true
+      operator_policy:
+        type: dict
+        required: true
+        options:
+          interface:
+            type: str
+            required: true
+          mac:
+            type: str
+            required: true
+          driver:
+            type: str
+            required: true
+          allow_runtime_tuning:
+            type: bool
+            required: true
+      interface:
+        type: str
+        required: true
+      preset:
+        type: str
+        required: true

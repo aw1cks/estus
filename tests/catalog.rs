@@ -105,6 +105,7 @@ mod tools {
     mod nic_rings_get;
     mod nic_rings_set;
     mod nic_rss_get;
+    mod nic_rss_set;
     mod nic_stats_get;
     mod package_get;
     mod package_repository_change;
