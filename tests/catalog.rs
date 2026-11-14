@@ -36,6 +36,7 @@ mod tools {
     mod network_interface_stats;
     mod network_link_down;
     mod network_link_up;
+    mod network_links_list;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
