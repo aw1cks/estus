@@ -90,6 +90,7 @@ mod tools {
     mod storage_device_get;
     mod storage_devices_list;
     mod storage_mounts_list;
+    mod sysctl_config_set;
     mod sysctl_get;
     mod systemd_manager_reload;
     mod systemd_unit_config_read;
