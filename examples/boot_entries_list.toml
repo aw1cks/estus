@@ -1,0 +1,47 @@
+# Explicit standalone opt-in. List bounded real bootctl entries with exact IDs and kernel/initrd associations. Source/type may be unknown on older bootctl. Command lines are withheld as sensitive.
+# Copy roles/boot_entries_list to /etc/estus/roles/boot_entries_list; review every file.
+# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
+# estus --config boot_entries_list.toml schema import-role boot_entries_list --role-path /etc/estus/roles/boot_entries_list --overlay overlay.json --output /etc/estus/boot_entries_list.schema.json
+# Import is offline; review snapshot before startup activation. No implicit install/escalation.
+# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
+# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
+# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
+# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
+# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+profile = "actions-only"
+enabled_tools = ["boot_entries_list"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+# Separate reviewed SSH identity and sudo policy; ordinary observation grants no mutation authority.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.boot_entries_list]
+description = "List bounded real bootctl entries with exact IDs and kernel/initrd associations. Source/type may be unknown on older bootctl. Command lines are withheld as sensitive."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_entries_list.schema.json", role_path = "/etc/estus/roles/boot_entries_list", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = { "offset" = "offset" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 128 } }, "required" = [], "additionalProperties" = false }
+result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "entries" = ["mcp_result", "entries"], "total_count" = ["mcp_result", "total_count"], "next_offset" = ["mcp_result", "next_offset"], "scope" = ["mcp_result", "scope"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "entries" = { "type" = "array", "maxItems" = 4, "items" = { "type" = "object", "properties" = { "entry_id" = { "type" = "string", "maxLength" = 255 }, "source" = { "type" = "string", "maxLength" = 128 }, "type" = { "type" = "string", "maxLength" = 128 }, "command_line_sensitive" = { "type" = "boolean" }, "unknown" = { "type" = "array", "maxItems" = 8, "items" = { "type" = "string", "maxLength" = 64 } }, "linux" = { "type" = "string", "maxLength" = 2048 }, "efi" = { "type" = "string", "maxLength" = 2048 }, "title" = { "type" = "string", "maxLength" = 2048 }, "path" = { "type" = "string", "maxLength" = 2048 }, "initrd" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "string", "maxLength" = 2048 } } }, "required" = ["entry_id", "source", "type", "command_line_sensitive", "unknown"], "additionalProperties" = false } }, "total_count" = { "type" = "integer", "minimum" = 0, "maximum" = 128 }, "next_offset" = { "type" = "integer", "minimum" = -1, "maximum" = 128 }, "scope" = { "type" = "string", "maxLength" = 128 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "entries", "total_count", "next_offset", "scope"], "additionalProperties" = false } }
