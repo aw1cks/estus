@@ -759,7 +759,15 @@ pub(crate) fn reduce(
         host,
         status,
         runner_rc: terminal.and_then(|t| t.rc),
-        changed: observed.and_then(|t| t.changed),
+        // Incomplete execution may have mutated after the last false observation.
+        // Positive evidence remains authoritative even when later work is unknown.
+        changed: observed.and_then(|t| {
+            if unknown && t.changed != Some(true) {
+                None
+            } else {
+                t.changed
+            }
+        }),
         tasks: observed.map(|t| t.tasks).unwrap_or_default(),
         censored: observed.is_some_and(|t| t.censored) || projected_censored,
         complete,
@@ -1153,6 +1161,66 @@ mod role_evidence {
         assert!(terminal.complete);
         assert_eq!(terminal.task.changed, Some(true));
         assert_eq!(terminal.task.tasks.failed, 1);
+    }
+
+    #[test]
+    fn interruption_preserves_positive_but_not_negative_change_evidence() {
+        for changed in [Some(false), None, Some(true)] {
+            let mut evidence = started();
+            task(&mut evidence, "ok", json!(changed), false, false);
+            let reply = reduce(
+                Some(evidence),
+                "target".into(),
+                None,
+                Completion {
+                    started_child: true,
+                    error: Some("timeout"),
+                    duration_ms: 1,
+                    group_cleanup: GroupCleanup::SignalledAndReaped,
+                },
+            );
+            let data = reply.data.unwrap();
+            assert_eq!(data.status, AutomationStatus::Timeout);
+            assert!(!data.complete);
+            assert_eq!(data.changed, changed.filter(|value| *value));
+            assert!(reply.error.unwrap().remote_state_unknown);
+        }
+    }
+
+    #[test]
+    fn failed_role_unknown_change_is_distinct_from_execution_failure() {
+        for prior in [Some(false), None, Some(true)] {
+            let mut evidence = started();
+            task(&mut evidence, "ok", json!(prior), false, false);
+            task(&mut evidence, "failed", Value::Null, false, false);
+            let changed = prior.filter(|value| *value);
+            terminal(
+                &mut evidence,
+                "failed",
+                2,
+                json!({"ok":1,"failed":1,"unreachable":0,"skipped":0,"rescued":0,"ignored":0}),
+                json!(changed),
+                false,
+            );
+            let reply = reduce(
+                Some(evidence),
+                "target".into(),
+                None,
+                Completion {
+                    started_child: true,
+                    error: None,
+                    duration_ms: 1,
+                    group_cleanup: GroupCleanup::SignalledAndReaped,
+                },
+            );
+            let data = reply.data.unwrap();
+            assert_eq!(data.status, AutomationStatus::Failed);
+            assert!(data.complete);
+            assert_eq!(data.changed, changed);
+            let error = reply.error.unwrap();
+            assert_eq!(error.code, "automation_failed");
+            assert!(!error.remote_state_unknown);
+        }
     }
 
     #[test]

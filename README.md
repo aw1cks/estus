@@ -613,6 +613,9 @@ Summaries include authoritative failed/skipped outcomes and nonzero
 `tasks.rescued`/`tasks.ignored`; rescued or ignored failures do not become invisible.
 Observed prior changes survive a later failure or incomplete run. Execution is
 bounded to 128 root results/256 starts; loop items are not retained as raw events.
+A failed role task without positive change evidence leaves `changed=null`, rather
+than claiming the target was unchanged. Package procedures preserve independent
+dpkg change observations when apt or subsequent verification fails.
 
 Role tasks, dependencies, handlers and templates are trusted operator code, not a
 sandbox. Selected-tree hashes do not attest external dependency trees or prevent

@@ -433,6 +433,7 @@ class RoleEvidence(Evidence):
         self.meta_skipped = 0
         self.playbook = str(playbook)
         self.collected = False
+        self.change_unknown = False
 
     def consume(self, event):
         require(not self.invalid)
@@ -477,6 +478,12 @@ class RoleEvidence(Evidence):
             require(type(ignored) is bool and (not ignored or outcome == "failed"))
             changed = result.get("changed")
             require(changed is None or type(changed) is bool)
+            # A failed task's false bit is not evidence that it made no changes:
+            # Core's stats exclude failed-task changes. Preserve true, otherwise
+            # retain uncertainty through stats, rescue and ignored failures.
+            if outcome == "failed" and changed is not True:
+                changed = None
+                self.change_unknown = True
             # Runner replaces no_log root/item results with {"censored": ...}.
             pending = [result]
             nodes = 0
@@ -566,7 +573,8 @@ class RoleEvidence(Evidence):
             require(self.raw["skipped"] - self.meta_skipped == observed["skipped"])
             require(observed["changed"] <= observed["ok"])
             if not self.censored and self.changed is not True:
-                self.changed = bool(observed["changed"])
+                self.changed = (True if observed["changed"] else
+                                None if self.change_unknown else False)
             self.tasks = dict(ok=observed["ok"], failed=observed["failures"],
                               unreachable=observed["dark"], skipped=observed["skipped"],
                               rescued=observed["rescued"], ignored=observed["ignored"])

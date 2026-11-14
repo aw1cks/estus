@@ -27,15 +27,54 @@ async fn packages_install() -> Result<()> {
         ensure!(before_repeat.status.success(), "repeat baseline oracle failed");
         let repeated=binding.call(json!({"package": "estus-catalog-demo", "version": "2.0"})).await?;
         let receipt=catalog::projection(&repeated)?;
-        ensure!(receipt["verified"]==true && receipt["changed"]==false && receipt["before"]==receipt["after"], "explicit desired-state repeat was not a verified no-op");
+        ensure!(receipt["verified"]==true && receipt["changed"]==false && receipt["before"]==receipt["after"] && repeated["data"]["changed"]==false, "explicit desired-state repeat was not a verified no-op for the caller");
         let after_repeat=guest.shell("cat /var/lib/dpkg/status /var/lib/estus-catalog/package-effects").await?;
         ensure!(after_repeat.status.success() && before_repeat.stdout==after_repeat.stdout, "explicit repeat changed dpkg state or reran maintainer scripts");
+        // Real apt failure after dpkg has already configured the package.
+        ensure!(guest.shell("apt-get -y remove estus-catalog-demo; printf '%s\\n' 'DPkg::Post-Invoke { \"exit 42\"; };' > /etc/apt/apt.conf.d/99-partial-failure").await?.status.success(), "partial failure setup");
+        let partial = binding.call(json!({"package":"estus-catalog-demo","version":"2.0"})).await?;
+        ensure!(guest.shell("test \"$(dpkg-query -W -f='${Status} ${Version}' estus-catalog-demo)\" = 'install ok installed 2.0'; test \"$(cat /usr/share/estus-catalog/estus-catalog-demo)\" = 'estus-catalog-demo 2.0'").await?.status.success(), "failed apt did not actually install target");
+        failed_mutation_receipt(&partial)?;
+        ensure!(guest.shell("rm /etc/apt/apt.conf.d/99-partial-failure; apt-get -y remove estus-catalog-demo").await?.status.success(), "partial failure cleanup");
+        // apt.conf values cannot contain backslashes or nested double quotes.
+        // Keep the fault in a private script, not an incorrectly escaped hook.
+        // The hook proves dpkg configured 2.0 before corrupting its recorded version.
+        ensure!(guest.shell(r#"set -eu
+cat > /run/estus-package-postcondition <<'SCRIPT'
+set -eu
+test "$(dpkg-query -W -f='${Status} ${Version}' estus-catalog-demo)" = 'install ok installed 2.0'
+sed -i '/^Package: estus-catalog-demo$/,/^$/s/^Version: 2.0$/Version: 9.0/' /var/lib/dpkg/status
+test "$(dpkg-query -W -f='${Version}' estus-catalog-demo)" = 9.0
+printf 'configured-2.0-then-recorded-9.0\n' > /run/estus-package-postcondition-observed
+SCRIPT
+sh -n /run/estus-package-postcondition
+printf '%s\n' 'DPkg::Post-Invoke { "sh /run/estus-package-postcondition"; };' > /etc/apt/apt.conf.d/99-postcondition-failure
+apt-config dump >/dev/null"#).await?.status.success(), "postcondition failure setup");
+        let postcondition = binding.call(json!({"package":"estus-catalog-demo","version":"2.0"})).await?;
+        ensure!(guest.shell("set -eu; test \"$(cat /run/estus-package-postcondition-observed)\" = configured-2.0-then-recorded-9.0; test \"$(dpkg-query -W -f='${Status} ${Version}' estus-catalog-demo)\" = 'install ok installed 9.0'; test \"$(cat /usr/share/estus-catalog/estus-catalog-demo)\" = 'estus-catalog-demo 2.0'").await?.status.success(), "postcondition fault did not leave independently observable mutation");
+        failed_mutation_receipt(&postcondition)?;
+        ensure!(guest.shell("set -eu; rm /etc/apt/apt.conf.d/99-postcondition-failure /run/estus-package-postcondition /run/estus-package-postcondition-observed; apt-get -y remove estus-catalog-demo").await?.status.success(), "postcondition failure cleanup");
         ensure!(guest.shell("apt-get -y remove estus-catalog-demo; printf '%s\\n' 'DPkg::Pre-Invoke { \"echo entered >> /var/lib/estus-catalog/interruption-attempts; sleep 90\"; };' > /etc/apt/apt.conf.d/99-interruption").await?.status.success(), "interruption setup");
-        ensure!(catalog::projection(&binding.call(json!({"package":"estus-catalog-demo","version":"2.0"})).await?).is_err(), "interrupted install reported verified");
+        let interrupted = binding.call(json!({"package":"estus-catalog-demo","version":"2.0"})).await?;
+        ensure!(catalog::projection(&interrupted).is_err(), "interrupted install reported verified");
+        ensure!(interrupted["data"]["changed"].is_null(), "unobserved interrupted mutation was reported unchanged: {interrupted}");
         ensure!(guest.shell("test \"$(wc -l < /var/lib/estus-catalog/interruption-attempts)\" = 1").await?.status.success(), "uncertain install replayed");
         Ok(())
     }.await;
     let cleanup = guest.stop().await;
     result?;
     cleanup
+}
+
+fn failed_mutation_receipt(reply: &serde_json::Value) -> Result<()> {
+    ensure!(
+        reply["data"]["status"] == "failed"
+            && reply["data"]["complete"] == true
+            && reply["data"]["changed"] == true
+            && reply["data"]["runner_rc"] == 2
+            && reply["error"]["code"] == "automation_failed"
+            && reply["data"]["projection"]["status"] == "unavailable",
+        "failed package execution erased actual mutation or confused projection failure: {reply}"
+    );
+    Ok(())
 }
