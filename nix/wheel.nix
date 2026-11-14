@@ -37,7 +37,12 @@ craneLib.mkCargoDerivation {
       in !builtins.elem relative [ "fuzz" "tests" ]
       && !lib.hasPrefix "tests/" relative && (
         craneLib.filterCargoSources path type
-        || builtins.elem relative [ "pyproject.toml" "MANIFEST.in" "README.md" ]
+        || builtins.elem relative [ "pyproject.toml" "setup.py" "MANIFEST.in" "README.md" ]
+        || (lib.hasPrefix "examples/" relative && (
+          lib.hasSuffix ".toml" relative || lib.hasSuffix ".json" relative
+          || lib.hasSuffix ".yml" relative || lib.hasSuffix ".yaml" relative
+          || lib.hasSuffix ".py" relative
+        ))
         || (lib.hasPrefix "python/" relative && lib.hasSuffix ".py" relative)
         || (lib.hasPrefix "src/" relative && lib.hasSuffix ".py" relative)
       );

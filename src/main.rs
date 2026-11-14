@@ -4,6 +4,9 @@ mod automation_exec;
 mod automation_protocol;
 mod bindings;
 mod capture;
+mod catalog_assets;
+mod catalog_cli;
+mod catalog_selection;
 mod command;
 mod config;
 mod controller;
@@ -50,7 +53,10 @@ fn main() -> ExitCode {
         };
     }
     let mut cli = config::Cli::parse();
-    let command = cli.command.take();
+    let command = match cli.command.take() {
+        Some(config::CliCommand::Catalog(args)) => return standalone_catalog(args),
+        other => other,
+    };
     let diagnostic = command.is_some();
     let config = match config::Config::load(cli) {
         Ok(config) => config,
@@ -77,6 +83,35 @@ fn main() -> ExitCode {
     }
 }
 
+fn standalone_catalog(args: catalog_cli::CatalogArgs) -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return fail("runtime_start_failed"),
+    };
+    let status = runtime.block_on(async {
+        let (Ok(mut interrupt), Ok(mut terminate)) = (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) else {
+            return fail("signal_setup_failed");
+        };
+        let shutdown = CancellationToken::new();
+        let operation = catalog_cli::run(args, shutdown.clone());
+        tokio::pin!(operation);
+        let status = tokio::select! {
+            status = &mut operation => status,
+            _ = interrupt.recv() => { shutdown.cancel(); operation.as_mut().await },
+            _ = terminate.recv() => { shutdown.cancel(); operation.as_mut().await },
+        };
+        ExitCode::from(status)
+    });
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    status
+}
+
 async fn run(mut config: config::Config, command: Option<config::CliCommand>) -> ExitCode {
     let (Ok(mut interrupt), Ok(mut terminate)) = (
         signal(SignalKind::interrupt()),
@@ -100,6 +135,7 @@ async fn run(mut config: config::Config, command: Option<config::CliCommand>) ->
                         .publish()
                         .await
                 }
+                config::CliCommand::Catalog(args) => catalog_cli::run(args, shutdown.clone()).await,
             }
         };
         tokio::pin!(operation);

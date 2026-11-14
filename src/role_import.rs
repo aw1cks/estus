@@ -35,6 +35,24 @@ pub(crate) struct ImportArgs {
     overlay: Option<PathBuf>,
 }
 
+impl ImportArgs {
+    pub(crate) fn reviewed(
+        role: String,
+        role_path: PathBuf,
+        output: PathBuf,
+        overlay: PathBuf,
+    ) -> Self {
+        Self {
+            role,
+            entry_point: "main".into(),
+            role_path: Some(role_path),
+            output,
+            explicit_schema: None,
+            overlay: Some(overlay),
+        }
+    }
+}
+
 #[derive(Args)]
 pub(crate) struct VerifyArgs {
     snapshot: PathBuf,
@@ -441,6 +459,19 @@ pub(crate) async fn perform(
     timeout_secs: Option<u64>,
     shutdown: CancellationToken,
 ) -> Result<Report, &'static str> {
+    let reference = config
+        .automation_runtime()
+        .map_err(|_| "runtime_unavailable")?;
+    perform_with_reference(&config, command, timeout_secs, shutdown, reference).await
+}
+
+pub(crate) async fn perform_with_reference(
+    config: &Config,
+    command: Command,
+    timeout_secs: Option<u64>,
+    shutdown: CancellationToken,
+    reference: Option<PathBuf>,
+) -> Result<Report, &'static str> {
     let deadline = tokio::time::Instant::now()
         .checked_add(
             config
@@ -448,9 +479,6 @@ pub(crate) async fn perform(
                 .map_err(|_| "invalid_timeout")?,
         )
         .ok_or("invalid_timeout")?;
-    let reference = config
-        .automation_runtime()
-        .map_err(|_| "runtime_unavailable")?;
     // Started file work is joined even on interruption, like module authoring.
     let prepared = tokio::task::spawn_blocking(move || prepare(command))
         .await

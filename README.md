@@ -640,71 +640,140 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
-## Operational catalog definitions
+## Bundled operational catalog
 
-Catalog entries are individually reviewed, opt-in definitions, not automatically
-registered builtins. Each `examples/<tool>.toml` selects one role under
-`examples/roles/<tool>`, one closed input contract and one bounded typed result.
-Installing or copying the catalog never enables every tool.
+Normal wheels and Nix packages include the versioned catalog: definitions,
+reviewed role sources and Python payloads. Ansible remains optional. Installing
+the package does **not** enable catalog tools or grant credentials or sudo.
+The repository's `examples/` tree is the canonical asset source.
 
-| Family | Example starting points |
+```sh
+estus catalog list
+estus catalog list --json
+estus catalog export --preset linux-health --output ./health
+```
+
+Listing and export need no SSH connection or Ansible runtime and work without a
+checkout. Normal launchers select their installed assets; development commands
+can use `estus catalog --root "$PWD/examples" list`. An explicit invalid root
+fails rather than silently selecting another catalog.
+
+| Preset | Scope |
 |---|---|
-| Processes, pressure and approved kernel/filesystem reads | `pressure_get`, `processes_list`, `process_get`, `process_fds_list`, `sysctl_get`, `device_attributes_get`, `filesystem_usage_get` |
-| Systemd, journal and cgroups | `systemd_unit_get`, `systemd_units_list`, `journal_read`, `cgroup_stats`, `cgroup_sample` |
-| Passive networking and explicitly active probes | `network_links_list`, `network_route_lookup`, `network_sockets_list`, `dns_lookup`, `tcp_connect_probe`, `icmp_probe`, `network_path_probe` |
-| Inventory and supported NIC observations | `hardware_system_get`, `storage_devices_list`, `storage_mounts_list`, `pci_devices_list`, `nic_features_get`, `nic_stats_get` |
-| Boot and module maintenance | `boot_status`, `boot_set_oneshot`, `host_reboot`, `kernel_module_load_plan`, `kernel_module_parameter_set` |
-| Reviewed virtual-device tuning and reported health | `nic_features_set`, `nic_rings_set`, `nic_channels_set`, `nic_coalesce_set`, `nic_rss_set`, `nic_pause_get`, `nic_pause_set`, `storage_raid_status`, `storage_device_health_get` |
-| Apt convergence and repository procedures | `packages_list`, `package_get`, `packages_install`, `packages_remove`, `packages_upgrade`, `package_repository_refresh`, `package_repository_change` |
+| `linux-health` | CPU counters, memory gauges and PSI |
+| `network-observe` | Reviewed passive interface/address/route observations |
+| `network-probes` | Explicitly approved active destinations/resolvers/ports |
+| `sensitive-observe` | Separately approved process/socket/journal disclosures |
 
-Review the selected example and every role file before import. Provision the
-controller runtime, target Python/utilities and a private mode0700 runner root.
-Copy the role to its configured absolute path, export that tool's
-`input_schema`, `fixed_args` and `input_map` as an overlay, then run the exact
-offline `schema import-role` command in the example header. Review the snapshot
-before enabling the tool; invoke it with a logical `host` and nested `inputs`.
+There is no `all` or `admin` preset. Reboot, module/package/repository mutation,
+NIC tuning and other maintenance remain individual opt-ins.
 
-Example unit names, interfaces, paths, module parameters, package names and
-repository identities are **reviewed fixture policies**, not production defaults.
-Adapt the closed input enums and fixed policy together. Policy fixed in role
-content also requires a content review and fresh snapshot; callers cannot replace
-it with flags, paths, environment, inventory or privilege selectors.
+### Review and prepare a site configuration
 
-Privileged and intentionally sensitive entries require the separately configured
-`automation:catalog` authority, never an inferred native sudo grant. Sensitive
-typed reads deliberately use `no_log=false`: binding-wide censorship would hide
-their requested projection. Approve those names independently and protect their
-private scratch; ordinary discovery/audit still excludes raw arguments/results.
+Export creates private **inert** `tools.toml`, role sources and exact JSON
+overlays. It creates no credentials or approved snapshots. Review the selected
+definitions and every role file first. Unit names, interfaces, paths, module
+parameters, package names and repositories outside `linux-health` are generally
+**fixture policies**, not production defaults: adapt the closed input enums,
+fixed policy and role allowlists together.
 
-Unit-file enable/disable/mask/unmask use `--no-reload`: persistent links and
-manager activation are distinct effects. Use the separately approved
-`systemd_manager_reload` when intended. Runtime sysctl/network/limit changes do
-not imply persistence. Reboot scheduling is not confirmed reboot completion;
-reconcile the boot ID independently. Interrupted mutations are never replayed
-automatically and do not imply rollback.
+For a Linux health deployment, provide your actual SSH mapping, selected optional
+runtime and preprovisioned mode0700 workspace in `site.toml`:
 
-The opt-in acceptance entry point builds preprovisioned EFI guests; every
-scenario gets a fresh private disk, keys and EFI state. The signed local apt
-repository and initial database are built beforehand, not installed at boot.
-Its public test-only signing key is not a production trust root. No workstation
-interfaces, services, sysctls, modules or bootloader are changed. Only the
-fixture's key service writes injected SSH host keys; OS generation is disabled.
-Key-install errors go to the private guest console, not MCP output.
+```toml
+profile = "actions-only"
+tool_presets = ["linux-health"]
+disabled_tools = []
+
+[catalog]
+version = "1"
+
+[targets.server]
+ssh_host = "server-ordinary"
+# Omitted selection inherits globally; [] explicitly denies all named tools.
+enabled_tools = ["cpu_stats", "memory_stats", "pressure_get"]
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+# Optional explicit runtime; otherwise use the launcher's selected runtime.
+# runtime = "/absolute/path/to/installed-runtime"
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+```
+
+Then explicitly import the reviewed contracts, inspect the output, and launch:
+
+```sh
+estus catalog prepare --site ./site.toml --definitions ./health/tools.toml \
+  --target server --output ./reviewed
+estus catalog inspect --site ./reviewed/estus.toml
+estus --config ./reviewed/estus.toml
+```
+
+Preparation is offline: it imports against the runtime selected for each
+ordinary/named authority, writes snapshots and a new configuration, and never
+starts the server or contacts targets. It does not fabricate missing authority.
+Its overall deadline includes all imports (`--timeout-secs`, default60).
+Existing output paths and definition collisions fail; output parents must be
+controlled by the account/root, not foreign-owned or non-sticky shared writable
+directories. Relative site paths retain the supplied site's directory even
+when the site file is a symlink.
+
+`inspect` explains resolved named-tool exposure and per-target permission,
+including whether the global profile permits native execution. It does not
+verify runtime health or remote capabilities; use `doctor` for explicit health
+checks. Review snapshots before using the generated configuration. Existing
+manual `schema import-role` authoring remains supported.
+
+### Selection, authority and upgrades
+
+Global named selection is preset membership plus `enabled_tools`, minus
+`disabled_tools`. Target selectors only narrow that result; omission inherits,
+explicit empty selection denies, and global disable always wins. Unknown or
+duplicate names fail. Catalog templates are inert until reviewed definitions
+are supplied; they do not consume the existing32-definition bound.
+
+Presets require an explicit catalog version. Changed membership must be reviewed,
+not adopted silently on upgrade. Source/runtime/overlay drift still invalidates
+snapshots; startup never refreshes approval.
+
+Existing `profile` remains the exposure ceiling, **not** a task preset:
+`actions-only` permits named tools without generic native execution;
+`read-only-files` and `files-only` exclude all named bindings. The existing
+`baseline` default is unchanged and can expose native execution even with a
+small `enabled_tools` list. Profiles are not OS/account sandboxes.
+
+Privileged/sensitive entries require separately configured `automation:catalog`
+authority where declared, never an inferred native sudo grant. Typed sensitive
+reads use `no_log=false` intentionally; protect private scratch and approve
+disclosure independently. Inputs cannot choose flags, paths, environment,
+inventory, credentials or privilege beyond the reviewed domain.
+
+Unit-file enable/disable/mask/unmask retain `--no-reload`; manager activation is
+the separate `systemd_manager_reload` capability. Runtime changes do not imply
+persistence. Reboot scheduling is not confirmed reboot completion. Interrupted
+mutations are never automatically replayed and do not imply rollback.
+
+### Qualification
 
 ```sh
 nix run .#catalog-acceptance-msrv
 nix run .#catalog-acceptance-msrv -- tools::pressure_get::pressure_get --exact
 ```
 
-Network-free capture regressions use stdlib Python from Nix check inputs; they
-load no Ansible runtime.
+Every real scenario owns a fresh preprovisioned EFI guest, keys, disk and EFI
+state. Signed local apt repositories use an explicitly public test-only signing
+key, not production trust. No workstation services, interfaces, modules,
+bootloader or physical devices are changed. Injected SSH keys have one writer;
+OS key generation is disabled and installation errors go to the private console.
+Fast parser tests use stdlib Python from Nix check inputs, not Ansible.
 
-The isolated device lab qualifies specific software interfaces: Virtio GRO,
-RX rings, TX NAPI coalescing and reviewed Toeplitz key presets; veth RX queue
-counts; e1000e-reported pause controls; Linux MD RAID1 state; and NVMe-reported
-SMART telemetry. These are not arbitrary-driver tuning or physical-media tests.
-Physical NIC FEC/EEE, transceivers and site-specific deployment procedures remain
-unqualified and are not shipped as always-unsupported placeholders.
+The isolated lab qualifies selected Virtio/veth/e1000e controls, Linux MD RAID1
+and virtual NVMe-reported telemetry. It does not qualify arbitrary drivers,
+physical media or wire-level pause behavior. Physical FEC/EEE, transceivers and
+site-specific deployment procedures remain unqualified, without placeholders.
 
 ## Catalog policy: facts first
 

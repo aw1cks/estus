@@ -1,3 +1,5 @@
+use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
@@ -149,6 +151,8 @@ pub(crate) enum CliCommand {
     Doctor(DoctorArgs),
     /// Import and verify reviewed offline Ansible module contracts; never execute them.
     Schema(crate::schema_import::SchemaArgs),
+    /// Discover, export and prepare bundled catalog definitions offline.
+    Catalog(crate::catalog_cli::CatalogArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
@@ -214,8 +218,155 @@ struct Document {
     targets: Option<BTreeMap<String, Target>>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
+    tool_presets: Vec<String>,
+    disabled_tools: Vec<String>,
+    catalog: CatalogSettings,
     controller: Controller,
     automation: Automation,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CatalogSettings {
+    root: Option<PathBuf>,
+    version: Option<String>,
+}
+
+fn resolve_catalog_selection(
+    document: &mut Document,
+    base: &Path,
+    env: &impl Fn(&str) -> Option<OsString>,
+) -> Result<(), ConfigError> {
+    let definitions: BTreeSet<&str> = document.tools.keys().map(String::as_str).collect();
+    let unknown = |names: &[String]| names.iter().any(|n| !definitions.contains(n.as_str()));
+    let target_needs_catalog = document.targets.iter().flat_map(|t| t.values()).any(|t| {
+        t.tool_presets.as_ref().is_some_and(|v| !v.is_empty())
+            || t.enabled_tools.as_deref().is_some_and(unknown)
+            || unknown(&t.disabled_tools)
+    });
+    let needs_catalog = !document.tool_presets.is_empty()
+        || target_needs_catalog
+        || unknown(&document.enabled_tools)
+        || unknown(&document.disabled_tools)
+        || document.catalog.version.is_some()
+        || document.catalog.root.is_some();
+    let catalog = if needs_catalog {
+        let path = document
+            .catalog
+            .root
+            .as_ref()
+            .cloned()
+            .or_else(|| env("ESTUS_CATALOG_ROOT").map(PathBuf::from))
+            .map(|p| resolve_path(p, base, "catalog.root"))
+            .transpose()?;
+        Some(
+            crate::catalog_assets::Catalog::load(path.as_deref())
+                .map_err(|reason| invalid("catalog", reason))?,
+        )
+    } else {
+        None
+    };
+    let uses_presets = !document.tool_presets.is_empty()
+        || document
+            .targets
+            .iter()
+            .flat_map(|t| t.values())
+            .any(|t| t.tool_presets.as_ref().is_some_and(|v| !v.is_empty()));
+    if uses_presets && document.catalog.version.is_none() {
+        return Err(invalid(
+            "catalog.version",
+            "preset selection requires an explicit catalog version",
+        ));
+    }
+    if let Some(version) = &document.catalog.version
+        && catalog
+            .as_ref()
+            .is_none_or(|c| c.manifest().version != *version)
+    {
+        return Err(invalid(
+            "catalog.version",
+            "review the changed catalog version before selecting presets",
+        ));
+    }
+    let manifest = catalog.as_ref().map(|c| c.manifest());
+    let selected = crate::catalog_selection::expand(
+        &definitions,
+        manifest,
+        &document.enabled_tools,
+        &document.tool_presets,
+        &document.disabled_tools,
+    )
+    .map_err(|reason| invalid("enabled_tools", reason))?;
+    if selected
+        .iter()
+        .any(|name| !definitions.contains(name.as_str()))
+    {
+        return Err(invalid(
+            "tools",
+            "selected catalog tools require prepared reviewed definitions",
+        ));
+    }
+    if let Some(targets) = &mut document.targets {
+        for target in targets.values_mut() {
+            if target.enabled_tools.is_some()
+                || target.tool_presets.is_some()
+                || !target.disabled_tools.is_empty()
+            {
+                let mut allowed = if target.enabled_tools.is_some() || target.tool_presets.is_some()
+                {
+                    crate::catalog_selection::expand(
+                        &definitions,
+                        manifest,
+                        target.enabled_tools.as_deref().unwrap_or(&[]),
+                        target.tool_presets.as_deref().unwrap_or(&[]),
+                        &target.disabled_tools,
+                    )
+                    .map_err(|reason| invalid("targets.*.enabled_tools", reason))?
+                } else {
+                    // Validate disable names even when none is globally selected.
+                    crate::catalog_selection::expand(
+                        &definitions,
+                        manifest,
+                        &[],
+                        &[],
+                        &target.disabled_tools,
+                    )
+                    .map_err(|reason| invalid("targets.*.disabled_tools", reason))?;
+                    let mut inherited = selected.clone();
+                    for name in &target.disabled_tools {
+                        inherited.remove(name);
+                    }
+                    inherited
+                };
+                allowed.retain(|name| selected.contains(name));
+                target.selected_bindings = Some(allowed);
+            }
+        }
+    }
+    document.enabled_tools = selected
+        .into_iter()
+        .filter(|name| {
+            let Some(hosts) = document
+                .tools
+                .get(name)
+                .and_then(|v| v.get("targets"))
+                .and_then(toml::Value::as_array)
+            else {
+                return true;
+            };
+            hosts.iter().any(|host| {
+                host.as_str()
+                    .and_then(|host| document.targets.as_ref().and_then(|t| t.get(host)))
+                    .is_none_or(|target| {
+                        target
+                            .selected_bindings
+                            .as_ref()
+                            .is_none_or(|allowed| allowed.contains(name))
+                    })
+            })
+        })
+        .collect();
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -330,6 +481,24 @@ struct Target {
     labels: BTreeMap<String, String>,
     #[serde(default)]
     sudo: Sudo,
+    #[serde(default)]
+    tool_presets: Option<Vec<String>>,
+    #[serde(default)]
+    enabled_tools: Option<Vec<String>>,
+    #[serde(default)]
+    disabled_tools: Vec<String>,
+    #[serde(skip)]
+    selected_bindings: Option<BTreeSet<String>>,
+}
+
+impl Target {
+    fn permits_binding(&self, name: &str) -> bool {
+        self.profile.permits_bindings()
+            && self
+                .selected_bindings
+                .as_ref()
+                .is_none_or(|names| names.contains(name))
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -397,6 +566,7 @@ impl Serialize for TargetSummaries<'_> {
                     sudo: &target.sudo,
                     global_profile: self.profile,
                     target_profile: target.profile,
+                    selection: target.selected_bindings.as_ref(),
                 },
                 observed_capabilities: ObservedCapabilities::Unknown,
             },
@@ -411,6 +581,7 @@ struct PermittedOperations<'a> {
     sudo: &'a Sudo,
     global_profile: Profile,
     target_profile: Profile,
+    selection: Option<&'a BTreeSet<String>>,
 }
 
 impl Serialize for PermittedOperations<'_> {
@@ -444,6 +615,9 @@ impl Serialize for PermittedOperations<'_> {
                             && self.target_profile.permits_bindings()
                             && self.bindings.get(id).is_some_and(|binding| {
                                 binding.enabled()
+                                    && self
+                                        .selection
+                                        .is_none_or(|names| names.contains(entry.name.as_ref()))
                                     && !binding.is_controller()
                                     && binding.targets.iter().any(|name| name == self.target_name)
                                     && binding.sudo().is_none_or(|(user, program)| {
@@ -582,12 +756,34 @@ impl Config {
         cwd: &Path,
         env: impl Fn(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
+        Self::load_with_catalog_root(cli, cwd, env, None)
+    }
+
+    fn load_with_catalog_root(
+        cli: Cli,
+        cwd: &Path,
+        env: impl Fn(&str) -> Option<OsString>,
+        catalog_root: Option<PathBuf>,
+    ) -> Result<Self, ConfigError> {
         let config_path = cli
             .config
             .or_else(|| env("ESTUS_CONFIG").map(PathBuf::from));
         let (mut document, base) = if let Some(path) = config_path {
             let path = resolve_path(path, cwd, "config")?;
-            let text = std::fs::read_to_string(&path)
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK)
+                .open(&path)
+                .map_err(|_| invalid("config", "cannot read explicitly selected TOML file"))?;
+            if !file
+                .metadata()
+                .map_err(|_| invalid("config", "cannot inspect TOML file"))?
+                .is_file()
+            {
+                return Err(invalid("config", "must be a regular TOML file"));
+            }
+            let mut text = String::new();
+            file.read_to_string(&mut text)
                 .map_err(|_| invalid("config", "cannot read explicitly selected TOML file"))?;
             let value: toml::Value = toml::from_str(&text)
                 .map_err(|_| invalid("config", "invalid TOML syntax or duplicate key"))?;
@@ -601,6 +797,10 @@ impl Config {
             (Document::default(), cwd.to_path_buf())
         };
 
+        if let Some(root) = catalog_root {
+            document.catalog.root = Some(root);
+        }
+        resolve_catalog_selection(&mut document, &base, &env)?;
         let ssh_override = cli
             .ssh_config
             .or_else(|| env("ESTUS_SSH_CONFIG").map(PathBuf::from));
@@ -615,12 +815,16 @@ impl Config {
         if let Some(path) = &ssh_config {
             // An explicit replacement must be readable now; never silently fall back
             // to the invoking user's normal SSH configuration.
-            let file = std::fs::File::open(path).map_err(|_| {
-                invalid(
-                    "ssh.config_file",
-                    "cannot read replacement SSH configuration",
-                )
-            })?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK)
+                .open(path)
+                .map_err(|_| {
+                    invalid(
+                        "ssh.config_file",
+                        "cannot read replacement SSH configuration",
+                    )
+                })?;
             if !file
                 .metadata()
                 .map_err(|_| {
@@ -956,24 +1160,20 @@ impl Config {
         host: &str,
     ) -> Result<ResolvedAutomation<'_>, ToolError> {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        let binding = self.bindings.get(id).ok_or_else(denied)?;
         if !self.binding_enabled(id)
-            || !self.bindings.get(id).is_some_and(|binding| {
-                binding.is_automation() && binding.targets.iter().any(|target| target == host)
-            })
+            || !binding.is_automation()
+            || !binding.targets.iter().any(|target| target == host)
             || !self
                 .targets
                 .as_ref()
                 .and_then(|targets| targets.get(host))
-                .is_some_and(|target| target.profile.permits_bindings())
+                .is_some_and(|target| target.permits_binding(&binding.name))
         {
             return Err(denied());
         }
         let ssh_executable = self.ssh_executable();
-        match self
-            .bindings
-            .get(id)
-            .and_then(|binding| binding.automation_authority())
-        {
+        match binding.automation_authority() {
             Some(AutomationAuthority::Ordinary) => Ok(ResolvedAutomation {
                 target: self.automation.targets.get(host).ok_or_else(denied)?,
                 ssh_config: self.ssh_config.as_deref(),
@@ -1045,6 +1245,53 @@ impl Config {
         &self.bindings
     }
 
+    pub(crate) fn from_file(path: PathBuf) -> Result<Self, ConfigError> {
+        Self::load(Cli {
+            config: Some(path),
+            ssh_config: None,
+            ssh: None,
+            command: None,
+        })
+    }
+
+    pub(crate) fn from_file_with_catalog_root(
+        path: PathBuf,
+        root: Option<PathBuf>,
+    ) -> Result<Self, ConfigError> {
+        let cwd = std::env::current_dir()
+            .map_err(|_| invalid("config", "cannot determine launch directory"))?;
+        Self::load_with_catalog_root(
+            Cli {
+                config: Some(path),
+                ssh_config: None,
+                ssh: None,
+                command: None,
+            },
+            &cwd,
+            |key| std::env::var_os(key),
+            root,
+        )
+    }
+
+    /// Import against exactly the runtime used by this authority at activation.
+    pub(crate) fn catalog_runtime(&self, authority: &str) -> Result<Option<PathBuf>, ConfigError> {
+        if authority == "automation" {
+            return self.automation_runtime();
+        }
+        let name = authority
+            .strip_prefix("automation:")
+            .ok_or_else(|| invalid("tools", "invalid catalog automation authority"))?;
+        let selected = self
+            .automation
+            .authorities
+            .get(name)
+            .ok_or_else(|| invalid("tools", "automation authority is not configured"))?;
+        match &selected.runtime {
+            Some(path) => Ok(Some(path.clone())),
+            None => self.automation_runtime(),
+        }
+    }
+
     pub(crate) fn binding_enabled(&self, id: BindingId) -> bool {
         self.profile.permits_bindings()
             && self.bindings.get(id).is_some_and(|binding| {
@@ -1054,7 +1301,7 @@ impl Config {
                             self.targets
                                 .as_ref()
                                 .and_then(|targets| targets.get(name))
-                                .is_some_and(|target| target.profile.permits_bindings())
+                                .is_some_and(|target| target.permits_binding(&binding.name))
                         }))
             })
     }
@@ -1085,7 +1332,7 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target.profile.permits_bindings() {
+        if !target.permits_binding(&binding.name) {
             return Err(denied());
         }
         match binding.sudo() {
@@ -1634,6 +1881,20 @@ fn validate_profile(value: &toml::Value, field: &'static str) -> Result<(), Conf
         .map_err(|_| invalid(field, "unknown startup profile"))
 }
 
+fn validate_tool_selection(table: &toml::Table, field: &'static str) -> Result<(), ConfigError> {
+    for key in ["enabled_tools", "disabled_tools", "tool_presets"] {
+        if let Some(value) = table.get(key) {
+            let entries = value
+                .as_array()
+                .ok_or_else(|| invalid(field, "must be arrays of strings"))?;
+            for entry in entries {
+                string(entry, field)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     let root = table(
         value,
@@ -1645,6 +1906,9 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "targets",
             "tools",
             "enabled_tools",
+            "disabled_tools",
+            "tool_presets",
+            "catalog",
             "controller",
             "automation",
             "output",
@@ -1655,12 +1919,11 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     {
         return Err(invalid("tools", "must be a table"));
     }
-    if let Some(value) = root.get("enabled_tools") {
-        let entries = value
-            .as_array()
-            .ok_or_else(|| invalid("enabled_tools", "must be an array of strings"))?;
-        for entry in entries {
-            string(entry, "enabled_tools")?;
+    validate_tool_selection(root, "enabled_tools")?;
+    if let Some(value) = root.get("catalog") {
+        let catalog = table(value, "catalog", &["root", "version"])?;
+        for value in catalog.values() {
+            string(value, "catalog")?;
         }
     }
     if let Some(value) = root.get("profile") {
@@ -1771,8 +2034,18 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             let target = table(
                 value,
                 "targets.*",
-                &["ssh_host", "profile", "sudo", "description", "labels"],
+                &[
+                    "ssh_host",
+                    "profile",
+                    "sudo",
+                    "description",
+                    "labels",
+                    "tool_presets",
+                    "enabled_tools",
+                    "disabled_tools",
+                ],
             )?;
+            validate_tool_selection(target, "targets.*.enabled_tools")?;
             string(
                 target
                     .get("ssh_host")
@@ -4161,5 +4434,160 @@ mode = "same-account"
                 "invalid_argument"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod catalog_selection_tests {
+    use super::*;
+
+    fn definition(name: &str) -> String {
+        format!(
+            r#"
+[tools.{name}]
+description = "Bounded account observation"
+revision = "1"
+targets = ["one", "two"]
+authority = "ordinary"
+effects = ["read"]
+execution = {{ kind = "native_argv", program = "/usr/bin/id", argv = ["--", {{ input = "account" }}] }}
+input_schema = {{ type = "object", additionalProperties = false, required = ["account"], properties = {{ account = {{ type = "string", minLength = 1, maxLength = 32 }} }} }}
+result = {{ kind = "command" }}
+"#
+        )
+    }
+
+    fn load(text: &str) -> Result<Config, ConfigError> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("site.toml");
+        std::fs::write(&path, text).unwrap();
+        Config::load_with(
+            Cli {
+                config: Some(path),
+                ssh_config: None,
+                ssh: Some(std::env::current_exe().unwrap()),
+                command: None,
+            },
+            directory.path(),
+            |_| None,
+        )
+    }
+
+    #[test]
+    fn target_selection_matches_discovery_and_cannot_resurrect_global_disables() {
+        let config = load(&format!(
+            r#"
+profile = "actions-only"
+enabled_tools = ["observe", "other"]
+disabled_tools = ["other"]
+[targets.one]
+ssh_host = "ordinary-one"
+enabled_tools = ["observe"]
+[targets.two]
+ssh_host = "ordinary-two"
+enabled_tools = ["other"]
+{}{}
+"#,
+            definition("observe"),
+            definition("other")
+        ))
+        .unwrap();
+        let (id, _) = config
+            .bindings
+            .entries()
+            .find(|(_, b)| b.name == "observe")
+            .unwrap();
+        let (disabled, _) = config
+            .bindings
+            .entries()
+            .find(|(_, b)| b.name == "other")
+            .unwrap();
+        assert!(config.binding_enabled(id));
+        assert!(!config.binding_enabled(disabled));
+        assert!(config.resolve_binding("one", id).is_ok());
+        assert_eq!(
+            config.resolve_binding("two", id).err().unwrap().code,
+            "policy_denied"
+        );
+        assert_eq!(
+            config.resolve_binding("two", disabled).err().unwrap().code,
+            "policy_denied"
+        );
+        let tools = ToolCatalog::new(
+            config
+                .bindings
+                .entries()
+                .map(|(id, b)| ToolEntry {
+                    id: ToolKey::Binding(id),
+                    name: Cow::Owned(b.name.clone()),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let discovered = serde_json::to_value(config.targets(&tools)).unwrap();
+        assert_eq!(
+            discovered["targets"][0]["permitted_operations"],
+            serde_json::json!(["observe"])
+        );
+        assert_eq!(
+            discovered["targets"][1]["permitted_operations"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn explicit_empty_target_selection_denies_every_named_tool() {
+        let config = load(&format!(
+            r#"
+profile = "actions-only"
+enabled_tools = ["observe"]
+[targets.one]
+ssh_host = "ordinary-one"
+enabled_tools = []
+[targets.two]
+ssh_host = "ordinary-two"
+tool_presets = []
+{}
+"#,
+            definition("observe")
+        ))
+        .unwrap();
+        assert!(
+            config
+                .bindings
+                .entries()
+                .all(|(id, _)| !config.binding_enabled(id))
+        );
+    }
+
+    #[test]
+    fn presets_are_pinned_inert_templates_not_authority_or_definition_grants() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let inert = load(&format!("[catalog]\nroot={root:?}\nversion='1'\n")).unwrap();
+        assert_eq!(inert.bindings.entries().count(), 0);
+        assert!(!inert.automation.required);
+        let prefix = format!(
+            "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\nversion='1'\n[targets.one]\nssh_host='one'\n[targets.two]\nssh_host='two'\n"
+        );
+        assert!(
+            load(&prefix).is_err(),
+            "preset fabricated unreviewed definitions"
+        );
+        let text = format!(
+            "{prefix}{}{}{}",
+            definition("cpu_stats"),
+            definition("memory_stats"),
+            definition("pressure_get")
+        );
+        let config = load(&text).unwrap();
+        assert!(
+            config
+                .bindings
+                .entries()
+                .all(|(id, _)| config.binding_enabled(id))
+        );
+        assert!(load(&text.replace("version='1'", "version='unreviewed-upgrade'")).is_err());
+        assert!(load(&text.replace("version='1'", "")).is_err());
+        assert!(load(&text.replace("linux-health", "unknown-preset")).is_err());
     }
 }

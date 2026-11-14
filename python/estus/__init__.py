@@ -9,6 +9,8 @@ import sys
 def main() -> None:
     package_root = Path(__file__).resolve(strict=True).parent
     executable = package_root / "_bin" / "estus"
+    # Installed inert data is selected by this launcher, never the caller's cwd.
+    os.environ["ESTUS_CATALOG_ROOT"] = str(package_root / "_catalog")
     # Preserve the interpreter pathname: resolving its symlink would lose a venv.
     os.environ["ESTUS_PYTHON_RUNTIME"] = json.dumps(
         {
