@@ -1,0 +1,47 @@
+# Explicit standalone opt-in. Schedule one fixed host reboot five seconds later. Receipt is scheduling only: require independent reconnect and changed boot ID to confirm reboot, then separate health checks. Never interpret SSH loss as confirmed success/failure or replay automatically.
+# Copy roles/host_reboot to /etc/estus/roles/host_reboot; review every file.
+# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
+# estus --config host_reboot.toml schema import-role host_reboot --role-path /etc/estus/roles/host_reboot --overlay overlay.json --output /etc/estus/host_reboot.schema.json
+# Import is offline; review snapshot before startup activation. No implicit install/escalation.
+# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
+# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
+# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
+# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
+# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+profile = "actions-only"
+enabled_tools = ["host_reboot"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+# Separate reviewed SSH identity and sudo policy; ordinary observation grants no mutation authority.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.host_reboot]
+description = "Schedule one fixed host reboot five seconds later. Receipt is scheduling only: require independent reconnect and changed boot ID to confirm reboot, then separate health checks. Never interpret SSH loss as confirmed success/failure or replay automatically."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read", "runtime_write", "availability"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/host_reboot.schema.json", role_path = "/etc/estus/roles/host_reboot", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "outcome" = ["mcp_result", "outcome"], "command_returncode" = ["mcp_result", "command_returncode"], "reboot_confirmed" = ["mcp_result", "reboot_confirmed"], "reconciliation_required" = ["mcp_result", "reconciliation_required"], "schedule_unit" = ["mcp_result", "schedule_unit"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "outcome" = { "type" = "string", "maxLength" = 32 }, "command_returncode" = { "type" = "integer", "minimum" = -255, "maximum" = 255 }, "reboot_confirmed" = { "type" = "boolean" }, "reconciliation_required" = { "type" = "string", "maxLength" = 256 }, "schedule_unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "outcome", "command_returncode", "reboot_confirmed", "reconciliation_required", "schedule_unit"], "additionalProperties" = false } }

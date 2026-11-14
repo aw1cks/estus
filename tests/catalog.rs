@@ -34,6 +34,7 @@ mod tools {
     mod device_attributes_get;
     mod dns_lookup;
     mod filesystem_usage_get;
+    mod host_reboot;
     mod icmp_probe;
     mod network_address_add;
     mod network_address_remove;
