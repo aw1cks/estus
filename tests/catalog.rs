@@ -37,6 +37,7 @@ mod tools {
     mod host_reboot;
     mod icmp_probe;
     mod kernel_modules_list;
+    mod kernel_state_get;
     mod network_address_add;
     mod network_address_remove;
     mod network_addresses_list;

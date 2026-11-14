@@ -1,0 +1,38 @@
+# Explicit standalone opt-in. Observe kernel taint, release and available lockdown, signature enforcement and module-disable policy. Absent/inaccessible fields remain explicitly unavailable.
+# Copy roles/kernel_state_get to /etc/estus/roles/kernel_state_get; review every file.
+# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
+# estus --config kernel_state_get.toml schema import-role kernel_state_get --role-path /etc/estus/roles/kernel_state_get --overlay overlay.json --output /etc/estus/kernel_state_get.schema.json
+# Import is offline; review snapshot before startup activation. No implicit install/escalation.
+# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
+# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
+# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
+# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
+# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+profile = "actions-only"
+enabled_tools = ["kernel_state_get"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+[tools.kernel_state_get]
+description = "Observe kernel taint, release and available lockdown, signature enforcement and module-disable policy. Absent/inaccessible fields remain explicitly unavailable."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/kernel_state_get.schema.json", role_path = "/etc/estus/roles/kernel_state_get", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "taint" = ["mcp_result", "taint"], "kernel_release" = ["mcp_result", "kernel_release"], "lockdown" = ["mcp_result", "lockdown"], "signature_enforce" = ["mcp_result", "signature_enforce"], "modules_disabled" = ["mcp_result", "modules_disabled"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "taint" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "kernel_release" = { "type" = "string", "maxLength" = 256 }, "lockdown" = { "type" = "string", "maxLength" = 4096 }, "signature_enforce" = { "type" = "string", "maxLength" = 4096 }, "modules_disabled" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "taint", "kernel_release"], "additionalProperties" = false } }
