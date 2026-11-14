@@ -1,0 +1,11 @@
+---
+argument_specs:
+  main:
+    short_description: journal_boots_list reviewed bounded operation
+    options:
+      target_python:
+        type: path
+        required: true
+      limit:
+        type: int
+        required: true
