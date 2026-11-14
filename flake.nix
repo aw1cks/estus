@@ -102,6 +102,7 @@
               --set ESTUS_TEST_BINARY ${native}/bin/estus \
               --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
               --set ESTUS_TEST_AUTOMATION_BINARY ${optional}/bin/estus \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]} \
               --add-flags '--include-ignored --nocapture --test-threads=2 --skip wheel::'
           '';
         runnerAcceptance = native: harness:
@@ -126,6 +127,7 @@
               { name = "role-acceptance"; scenario = "real_runner_role_acceptance"; }
               { name = "playbook-acceptance"; scenario = "real_runner_playbook_acceptance"; }
               { name = "authority-acceptance"; scenario = "real_runner_authority_acceptance"; isolated = true; }
+              { name = "isolated-runner-acceptance"; scenario = "real_runner_isolated_fixture_smoke"; isolated = true; }
               { name = "progress-acceptance"; scenario = "real_runner_progress_setup_acceptance"; }
               { name = "host-summary-acceptance"; scenario = "real_host_summary_acceptance"; isolated = true; }
               { name = "cpu-stats-acceptance"; scenario = "real_cpu_stats_acceptance"; isolated = true; }
@@ -213,6 +215,14 @@
         apps.authority-acceptance-msrv = {
           type = "app";
           program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/authority-acceptance";
+        };
+        apps.isolated-runner-acceptance = {
+          type = "app";
+          program = "${runnerAcceptance package acceptance}/bin/isolated-runner-acceptance";
+        };
+        apps.isolated-runner-acceptance-msrv = {
+          type = "app";
+          program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/isolated-runner-acceptance";
         };
         apps.wheel-acceptance = {
           type = "app";

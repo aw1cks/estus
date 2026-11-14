@@ -82,11 +82,29 @@
                 run = "nix flake check -L --no-update-lock-file --keep-going";
               }
               {
-                name = "Run packaged MSRV native SSH acceptance";
+                name = "Run packaged MSRV native and controller acceptance";
                 run = ''
                   runtime=$(mktemp -d "$HOME/.estus-native.XXXXXXXX")
                   trap 'rm -rf -- "$runtime"' EXIT
-                  XDG_RUNTIME_DIR="$runtime" nix run -L --no-update-lock-file .#ssh-native-msrv
+                  export XDG_RUNTIME_DIR="$runtime"
+                  nix run -L --no-update-lock-file .#ssh-native-msrv
+                  nix run -L --no-update-lock-file .#controller-scripts-msrv
+                  nix run -L --no-update-lock-file .#doctor-acceptance-msrv
+                  nix run -L --no-update-lock-file .#progress-acceptance-msrv
+                '';
+              }
+              {
+                name = "Run packaged MSRV Ansible acceptance";
+                shell = "bash";
+                run = ''
+                  runtime=$(mktemp -d "$HOME/.estus-ansible.XXXXXXXX")
+                  trap 'rm -rf -- "$runtime"' EXIT
+                  export XDG_RUNTIME_DIR="$runtime"
+                  for suite in automation runner projection role playbook runner-progress; do
+                    echo "::group::$suite acceptance"
+                    nix run -L --no-update-lock-file ".#$suite-acceptance-msrv"
+                    echo "::endgroup::"
+                  done
                 '';
               }
               {
@@ -96,6 +114,21 @@
                 run = ''
                   nix run -L --no-update-lock-file .#ci
                   nix run -L --no-update-lock-file .#ci-msrv
+                '';
+              }
+              {
+                name = "Run packaged MSRV Linux Ansible acceptance";
+                "if" = "runner.os == 'Linux'";
+                shell = "bash";
+                env.DOCKER_HOST = "unix:///var/run/docker.sock";
+                run = ''
+                  ESTUS_TEST_FIXTURE=$(nix build -L --no-update-lock-file --no-link --print-out-paths .#ssh-automation-fixture-image)
+                  export ESTUS_TEST_FIXTURE
+                  for suite in isolated-runner authority host-summary cpu-stats memory-stats; do
+                    echo "::group::$suite acceptance"
+                    nix run -L --no-update-lock-file ".#$suite-acceptance-msrv"
+                    echo "::endgroup::"
+                  done
                 '';
               }
             ];

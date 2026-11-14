@@ -1079,7 +1079,7 @@ that yields `unavailable` without discarding known execution completion.
 
 `nix run .#projection-acceptance-msrv` runs the focused real Runner suite with the
 same non-root/private-runtime-directory prerequisites as native SSH acceptance.
-It does not activate hosted CI or install request-time dependencies.
+No request-time dependencies are installed.
 
 ## Native / Nix
 
@@ -1095,6 +1095,28 @@ Native Nix packaging supplies OpenSSH and has no Python/Ansible runtime dependen
 The separate `.#automation-msrv` output supplies the optional pinned Ansible runtime;
 see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
 That health check verifies imports and identity, not Ansible workload execution.
+
+## CI coverage
+
+The generated workflow (`nix/ci.nix`; regenerate with
+`nix run .#generate-workflows`) runs on Linux x86_64/arm64 and macOS arm64:
+
+| Layer | Hosted coverage |
+| --- | --- |
+| Sandboxed checks | Default compiler and Rust 1.88 network-free tests; acceptance executable compilation; formatting and workflow consistency |
+| Installed MSRV native | Real SSH/SFTP, controller scripts, doctor and native/controller/SFTP progress |
+| Installed MSRV Ansible | Pinned runtime health and schema import/drift; real SSH/Runner modules, typed projections, roles, playbooks and progress |
+| Linux containers | Default/MSRV SSH baseline; MSRV module/facts smoke, automation authority and shipped host-summary, CPU and memory roles |
+
+Local SSH suites use a private runtime directory under the runner's home.
+Linux automation suites build the dedicated `ssh-automation-fixture-image` and
+select it explicitly through `ESTUS_TEST_FIXTURE`, with an explicit Docker socket.
+These are workload tests, not just Ansible import checks: existing assertions
+exercise failure, cancellation, cleanup, private-output boundaries and remote effects.
+
+Wheel installation/launcher acceptance remains opt-in (`nix run .#wheel-acceptance`);
+hosted coverage of the native package and Nix Ansible bundle does not prove the
+outside-Nix Python/wheel path.
 
 ## Fuzzing
 
