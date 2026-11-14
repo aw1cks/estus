@@ -28,4 +28,5 @@ mod tools {
     mod device_attributes_get;
     mod filesystem_usage_get;
     mod pressure_get;
+    mod process_fds_list;
 }
