@@ -621,7 +621,7 @@ class Cancellation:
     def scratch(self):
         size = 0
         count = 0
-        def visit(fd, depth):
+        def visit(fd, depth, temporary=False):
             nonlocal size, count
             require(depth <= 32)
             with os.scandir(fd) as entries:
@@ -641,12 +641,15 @@ class Cancellation:
                         except FileNotFoundError:
                             continue
                         try:
-                            visit(child, depth + 1)
+                            visit(child, depth + 1, temporary or (depth == 0 and entry.name == "tmp"))
                         finally:
                             os.close(child)
                     elif depth == 0 and entry.name == "runner.lease":
                         require(stat.S_ISFIFO(info.st_mode) and info.st_uid == os.getuid()
                                 and stat.S_IMODE(info.st_mode) == 0o600)
+                    elif temporary and stat.S_ISSOCK(info.st_mode):
+                        # Python multiprocessing IPC stays inside private TMPDIR.
+                        require(info.st_uid == os.getuid())
                     else:
                         require(stat.S_ISREG(info.st_mode))
         fd = os.open(self.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

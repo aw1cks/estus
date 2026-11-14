@@ -5,7 +5,7 @@
 //! not descendant disappearance, rollback, or bounded shutdown on a broken OS.
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -366,7 +366,13 @@ struct Monitoring {
 }
 
 fn scratch_within_limit(root: &Path, mut bytes: u64, mut files: usize) -> io::Result<bool> {
-    fn visit(path: &Path, depth: usize, bytes: &mut u64, files: &mut usize) -> io::Result<bool> {
+    fn visit(
+        path: &Path,
+        depth: usize,
+        temporary: bool,
+        bytes: &mut u64,
+        files: &mut usize,
+    ) -> io::Result<bool> {
         if depth > 16 {
             return Ok(false);
         }
@@ -385,7 +391,8 @@ fn scratch_within_limit(root: &Path, mut bytes: u64, mut files: usize) -> io::Re
                 result => result?,
             };
             if metadata.is_dir() {
-                if !visit(&entry.path(), depth + 1, bytes, files)? {
+                let temporary = temporary || (depth == 0 && entry.file_name() == "tmp");
+                if !visit(&entry.path(), depth + 1, temporary, bytes, files)? {
                     return Ok(false);
                 }
             } else if metadata.is_file() {
@@ -393,16 +400,20 @@ fn scratch_within_limit(root: &Path, mut bytes: u64, mut files: usize) -> io::Re
                     return Ok(false);
                 }
                 *bytes -= metadata.len();
-            } else if !(depth == 0
+            } else if !((depth == 0
                 && entry.file_name() == "runner.lease"
                 && metadata.file_type().is_fifo())
+                // Python multiprocessing uses Unix sockets under private TMPDIR.
+                || (temporary
+                    && metadata.file_type().is_socket()
+                    && metadata.uid() == nix::unistd::getuid().as_raw()))
             {
                 return Ok(false);
             }
         }
         Ok(true)
     }
-    visit(root, 0, &mut bytes, &mut files)
+    visit(root, 0, false, &mut bytes, &mut files)
 }
 
 async fn monitor(
@@ -885,6 +896,23 @@ pub(crate) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_scratch_counts_private_temporary_sockets_without_allowing_other_special_entries()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root.path().join("tmp").join("worker");
+        fs::create_dir_all(&temporary).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(temporary.join("ipc")).unwrap();
+        assert!(scratch_within_limit(root.path(), 1024, 3).unwrap());
+        assert!(!scratch_within_limit(root.path(), 1024, 2).unwrap());
+        let outside = root.path().join("outside");
+        let _outside = std::os::unix::net::UnixListener::bind(&outside).unwrap();
+        assert!(!scratch_within_limit(root.path(), 1024, 4).unwrap());
+        fs::remove_file(outside).unwrap();
+        std::os::unix::fs::symlink(&temporary, root.path().join("link")).unwrap();
+        assert!(!scratch_within_limit(root.path(), 1024, 4).unwrap());
+    }
 
     #[test]
     fn cli_completion_does_not_release_ownership_before_writer_exit() {

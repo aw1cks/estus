@@ -561,6 +561,10 @@ Scratch defaults to 16 MiB/512 entries. Byte/file polling cancels on an observed
 watermark, not a hard filesystem or memory quota. Runner's unavoidable private
 metadata/transient files can contain secrets; supported duplicate output/event
 capture is suppressed and invocation files are removed after ownership ends.
+Same-UID Unix sockets beneath the invocation's private temporary directory are
+permitted for Python multiprocessing IPC and still count toward the entry limit.
+Symlinks, sockets elsewhere and other special files remain rejected, apart from
+the fixed owned Runner lease FIFO.
 Crash recovery does not promise secure erasure. Privilege escalation and retained
 raw events remain outside this implementation.
 
