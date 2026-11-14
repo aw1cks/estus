@@ -93,6 +93,7 @@ mod tools {
     mod systemd_unit_reset_failed;
     mod systemd_unit_restart;
     mod systemd_unit_set_runtime_limits;
+    mod systemd_unit_start;
     mod tcp_connect_probe;
     mod time_sync_status;
 }

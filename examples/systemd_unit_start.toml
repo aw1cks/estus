@@ -1,0 +1,46 @@
+# Opt-in Linux systemd binding; review fixed manager scope and unit allowlist.
+# Copy roles/systemd_unit_start to /etc/estus/roles/systemd_unit_start; export this tool's
+# input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config systemd_unit_start.toml schema import-role systemd_unit_start --role-path /etc/estus/roles/systemd_unit_start --overlay overlay.json --output /etc/estus/systemd_unit_start.schema.json
+# Review snapshot before activation; provision workspace 0700, target Python/systemctl.
+# Unit policy changes require reviewing BOTH schema enum and fixed allowed_units.
+# User scope needs the executing account's running user manager and runtime environment.
+# Named catalog authority uses a separate reviewed SSH identity and sudo root.
+profile = "actions-only"
+enabled_tools = ["systemd_unit_start"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+[automation.authorities.catalog.become]
+method = "sudo"
+user = "root"
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.systemd_unit_start]
+description = "Fixed start operation in operator manager scope. Explicit completion/readback is separate from application health. Dependencies/activation can affect other units; interrupted work is not replayed."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["runtime_write", "availability", "read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_unit_start.schema.json", role_path = "/etc/estus/roles/systemd_unit_start", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+input_map = { "unit" = "unit" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "enum" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"], "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
+[tools.systemd_unit_start.result]
+kind = "ansible_projection"
+fields = { "scope" = ["mcp_result", "scope"], "operation" = ["mcp_result", "operation"], "operation_completed" = ["mcp_result", "operation_completed"], "health" = ["mcp_result", "health"], "unit" = ["mcp_result", "unit"], "properties" = ["mcp_result", "properties"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "operation" = { "type" = "string", "const" = "start", "maxLength" = 5 }, "operation_completed" = { "type" = "boolean", "const" = true }, "health" = { "type" = "string", "const" = "not_checked", "maxLength" = 11 }, "unit" = { "type" = "string", "maxLength" = 128 }, "properties" = { "type" = "object", "properties" = { "Id" = { "type" = "string", "maxLength" = 4096 }, "LoadState" = { "type" = "string", "maxLength" = 4096 }, "ActiveState" = { "type" = "string", "maxLength" = 4096 }, "SubState" = { "type" = "string", "maxLength" = 4096 }, "UnitFileState" = { "type" = "string", "maxLength" = 4096 }, "MainPID" = { "type" = "string", "maxLength" = 4096 }, "Result" = { "type" = "string", "maxLength" = 4096 } }, "required" = [], "additionalProperties" = false } }, "required" = ["scope", "operation", "operation_completed", "health", "unit", "properties"], "additionalProperties" = false }
