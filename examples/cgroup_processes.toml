@@ -1,0 +1,36 @@
+# Reviewed Linux-only cgroup_processes; logs can contain secrets; no arbitrary paths/code/flags.
+# Copy roles/cgroup_processes to /etc/estus/roles/cgroup_processes, review all tasks, export
+# input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config cgroup_processes.toml schema import-role cgroup_processes --role-path /etc/estus/roles/cgroup_processes --overlay overlay.json --output /etc/estus/cgroup_processes.schema.json
+# Review snapshot before activation; provision /var/lib/estus/runner mode 0700.
+# Install pinned Python3 and the fixed utilities used below; no auto-install.
+profile = "actions-only"
+enabled_tools = ["cgroup_processes"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.cgroup_processes]
+description = "Bounded direct membership of approved cgroup only, without command arguments. PID membership races are explicit; no process signalling or migration."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/cgroup_processes.schema.json", role_path = "/etc/estus/roles/cgroup_processes", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
+input_map = { "limit" = "limit" }
+limits = { timeout_secs = 40 }
+input_schema = { "type" = "object", "properties" = { "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 64 } }, "required" = ["limit"], "additionalProperties" = false }
+[tools.cgroup_processes.result]
+kind = "ansible_projection"
+fields = { "root" = ["mcp_result", "root"], "boot_id" = ["mcp_result", "boot_id"], "identity" = ["mcp_result", "identity"], "controllers" = ["mcp_result", "controllers"], "subtree_control" = ["mcp_result", "subtree_control"], "ancestors" = ["mcp_result", "ancestors"], "scope" = ["mcp_result", "scope"], "pids" = ["mcp_result", "pids"], "truncated" = ["mcp_result", "truncated"], "membership_atomic" = ["mcp_result", "membership_atomic"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "root" = { "type" = "string", "maxLength" = 256 }, "boot_id" = { "type" = "string", "maxLength" = 36 }, "identity" = { "type" = "string", "maxLength" = 128 }, "controllers" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 }, "subtree_control" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 }, "ancestors" = { "type" = "array", "items" = { "type" = "object", "properties" = { "path" = { "type" = "string", "maxLength" = 1024 }, "constraints" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["name", "value"], "additionalProperties" = false }, "maxItems" = 8 } }, "required" = ["path", "constraints"], "additionalProperties" = false }, "maxItems" = 32 }, "scope" = { "type" = "string", "maxLength" = 64 }, "pids" = { "type" = "array", "items" = { "type" = "integer", "minimum" = 1, "maximum" = 2147483647 }, "maxItems" = 64 }, "truncated" = { "type" = "boolean" }, "membership_atomic" = { "type" = "boolean", "const" = false } }, "required" = ["root", "boot_id", "identity", "controllers", "subtree_control", "ancestors", "scope", "pids", "truncated", "membership_atomic"], "additionalProperties" = false }
