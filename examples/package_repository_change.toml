@@ -1,0 +1,37 @@
+# Opt-in apt-only procedure. Preprovision apt, dpkg, python-apt and signed sources; never bootstrap dependencies.
+# Copy roles/package_repository_change to /etc/estus/roles/package_repository_change, review tasks and operator-fixed allowlists.
+# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config package_repository_change.toml schema import-role package_repository_change --role-path /etc/estus/roles/package_repository_change --overlay overlay.json --output /etc/estus/package_repository_change.schema.json
+# Review snapshot before activation; /var/lib/estus/runner must be mode 0700 owned by MCP.
+# Mutations require separately configured automation:catalog identity with root become; no retry after uncertainty.
+# Package commands may run maintainer scripts. No rollback, transactional snapshot or quiescence is promised.
+profile = "actions-only"
+enabled_tools = ["package_repository_change"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.package_repository_change]
+description = "Select one of two reviewed signed file repositories; no refresh or arbitrary trust bypass."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["persistent_write", "read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/package_repository_change.schema.json", role_path = "/etc/estus/roles/package_repository_change", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_sources" = { "primary" = "deb [signed-by=/usr/share/keyrings/estus-catalog.gpg] file:/opt/estus-catalog/repo-a ./", "alternate" = "deb [signed-by=/usr/share/keyrings/estus-catalog.gpg] file:/opt/estus-catalog/repo-b ./" } }
+input_map = { "repository" = "repository" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "additionalProperties" = false, "required" = ["repository"], "properties" = { "repository" = { "type" = "string", "enum" = ["primary", "alternate"] } } }
+[tools.package_repository_change.result]
+kind = "ansible_projection"
+fields = { "repository" = ["mcp_result", "repository"], "source" = ["mcp_result", "source"], "signature_required" = ["mcp_result", "signature_required"], "changed" = ["mcp_result", "changed"], "refreshed" = ["mcp_result", "refreshed"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "additionalProperties" = false, "required" = ["repository", "source", "signature_required", "changed", "refreshed"], "properties" = { "repository" = { "type" = "string", "enum" = ["primary", "alternate"], "maxLength" = 64 }, "source" = { "type" = "string", "maxLength" = 512 }, "signature_required" = { "type" = "boolean", "const" = true }, "changed" = { "type" = "boolean" }, "refreshed" = { "type" = "boolean", "const" = false } } }
