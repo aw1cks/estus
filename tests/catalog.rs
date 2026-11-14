@@ -103,6 +103,7 @@ mod tools {
     mod nic_pause_get;
     mod nic_pause_set;
     mod nic_rings_get;
+    mod nic_rings_set;
     mod nic_rss_get;
     mod nic_stats_get;
     mod package_get;
