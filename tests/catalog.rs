@@ -36,6 +36,7 @@ mod tools {
     mod filesystem_usage_get;
     mod host_reboot;
     mod icmp_probe;
+    mod kernel_module_get;
     mod kernel_module_parameter_set;
     mod kernel_module_parameters_get;
     mod kernel_modules_list;
