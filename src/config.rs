@@ -4563,11 +4563,13 @@ tool_presets = []
     #[test]
     fn presets_are_pinned_inert_templates_not_authority_or_definition_grants() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let inert = load(&format!("[catalog]\nroot={root:?}\nversion='1'\n")).unwrap();
+        let catalog = crate::catalog_assets::Catalog::load(Some(&root)).unwrap();
+        let pin = format!("version={:?}", catalog.manifest().version);
+        let inert = load(&format!("[catalog]\nroot={root:?}\n{pin}\n")).unwrap();
         assert_eq!(inert.bindings.entries().count(), 0);
         assert!(!inert.automation.required);
         let prefix = format!(
-            "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\nversion='1'\n[targets.one]\nssh_host='one'\n[targets.two]\nssh_host='two'\n"
+            "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[targets.two]\nssh_host='two'\n"
         );
         assert!(
             load(&prefix).is_err(),
@@ -4586,8 +4588,8 @@ tool_presets = []
                 .entries()
                 .all(|(id, _)| config.binding_enabled(id))
         );
-        assert!(load(&text.replace("version='1'", "version='unreviewed-upgrade'")).is_err());
-        assert!(load(&text.replace("version='1'", "")).is_err());
+        assert!(load(&text.replace(&pin, "version='unreviewed-upgrade'")).is_err());
+        assert!(load(&text.replace(&pin, "")).is_err());
         assert!(load(&text.replace("linux-health", "unknown-preset")).is_err());
     }
 }

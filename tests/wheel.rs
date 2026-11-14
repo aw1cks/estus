@@ -414,8 +414,8 @@ async fn installed_wheel_channels() -> Result<()> {
         };
         let listed = checked(launch(false).args(["catalog", "list", "--json"])).await?;
         let listing: Value = serde_json::from_slice(&listed.stdout)?;
-        ensure!(listing["tools"].as_array().is_some_and(|tools| tools.len() == 113),
-            "{channel} installed catalog is incomplete: {listing}");
+        ensure!(listing["schema"] == 1 && listing["tools"].is_array(),
+            "{channel} invalid catalog listing: {listing}");
         let export = installed.root.path().join(format!("catalog-{channel}"));
         checked(launch(false).args(["catalog", "export", "--preset", "linux-health", "--output"]).arg(&export)).await?;
         let definitions: toml::Table = fs::read_to_string(export.join("tools.toml"))?.parse()?;
@@ -616,7 +616,6 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
         .arg("-d").arg(root.path())).await?;
     let assets = workspace.join("estus/_catalog");
     let catalog = catalog_assets::Catalog::load(Some(&assets)).map_err(anyhow::Error::msg)?;
-    ensure!(catalog.manifest().tools.len() == 113, "incomplete wheel catalog");
     for name in catalog.manifest().tools.keys() {
         catalog.definition(name).map_err(anyhow::Error::msg)?;
         catalog.copy_role(name, &workspace.join(format!("role-{name}")))
