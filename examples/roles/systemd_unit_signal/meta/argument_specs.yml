@@ -1,0 +1,22 @@
+---
+argument_specs:
+  main:
+    short_description: systemd_unit_signal reviewed bounded capability
+    options:
+      target_python:
+        type: str
+        required: true
+      manager_scope:
+        type: str
+        required: true
+        choices: [system, user]
+      allowed_units:
+        type: list
+        required: true
+        elements: str
+      unit:
+        type: str
+        required: true
+      signal:
+        type: str
+        required: true

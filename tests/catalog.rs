@@ -94,6 +94,7 @@ mod tools {
     mod systemd_unit_reset_failed;
     mod systemd_unit_restart;
     mod systemd_unit_set_runtime_limits;
+    mod systemd_unit_signal;
     mod systemd_unit_start;
     mod systemd_unit_stop;
     mod systemd_unit_try_restart;
