@@ -41,7 +41,8 @@
               && (craneLib.filterCargoSources path type
                 || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
                   && pkgs.lib.hasSuffix ".py" path)
-                || pkgs.lib.hasPrefix "${toString ./.}/examples/" path);
+                || pkgs.lib.hasPrefix "${toString ./.}/examples/" path
+                || pkgs.lib.hasPrefix "${toString ./.}/tests/catalog/fixtures/" path);
           };
           strictDeps = true;
           doCheck = true;

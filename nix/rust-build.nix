@@ -17,7 +17,8 @@ let
   package = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts cargoTestExtraArgs;
     nativeBuildInputs = [ pkgs.makeWrapper ];
-    nativeCheckInputs = controllerTestPrograms ++ [ pkgs.openssh ];
+    # Captured production parsers need only isolated stdlib Python, not Ansible.
+    nativeCheckInputs = controllerTestPrograms ++ [ pkgs.openssh pkgs.python3 ];
     postFixup = ''
       wrapProgram "$out/bin/estus" \
         --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh ]}
