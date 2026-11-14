@@ -1,0 +1,37 @@
+# Operator approval: selector enum is a reviewed topology allowlist; edit and
+# reimport it for the target before activation, never widen it from caller input.
+# Opt-in: copy roles/network_device_get to /etc/estus/roles/network_device_get; export input_schema,
+# fixed_args and input_map as overlay.json. Review the offline imported snapshot:
+# estus --config network_device_get.toml schema import-role network_device_get --role-path /etc/estus/roles/network_device_get --overlay overlay.json --output /etc/estus/network_device_get.schema.json
+# Provision mode0700 /var/lib/estus/runner, Python3 and declared inspection utilities.
+# Actual selected driver network_device_get fields; absent capabilities named, never fabricated zeros. Fixed ethtool command, no changes or duplicate setup offload features.
+profile = "actions-only"
+enabled_tools = ["network_device_get"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.network_device_get]
+description = "Actual selected driver network_device_get fields; absent capabilities named, never fabricated zeros. Fixed ethtool command, no changes or duplicate setup offload features."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/network_device_get.schema.json", role_path = "/etc/estus/roles/network_device_get", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = { "interface" = "interface" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "maxLength" = 15, "enum" = ["eth0", "catalog0", "lo"] } }, "required" = ["interface"], "additionalProperties" = false }
+[tools.network_device_get.result]
+kind = "ansible_projection"
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "interface" = ["mcp_result", "interface"], "supported" = ["mcp_result", "supported"], "values" = ["mcp_result", "values"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "interface" = { "type" = "string", "maxLength" = 15 }, "supported" = { "type" = "boolean" }, "values" = { "type" = "object", "properties" = { "driver" = { "type" = "string", "maxLength" = 4096 }, "version" = { "type" = "string", "maxLength" = 4096 }, "firmware_version" = { "type" = "string", "maxLength" = 4096 }, "expansion_rom_version" = { "type" = "string", "maxLength" = 4096 }, "bus_info" = { "type" = "string", "maxLength" = 4096 }, "supports_statistics" = { "type" = "string", "maxLength" = 4096 }, "supports_test" = { "type" = "string", "maxLength" = 4096 }, "supports_eeprom_access" = { "type" = "string", "maxLength" = 4096 }, "supports_register_dump" = { "type" = "string", "maxLength" = 4096 }, "supports_priv_flags" = { "type" = "string", "maxLength" = 4096 } }, "required" = [], "additionalProperties" = false } }, "required" = ["source", "observed_at", "unavailable", "interface", "supported", "values"], "additionalProperties" = false }

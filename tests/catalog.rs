@@ -32,6 +32,7 @@ mod tools {
     mod network_address_add;
     mod network_address_remove;
     mod network_addresses_list;
+    mod network_device_get;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
