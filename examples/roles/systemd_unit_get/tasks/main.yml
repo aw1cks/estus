@@ -1,0 +1,30 @@
+---
+- name: Enforce fixed operator unit selection
+  ansible.builtin.assert:
+    that:
+      - manager_scope in ['system', 'user']
+      - unit in allowed_units
+      - unit is match('^[A-Za-z0-9_@.:-]{1,128}$')
+    quiet: true
+- name: Resolve executing account runtime directory without privilege changes
+  ansible.builtin.command:
+    argv: ['{{ target_python }}', '-I', '-c', 'import os; print(os.getuid())']
+    expand_argument_vars: false
+  register: systemd_account
+  changed_when: false
+- name: Use maintained module with exactly this capability's semantics
+  ansible.builtin.systemd_service:
+    name: '{{ unit }}'
+    scope: '{{ manager_scope }}'
+    daemon_reload: false
+    daemon_reexec: false
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ systemd_account.stdout | trim }}"
+  register: systemd_effect
+  changed_when: false
+- name: Publish closed non-secret selected status properties
+  ansible.builtin.set_fact:
+    mcp_result:
+      scope: '{{ manager_scope }}'
+      properties: "{{ dict(systemd_effect.status.items() | selectattr('0', 'in', ['Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState', 'MainPID', 'Result', 'InvocationID', 'NRestarts', 'ActiveEnterTimestampMonotonic', 'InactiveEnterTimestampMonotonic']) | list) }}"
+      unavailable: "{{ ['Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState', 'MainPID', 'Result', 'InvocationID', 'NRestarts', 'ActiveEnterTimestampMonotonic', 'InactiveEnterTimestampMonotonic'] | difference(systemd_effect.status.keys() | list) }}"

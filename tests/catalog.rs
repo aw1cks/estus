@@ -89,6 +89,7 @@ mod tools {
     mod systemd_manager_reload;
     mod systemd_unit_config_read;
     mod systemd_unit_dependencies;
+    mod systemd_unit_get;
     mod tcp_connect_probe;
     mod time_sync_status;
 }
