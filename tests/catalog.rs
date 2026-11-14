@@ -101,6 +101,7 @@ mod tools {
     mod nic_rings_get;
     mod nic_rss_get;
     mod nic_stats_get;
+    mod packages_list;
     mod pci_device_get;
     mod pci_devices_list;
     mod pci_driver_binding_get;
