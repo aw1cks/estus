@@ -66,6 +66,7 @@ mod tools {
     mod network_routes_list;
     mod network_rules_list;
     mod network_sockets_list;
+    mod pci_devices_list;
     mod pressure_get;
     mod process_fds_list;
     mod process_get;
