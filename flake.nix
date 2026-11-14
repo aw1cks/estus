@@ -128,6 +128,7 @@
             ]}
           '';
         catalogVm = import ./nix/catalog-vm.nix { inherit inputs; hostPkgs = pkgs; };
+        catalogLabVm = import ./nix/catalog-vm.nix { inherit inputs; hostPkgs = pkgs; lab = true; };
         catalogAcceptance = native: harness: pkgs.runCommand "estus-catalog-acceptance" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
         } ''
@@ -137,6 +138,7 @@
             --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
             --set ESTUS_TEST_CATALOG_ASSETS ${commonArgs.src}/examples \
             --set ESTUS_TEST_CATALOG_VM ${catalogVm}/bin/catalog-guest \
+            --set ESTUS_TEST_CATALOG_LAB_VM ${catalogLabVm}/bin/catalog-lab-guest \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
             --add-flags '--ignored --nocapture --test-threads=2'
         '';
@@ -151,6 +153,7 @@
           inherit automation;
           inherit wheel;
           catalog-vm = catalogVm;
+          catalog-lab-vm = catalogLabVm;
           catalog-acceptance = catalogAcceptance package acceptance;
           catalog-acceptance-msrv = catalogAcceptance msrvBuild.package msrvBuild.acceptance;
           automation-msrv = automationMsrv;

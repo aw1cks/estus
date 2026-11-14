@@ -628,22 +628,27 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
-## Catalog qualification target
+## Operational catalog qualification fixture
 
-The optional catalog acceptance target uses a preprovisioned Linux EFI guest.
-Rust creates fresh private SSH keys, a writable disk overlay and EFI state for
-each scenario, then kills/reaps the owned guest and removes its private files.
-Systemd, isolated networking, a harmless signed test module, two actual boot
-entries, and a signed local apt repository/database are built beforehand.
-No workstation service, interface, sysctl, module or bootloader is modified.
+`nix build .#catalog-vm .#catalog-lab-vm` builds concrete preprovisioned EFI
+Linux guests. Every Rust acceptance scenario owns fresh private keys, writable
+disk overlays and EFI state; no workstation services, interfaces, modules,
+bootloader, host sudo policy or physical devices are changed.
+
+The main guest includes ordinary/admin identities, a real system manager with
+mutable unit-file directories, cgroups, isolated network interfaces, controlled
+boot entries, a harmless signed module and a prebuilt signed local apt repository.
+Unit directories retain operator-created links across reboot. The public test-only
+repository signing key is not a production trust root.
+
+The device lab has an independent management interface, isolated Virtio/e1000e
+NICs, two guest-only MD candidate disks and a virtual NVMe controller. These are
+prerequisites for explicitly scoped software-device tests, not physical-media,
+FEC/EEE, optics or arbitrary-driver qualification.
 
 ```sh
-nix run .#catalog-acceptance-msrv -- catalog_guest_qualification --exact
+nix run .#catalog-acceptance-msrv
 ```
-
-The fixture check proves ordinary/admin principals and real noninteractive sudo,
-EFI/systemd/module/network prerequisites and genuine initial package state.
-It does not qualify physical devices or imply transactional operation effects.
 
 ## Catalog policy: facts first
 

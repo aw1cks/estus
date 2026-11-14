@@ -26,8 +26,16 @@ pub struct Guest {
 
 impl Guest {
     pub async fn start() -> Result<Self> {
-        let runner = std::env::var_os("ESTUS_TEST_CATALOG_VM")
-            .context("set ESTUS_TEST_CATALOG_VM to the Nix-built catalog guest executable")?;
+        Self::launch("ESTUS_TEST_CATALOG_VM").await
+    }
+
+    pub async fn start_lab() -> Result<Self> {
+        Self::launch("ESTUS_TEST_CATALOG_LAB_VM").await
+    }
+
+    async fn launch(variable: &str) -> Result<Self> {
+        let runner = std::env::var_os(variable)
+            .with_context(|| format!("set {variable} to the Nix-built catalog guest executable"))?;
         let runner = support::executable(Path::new(&runner))?;
         let root = tempfile::Builder::new()
             .prefix("estus-catalog-")

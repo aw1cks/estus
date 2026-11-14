@@ -12,10 +12,30 @@ async fn catalog_guest_qualification() -> anyhow::Result<()> {
         let control = guest.shell("test -d /sys/firmware/efi && test -d /sys/fs/cgroup/system.slice && test -e /sys/module/estus_catalog/parameters/value && test -e /boot/loader/entries/estus-current.conf && test -e /boot/loader/entries/estus-alternate.conf && systemctl is-active estus-fixture.service && ip -j address show dev catalog0").await?;
         anyhow::ensure!(control.status.success(), "guest lacks required real boot/systemd/module/network evidence: {}", String::from_utf8_lossy(&control.stderr));
         anyhow::ensure!(String::from_utf8_lossy(&control.stdout).contains("192.0.2.1"), "guest fixture address missing");
+        let mutable_units = guest.shell("test ! -L /etc/systemd/system && test ! -L /etc/systemd/system/multi-user.target.wants && touch /etc/systemd/system/.estus-write-probe /etc/systemd/system/multi-user.target.wants/.estus-write-probe && rm /etc/systemd/system/.estus-write-probe /etc/systemd/system/multi-user.target.wants/.estus-write-probe").await?;
+        anyhow::ensure!(mutable_units.status.success(), "fixture unit-file directories are not writable: {}", String::from_utf8_lossy(&mutable_units.stderr));
         let ordinary = guest.ordinary("/usr/bin/id -u").await?;
         anyhow::ensure!(ordinary.status.success() && ordinary.stdout == b"1000\n", "ordinary key/principal is not usable: {}", String::from_utf8_lossy(&ordinary.stderr));
         let administrative = guest.administrative("/usr/bin/id -u; /usr/bin/sudo -H -n -k /usr/bin/id -u").await?;
         anyhow::ensure!(administrative.status.success() && administrative.stdout == b"1001\n0\n", "separate administrative identity/sudo is not usable: {}", String::from_utf8_lossy(&administrative.stderr));
+        Ok(())
+    }.await;
+    let cleanup = guest.stop().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM"]
+async fn catalog_lab_qualification() -> anyhow::Result<()> {
+    let guest = catalog::Guest::start_lab().await?;
+    let result: anyhow::Result<()> = async {
+        let observed = guest.shell("/usr/bin/ip link set tune0 up && /usr/bin/ip link set pause0 up && test -b /dev/vdb && test -b /dev/vdc && test -b /dev/nvme0n1 && test -r /proc/mdstat && /usr/bin/ethtool -i tune0 && /usr/bin/ethtool -i pause0 && /usr/bin/nvme id-ctrl /dev/nvme0 -o json").await?;
+        anyhow::ensure!(observed.status.success(), "virtual tuning/storage lab prerequisites failed: {}", String::from_utf8_lossy(&observed.stderr));
+        let text = String::from_utf8(observed.stdout)?;
+        anyhow::ensure!(text.contains("virtio_net") && text.contains("e1000e") && text.contains("ESTUS-LAB-NVME"), "lab did not expose the real selected drivers/controller");
+        let management = guest.ordinary("/usr/bin/id -u").await?;
+        anyhow::ensure!(management.status.success() && management.stdout == b"1000\n", "lab devices displaced the independent management path");
         Ok(())
     }.await;
     let cleanup = guest.stop().await;
