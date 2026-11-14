@@ -334,8 +334,7 @@ async fn installed_wheel_channels() -> Result<()> {
     let automation = executable(&input("ESTUS_TEST_AUTOMATION_SUITE")?)?;
     let native = executable(&input("ESTUS_TEST_BINARY")?)?;
     let runtime = PathBuf::from(
-        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
-            .context("set ESTUS_TEST_ANSIBLE_RUNTIME")?,
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("set ESTUS_TEST_ANSIBLE_RUNTIME")?,
     );
     ensure!(
         runtime.is_absolute() && runtime.join("runtime.json").is_file(),

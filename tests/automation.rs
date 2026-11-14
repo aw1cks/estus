@@ -1124,8 +1124,7 @@ mod wheel {
     async fn installed_base_remains_native_only_and_requested_extra_fails_before_mcp() -> Result<()>
     {
         let native = Local::new("")?;
-        let mut server =
-            Server::start(native.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?)?;
+        let mut server = Server::start(native.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?)?;
         server.catalog().await?;
         server.stop().await?;
         let required = Local::new("[automation]\nrequired = true\n")?;
@@ -1256,8 +1255,7 @@ mod wheel {
         fixture.private(&checked)?;
         ensure!(!fixture.root.path().join("forbidden-local-temp").exists());
         let mut missing_package = environment_descriptor(&interpreter, &prefix);
-        missing_package["package_root"] =
-            json!(fixture.root.path().join("missing-package/estus"));
+        missing_package["package_root"] = json!(fixture.root.path().join("missing-package/estus"));
         let mut missing_scripts = environment_descriptor(&interpreter, &prefix);
         missing_scripts["scripts"] = json!(fixture.root.path().join("missing-scripts"));
         for bad_descriptor in [
@@ -1294,10 +1292,7 @@ mod wheel {
         ensure!(prefix.is_absolute() && prefix.is_dir());
         ensure!(interpreter.parent() == Some(prefix.join("bin").as_path()));
         // Refuse the supplied original environments even if accidentally configured as mutable.
-        for reference in [
-            "ESTUS_TEST_WHEEL_BINARY",
-            "ESTUS_TEST_BASE_WHEEL_BINARY",
-        ] {
+        for reference in ["ESTUS_TEST_WHEEL_BINARY", "ESTUS_TEST_BASE_WHEEL_BINARY"] {
             ensure!(fs::canonicalize(&prefix)? != fs::canonicalize(wheel_prefix(reference)?)?);
         }
         let descriptor = environment_descriptor(&interpreter, &prefix).to_string();
