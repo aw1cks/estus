@@ -87,6 +87,7 @@ mod tools {
     mod storage_mounts_list;
     mod sysctl_get;
     mod systemd_manager_reload;
+    mod systemd_unit_config_read;
     mod tcp_connect_probe;
     mod time_sync_status;
 }
