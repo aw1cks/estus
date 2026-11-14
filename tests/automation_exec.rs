@@ -4431,6 +4431,27 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
         ensure!(serde_json::from_slice::<Value>(&observed.stdout)?
             == json!({"instance":disabled_inputs["instance"],"config":disabled_inputs["config"]}));
         a.clean()?;
+        // Quoted unsafe scalars must not be re-resolved as YAML native values.
+        // Check both flat role parameters and nested data through target bytes.
+        for (id, scalar, banner) in [(223, "0", ""), (224, "false", "false"), (225, "null", "null")] {
+            let scalar_inputs = json!({"instance":scalar,
+                "config":{"banner":banner,"enabled":false}});
+            let response = server.request(id, "tools/call", json!({"name":"app_config",
+                "arguments":{"host":"plain","inputs":scalar_inputs}})).await?;
+            let envelope = &response["result"]["structuredContent"];
+            verified_role(envelope, "successful", json!(true))?;
+            ensure!(envelope["error"].is_null()
+                && envelope["data"]["projection"]["status"] == "complete"
+                && envelope["data"]["projection"]["value"]["instance"] == scalar,
+                "string-like role scalar changed type: {response}");
+            let observed = a.fixture.direct("plain",
+                &format!("cat {}", support::quote(&disabled_path))).await?;
+            ensure!(observed.status.success(), "independent scalar read failed");
+            ensure!(serde_json::from_slice::<Value>(&observed.stdout)? == scalar_inputs,
+                "flat or nested string-like scalar changed type in managed bytes");
+            ensure!(!a.forbidden.exists(), "caller data executed a controller lookup");
+            a.clean()?;
+        }
         let partial = a.call(&mut server, 230, "partial", json!({"host":"plain","inputs":{}})).await?;
         verified_role(&partial, "failed", json!(true))?;
         ensure!(!partial["error"].is_null() && partial["error"]["remote_state_unknown"] == false

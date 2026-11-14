@@ -801,23 +801,22 @@ def selected_runtime(spec, workspace):
 def layout(workspace, spec, roots, selected_path):
     import yaml
 
-    class Literal(str):
+    class Literal(dict):
         pass
 
     class Dumper(yaml.SafeDumper):
         def ignore_aliases(self, data):
             return True
 
-    Dumper.add_representer(Literal, lambda dumper, value: dumper.represent_scalar("!unsafe", value, style="'"))
+    # Core resolves !unsafe scalars implicitly, even if quoted: "" becomes
+    # None and "false"/"0" become booleans/integers. Tag the containing mapping
+    # instead so ordinary YAML scalar tags preserve types before recursive
+    # unsafe wrapping prevents templating at every depth.
+    Dumper.add_representer(Literal, lambda dumper, value: dumper.represent_mapping("!unsafe", value))
 
     def literal(value):
-        if type(value) is str:
-            return Literal(value)
-        if type(value) is dict:
-            return {Literal(key): literal(child) for key, child in value.items()}
-        if type(value) is list:
-            return [literal(child) for child in value]
-        return value
+        require(type(value) is dict)
+        return Literal(value)
 
     def document(path, value):
         path.write_text(yaml.dump(value, Dumper=Dumper, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -904,8 +903,8 @@ def layout(workspace, spec, roots, selected_path):
     # Every execution mode uses this generated, high-precedence transport.
     # Caller literals stay nested and role argument variables stay task-scoped.
     controls = dict(inventory["all"]["hosts"][HOST])
-    controls["estus_arguments"] = literal(spec["arguments"])
-    document(project / "arguments.yml", controls)
+    controls["estus_arguments"] = spec["arguments"]
+    document(project / "arguments.yml", literal(controls))
     config = workspace / "ansible.cfg"
     config.write_text("[defaults]\ncollections_scan_sys_path = False\nretry_files_enabled = False\n"
                       "fact_caching = memory\nhost_key_checking = True\ndisplay_args_to_stdout = False\n"

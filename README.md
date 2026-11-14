@@ -543,8 +543,10 @@ Summary-only results contain logical host, status, Runner return code, bounded t
 counts, change/censorship/completion, duration and local cleanup evidence. They
 still exclude module values. Typed bindings may expose only explicitly selected
 fields as described below; whole raw events/arguments/environment are not returned.
-`no_log` remains censored. Nested module input strings use documented `!unsafe`
-tags rather than caller-supplied Jinja evaluation.
+`no_log` remains censored. Caller argument trees are wrapped with `!unsafe`,
+preventing nested Jinja evaluation while preserving string types—including empty,
+numeric-looking, boolean-looking and null-looking strings. Per-scalar unsafe tags
+are not used because Core can re-resolve their quoted contents as YAML native values.
 Failed modules may report mutation even when Core omits their changed count.
 That observation survives a known failure; it is not rewritten as unchanged or
 discarded as a protocol error.
