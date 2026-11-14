@@ -118,7 +118,7 @@
               --prefix PATH : ${pkgs.lib.makeBinPath (
                 [ pkgs.openssh pkgs.coreutils pkgs.bash ]
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
-                ++ pkgs.lib.optionals (entry.isolated or false) [ pkgs.docker-client ]
+                ++ pkgs.lib.optionals (entry.isolated or false) [ pkgs.docker-client pkgs.gnutar ]
               )} \
               --add-flags '--ignored --exact ${entry.scenario} --nocapture'
             '') [
@@ -365,6 +365,7 @@
             pkgs.openssh
             pkgs.coreutils
             pkgs.docker-client
+            pkgs.gnutar
           ];
         };
         # Optional tooling only; normal builds/checks retain their stable toolchain.

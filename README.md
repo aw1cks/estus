@@ -1114,6 +1114,12 @@ select it explicitly through `ESTUS_TEST_FIXTURE`, with an explicit Docker socke
 These are workload tests, not just Ansible import checks: existing assertions
 exercise failure, cancellation, cleanup, private-output boundaries and remote effects.
 
+Fixture identity checks support both classic image stores and Docker's containerd
+store. When the daemon reports a manifest ID instead of the artifact's config
+digest, the harness exports that immutable image with the pinned Docker CLI and
+GNU tar, verifies the config bytes against `image-id`, then selects and checks
+the daemon ID for every running fixture. A changed tag or config still fails.
+
 Wheel installation/launcher acceptance remains opt-in (`nix run .#wheel-acceptance`);
 hosted coverage of the native package and Nix Ansible bundle does not prove the
 outside-Nix Python/wheel path.

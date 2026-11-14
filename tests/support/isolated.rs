@@ -1,4 +1,4 @@
-//! Concrete Nix-image fixture selected by config digest, with artifact identity checks.
+//! Concrete Nix-image fixture with verified config content and immutable daemon selection.
 //! The SDK may attempt a pull on create-404; these tests do not promise offline execution.
 use std::{
     fs,
@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use indoc::{formatdoc, indoc};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use testcontainers::{
     ContainerAsync, CopyTargetOptions, GenericImage, ImageExt,
@@ -170,7 +171,7 @@ impl Docker {
         Ok(output)
     }
 
-    async fn inspect_image(&self, artifact: &Artifact) -> Result<()> {
+    async fn inspect_image(&self, artifact: &Artifact) -> Result<String> {
         let output = self
             .checked(
                 &[
@@ -183,10 +184,85 @@ impl Docker {
                 STARTUP,
             )
             .await?;
+        let id = String::from_utf8(output.stdout)?.trim().to_owned();
         ensure!(
-            String::from_utf8(output.stdout)?.trim() == artifact.digest,
-            "loaded image-ref does not match artifact image-id"
+            id.strip_prefix("sha256:").is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }),
+            "Docker returned an invalid immutable image ID"
         );
+        Ok(id)
+    }
+
+    async fn verify_config(
+        &self,
+        artifact: &Artifact,
+        image_id: &str,
+        directory: &Path,
+    ) -> Result<()> {
+        if image_id == artifact.digest {
+            return Ok(());
+        }
+        // Containerd-backed Docker exposes a manifest ID, not the config ID.
+        // Export that immutable image and verify the actual config bytes before
+        // authorizing its daemon ID; never accept an arbitrary changed tag.
+        let archive = directory.join("loaded-image.tar");
+        let saved = bounded(
+            self.command()
+                .args(["image", "save", "--output"])
+                .arg(&archive)
+                .arg(image_id),
+            STARTUP,
+        )
+        .await?;
+        ensure!(
+            saved.status.success(),
+            "exporting loaded fixture image failed: {}",
+            String::from_utf8_lossy(&saved.stderr)
+        );
+        let tar = find_program("tar").context("Nix-provided tar prerequisite")?;
+        let manifest = bounded(
+            Command::new(&tar)
+                .args(["--extract", "--to-stdout", "--file"])
+                .arg(&archive)
+                .args(["--", "manifest.json"]),
+            STARTUP,
+        )
+        .await?;
+        ensure!(
+            manifest.status.success(),
+            "reading exported image manifest failed"
+        );
+        let manifest: Vec<serde_json::Value> = serde_json::from_slice(&manifest.stdout)?;
+        ensure!(manifest.len() == 1, "fixture export must contain one image");
+        let config = manifest[0]["Config"]
+            .as_str()
+            .context("exported fixture config path")?;
+        let hash = artifact.digest.trim_start_matches("sha256:");
+        ensure!(
+            config == format!("{hash}.json") || config == format!("blobs/sha256/{hash}"),
+            "loaded image config does not match artifact image-id"
+        );
+        let config = bounded(
+            Command::new(&tar)
+                .args(["--extract", "--to-stdout", "--file"])
+                .arg(&archive)
+                .args(["--", config]),
+            STARTUP,
+        )
+        .await?;
+        ensure!(
+            config.status.success(),
+            "reading exported image config failed"
+        );
+        ensure!(
+            hex::encode(Sha256::digest(&config.stdout)) == hash,
+            "loaded image config bytes do not match artifact image-id"
+        );
+        fs::remove_file(archive)?;
         Ok(())
     }
 
@@ -269,6 +345,7 @@ pub struct Fixture {
     root: TempDir,
     docker: Docker,
     artifact: Artifact,
+    image_id: String,
     containers: Vec<ContainerAsync<GenericImage>>,
     names: Vec<String>,
     pub ssh: PathBuf,
@@ -294,6 +371,20 @@ impl Fixture {
         let artifact = Artifact::read(Path::new(&directory), kind)?;
         let docker = Docker::explicit()?;
         let root = tempfile::tempdir()?;
+        let mut command = docker.command();
+        command
+            .args(["image", "load", "--input"])
+            .arg(&artifact.archive);
+        let loaded = bounded(&mut command, STARTUP).await?;
+        ensure!(
+            loaded.status.success(),
+            "fixture image load failed: {}",
+            String::from_utf8_lossy(&loaded.stderr)
+        );
+        let image_id = docker.inspect_image(&artifact).await?;
+        docker
+            .verify_config(&artifact, &image_id, root.path())
+            .await?;
         let mut fixture = Self {
             ssh: find_program("ssh")?,
             ssh_config: root.path().join("ssh_config"),
@@ -303,6 +394,7 @@ impl Fixture {
             root,
             docker,
             artifact,
+            image_id,
             containers: Vec::new(),
             names: Vec::new(),
         };
@@ -328,17 +420,6 @@ impl Fixture {
     }
 
     async fn initialize(&mut self, extra: &str) -> Result<()> {
-        let mut command = self.docker.command();
-        command
-            .args(["image", "load", "--input"])
-            .arg(&self.artifact.archive);
-        let loaded = bounded(&mut command, STARTUP).await?;
-        ensure!(
-            loaded.status.success(),
-            "fixture image load failed: {}",
-            String::from_utf8_lossy(&loaded.stderr)
-        );
-        self.docker.inspect_image(&self.artifact).await?;
         let keygen = find_program("ssh-keygen")?;
         for name in self
             .accounts()
@@ -372,12 +453,14 @@ impl Fixture {
                 "fixture container name already exists"
             );
             self.names.push(name.clone());
-            self.docker.inspect_image(&self.artifact).await?;
+            ensure!(
+                self.docker.inspect_image(&self.artifact).await? == self.image_id,
+                "loaded image-ref changed after artifact verification"
+            );
             let (algorithm, hash) = self
-                .artifact
-                .digest
+                .image_id
                 .split_once(':')
-                .context("validated image config digest")?;
+                .context("validated immutable daemon image ID")?;
             let mut config = indoc! {"
                 Port 2222
                 ListenAddress 0.0.0.0
@@ -484,9 +567,8 @@ impl Fixture {
                 )
                 .await?;
             ensure!(
-                String::from_utf8(output.stdout)?.trim()
-                    == format!("{} true", self.artifact.digest),
-                "running container does not match artifact config digest/running state"
+                String::from_utf8(output.stdout)?.trim() == format!("{} true", self.image_id),
+                "running container does not match verified image ID/running state"
             );
         }
         Ok(())

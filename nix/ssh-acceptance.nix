@@ -71,7 +71,7 @@ craneLib.mkCargoDerivation (commonArgs // {
       --add-flags '--ignored --nocapture --test-threads=2'
     makeWrapper "$out/libexec/ssh_e2e" "$out/bin/ssh-baseline" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils ]} \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.docker-client pkgs.coreutils pkgs.gnutar ]} \
       --add-flags '--ignored --nocapture --test-threads=2'
     makeWrapper "$out/libexec/controller" "$out/bin/controller-scripts" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
