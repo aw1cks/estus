@@ -93,6 +93,7 @@ mod tools {
     mod sysctl_config_set;
     mod sysctl_get;
     mod sysctl_set_runtime;
+    mod systemd_jobs_list;
     mod systemd_manager_reload;
     mod systemd_unit_config_read;
     mod systemd_unit_dependencies;
