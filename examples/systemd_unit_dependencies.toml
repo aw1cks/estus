@@ -1,0 +1,37 @@
+# Opt-in Linux systemd binding; review fixed manager scope and unit allowlist.
+# Copy roles/systemd_unit_dependencies to /etc/estus/roles/systemd_unit_dependencies; export this tool's
+# input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config systemd_unit_dependencies.toml schema import-role systemd_unit_dependencies --role-path /etc/estus/roles/systemd_unit_dependencies --overlay overlay.json --output /etc/estus/systemd_unit_dependencies.schema.json
+# Review snapshot before activation; provision workspace 0700, target Python/systemctl.
+# Unit policy changes require reviewing BOTH schema enum and fixed allowed_units.
+# User scope needs the executing account's running user manager and runtime environment.
+profile = "actions-only"
+enabled_tools = ["systemd_unit_dependencies"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.systemd_unit_dependencies]
+description = "Bounded forward/reverse dependency, ordering and activation relationships. Traversal depth is not the full mutation blast radius."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_unit_dependencies.schema.json", role_path = "/etc/estus/roles/systemd_unit_dependencies", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+input_map = { "unit" = "unit", "direction" = "direction", "depth" = "depth" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "enum" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"], "maxLength" = 128 }, "direction" = { "type" = "string", "enum" = ["forward", "reverse"] }, "depth" = { "type" = "integer", "minimum" = 1, "maximum" = 3 } }, "required" = ["unit", "direction", "depth"], "additionalProperties" = false }
+[tools.systemd_unit_dependencies.result]
+kind = "ansible_projection"
+fields = { "scope" = ["mcp_result", "scope"], "unit" = ["mcp_result", "unit"], "direction" = ["mcp_result", "direction"], "depth" = ["mcp_result", "depth"], "relationships" = ["mcp_result", "relationships"], "truncated" = ["mcp_result", "truncated"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "unit" = { "type" = "string", "maxLength" = 128 }, "direction" = { "type" = "string", "maxLength" = 16 }, "depth" = { "type" = "integer", "minimum" = 1, "maximum" = 3 }, "relationships" = { "type" = "array", "items" = { "type" = "object", "properties" = { "source" = { "type" = "string", "maxLength" = 256 }, "relation" = { "type" = "string", "maxLength" = 32 }, "target" = { "type" = "string", "maxLength" = 256 }, "depth" = { "type" = "integer", "minimum" = 1, "maximum" = 3 } }, "required" = ["source", "relation", "target", "depth"], "additionalProperties" = false }, "maxItems" = 16 }, "truncated" = { "type" = "boolean" } }, "required" = ["scope", "unit", "direction", "depth", "relationships", "truncated"], "additionalProperties" = false }
