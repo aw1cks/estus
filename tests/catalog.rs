@@ -71,6 +71,7 @@ mod tools {
     mod nic_features_get;
     mod nic_link_get;
     mod nic_rings_get;
+    mod nic_rss_get;
     mod nic_stats_get;
     mod pci_device_get;
     mod pci_devices_list;
