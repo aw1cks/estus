@@ -32,6 +32,15 @@ pub(crate) struct Manifest {
     pub(crate) tools: BTreeMap<String, Template>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Qualification {
+    Unqualified,
+    SitePolicyTemplate,
+    LaboratoryOnly,
+    DeploymentQualified,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Template {
@@ -39,6 +48,7 @@ pub(crate) struct Template {
     pub(crate) role: String,
     pub(crate) policy_required: bool,
     pub(crate) requires: Vec<String>,
+    pub(crate) qualification: Qualification,
 }
 
 fn unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
@@ -143,7 +153,7 @@ impl Catalog {
             MANIFEST_LIMIT,
         )?;
         let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
-        if manifest.schema != 1
+        if manifest.schema != 2
             || !name_valid(&manifest.version)
             || manifest.tools.is_empty()
             || manifest.tools.len() > 1024

@@ -13,7 +13,7 @@ use nix::sys::signal::Signal;
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::symlink,
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
@@ -23,6 +23,42 @@ use tempfile::TempDir;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 const SETUP: Duration = Duration::from_secs(900);
+
+fn selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) -> Result<()> {
+    let path = output.join("catalog-selection.json");
+    let selection: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    ensure!(
+        selection["schema"] == 2
+            && selection["version"] == "6"
+            && selection["scope"] == "catalog_templates"
+            && selection
+                .as_object()
+                .is_some_and(|fields| fields.len() == 4),
+        "invalid installed selection metadata: {selection}"
+    );
+    ensure!(
+        selection["tools"]
+            .as_object()
+            .is_some_and(|tools| tools.len() == selected.len()),
+        "exported selection inventory diverged"
+    );
+    for &name in selected {
+        ensure!(
+            selection["tools"][name]
+                == json!({
+                    "qualification": canonical["tools"][name]["qualification"],
+                    "policy_required": canonical["tools"][name]["policy_required"],
+                    "requires": canonical["tools"][name]["requires"],
+                }),
+            "{name}: installed selection metadata diverged"
+        );
+    }
+    ensure!(
+        fs::metadata(path)?.permissions().mode() & 0o777 == 0o600,
+        "exported selection metadata is not private"
+    );
+    Ok(())
+}
 
 fn input(name: &str) -> Result<PathBuf> {
     let path = PathBuf::from(std::env::var_os(name).with_context(|| format!("set {name}"))?);
@@ -344,6 +380,9 @@ async fn installed_wheel_channels() -> Result<()> {
         runtime.is_absolute() && runtime.join("runtime.json").is_file(),
         "missing immutable Ansible bundle"
     );
+    let canonical: Value = serde_json::from_slice(&fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/catalog.json"),
+    )?)?;
     let installed = Installed::new()?;
     let python = installed.python().await?;
     let extra_requirement = format!("{}[ansible]", wheel.to_str().context("UTF-8 wheel path")?);
@@ -388,7 +427,7 @@ async fn installed_wheel_channels() -> Result<()> {
             } else {
                 &wheel
             };
-            match selection {
+            let mut command = match selection {
                 Channel::Tool => installed.command(&installed.launcher(extra)),
                 Channel::Uvx => {
                     let mut command = installed.uv();
@@ -410,21 +449,91 @@ async fn installed_wheel_channels() -> Result<()> {
                         .arg("estus");
                     command
                 }
-            }
+            };
+            command.env(
+                "ESTUS_CATALOG_ROOT",
+                installed.root.path().join("untrusted-missing"),
+            );
+            command
         };
         let listed = checked(launch(false).args(["catalog", "list", "--json"])).await?;
         let listing: Value = serde_json::from_slice(&listed.stdout)?;
         ensure!(
-            listing["schema"] == 1 && listing["tools"].is_array(),
+            listing["schema"] == 2 && listing["version"] == "6" && listing["tools"].is_array(),
             "{channel} invalid catalog listing: {listing}"
         );
+        let tools = listing["tools"]
+            .as_array()
+            .context("installed catalog tools")?;
+        ensure!(
+            tools.len()
+                == canonical["tools"]
+                    .as_object()
+                    .context("canonical tools")?
+                    .len(),
+            "{channel} installed catalog inventory is incomplete"
+        );
+        let mut names = std::collections::BTreeSet::new();
+        for tool in tools {
+            let name = tool["name"].as_str().context("catalog template name")?;
+            ensure!(
+                names.insert(name),
+                "{channel} duplicate catalog template: {name}"
+            );
+            ensure!(
+                canonical["tools"].get(name).is_some()
+                    && matches!(
+                        tool["qualification"].as_str(),
+                        Some("site_policy_template" | "laboratory_only")
+                    )
+                    && tool["policy_required"].is_boolean()
+                    && tool["requires"].is_array(),
+                "{channel} missing explicit catalog qualification/prerequisites: {name}"
+            );
+            for field in ["qualification", "policy_required", "requires"] {
+                ensure!(
+                    tool[field] == canonical["tools"][name][field],
+                    "{channel} installed {name}: {field} diverged"
+                );
+            }
+        }
+        for (name, prerequisite) in [
+            ("nic_eee_get", "estus_nic_model"),
+            ("nic_eee_set", "estus_nic_model"),
+            ("nic_transceiver_get", "estus_nic_model"),
+            ("nic_fec_get", "netdevsim"),
+            ("nic_fec_set", "netdevsim"),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .with_context(|| format!("{channel} missing {name}"))?;
+            ensure!(
+                tool["qualification"] == "laboratory_only"
+                    && tool["requires"]
+                        .as_array()
+                        .is_some_and(|requires| requires.contains(&json!(prerequisite))),
+                "{channel} {name} must retain laboratory qualification and {prerequisite}"
+            );
+        }
         let export = installed.root.path().join(format!("catalog-{channel}"));
-        checked(
+        let exported = checked(
             launch(false)
                 .args(["catalog", "export", "--preset", "linux-health", "--output"])
                 .arg(&export),
         )
         .await?;
+        let report: Value = serde_json::from_slice(&exported.stdout)?;
+        ensure!(
+            report["enabled"] == false
+                && report["tools"] == json!(["cpu_stats", "memory_stats", "pressure_get"]),
+            "{channel} export granted authority or changed selection: {report}"
+        );
+        selection_metadata(
+            &export,
+            &canonical,
+            &["cpu_stats", "memory_stats", "pressure_get"],
+        )?;
         let definitions: toml::Table = fs::read_to_string(export.join("tools.toml"))?.parse()?;
         ensure!(
             definitions["tools"]
@@ -444,6 +553,33 @@ async fn installed_wheel_channels() -> Result<()> {
                 "{channel} health export is missing production assets for {name}"
             );
         }
+        let laboratory = installed.root.path().join(format!("laboratory-{channel}"));
+        let exported = checked(
+            launch(false)
+                .args([
+                    "catalog",
+                    "export",
+                    "--tool",
+                    "nic_eee_get",
+                    "--tool",
+                    "nic_eee_set",
+                    "--tool",
+                    "nic_transceiver_get",
+                    "--output",
+                ])
+                .arg(&laboratory),
+        )
+        .await?;
+        let report: Value = serde_json::from_slice(&exported.stdout)?;
+        ensure!(
+            report["enabled"] == false,
+            "{channel} laboratory export granted authority"
+        );
+        selection_metadata(
+            &laboratory,
+            &canonical,
+            &["nic_eee_get", "nic_eee_set", "nic_transceiver_get"],
+        )?;
         for signal in [None, Some(Signal::SIGINT), Some(Signal::SIGTERM)] {
             let mut command = launch(false);
             command.arg("--config").arg(&config);

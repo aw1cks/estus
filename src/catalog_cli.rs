@@ -311,6 +311,14 @@ fn selected(
     Ok(names)
 }
 
+fn template_metadata(template: &crate::catalog_assets::Template) -> Value {
+    json!({
+        "qualification":template.qualification,
+        "policy_required":template.policy_required,
+        "requires":template.requires,
+    })
+}
+
 fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
     let mut tools = Vec::with_capacity(catalog.manifest().tools.len());
     for (name, template) in &catalog.manifest().tools {
@@ -321,10 +329,10 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
             .and_then(|v| v.get("description"))
             .and_then(toml::Value::as_str)
             .ok_or("catalog_definition_invalid")?;
-        tools.push(json!({"name":name,"description":description,"policy_required":template.policy_required,"requires":template.requires}));
+        tools.push(json!({"name":name,"description":description,"qualification":template.qualification,"policy_required":template.policy_required,"requires":template.requires}));
     }
     if as_json {
-        let mut bytes = serde_json::to_vec(&json!({"schema":1,"version":catalog.manifest().version,"presets":catalog.manifest().presets,"tools":tools}))
+        let mut bytes = serde_json::to_vec(&json!({"schema":catalog.manifest().schema,"version":catalog.manifest().version,"presets":catalog.manifest().presets,"tools":tools}))
             .map_err(|_| "catalog_output_invalid")?;
         bytes.push(b'\n');
         return Ok(bytes);
@@ -338,8 +346,11 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
     }
     for tool in tools {
         text.push_str(&format!(
-            "{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t",
             tool["name"].as_str().ok_or("catalog_output_invalid")?,
+            tool["qualification"]
+                .as_str()
+                .ok_or("catalog_output_invalid")?,
             if tool["policy_required"] == true {
                 "site policy required"
             } else {
@@ -349,6 +360,18 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
                 .as_str()
                 .ok_or("catalog_output_invalid")?
         ));
+        for (index, requirement) in tool["requires"]
+            .as_array()
+            .ok_or("catalog_output_invalid")?
+            .iter()
+            .enumerate()
+        {
+            if index != 0 {
+                text.push(',');
+            }
+            text.push_str(requirement.as_str().ok_or("catalog_output_invalid")?);
+        }
+        text.push('\n');
     }
     Ok(text.into_bytes())
 }
@@ -368,7 +391,14 @@ fn export(
             .map_err(|_| "catalog_output_unavailable")?;
     }
     let mut definitions = toml::Table::new();
+    let mut metadata = serde_json::Map::new();
     for name in &names {
+        let template = catalog
+            .manifest()
+            .tools
+            .get(name)
+            .ok_or("catalog_tool_unknown")?;
+        metadata.insert(name.clone(), template_metadata(template));
         let mut document = catalog.definition(name)?;
         let mut definition = document
             .get_mut("tools")
@@ -409,8 +439,15 @@ fn export(
         toml::to_string_pretty(&document).map_err(|_| "catalog_output_invalid")?
     );
     write_private(&output.path.join("tools.toml"), text.as_bytes())?;
-    let report =
-        json!({"ok":true,"version":catalog.manifest().version,"tools":names,"enabled":false});
+    write_private(
+        &output.path.join("catalog-selection.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "schema":catalog.manifest().schema,"version":catalog.manifest().version,
+            "scope":"catalog_templates","tools":metadata,
+        }))
+        .map_err(|_| "catalog_output_invalid")?,
+    )?;
+    let report = json!({"ok":true,"version":catalog.manifest().version,"tools":names,"enabled":false,"qualification_file":"catalog-selection.json"});
     output.finish();
     Ok(report)
 }
@@ -764,7 +801,8 @@ pub(crate) async fn run(
             }
             CatalogCommand::Inspect { site } => {
                 let root = explicit_root.then(|| catalog.root().to_path_buf());
-                match tokio::task::spawn_blocking(move || inspect(site, root, cli)).await {
+                match tokio::task::spawn_blocking(move || inspect(site, root, cli, &catalog)).await
+                {
                     Ok(value) => value.and_then(|v| {
                         serde_json::to_vec(&v).map_err(|_| Failure::from("catalog_output_invalid"))
                     }),
@@ -840,6 +878,7 @@ fn inspect(
     site: PathBuf,
     root: Option<PathBuf>,
     cli: crate::config::Cli,
+    catalog: &Catalog,
 ) -> Result<Value, Failure> {
     let config = Config::from_file_with_catalog_root(cli, site, root)?;
     let tools: Vec<_> = config
@@ -858,14 +897,17 @@ fn inspect(
                     json!({"name":host,"permitted":permitted})
                 })
                 .collect();
-            json!({"name":binding.name,"enabled":config.binding_enabled(id),"targets":targets})
+            let template = catalog.manifest().tools.get(&binding.name)
+                .map(template_metadata)
+                .unwrap_or_else(|| json!({"qualification":"unqualified"}));
+            json!({"name":binding.name,"enabled":config.binding_enabled(id),"targets":targets,"catalog_template":template})
         })
         .collect();
     Ok(
         json!({"scope":"named_tools","global_native_execution":config.tool_enabled(crate::config::ToolId::Exec),
         "global_native_file_read":config.tool_enabled(crate::config::ToolId::ReadFile),
         "global_native_file_write":config.tool_enabled(crate::config::ToolId::WriteFile),
-        "runtime_verification":"not_performed","tools":tools}),
+        "runtime_verification":"not_performed","qualification_scope":"catalog_template","tools":tools}),
     )
 }
 

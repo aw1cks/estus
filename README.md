@@ -782,6 +782,16 @@ checkout. Normal launchers select their installed assets; development commands
 can use `estus catalog --root "$PWD/examples" list`. An explicit invalid root
 fails rather than silently selecting another catalog.
 
+Catalog manifest/list format2 requires explicit qualification alongside
+`policy_required` and `requires`; inventory version6 is unchanged.
+`site_policy_template` requires site review, while `laboratory_only` identifies
+hard-coded synthetic-device or fixture contracts, not production defaults.
+`unqualified` makes no readiness claim. `deployment_qualified` is reserved for
+documented complete workflow evidence; no current entry has that designation.
+Qualification describes the catalog template, not a configured binding's
+authority or a successful deployment. Inspection labels this scope explicitly
+and marks non-catalog bindings unqualified.
+
 | Preset | Scope |
 |---|---|
 | `linux-health` | CPU counters, memory gauges and PSI |
@@ -813,8 +823,9 @@ published. It never writes EEPROM or runs an active hardware diagnostic.
 
 ### Review and prepare a site configuration
 
-Export creates private **inert** `tools.toml`, role sources and exact JSON
-overlays. It creates no credentials or approved snapshots. Review the selected
+Export creates private **inert** `tools.toml`, role sources, exact JSON
+overlays and `catalog-selection.json` qualification/prerequisite metadata.
+It creates no credentials or approved snapshots. Review the selected
 definitions and every role file first. Unit names, interfaces, paths, module
 parameters, package names and repositories outside `linux-health` are generally
 **fixture policies**, not production defaults: adapt the closed input enums,

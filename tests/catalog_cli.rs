@@ -102,6 +102,7 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
         String::from_utf8_lossy(&output.stderr)
     );
     let data: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(data["schema"] == 2 && data["version"] == "6");
     ensure!(
         data["presets"]["linux-health"]
             == serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"]),
@@ -127,6 +128,25 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
         tuning["policy_required"] == true,
         "NIC tuning lost explicit site-policy gate"
     );
+    for name in [
+        "nic_eee_get",
+        "nic_eee_set",
+        "nic_transceiver_get",
+        "nic_fec_get",
+        "nic_fec_set",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .context("laboratory template")?;
+        ensure!(
+            tool["qualification"] == "laboratory_only"
+                && tool["requires"]
+                    .as_array()
+                    .is_some_and(|requires| !requires.is_empty()),
+            "laboratory hardware was presented without qualification/prerequisites: {tool}"
+        );
+    }
     ensure!(
         data["presets"].get("all").is_none() && data["presets"].get("admin").is_none(),
         "blanket privileged preset exposed"
@@ -155,6 +175,23 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
         report["enabled"] == false,
         "export activated unreviewed definitions"
     );
+    let selection: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(destination.join("catalog-selection.json"))?)?;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(assets().join("catalog.json"))?)?;
+    ensure!(
+        selection["schema"] == 2
+            && selection["version"] == manifest["version"]
+            && selection["scope"] == "catalog_templates"
+    );
+    for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+        for field in ["qualification", "policy_required", "requires"] {
+            ensure!(
+                selection["tools"][name][field] == manifest["tools"][name][field],
+                "export changed template metadata for {name}/{field}"
+            );
+        }
+    }
     let definitions: toml::Value =
         toml::from_str(&std::fs::read_to_string(destination.join("tools.toml"))?)?;
     ensure!(
@@ -189,6 +226,13 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
     ensure!(
         std::fs::metadata(&destination)?.permissions().mode() & 0o777 == 0o700,
         "private exported policy is group/world accessible"
+    );
+    ensure!(
+        std::fs::metadata(destination.join("catalog-selection.json"))?
+            .permissions()
+            .mode()
+            & 0o777
+            == 0o600
     );
     Ok(())
 }
@@ -244,10 +288,10 @@ fn inspect_honors_explicit_catalog_root_without_ambient_configuration() -> Resul
         serde_json::from_slice(&std::fs::read(assets().join("catalog.json"))?)?;
     let pin = serde_json::to_string(&manifest["version"])?;
     let mut text = format!(
-        "tool_presets=['linux-health']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n",
+        "tool_presets=['linux-health']\nenabled_tools=['custom_action']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n",
         pin
     );
-    for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+    for name in ["cpu_stats", "memory_stats", "pressure_get", "custom_action"] {
         text.push_str(&format!(
             r#"
 [tools.{name}]
@@ -302,6 +346,22 @@ result={{kind="command"}}
                 .all(|v| v["enabled"] == bindings && v["targets"][0]["permitted"] == bindings),
             "inspect did not resolve named authority for {profile:?}"
         );
+        ensure!(report["qualification_scope"] == "catalog_template");
+        for tool in report["tools"].as_array().context("inspected tools")? {
+            if tool["name"] == "custom_action" {
+                ensure!(
+                    tool["catalog_template"] == serde_json::json!({"qualification":"unqualified"})
+                );
+            } else {
+                let name = tool["name"].as_str().context("tool name")?;
+                for field in ["qualification", "policy_required", "requires"] {
+                    ensure!(
+                        tool["catalog_template"][field] == manifest["tools"][name][field],
+                        "inspection lost catalog template metadata"
+                    );
+                }
+            }
+        }
     }
     let outdated = text.replacen(&format!("\nversion={pin}\n"), "\nversion=\"1\"\n", 1);
     std::fs::write(&site, outdated)?;

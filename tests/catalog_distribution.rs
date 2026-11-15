@@ -56,13 +56,43 @@ fn canonical_catalog_exports_every_operational_definition_and_role() {
 
 fn small_catalog(root: &Path) {
     fs::create_dir_all(root.join("roles/cpu_stats/tasks")).unwrap();
-    fs::write(root.join("catalog.json"), r#"{"schema":1,"version":"1","presets":{"linux-health":["cpu_stats"]},"tools":{"cpu_stats":{"definition":"cpu_stats.toml","role":"roles/cpu_stats","policy_required":false,"requires":["linux"]}}}"#).unwrap();
+    fs::write(root.join("catalog.json"), r#"{"schema":2,"version":"1","presets":{"linux-health":["cpu_stats"]},"tools":{"cpu_stats":{"definition":"cpu_stats.toml","role":"roles/cpu_stats","qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
     fs::write(
         root.join("cpu_stats.toml"),
         "[tools.cpu_stats]\ndescription = 'fixture'\n",
     )
     .unwrap();
     fs::write(root.join("roles/cpu_stats/tasks/main.yml"), "---\n[]\n").unwrap();
+}
+#[test]
+fn missing_unknown_and_legacy_qualification_formats_fail_closed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    small_catalog(&root);
+    let path = root.join("catalog.json");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for case in 0..3 {
+        let mut manifest = original.clone();
+        match case {
+            0 => {
+                manifest["tools"]["cpu_stats"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("qualification");
+            }
+            1 => {
+                manifest["tools"]["cpu_stats"]["qualification"] =
+                    serde_json::json!("PRIVATE_UNREVIEWED_QUALIFICATION")
+            }
+            2 => manifest["schema"] = serde_json::json!(1),
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(
+            Catalog::load(Some(&root)).is_err(),
+            "accepted qualification case {case}"
+        );
+    }
 }
 
 #[test]
@@ -152,9 +182,9 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
     let original = fs::read_to_string(&manifest).unwrap();
     for replacement in [
         original.replace("cpu_stats.toml", "../cpu_stats.toml"),
-        original.replace("\"schema\":1", "\"schema\":2"),
-        original.replace("\"schema\":1", "\"schema\":1,\"schema\":1"),
-        original.replace("\"schema\":1", "\"schema\":1,\"unexpected\":true"),
+        original.replace("\"schema\":2", "\"schema\":1"),
+        original.replace("\"schema\":2", "\"schema\":2,\"schema\":2"),
+        original.replace("\"schema\":2", "\"schema\":2,\"unexpected\":true"),
     ] {
         fs::write(&manifest, replacement).unwrap();
         assert!(Catalog::load(Some(&root)).is_err());
@@ -192,7 +222,52 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listing["schema"], 1);
+    assert_eq!(listing["schema"], 2);
+    assert_eq!(listing["version"], "6");
+    let canonical: Value = serde_json::from_slice(
+        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/catalog.json")).unwrap(),
+    )
+    .unwrap();
+    let tools = listing["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), canonical["tools"].as_object().unwrap().len());
+    let mut names = std::collections::BTreeSet::new();
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        assert!(names.insert(name), "duplicate installed template: {name}");
+        assert!(canonical["tools"].get(name).is_some(), "{name}");
+        assert!(
+            matches!(
+                tool["qualification"].as_str(),
+                Some("site_policy_template" | "laboratory_only")
+            ),
+            "{name}: missing or unsupported qualification"
+        );
+        assert!(tool["policy_required"].is_boolean(), "{name}");
+        assert!(tool["requires"].is_array(), "{name}");
+        for field in ["qualification", "policy_required", "requires"] {
+            assert_eq!(
+                tool[field], canonical["tools"][name][field],
+                "{name}: {field}"
+            );
+        }
+    }
+    for (name, prerequisite) in [
+        ("nic_eee_get", "estus_nic_model"),
+        ("nic_eee_set", "estus_nic_model"),
+        ("nic_transceiver_get", "estus_nic_model"),
+        ("nic_fec_get", "netdevsim"),
+        ("nic_fec_set", "netdevsim"),
+    ] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool["qualification"], "laboratory_only", "{name}");
+        assert!(
+            tool["requires"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(prerequisite)),
+            "{name}: missing {prerequisite}"
+        );
+    }
     assert_eq!(
         listing["presets"]["linux-health"],
         serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"])
@@ -214,6 +289,17 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         exported.status.success(),
         "{}",
         String::from_utf8_lossy(&exported.stderr)
+    );
+    let report: Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert_eq!(report["enabled"], false);
+    assert_eq!(
+        report["tools"],
+        serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"])
+    );
+    assert_selection_metadata(
+        &output,
+        &canonical,
+        &["cpu_stats", "memory_stats", "pressure_get"],
     );
     let definitions: toml::Table = fs::read_to_string(output.join("tools.toml"))
         .unwrap()
@@ -252,6 +338,64 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
             .next()
             .is_none()
     );
+    let laboratory = work.join("laboratory");
+    let exported = installed_command(
+        &binary,
+        &work,
+        &[
+            "catalog",
+            "export",
+            "--tool",
+            "nic_eee_get",
+            "--tool",
+            "nic_eee_set",
+            "--tool",
+            "nic_transceiver_get",
+            "--output",
+            laboratory.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let report: Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert_eq!(report["enabled"], false);
+    assert_selection_metadata(
+        &laboratory,
+        &canonical,
+        &["nic_eee_get", "nic_eee_set", "nic_transceiver_get"],
+    );
+    let site = work.join("site.toml");
+    fs::write(&site, "").unwrap();
+    let inspected = installed_command(
+        &binary,
+        &work,
+        &[
+            "--ssh",
+            binary.to_str().unwrap(),
+            "catalog",
+            "inspect",
+            "--site",
+            site.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let inspection: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(inspection["qualification_scope"], "catalog_template");
+    assert_eq!(inspection["tools"], serde_json::json!([]));
+    for field in [
+        "global_native_execution",
+        "global_native_file_read",
+        "global_native_file_write",
+    ] {
+        assert_eq!(inspection[field], false, "{field}");
+    }
     assert!(
         !installed_command(
             &binary,
@@ -292,5 +436,33 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         )
         .status
         .success()
+    );
+}
+
+fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) {
+    let path = output.join("catalog-selection.json");
+    let selection: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(selection["schema"], 2);
+    assert_eq!(selection["version"], "6");
+    assert_eq!(selection["scope"], "catalog_templates");
+    assert_eq!(selection.as_object().unwrap().len(), 4);
+    assert_eq!(
+        selection["tools"].as_object().unwrap().len(),
+        selected.len()
+    );
+    for &name in selected {
+        assert_eq!(
+            selection["tools"][name],
+            serde_json::json!({
+                "qualification": canonical["tools"][name]["qualification"],
+                "policy_required": canonical["tools"][name]["policy_required"],
+                "requires": canonical["tools"][name]["requires"],
+            }),
+            "{name}: exported qualification metadata diverged"
+        );
+    }
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
     );
 }
