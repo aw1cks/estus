@@ -42,6 +42,7 @@
                 || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
                   && pkgs.lib.hasSuffix ".py" path)
                 || pkgs.lib.hasPrefix "${toString ./.}/examples/" path
+                || pkgs.lib.hasPrefix "${toString ./.}/vendor/openssh-sftp-client/" path
                 || pkgs.lib.hasPrefix "${toString ./.}/tests/catalog/fixtures/" path);
           };
           strictDeps = true;

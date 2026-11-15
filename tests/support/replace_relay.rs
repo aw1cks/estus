@@ -2,7 +2,11 @@
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    io::Read,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -24,6 +28,7 @@ pub enum Fault {
 
 #[derive(Default, Debug)]
 pub struct Evidence {
+    pub opens: Vec<StageOpen>,
     pub requests: Vec<u8>,
     pub renames: usize,
     pub dropped_success: bool,
@@ -33,6 +38,86 @@ pub struct Evidence {
     pub rename_index: Option<usize>,
     rename_id: Option<u32>,
     open_id: Option<u32>,
+}
+
+#[derive(Debug)]
+pub struct StageOpen {
+    id: u32,
+    path: PathBuf,
+    pub pflags: u32,
+    pub attr_flags: u32,
+    pub permissions: u32,
+    pub initial_mode: Option<u32>,
+    pub initial_len: Option<u64>,
+}
+
+impl Evidence {
+    pub fn assert_private_stage_opens(&self, expected: usize) -> Result<()> {
+        ensure!(self.opens.len() == expected, "stage OPEN count: {self:?}");
+        for open in &self.opens {
+            ensure!(
+                open.pflags == (0x02 | 0x08 | 0x20),
+                "expected WRITE|CREAT|EXCL, without TRUNC: {open:?}"
+            );
+            ensure!(
+                open.attr_flags == 0x04 && open.permissions == 0o600,
+                "OPEN must request permissions0600: {open:?}"
+            );
+            ensure!(
+                open.initial_mode == Some(0o600) && open.initial_len == Some(0),
+                "stage must already be empty/mode0600 before forwarding HANDLE: {open:?}"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn uint32(body: &mut &[u8]) -> Result<u32> {
+    let bytes = body.get(..4).context("truncated SFTP uint32")?;
+    let value = u32::from_be_bytes(bytes.try_into()?);
+    *body = &body[4..];
+    Ok(value)
+}
+
+fn string<'a>(body: &mut &'a [u8]) -> Result<&'a [u8]> {
+    let length = uint32(body)? as usize;
+    let value = body.get(..length).context("truncated SFTP string")?;
+    *body = &body[length..];
+    Ok(value)
+}
+
+fn stage_open(body: &[u8]) -> Result<StageOpen> {
+    let mut fields = &body[1..];
+    let id = uint32(&mut fields)?;
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(string(&mut fields)?));
+    let name = path.file_name().context("stage OPEN filename")?.as_bytes();
+    let suffix = name
+        .strip_prefix(b".estus-replace-")
+        .context("stage OPEN prefix")?;
+    ensure!(
+        suffix.len() == 32
+            && suffix
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)),
+        "unexpected stage OPEN path: {path:?}"
+    );
+    let pflags = uint32(&mut fields)?;
+    let attr_flags = uint32(&mut fields)?;
+    ensure!(
+        attr_flags == 0x04,
+        "expected only permissions in OPEN attrs: {attr_flags:#x}"
+    );
+    let permissions = uint32(&mut fields)?;
+    ensure!(fields.is_empty(), "trailing stage OPEN attributes");
+    Ok(StageOpen {
+        id,
+        path,
+        pflags,
+        attr_flags,
+        permissions,
+        initial_mode: None,
+        initial_len: None,
+    })
 }
 
 pub struct Oracle {
@@ -96,6 +181,19 @@ async fn reap(children: &mut Vec<Child>) -> Result<()> {
 
 impl Relay {
     pub async fn start(server: &Path, fault: Fault, oracle: Option<Oracle>) -> Result<Self> {
+        Self::start_configured(server, fault, oracle, None).await
+    }
+
+    pub async fn start_denied(server: &Path, request: &str, log: &Path) -> Result<Self> {
+        Self::start_configured(server, Fault::None, None, Some((request, log))).await
+    }
+
+    async fn start_configured(
+        server: &Path,
+        fault: Fault,
+        oracle: Option<Oracle>,
+        denied: Option<(&str, &Path)>,
+    ) -> Result<Self> {
         let work = tempfile::tempdir()?;
         fs::set_permissions(work.path(), fs::Permissions::from_mode(0o700))?;
         let requests = work.path().join("requests");
@@ -103,7 +201,8 @@ impl Relay {
         let launches = work.path().join("launches");
         ensure!(
             work.path()
-                .to_string_lossy()
+                .to_str()
+                .context("UTF-8 private relay path")?
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric()
                     || matches!(byte, b'/' | b'.' | b'-' | b'_')),
@@ -131,7 +230,9 @@ impl Relay {
                         "-c",
                         &format!(
                             "exec cat < {}",
-                            super::support::quote(&requests.to_string_lossy())
+                            super::support::quote(
+                                requests.to_str().context("UTF-8 request FIFO path")?
+                            )
                         ),
                     ])
                     .stdin(Stdio::null())
@@ -152,7 +253,9 @@ impl Relay {
                         "-c",
                         &format!(
                             "exec cat > {}",
-                            super::support::quote(&responses.to_string_lossy())
+                            super::support::quote(
+                                responses.to_str().context("UTF-8 response FIFO path")?
+                            )
                         ),
                     ])
                     .stdin(Stdio::piped())
@@ -167,11 +270,19 @@ impl Relay {
                 .stdin
                 .take()
                 .context("response pipe")?;
+            let mut server_command = Command::new(server);
+            server_command.args(["-u", "0000"]);
+            if let Some((request, log)) = denied {
+                server_command
+                    .args(["-P", request, "-e", "-l", "DEBUG3"])
+                    .stderr(fs::File::create(log)?);
+            } else {
+                server_command.stderr(Stdio::null());
+            }
             children.push(
-                Command::new(server)
+                server_command
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
                     .kill_on_drop(true)
                     .spawn()?,
             );
@@ -201,8 +312,14 @@ impl Relay {
                             .map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
                         ensure!(seen.requests.len() < 4096, "too many SFTP requests");
                         seen.requests.push(body[0]);
-                        if body[0] == 3 && body.len() >= 5 {
-                            seen.open_id = Some(u32::from_be_bytes(body[1..5].try_into()?));
+                        if body[0] == 3 {
+                            let open = stage_open(&body)?;
+                            ensure!(
+                                !seen.opens.iter().any(|previous| previous.id == open.id),
+                                "reused stage OPEN request id"
+                            );
+                            seen.open_id = Some(open.id);
+                            seen.opens.push(open);
                         }
                         if body[0] == 6 {
                             seen.writes += 1;
@@ -226,25 +343,21 @@ impl Relay {
                                 let stages: Vec<_> = stages
                                     .iter()
                                     .filter(|entry| {
-                                        entry
-                                            .file_name()
-                                            .to_string_lossy()
-                                            .starts_with(".estus-replace-")
+                                        entry.file_name().as_bytes().starts_with(b".estus-replace-")
                                     })
                                     .collect();
                                 ensure!(stages.len() == 1, "expected one owned sibling stage");
                                 let name = stages[0].file_name();
-                                let name = name.to_string_lossy();
                                 let suffix = name
-                                    .strip_prefix(".estus-replace-")
+                                    .as_bytes()
+                                    .strip_prefix(b".estus-replace-")
                                     .context("stage prefix")?;
                                 ensure!(
                                     suffix.len() == 32
-                                        && suffix
-                                            .bytes()
-                                            .all(|b| b.is_ascii_digit()
-                                                || (b'a'..=b'f').contains(&b)),
-                                    "stage name: {name}"
+                                        && suffix.iter().all(
+                                            |b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)
+                                        ),
+                                    "stage name: {name:?}"
                                 );
                                 let metadata = stages[0].metadata()?;
                                 ensure!(
@@ -255,14 +368,13 @@ impl Relay {
                                     metadata.len() > 0 && metadata.len() < oracle.new_len as u64;
                             }
                         }
-                        if body[0] == 200 && body.len() >= 9 {
-                            let length = u32::from_be_bytes(body[5..9].try_into()?) as usize;
-                            if body.get(9..9 + length)
-                                == Some(b"posix-rename@openssh.com".as_slice())
-                            {
+                        if body[0] == 200 {
+                            let mut fields = &body[1..];
+                            let id = uint32(&mut fields)?;
+                            if string(&mut fields)? == b"posix-rename@openssh.com" {
                                 seen.renames += 1;
                                 seen.rename_index = Some(seen.requests.len() - 1);
-                                seen.rename_id = Some(u32::from_be_bytes(body[1..5].try_into()?));
+                                seen.rename_id = Some(id);
                             }
                         }
                     }
@@ -270,7 +382,7 @@ impl Relay {
                     // Serialize only genuine writes against their genuine STATUS:
                     // the next stage observation cannot race server write dispatch.
                     if body[0] == 6 {
-                        let id = u32::from_be_bytes(body[1..5].try_into()?);
+                        let id = uint32(&mut &body[1..])?;
                         status_rx.wait_for(|status| *status == Some(id)).await?;
                     }
                 }
@@ -288,6 +400,36 @@ impl Relay {
                         let mut seen = replies_seen
                             .lock()
                             .map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+                        if body[0] == 102 {
+                            let mut fields = &body[1..];
+                            let id = uint32(&mut fields)?;
+                            ensure!(
+                                !string(&mut fields)?.is_empty() && fields.is_empty(),
+                                "invalid genuine HANDLE response"
+                            );
+                            let open = seen
+                                .opens
+                                .iter_mut()
+                                .find(|open| open.id == id)
+                                .context("HANDLE without stage OPEN")?;
+                            ensure!(open.initial_mode.is_none(), "replayed stage HANDLE");
+                            // The real server has created the file, but the client cannot
+                            // chmod/write until this genuine HANDLE is forwarded below.
+                            let mut file = fs::File::open(&open.path)?;
+                            let metadata = file.metadata()?;
+                            ensure!(metadata.is_file(), "stage is not a regular file");
+                            let mut first_byte = [0; 1];
+                            ensure!(
+                                file.read(&mut first_byte)? == 0,
+                                "stage initially contains data"
+                            );
+                            open.initial_mode = Some(metadata.mode() & 0o7777);
+                            open.initial_len = Some(metadata.len());
+                            ensure!(
+                                open.initial_mode == Some(0o600) && open.initial_len == Some(0),
+                                "stage exposed before chmod/write: {open:?}"
+                            );
+                        }
                         if matches!(fault, Fault::OpenAck)
                             && body[0] == 102
                             && body.len() >= 5

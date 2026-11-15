@@ -443,16 +443,18 @@ async fn replace_sftp(
             return Err(Failure::io());
         }
         let mut options = sftp.options();
-        options.write(true).create_new(true);
+        options
+            .write(true)
+            .create_new(true)
+            .create_permissions(Permissions::from(0o600));
         // Only an acknowledged EXCL OPEN establishes ownership. An uncertain
         // OPEN or collision must never cause pathname cleanup.
         *phase = ReplacePhase::Opening;
         let mut file = options.open(&path).await.map_err(sftp_failure)?;
         *phase = ReplacePhase::Staging;
         let written = async {
-            // OpenOptions cannot supply creation attributes. The empty stage
-            // may be visible with server defaults, but no content is written
-            // until this handle-based chmod has been acknowledged.
+            // Defensive confirmation only: confidentiality already holds at
+            // the exclusive OPEN, even if another user observes the empty stage.
             file.set_permissions(Permissions::from(0o600))
                 .await
                 .map_err(sftp_failure)?;

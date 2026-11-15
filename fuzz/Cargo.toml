@@ -18,7 +18,7 @@ base64 = "0.22"
 bytes = "1"
 sha2 = { version = "0.11.1", default-features = false }
 hex = "0.4.3"
-openssh-sftp-client = { version = "0.15.12", default-features = false }
+openssh-sftp-client = { version = "0.15.12", path = "../vendor/openssh-sftp-client", default-features = false }
 openssh-sftp-protocol = { version = "=0.26.1", default-features = false }
 
 [[bin]]

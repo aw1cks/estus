@@ -5973,12 +5973,13 @@ async fn ssh_remove_directory_prehandshake_timeout() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
 async fn ssh_replace_file_atomic_visibility_and_lost_ack() -> Result<()> {
-    for drop_ack in [false, true] {
+    // Each relay owns exactly one real SFTP session, including for empty payloads.
+    for (drop_ack, new_len) in [(false, 0), (false, 786_432), (true, 786_432)] {
         let work = tempfile::tempdir()?;
         let destination = work.path().join("destination");
         let hardlink = work.path().join("old-hardlink");
         let old = vec![b'O'; 262_144];
-        let new = vec![b'N'; 786_432];
+        let new = vec![b'N'; new_len];
         fs::write(&destination, &old)?;
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o644))?;
         fs::hard_link(&destination, &hardlink)?;
@@ -6065,11 +6066,16 @@ async fn ssh_replace_file_atomic_visibility_and_lost_ack() -> Result<()> {
                     ensure!(fs::metadata(&hardlink)?.mode() & 0o7777 == 0o644);
                     ensure!(fs::read_dir(work.path())?.count() == 2, "successful rename left a stage");
                     let seen = evidence.lock().map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+                    seen.assert_private_stage_opens(1)?;
                     ensure!(!seen.requests.iter().any(|kind| matches!(*kind, 13 | 18)),
                         "replacement deleted an entry or used standard rename: {seen:?}");
                     ensure!(seen.renames == 1, "rename replayed: {seen:?}");
                     ensure!(seen.dropped_success == drop_ack, "lost ack was not a genuine successful STATUS");
-                    ensure!(seen.writes > 1 && seen.staged_partial, "did not observe real multi-write staging");
+                    if new.is_empty() {
+                        ensure!(seen.writes == 0 && !seen.staged_partial, "empty replacement issued a write: {seen:?}");
+                    } else {
+                        ensure!(seen.writes > 1 && seen.staged_partial, "did not observe real multi-write staging");
+                    }
                     let rename = seen.rename_index.context("POSIX rename request")?;
                     ensure!(seen.requests[rename + 1..].iter().all(|kind| !matches!(*kind, 3 | 6 | 13 | 18 | 200)),
                         "mutation/replay/cleanup after rename: {seen:?}");
@@ -6098,7 +6104,7 @@ async fn ssh_replace_file_atomic_visibility_and_lost_ack() -> Result<()> {
             Ok::<_, anyhow::Error>(())
         }.await;
         let observed_state = format!(
-            "drop_ack={drop_ack}; evidence={:?}; destination={:?}",
+            "drop_ack={drop_ack}; new_len={new_len}; evidence={:?}; destination={:?}",
             evidence.lock(),
             fs::metadata(&destination).map(|metadata| (metadata.ino(), metadata.len()))
         );
@@ -6120,7 +6126,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
     let scenario = async {
         let client = Client::start(&fixture.config).await?;
         let cases = async {
-            let directory = fixture.root.path().join("replace-private");
+            let directory = fixture.root.path().join("replace-private-é雪 space-'\"\n${HOME}$(printf NEVER)");
             fs::create_dir(&directory)?;
             for (name, content, encoding, expected) in [
                 ("é雪 space-'\"\n${HOME}$(printf NEVER)", "UTF8_é雪\0END", "utf8", "UTF8_é雪\0END".as_bytes()),
@@ -6174,7 +6180,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
             ensure!(fs::metadata(&tree)?.ino() == tree_inode);
             ensure!(fs::read(tree.join("child"))? == b"TREE_UNCHANGED");
             let stages = fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
-            let stages: Vec<_> = stages.iter().filter(|entry| entry.file_name().to_string_lossy().starts_with(".estus-replace-")).collect();
+            let stages: Vec<_> = stages.iter().filter(|entry| entry.file_name().as_bytes().starts_with(b".estus-replace-")).collect();
             ensure!(stages.len() == 1, "rename-attempt failure must not clean its stage");
             ensure!(fs::read(stages[0].path())? == b"NO_DIRECTORY_REPLACE");
             Ok::<_, anyhow::Error>(())
@@ -6196,16 +6202,17 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
 #[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
 async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
     let server = Fixture::sftp_server()?;
-    for request in ["posix-rename", "write", "fsetstat", "close"] {
+    for request in ["posix-rename", "open", "write", "fsetstat", "close"] {
         let work = tempfile::tempdir()?;
         let requests = work.path().join("requests.log");
-        let script = format!(
-            "exec {} -P {request} -e -l DEBUG3 2>> {}",
-            server.display(),
-            requests.display()
-        );
-        let subsystem = format!("/bin/sh -c {}", quote(&script));
-        let fixture = Fixture::start_with_sftp_subsystem("", &subsystem).await?;
+        let relay = replace_relay::Relay::start_denied(&server, request, &requests).await?;
+        let fixture = match Fixture::start_with_sftp_subsystem("", &relay.subsystem).await {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                let _ = relay.stop().await;
+                return Err(error);
+            }
+        };
         let scenario = async {
             let client = Client::start(&fixture.config).await?;
             let cases = async {
@@ -6231,7 +6238,7 @@ async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
                 ensure!(fs::metadata(&path)?.ino() == inode);
                 ensure!(
                     fs::read_dir(&directory)?.count() == 1,
-                    "acknowledged pre-rename stage not removed"
+                    "failed OPEN created a stage or acknowledged pre-rename stage not removed"
                 );
                 Ok::<_, anyhow::Error>(())
             }
@@ -6246,6 +6253,24 @@ async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
             stopped?;
             gone?;
             let log = fs::read_to_string(&requests)?;
+            let seen = relay
+                .evidence
+                .lock()
+                .map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+            if request == "open" {
+                ensure!(seen.opens.len() == 1, "failed OPEN replayed: {seen:?}");
+                let open = &seen.opens[0];
+                ensure!(
+                    open.pflags == (0x02 | 0x08 | 0x20)
+                        && open.attr_flags == 0x04
+                        && open.permissions == 0o600
+                        && open.initial_mode.is_none()
+                        && open.initial_len.is_none(),
+                    "failed OPEN flags/attrs or fabricated HANDLE: {seen:?}"
+                );
+            } else {
+                seen.assert_private_stage_opens(usize::from(request != "posix-rename"))?;
+            }
             if request == "posix-rename" {
                 for mutation in [
                     "open \"",
@@ -6267,6 +6292,20 @@ async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
                         .count()
                         == 1
                 );
+            } else if request == "open" {
+                ensure!(
+                    log.lines()
+                        .filter(|line| line.contains("Refusing denylisted open request"))
+                        .count()
+                        == 1,
+                    "expected one genuine rejected OPEN: {log}"
+                );
+                for mutation in ["remove name ", "write \"", "fsetstat ", "rename old "] {
+                    ensure!(
+                        !log.contains(mutation),
+                        "failed OPEN claimed/mutated a stage: {log}"
+                    );
+                }
             } else {
                 ensure!(
                     log.lines()
@@ -6290,9 +6329,11 @@ async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
         }
         .await;
         let cleanup = fixture.stop().await;
+        let relayed = relay.stop().await;
         let removed = work.close();
         scenario?;
         cleanup?;
+        relayed?;
         removed?;
     }
     Ok(())
@@ -6330,7 +6371,7 @@ async fn ssh_replace_file_unacknowledged_open_does_not_claim_stage() -> Result<(
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
             ensure!(fs::metadata(&path)?.ino() == inode && fs::read(&path)? == b"UNACKNOWLEDGED_OLD");
             let entries = fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
-            let stages: Vec<_> = entries.iter().filter(|entry| entry.file_name().to_string_lossy().starts_with(".estus-replace-")).collect();
+            let stages: Vec<_> = entries.iter().filter(|entry| entry.file_name().as_bytes().starts_with(b".estus-replace-")).collect();
             ensure!(stages.len() == 1 && fs::metadata(stages[0].path())?.len() == 0,
                 "uncertain OPEN must leave the real empty stage, never claim/delete it");
             Ok::<_, anyhow::Error>(())
@@ -6343,6 +6384,7 @@ async fn ssh_replace_file_unacknowledged_open_does_not_claim_stage() -> Result<(
         gone?;
         let seen = relay.evidence.lock().map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
         ensure!(seen.dropped_open && !seen.dropped_success && seen.renames == 0 && seen.writes == 0);
+        seen.assert_private_stage_opens(1)?;
         ensure!(seen.requests.iter().filter(|kind| **kind == 3).count() == 1, "uncertain OPEN replayed");
         let open = seen.requests.iter().position(|kind| *kind == 3).context("real OPEN request")?;
         ensure!(!seen.requests[open + 1..].iter().any(|kind| matches!(*kind, 6 | 13 | 18 | 9 | 10 | 200)),

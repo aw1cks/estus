@@ -236,10 +236,13 @@ before SSH. A missing destination may be created, but `overwrite=true` is still
 required.
 
 The server must advertise POSIX rename before any filesystem mutation. Estus
-exclusively creates a random `.estus-replace-<32 hex digits>` sibling, sets mode0600
-before writing content, completes the full write and CLOSE, then atomically
-renames it over the destination. The initial empty stage briefly uses server
-creation defaults before chmod; no payload is written until chmod succeeds.
+exclusively creates a random `.estus-replace-<32 hex digits>` sibling with mode0600
+in the original OPEN, confirms permissions by handle, completes the full write
+and CLOSE, then atomically renames it over the destination. Another account
+cannot gain a readable descriptor through permissive server creation defaults.
+The minimal high-level SFTP API extension is vendored from 0.15.12; provenance
+and the local delta are recorded in `vendor/openssh-sftp-client/README.md`.
+Upstream submission is deferred until the integration has settled.
 Unsupported atomicity never falls back to standard rename, destination truncate,
 unlink/copy/delete, sudo or shell/SCP.
 
