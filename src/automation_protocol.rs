@@ -522,6 +522,7 @@ impl Evidence {
                 if self.mode != ExecutionMode::Module
                     || total > 1
                     || (complete && (!self.ready || total != 1))
+                    || (tasks.skipped == 1 && changed == Some(true))
                     || self.task.as_ref().is_some_and(|task| {
                         task.tasks != tasks
                             || task.censored != censored
@@ -534,7 +535,9 @@ impl Evidence {
                     return;
                 }
                 let coherent = match status {
-                    AutomationStatus::Successful => complete && rc == Some(0) && tasks.ok == 1,
+                    AutomationStatus::Successful => {
+                        complete && rc == Some(0) && (tasks.ok == 1 || tasks.skipped == 1)
+                    }
                     AutomationStatus::Failed => {
                         complete && rc.is_some_and(|rc| rc != 0) && tasks.failed == 1
                     }
@@ -852,6 +855,67 @@ mod tests {
         terminal["complete"] = json!(true);
         send(&mut missing, terminal);
         assert!(missing.failed());
+    }
+
+    #[test]
+    fn singleton_skips_complete_without_inventing_censored_change() {
+        let skipped = |task_changed: Value, changed: Value, censored: bool, patch: &Value| {
+            let mut e = Evidence::new("test".into(), ExecutionMode::Module);
+            send(&mut e, frame("ready"));
+            let mut task = frame("task");
+            task["outcome"] = json!("skipped");
+            task["changed"] = task_changed;
+            task["censored"] = json!(censored);
+            send(&mut e, task);
+            let mut terminal = frame("terminal");
+            terminal["status"] = json!("successful");
+            terminal["rc"] = json!(0);
+            terminal["changed"] = changed;
+            terminal["tasks"] = json!({"ok":0,"failed":0,"unreachable":0,"skipped":1});
+            terminal["censored"] = json!(censored);
+            terminal["complete"] = json!(true);
+            terminal
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            send(&mut e, terminal);
+            e.finish();
+            e
+        };
+        for (observed, changed, censored) in [
+            (json!(false), json!(false), false),
+            (Value::Null, json!(false), false),
+            (Value::Null, Value::Null, true),
+        ] {
+            let e = skipped(observed, changed.clone(), censored, &json!({}));
+            assert!(!e.failed());
+            let terminal = e.terminal.unwrap();
+            assert!(terminal.complete);
+            assert!(matches!(terminal.status, AutomationStatus::Successful));
+            assert_eq!(terminal.rc, Some(0));
+            assert_eq!(terminal.task.tasks.skipped, 1);
+            assert_eq!(terminal.task.tasks.ok, 0);
+            assert_eq!(terminal.task.changed, changed.as_bool());
+            assert_eq!(terminal.task.censored, censored);
+        }
+        for patch in [
+            json!({"rc":2}),
+            json!({"status":"failed"}),
+            json!({"status":"unreachable","rc":4}),
+            json!({"complete":false}),
+            json!({"changed":true}),
+            json!({"tasks":{"ok":0,"failed":0,"unreachable":0,"skipped":0}}),
+            json!({"tasks":{"ok":1,"failed":0,"unreachable":0,"skipped":0}}),
+            json!({"tasks":{"ok":1,"failed":0,"unreachable":0,"skipped":1}}),
+            json!({"censored":true}),
+        ] {
+            assert!(
+                skipped(Value::Null, Value::Null, false, &patch).failed(),
+                "accepted contradictory skipped completion: {patch}"
+            );
+        }
+        assert!(skipped(json!(true), json!(true), false, &json!({})).failed());
+        assert!(skipped(Value::Null, json!(false), true, &json!({})).failed());
     }
 
     #[test]

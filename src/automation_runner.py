@@ -391,7 +391,7 @@ class Evidence:
             require(not observed["changed"] or self.outcome in ("ok", "failed"))
             if self.censored:
                 self.changed = None
-            elif self.changed is None and self.outcome == "ok":
+            elif self.changed is None and self.outcome in ("ok", "skipped"):
                 self.changed = bool(observed["changed"])
             self.stats = observed
         elif kind.startswith("runner_on_") and kind != "runner_on_start":
@@ -404,7 +404,7 @@ class Evidence:
         require(rc is None or type(rc) is int and -(2**31) <= rc < 2**31)
         require(not self.invalid and self.stats is not None)
         require(self.statuses == ["starting", "running", runner.status])
-        if self.outcome == "ok":
+        if self.outcome in ("ok", "skipped"):
             require(runner.status == "successful" and rc == 0)
             return "successful"
         if self.outcome == "unreachable":

@@ -659,6 +659,11 @@ are not used because Core can re-resolve their quoted contents as YAML native va
 Failed modules may report mutation even when Core omits their changed count.
 That observation survives a known failure; it is not rewritten as unchanged or
 discarded as a protocol error.
+A singleton skipped module is complete success when Runner reports successful
+completion with return code zero and matching skipped task statistics (for
+example, a verbosity-gated `debug` task). It preserves `tasks.skipped = 1`
+and known unchanged evidence; `no_log` keeps `changed = null`, not a fabricated
+`false`. Contradictory status, counts or change evidence still fail closed.
 
 `automation.max_concurrent` defaults to 2; each logical target admits one automation
 invocation at a time. The existing global operation cap also applies. Admission

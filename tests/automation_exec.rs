@@ -1044,6 +1044,130 @@ async fn send_command(server: &mut WireServer, id: u64, arguments: Value) -> Res
     server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"command","arguments":arguments}})).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]
+async fn real_runner_skipped_module_completion() -> Result<()> {
+    let a = Acceptance::start().await?;
+    let result = async {
+        let guard = a.fixture.root.path().join("creates-guard");
+        let marker = a.fixture.root.path().join("guarded-command-runs");
+        let script = format!(
+            "with open({:?}, 'ab') as f: f.write(b'EXECUTED\\n')\nprint({PRIVATE:?})",
+            text(&marker)?,
+        );
+        let overlay = json!({
+            "input_schema":{"type":"object","properties":{},"additionalProperties":false,"maxProperties":0},
+            "fixed_args":{"argv":[text(&a.python)?,"-c",script],"creates":text(&guard)?,"expand_argument_vars":false},
+            "input_map":{}
+        });
+        let snapshot = a.fixture.root.path().join("guarded-command-review.json");
+        import_reviewed(&a.fixture.config, &snapshot, "ansible.builtin.command", &overlay).await?;
+        let debug_overlay = json!({
+            "input_schema":{"type":"object","properties":{"verbosity":{"type":"integer","enum":[0,4]}},"required":["verbosity"],"additionalProperties":false},
+            "fixed_args":{"msg":PRIVATE},"input_map":{"verbosity":"verbosity"}
+        });
+        let debug_snapshot = a.fixture.root.path().join("conditional-debug-review.json");
+        import_reviewed(&a.fixture.config, &debug_snapshot, "ansible.builtin.debug", &debug_overlay).await?;
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&a.fixture.config)?)?;
+        let mut tools = toml::map::Map::new();
+        for (name, no_log, snapshot, overlay, effect) in [
+            ("guarded", false, &snapshot, &overlay, "runtime_write"),
+            ("guarded_secret", true, &snapshot, &overlay, "runtime_write"),
+            ("conditional", false, &debug_snapshot, &debug_overlay, "probe"),
+            ("conditional_secret", true, &debug_snapshot, &debug_overlay, "probe"),
+        ] {
+            let mut binding = json!({
+                "description":"Reviewed module completion fixture",
+                "revision":"fixture-1","authority":"automation","effects":[effect],
+                "targets":["plain"],
+                "execution":{"kind":"ansible_module","snapshot":text(snapshot)?,"no_log":no_log},
+                "result":{"kind":"ansible_summary"},"limits":{"timeout_secs":12}
+            });
+            for key in ["input_schema", "fixed_args", "input_map"] {
+                binding[key] = overlay[key].clone();
+            }
+            tools.insert(name.to_owned(), table(binding)?);
+        }
+        config.insert("tools".into(), toml::Value::Table(tools));
+        config.insert("enabled_tools".into(), table(json!(["guarded","guarded_secret","conditional","conditional_secret"]))?);
+        fs::write(&a.fixture.config, toml::to_string(&config)?)?;
+        let mut server = a.server().await?;
+        let calls = async {
+            for (id, name, guarded, censored) in [
+                (2, "guarded", true, false),
+                (3, "guarded", false, false),
+                (4, "guarded_secret", true, true),
+            ] {
+                if guarded {
+                    fs::write(&guard, b"EXISTING_GUARD")?;
+                } else {
+                    fs::remove_file(&guard)?;
+                }
+                let envelope = a.call(&mut server, id, name, json!({"host":"plain","inputs":{}})).await?;
+                let data = &envelope["data"];
+                ensure!(
+                    envelope["error"].is_null()
+                        && data["status"] == "successful"
+                        && data["complete"] == true
+                        && data["runner_rc"] == 0
+                        && data["tasks"]["ok"] == 1
+                        && data["tasks"]["skipped"] == 0
+                        && data["tasks"]["failed"] == 0
+                        && data["tasks"]["unreachable"] == 0
+                        && data["censored"] == censored
+                        && data["changed"] == if censored { Value::Null } else { json!(!guarded) }
+                        && data["owned_group_cleanup"] == "signalled_and_reaped",
+                    "guarded module did not retain coherent execution evidence: {envelope}"
+                );
+                if id == 2 {
+                    ensure!(!marker.exists(), "guarded command ran");
+                } else {
+                    ensure!(fs::read(&marker)? == b"EXECUTED\n",
+                        "command failed to run exactly once across guarded and censored skips");
+                }
+                if guarded {
+                    ensure!(fs::read(&guard)? == b"EXISTING_GUARD");
+                }
+                let finished = a.finish(&server.log, id).await?;
+                ensure!(finished["error_code"].is_null());
+            }
+            for (id, name, verbosity, skipped, censored) in [
+                (5, "conditional", 4, true, false),
+                (6, "conditional", 0, false, false),
+                (7, "conditional_secret", 4, true, true),
+            ] {
+                let envelope = a.call(&mut server, id, name,
+                    json!({"host":"plain","inputs":{"verbosity":verbosity}})).await?;
+                let data = &envelope["data"];
+                ensure!(
+                    envelope["error"].is_null()
+                        && data["status"] == "successful"
+                        && data["complete"] == true
+                        && data["runner_rc"] == 0
+                        && data["tasks"]["ok"] == u32::from(!skipped)
+                        && data["tasks"]["skipped"] == u32::from(skipped)
+                        && data["tasks"]["failed"] == 0
+                        && data["tasks"]["unreachable"] == 0
+                        && data["censored"] == censored
+                        && data["changed"] == if censored { Value::Null } else { json!(false) }
+                        && data["owned_group_cleanup"] == "signalled_and_reaped",
+                    "verbosity-gated module lost coherent completion evidence: {envelope}"
+                );
+                ensure!(fs::read(&marker)? == b"EXECUTED\n");
+                ensure!(a.finish(&server.log, id).await?["error_code"].is_null());
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let stopped = server.stop(None).await;
+        calls?;
+        a.private(&stopped?.text())?;
+        a.clean()
+    }.await;
+    let cleanup = a.fixture.stop().await;
+    result?;
+    cleanup
+}
+
 /// Explicit entry: cargo test --test automation_exec real_runner_fixture_acceptance -- --ignored --exact --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]
