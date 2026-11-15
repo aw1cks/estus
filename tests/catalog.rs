@@ -2,11 +2,11 @@
 #![allow(dead_code)]
 #[path = "support/catalog.rs"]
 mod catalog;
+#[path = "support/nic_model.rs"]
+mod nic_model;
 #[path = "support/payload.rs"]
 mod payload;
 mod support;
-#[path = "support/nic_model.rs"]
-mod nic_model;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ESTUS_TEST_CATALOG_VM and pinned Runner runtime"]
@@ -116,6 +116,7 @@ mod tools {
     mod nic_rss_get;
     mod nic_rss_set;
     mod nic_stats_get;
+    mod nic_transceiver_get;
     mod package_get;
     mod package_repository_change;
     mod package_repository_refresh;

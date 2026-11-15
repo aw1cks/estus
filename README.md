@@ -674,14 +674,18 @@ with driver readback and an honest no-op receipt. The lab uses Linux
 `netdevsim` as `fec0`, separate from its management interface. These tools
 qualify virtual-driver configuration, not physical error correction.
 
-`nic_eee_get` is individually opt-in and reads the software model's EEE
-configuration. Enabled and negotiated-active are separate; an LPI-off hidden
-Tx LPI timer is omitted rather than invented. No tuning permission is granted.
+The lab-only `estus_nic_model` driver adds isolated `model0` for
+`nic_eee_get`, `nic_eee_set` and `nic_transceiver_get`. These tools use the normal
+reviewed Ansible path, real kernel ethtool callbacks and the real ethtool binary;
+the driver is not installed on production targets by Estus.
 
-`nic_eee_set` separately approves an enabled flag and a 0–1000000 microsecond
-Tx LPI timer, always requesting Tx LPI on. It reads back configuration, skips
-no-op writes and never retries or rolls back. The model stays inactive even when
-enabled; rejected writes, readback mismatches and partial effects are tested.
+EEE setting accepts an enabled flag and a 0–1000000 microsecond Tx LPI timer,
+always requesting Tx LPI on. Configuration is not negotiation: the model remains
+inactive even when enabled, and an LPI-off hidden timer is omitted, not zero.
+Setters check actual readback, skip writes on no-ops and never replay or roll back.
+Transceiver observation publishes only vendor/part and selected typed sensors
+from an explicitly synthetic SFF-8472 EEPROM; serial, date and raw pages are not
+published. It never writes EEPROM or runs an active hardware diagnostic.
 
 ### Review and prepare a site configuration
 
@@ -701,7 +705,7 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "5"
+version = "6"
 
 [targets.server]
 ssh_host = "server-ordinary"
@@ -752,7 +756,7 @@ are supplied; they do not consume the existing32-definition bound.
 
 Presets require an explicit catalog version; use the version reported by
 `estus catalog list --json` after reviewing the installed inventory. Catalog
-inventory changes advance that version (the FEC additions advance 1 to 3).
+inventory changes advance that version (the NIC model additions advance 3 to 6).
 Review existing pins rather than silently adopting an upgrade. Source/runtime/
 overlay drift still invalidates snapshots; startup never refreshes approval.
 
@@ -788,15 +792,17 @@ OS key generation is disabled and installation errors go to the private console.
 Fast parser tests use stdlib Python from Nix check inputs, not Ansible.
 
 The isolated lab qualifies selected Virtio/veth/e1000e controls, Linux
-`netdevsim` FEC configuration, Linux MD RAID1 and virtual NVMe-reported telemetry.
-Its additional lab-only `estus_nic_model` interface `model0` provides synthetic
-EEE state and SFF-8472 EEPROM data through real kernel ethtool callbacks. Native
-Rust tests exercise permissions, configuration, fault injection and module
-lifetime; no address or management route is assigned to this interface.
+`netdevsim` FEC configuration, modeled EEE state and synthetic module decoding,
+Linux MD RAID1 and virtual NVMe-reported telemetry. The NIC model exposes
+root-only fault controls for unsupported/read-error replies, rejected writes,
+accepted-but-unapplied writes, partial effects, delayed reads and malformed
+module data. Tests use real ethtool calls and Rust assertions, including
+independent readback and management-path survival.
 
-This is software API/decoding qualification, not physical power savings, peer
-negotiation, optical accuracy, physical FEC or wire-level pause proof. Physical
-confirmation remains deferred; site-specific procedures remain unqualified.
+This is software configuration/API and decoding qualification—not physical
+power savings, peer negotiation, optical accuracy, arbitrary-driver support,
+physical FEC or wire-level pause proof. Physical confirmation remains deferred.
+Site-specific deployment procedures remain unqualified, without placeholders.
 
 ## Catalog policy: facts first
 
