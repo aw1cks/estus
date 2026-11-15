@@ -262,6 +262,9 @@ impl<'a> Metadata<'a> {
         owned_group_cleanup: Option<GroupCleanup>,
     ) -> Record<'a> {
         let controller = matches!(self.identity_role, IdentityRole::Controller);
+        // Even validated/configured identifiers belong only to execution
+        // records. No rejection path may disclose caller sudo user/program.
+        let execution_identity = !controller && event != "reject";
         Record {
             event,
             timestamp_ms: millis(
@@ -274,8 +277,12 @@ impl<'a> Metadata<'a> {
             host: if controller { None } else { self.host },
             identity_role: self.identity_role,
             sudo_mode: if controller { None } else { self.sudo_mode },
-            user: if controller { None } else { self.user },
-            program: if controller { None } else { self.program },
+            user: if execution_identity { self.user } else { None },
+            program: if execution_identity {
+                self.program
+            } else {
+                None
+            },
             binding_revision: self.binding_revision,
             executor: self.executor,
             status: None,

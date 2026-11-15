@@ -1325,6 +1325,8 @@ impl Operation {
         }
     }
 
+    // Safe before validation, authorization, admission or cancellation checks.
+    // Caller-supplied sudo identifiers are added only from a prepared invocation.
     fn metadata<'a>(&'a self, state: &'a State, request_id: &'a RequestId) -> Metadata<'a> {
         let (tool, host, user, program, revision, executor) = match self {
             Self::Exec(request) => (
@@ -1346,8 +1348,8 @@ impl Operation {
             Self::Sudo(request) => (
                 ToolKey::Builtin(ToolId::Sudo),
                 Some(request.host.as_str()),
-                Some(request.user.as_str()),
-                request.argv.first().map(String::as_str),
+                None,
+                None,
                 None,
                 None,
             ),
@@ -1384,7 +1386,9 @@ impl Operation {
             binding_revision: revision,
             executor,
             sudo_mode: mode,
-            identity_role: if user.is_some() && mode != Some(SudoMode::SameAccount) {
+            identity_role: if (matches!(self, Self::Sudo(_)) || user.is_some())
+                && mode != Some(SudoMode::SameAccount)
+            {
                 IdentityRole::Elevated
             } else {
                 IdentityRole::Ordinary
@@ -1574,6 +1578,14 @@ impl State {
                 metadata.reject(started, &error);
                 return ToolReply::failure(error);
             }
+        };
+        let metadata = match (&request, &invocation) {
+            (Operation::Sudo(_), Invocation::Sudo { user, argv }) => Metadata {
+                user: Some(user),
+                program: argv.first().map(String::as_str),
+                ..metadata
+            },
+            _ => metadata,
         };
         let audit = Audit::start(metadata, started);
         let retention = request.retain_output().then(|| self.outputs.reserve());

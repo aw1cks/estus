@@ -794,10 +794,15 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
             ("ssh_sudo", json!({"host":"allowed","user":"service","argv":["/usr/bin/id"]}), "policy_denied"),
             ("ssh_sudo", json!({"host":"allowed","argv":["/bin/id"]}), "policy_denied"),
             ("ssh_sudo", json!({"host":"allowed","argv":["relative"]}), "invalid_argument"),
+            ("ssh_sudo", json!({"host":"allowed","user":"bad DO_NOT_LOG_PAYLOAD","argv":["/usr/bin/id"]}), "invalid_argument"),
+            ("ssh_sudo", json!({"host":"allowed","user":"DO_NOT_LOG_PAYLOAD","argv":["/usr/bin/id"]}), "policy_denied"),
+            ("ssh_sudo", json!({"host":"allowed","argv":["DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
+            ("ssh_sudo", json!({"host":"allowed","argv":["/DO_NOT_LOG_PAYLOAD"]}), "policy_denied"),
         ].into_iter().enumerate() {
             let id = 20 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}})).await?;
             let response = server.response(id).await?;
+            ensure!(!response.to_string().contains("DO_NOT_LOG_PAYLOAD"), "rejection reflected input");
             ensure!(response["result"]["isError"] == true, "{response}");
             ensure!(response["result"]["structuredContent"]["data"].is_null());
             ensure!(response["result"]["structuredContent"]["error"]["code"] == code, "{response}");
@@ -817,7 +822,80 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
             record["event"] != "master_start",
             "rejected request launched SSH"
         );
+        if record["tool"] == "ssh_sudo" {
+            ensure!(record["event"] == "reject");
+            ensure!(
+                record.get("user").is_none() && record.get("program").is_none(),
+                "sudo rejection retained caller identity fields: {record}"
+            );
+        }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_sudo_keeps_validated_identifiers_on_transport_failure() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("operator.toml");
+    std::fs::write(
+        &path,
+        indoc::indoc! {"
+            [targets.allowed]
+            ssh_host = 'never-connected.invalid'
+            [targets.allowed.sudo]
+            mode = 'separate-identity'
+            ssh_host = 'never-connected-elevated.invalid'
+            users = ['root']
+            programs = ['/usr/bin/id']
+        "},
+    )?;
+    // A real, immediately failing local executable guarantees no network/SSH
+    // configuration evaluation while exercising accepted-operation auditing.
+    let false_binary = std::env::split_paths(&std::env::var_os("PATH").context("PATH")?)
+        .map(|directory| directory.join("false"))
+        .find(|path| path.is_file())
+        .context("false executable prerequisite")?;
+    let mut server = Server::start(&[
+        "--config",
+        path.to_str().context("config path")?,
+        "--ssh",
+        false_binary.to_str().context("false path")?,
+    ])?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"ssh_sudo","arguments":{
+                    "host":"allowed","user":"root","argv":["/usr/bin/id"]}}}))
+            .await?;
+        let response = server.response(2).await?;
+        let code = response["result"]["structuredContent"]["error"]["code"]
+            .as_str()
+            .context("transport error")?;
+        ensure!(
+            code != "policy_denied" && code != "invalid_argument",
+            "{response}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    let mut events = Vec::new();
+    for line in stderr.split_inclusive(|byte| *byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        if record["tool"] == "ssh_sudo" && record["request_id"] == 2 {
+            ensure!(record["user"] == "root" && record["program"] == "/usr/bin/id");
+            ensure!(record["identity_role"] == "elevated");
+            events.push(record["event"].as_str().context("audit event")?.to_owned());
+        }
+    }
+    ensure!(
+        events == ["start", "finish"],
+        "accepted sudo audit: {events:?}"
+    );
     Ok(())
 }
 

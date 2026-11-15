@@ -365,6 +365,11 @@ After application cleanup and runtime shutdown, diagnostic draining gets at
 most100ms. A still-blocked diagnostic-only thread is abandoned at process exit;
 remaining records may be lost. Audit is not a durable or complete execution log.
 
+Rejected requests omit sudo user/program identifiers, including validation,
+policy, admission and pre-dispatch cancellation failures. Accepted native sudo
+operations retain validated user/program identifiers in start/finish records;
+ordinary command payloads and arguments are not logged.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`
