@@ -203,6 +203,7 @@ pub(crate) struct Config {
     ssh_executable: PathBuf,
     limits: Limits,
     output: crate::output::Limits,
+    directory: crate::filedata::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
     bindings: Bindings,
     automation: Automation,
@@ -216,6 +217,7 @@ struct Document {
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
+    directory: crate::filedata::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
@@ -236,6 +238,7 @@ impl Default for Document {
             ssh: Ssh::default(),
             limits: Limits::default(),
             output: crate::output::Limits::default(),
+            directory: crate::filedata::DirectoryLimits::default(),
             targets: None,
             tools: BTreeMap::new(),
             enabled_tools: Vec::new(),
@@ -672,6 +675,10 @@ struct DiscoveryLimits {
     max_command_bytes: usize,
     max_encoded_command_bytes: usize,
     max_response_bytes: usize,
+    max_directory_cursors: usize,
+    max_directory_cursors_per_target: usize,
+    directory_cursor_idle_timeout_secs: u64,
+    max_directory_page_bytes: usize,
 }
 
 #[derive(Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -935,6 +942,10 @@ impl Config {
             .output
             .validate()
             .map_err(|reason| invalid("output", reason))?;
+        document
+            .directory
+            .validate()
+            .map_err(|reason| invalid("directory", reason))?;
         if let Some(targets) = &document.targets {
             validate_targets(targets)?;
         }
@@ -1056,6 +1067,7 @@ impl Config {
             ssh_executable,
             limits: document.limits,
             output: document.output,
+            directory: document.directory,
             targets: document.targets,
             bindings,
             automation: document.automation,
@@ -1064,6 +1076,10 @@ impl Config {
 
     pub(crate) fn output_limits(&self) -> crate::output::Limits {
         self.output
+    }
+
+    pub(crate) fn directory_limits(&self) -> crate::filedata::DirectoryLimits {
+        self.directory
     }
 
     /// A startup prerequisite only; this does not enable automation tools.
@@ -1264,6 +1280,10 @@ impl Config {
                 max_command_bytes: MAX_COMMAND_BYTES,
                 max_encoded_command_bytes: MAX_COMMAND_BYTES,
                 max_response_bytes: MAX_RESPONSE_BYTES,
+                max_directory_cursors: self.directory.max_cursors,
+                max_directory_cursors_per_target: crate::filedata::DIRECTORY_CURSORS_PER_TARGET,
+                directory_cursor_idle_timeout_secs: self.directory.idle_timeout_secs,
+                max_directory_page_bytes: crate::filedata::DIRECTORY_PAGE_BYTES,
             },
         }
     }
@@ -1937,6 +1957,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "controller",
             "automation",
             "output",
+            "directory",
         ],
     )?;
     if let Some(value) = root.get("tools")
@@ -1981,6 +2002,20 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             ("ttl_secs", "output.ttl_secs"),
         ] {
             if output
+                .get(key)
+                .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
+            {
+                return Err(invalid(field, "must be a strictly positive integer"));
+            }
+        }
+    }
+    if let Some(value) = root.get("directory") {
+        let directory = table(value, "directory", &["max_cursors", "idle_timeout_secs"])?;
+        for (key, field) in [
+            ("max_cursors", "directory.max_cursors"),
+            ("idle_timeout_secs", "directory.idle_timeout_secs"),
+        ] {
+            if directory
                 .get(key)
                 .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
             {
@@ -3801,7 +3836,8 @@ programs=['/private/program']
     #[test]
     fn discovery_limits_report_resolved_toml_and_environment_policy_without_clamping() {
         let text = "[limits]\nconnect_timeout_secs=2\noperation_timeout_secs=3\n\
-                    max_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6";
+                    max_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6\n\
+                    [directory]\nmax_cursors=2\nidle_timeout_secs=7";
         let config = load_text(text, &[]).unwrap();
         let limits = serde_json::to_value(config.targets(&catalog())).unwrap()["limits"].clone();
         assert_eq!(
@@ -3811,7 +3847,9 @@ programs=['/private/program']
                 "max_output_bytes":5, "max_file_bytes":6, "max_stdin_bytes":6,
                 "max_command_bytes":MAX_COMMAND_BYTES,
                 "max_encoded_command_bytes":MAX_COMMAND_BYTES,
-                "max_response_bytes":MAX_RESPONSE_BYTES
+                "max_response_bytes":MAX_RESPONSE_BYTES,
+                "max_directory_cursors":2, "max_directory_cursors_per_target":2,
+                "directory_cursor_idle_timeout_secs":7, "max_directory_page_bytes":1_048_576
             })
         );
         let config = load_text(
@@ -3833,9 +3871,30 @@ programs=['/private/program']
                 "max_output_bytes":20000000, "max_file_bytes":30000000,
                 "max_stdin_bytes":30000000, "max_command_bytes":MAX_COMMAND_BYTES,
                 "max_encoded_command_bytes":MAX_COMMAND_BYTES,
-                "max_response_bytes":MAX_RESPONSE_BYTES
+                "max_response_bytes":MAX_RESPONSE_BYTES,
+                "max_directory_cursors":2, "max_directory_cursors_per_target":2,
+                "directory_cursor_idle_timeout_secs":7, "max_directory_page_bytes":1_048_576
             })
         );
+    }
+
+    #[test]
+    fn directory_resources_reject_invalid_or_unbounded_settings_without_reflection() {
+        for policy in [
+            "max_cursors=0",
+            "max_cursors=9",
+            "idle_timeout_secs=0",
+            "idle_timeout_secs=301",
+            "max_cursors=1.5",
+            "max_cursors='DIRECTORY_PRIVATE_VALUE'",
+            "DIRECTORY_PRIVATE_KEY='DIRECTORY_PRIVATE_VALUE'",
+        ] {
+            let error = load_text(&format!("[directory]\n{policy}"), &[])
+                .err()
+                .expect("invalid directory resource policy must fail");
+            let diagnostic = format!("{error:?} {error}");
+            assert!(!diagnostic.contains("DIRECTORY_PRIVATE"));
+        }
     }
 
     #[test]

@@ -2824,6 +2824,562 @@ async fn ssh_stat() -> Result<()> {
     cleanup
 }
 
+fn directory_token(data: &Value) -> Result<String> {
+    let token = data["continuation"]
+        .as_str()
+        .context("directory continuation")?;
+    ensure!(
+        token.len() == 32
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+    ensure!(data["truncated"] == true);
+    ensure!(
+        data["expires_in_secs"]
+            .as_u64()
+            .is_some_and(|seconds| (1..=300).contains(&seconds))
+    );
+    Ok(token.to_owned())
+}
+
+async fn drain_directory(
+    client: &Client,
+    host: &str,
+    path: &Path,
+    mut data: Value,
+    page_size: usize,
+) -> Result<Vec<Value>> {
+    let mut entries = Vec::new();
+    let mut tokens = std::collections::HashSet::new();
+    loop {
+        let page = data["entries"]
+            .as_array()
+            .context("directory page entries")?;
+        ensure!(
+            !page.is_empty() || data["truncated"] == false,
+            "nonterminal page made no progress"
+        );
+        ensure!(page.len() <= page_size);
+        ensure!(
+            serde_json::to_vec(page)?.len() <= 1_048_576,
+            "directory page exceeded byte cap"
+        );
+        entries.extend(page.iter().cloned());
+        if data["truncated"] == false {
+            ensure!(data.get("continuation").is_none() && data.get("expires_in_secs").is_none());
+            break;
+        }
+        let token = directory_token(&data)?;
+        ensure!(
+            tokens.insert(token.clone()),
+            "directory token did not rotate"
+        );
+        let reply = client
+            .call(
+                "ssh_list_directory",
+                json!({
+                    "host":host,"path":path,"max_entries":page_size,"continuation":token
+                }),
+            )
+            .await?;
+        data = succeeded(&reply)?.clone();
+        let stale = client
+            .call(
+                "ssh_list_directory",
+                json!({
+                    "host":host,"path":path,"max_entries":page_size,"continuation":token
+                }),
+            )
+            .await?;
+        failed(&stale, "not_found")?;
+    }
+    let mut names = std::collections::HashSet::new();
+    for entry in &entries {
+        let raw = STANDARD.decode(
+            entry["name_base64"]
+                .as_str()
+                .context("raw directory name")?,
+        )?;
+        ensure!(names.insert(raw), "stable listing duplicated an entry");
+    }
+    Ok(entries)
+}
+
+fn directory_log_count(path: &Path, needle: &str) -> Result<usize> {
+    match fs::read_to_string(path) {
+        Ok(log) => Ok(log.lines().filter(|line| line.contains(needle)).count()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn await_directory_log(path: &Path, needle: &str, count: usize) -> Result<()> {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if directory_log_count(path, needle)? >= count {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("real SFTP lifecycle evidence did not arrive")??;
+    ensure!(
+        directory_log_count(path, needle)? == count,
+        "unexpected SFTP replay/lifecycle count"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_directory_cursor_lifecycle() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let launches = work.path().join("launches");
+    let closed = work.path().join("closed");
+    let requests = work.path().join("requests");
+    let script = format!(
+        "trap '' HUP; exec 3<&0; {} <&3 -e -l VERBOSE 2>> {} & child=$!; echo launched >> {}; wait $child; echo closed >> {}",
+        Fixture::sftp_server()?.display(),
+        requests.display(),
+        launches.display(),
+        closed.display(),
+    );
+    let fixture =
+        Fixture::start_with_sftp_subsystem("", &format!("/bin/sh -c {}", quote(&script))).await?;
+    let scenario = async {
+        let directory = fixture.root.path().join("cursor-directory");
+        fs::create_dir(&directory)?;
+        for i in 0..3201 {
+            fs::write(directory.join(format!("entry-{i:05}")), b"")?;
+        }
+        #[cfg(target_os = "linux")]
+        fs::write(directory.join(std::ffi::OsString::from_vec(b"raw-\xff\xfe".to_vec())), b"")?;
+        let expected: std::collections::BTreeSet<_> = fs::read_dir(&directory)?
+            .map(|entry| Ok(entry?.file_name().as_bytes().to_vec()))
+            .collect::<Result<_>>()?;
+        let client = Client::start(&fixture.config).await?;
+        let mut private_tokens = Vec::new();
+        let cases = async {
+            let first = client.call("ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
+            let token = directory_token(succeeded(&first)?)?;
+            private_tokens.push(token.clone());
+            for args in [
+                json!({"host":"resource","path":directory,"continuation":token}),
+                json!({"host":"plain","path":directory.join("."),"continuation":token}),
+            ] {
+                failed(&client.call("ssh_list_directory", args).await?, "invalid_argument")?;
+            }
+            let foreign = Client::start(&fixture.config).await?;
+            let denied = foreign.call("ssh_list_directory", json!({"host":"plain","path":directory,"continuation":token})).await;
+            let stopped = foreign.stop().await;
+            failed(&denied?, "not_found")?;
+            stopped?;
+            ensure!(succeeded(&exec(&client, "printf CURSOR_PEER").await?)?["stdout"] == "CURSOR_PEER");
+            let stat = client.call("ssh_stat", json!({"host":"plain","path":directory})).await?;
+            succeeded(&stat)?;
+            let next = client.call("ssh_list_directory", json!({
+                "host":"plain","path":directory,"max_entries":127,"timeout_secs":5,"continuation":token
+            })).await?;
+            failed(&client.call("ssh_list_directory", json!({"host":"plain","path":directory,"continuation":token})).await?, "not_found")?;
+            let mut all = succeeded(&first)?["entries"].as_array().context("initial entries")?.clone();
+            all.extend(drain_directory(&client, "plain", &directory, succeeded(&next)?.clone(), 127).await?);
+            let mut actual = std::collections::BTreeSet::new();
+            for entry in &all {
+                ensure!(actual.insert(STANDARD.decode(entry["name_base64"].as_str().context("raw name")?)?), "duplicate across first page");
+            }
+            ensure!(actual == expected, "stable continuation lost raw entries");
+            await_directory_log(&closed, "closed", 2).await?; // listing + native stat
+            ensure!(directory_log_count(&requests, "opendir \"")? == 1, "pages reopened directory");
+            ensure!(directory_log_count(&launches, "")? == 2, "invalid/foreign handles launched a subsystem");
+
+            // Mutation has no snapshot promise. Finish this same stream, bounding
+            // progress, but deliberately do not compare it to either filesystem set.
+            let first = client.call("ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1000})).await?;
+            fs::remove_file(directory.join("entry-03200"))?;
+            fs::write(directory.join("churn-new"), b"")?;
+            let mut page = succeeded(&first)?.clone();
+            let mut seen_tokens = std::collections::HashSet::new();
+            for _ in 0..10 {
+                if page["truncated"] == false { break; }
+                let token = directory_token(&page)?;
+                ensure!(seen_tokens.insert(token.clone()), "churn reused token");
+                let reply = client.call("ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1000,"continuation":token})).await?;
+                page = succeeded(&reply)?.clone();
+                ensure!(page["entries"].as_array().context("churn entries")?.len() <= 1000);
+            }
+            ensure!(page["truncated"] == false, "churn made no bounded progress");
+            await_directory_log(&closed, "closed", 3).await?;
+            ensure!(directory_log_count(&requests, "opendir \"")? == 2, "churn silently restarted");
+
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        cases?;
+        let stopped = stopped?;
+        let diagnostics = stopped.text();
+        ensure!(!diagnostics.contains(directory.to_str().context("directory path")?));
+        for token in private_tokens {
+            ensure!(!diagnostics.contains(&token), "directory token leaked into audit");
+        }
+        assert_masters_gone(&owned?).await?;
+        let capacity = Client::start(&fixture.config).await?;
+        let capacity_cases = async {
+            let empty = fixture.root.path().join("cursor-empty");
+            fs::create_dir(&empty)?;
+            for (index, host) in ["plain", "resource", "slots-0", "slots-1"].into_iter().enumerate() {
+                for _ in 0..2 {
+                    let reply = capacity.call("ssh_list_directory", json!({"host":host,"path":directory,"max_entries":1})).await?;
+                    directory_token(succeeded(&reply)?)?;
+                }
+                if index == 0 {
+                    let denied = capacity.call("ssh_list_directory", json!({"host":host,"path":directory,"max_entries":1})).await?;
+                    failed(&denied, "resource_limit")?;
+                    let one_shot = capacity.call("ssh_list_directory", json!({"host":host,"path":empty,"max_entries":1})).await?;
+                    ensure!(succeeded(&one_shot)? == &json!({"entries":[],"truncated":false}));
+                    let (command, read) = tokio::join!(
+                        exec(&capacity, "printf IDLE_CURSORS_ALLOW_NATIVE_WORK"),
+                        capacity.call("ssh_read_file", json!({"host":"plain","path":directory.join("entry-00000"),"max_bytes":1}))
+                    );
+                    ensure!(succeeded(&command?)?["stdout"] == "IDLE_CURSORS_ALLOW_NATIVE_WORK");
+                    succeeded(&read?)?;
+                }
+            }
+            let denied = capacity.call("ssh_list_directory", json!({"host":"slots-2","path":directory,"max_entries":1})).await?;
+            failed(&denied, "resource_limit")?;
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&capacity.log);
+        let stopped = capacity.stop().await;
+        capacity_cases?;
+        stopped?;
+        assert_masters_gone(&owned?).await?;
+        await_directory_log(&closed, "closed", directory_log_count(&launches, "")?).await?;
+
+
+        // A one-credit, one-second store proves global exhaustion, timer-owned
+        // cleanup and EOF cleanup using remote channel/session completion.
+        let config = fixture.root.path().join("directory-limits.toml");
+        fs::write(&config, format!("{}\n[directory]\nmax_cursors=1\nidle_timeout_secs=1\n", fs::read_to_string(&fixture.config)?))?;
+        let mut wire = WireServer::start(&config)?;
+        let cases = async {
+            wire.initialize().await?;
+            script_wire_call(&mut wire, 10, "ssh_exec", json!({"host":"resource","command":"printf WARM_CURSOR_PEER"})).await
+                .and_then(|reply| succeeded(&reply).map(|_| ()))?;
+            let first = script_wire_call(&mut wire, 2, "ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
+            let expired = directory_token(succeeded(&first)?)?;
+            ensure!(succeeded(&first)?["expires_in_secs"] == 1);
+            let denied = script_wire_call(&mut wire, 3, "ssh_list_directory", json!({"host":"resource","path":directory,"max_entries":1})).await?;
+            failed(&denied, "resource_limit")?;
+            let launched = directory_log_count(&launches, "")?;
+            await_directory_log(&closed, "closed", launched).await?;
+            let stale = script_wire_call(&mut wire, 4, "ssh_list_directory", json!({"host":"plain","path":directory,"continuation":expired})).await?;
+            failed(&stale, "not_found")?;
+            let next = script_wire_call(&mut wire, 5, "ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
+            directory_token(succeeded(&next)?)?;
+            // Leave this retained cursor open: EOF below must close its channel
+            // and reap the owned master, independently of idle expiry.
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let owned = masters(&wire.log);
+        let stopped = wire.stop(None).await;
+        cases?;
+        stopped?;
+        await_directory_log(&closed, "closed", directory_log_count(&launches, "")?).await?;
+        assert_masters_gone(&owned?).await
+    }.await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup?;
+    work.close()?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
+    for cancel in [false, true] {
+        let work = tempfile::tempdir()?;
+        let first_session = work.path().join("first-session");
+        let normal_launches = work.path().join("normal-launches");
+        let requests = work.path().join("requests");
+        let server = Fixture::sftp_server()?;
+        let fault = if cancel {
+            replace_relay::Fault::DirectoryPageAck
+        } else {
+            replace_relay::Fault::None
+        };
+        let mut relay = replace_relay::Relay::start(&server, fault, None).await?;
+        // Exactly one genuine subsystem uses the relay. Explicit new listings
+        // use the ordinary real server, never a test-created protocol response.
+        let script = format!(
+            "if mkdir {} 2>/dev/null; then {}; else echo launched >> {}; exec {} -e -l VERBOSE 2>> {}; fi",
+            quote(&first_session.to_string_lossy()),
+            relay.subsystem,
+            quote(&normal_launches.to_string_lossy()),
+            quote(&server.to_string_lossy()),
+            quote(&requests.to_string_lossy()),
+        );
+        let launcher = work.path().join("sftp-route");
+        fs::write(&launcher, format!("#!/bin/sh\n{script}\n"))?;
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700))?;
+        let fixture =
+            match Fixture::start_with_sftp_subsystem("", launcher.to_str().context("route path")?)
+                .await
+            {
+                Ok(fixture) => fixture,
+                Err(error) => {
+                    let _ = relay.stop().await;
+                    return Err(error);
+                }
+            };
+        let scenario = async {
+            let directory = fixture.root.path().join("controlled-cursor-private");
+            fs::create_dir(&directory)?;
+            for index in 0..3201 {
+                fs::write(directory.join(format!("entry-{index:05}")), b"")?;
+            }
+            let peer = fixture.root.path().join("cursor-peer");
+            fs::write(&peer, b"CURSOR_NATIVE_PEER")?;
+            let config = fixture.root.path().join("controlled-directory.toml");
+            fs::write(
+                &config,
+                format!(
+                    "{}\n[directory]\nmax_cursors=1\nidle_timeout_secs=300\n",
+                    fs::read_to_string(&fixture.config)?,
+                ),
+            )?;
+            let client = Client::start(&config).await?;
+            let mut private_tokens = Vec::new();
+            let cases = async {
+                ensure!(
+                    succeeded(&exec(&client, "printf CONTROLLED_CURSOR_MASTER").await?)?["stdout"]
+                        == "CONTROLLED_CURSOR_MASTER"
+                );
+                let owned = observed_masters(&client.log, 1).await?;
+                let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
+                let first = client
+                    .call(
+                        "ssh_list_directory",
+                        json!({
+                            "host":"plain","path":directory,"max_entries":1
+                        }),
+                    )
+                    .await?;
+                let dead = directory_token(succeeded(&first).context("initial controlled page")?)?;
+                private_tokens.push(dead.clone());
+                if cancel {
+                    let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
+                        "ssh_list_directory",
+                        json!({"host":"plain","path":directory,"max_entries":1000,
+                            "continuation":dead,"timeout_secs":10}),
+                    )));
+                    let handle = timeout(
+                        Duration::from_secs(5),
+                        client
+                            .service
+                            .send_cancellable_request(request, PeerRequestOptions::default()),
+                    )
+                    .await??;
+                    timeout(Duration::from_secs(5), async {
+                        loop {
+                            let withheld = {
+                                let seen = relay
+                                    .evidence
+                                    .lock()
+                                    .map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+                                seen.dropped_directory_page
+                            };
+                            if withheld {
+                                return Ok::<_, anyhow::Error>(());
+                            }
+                            sleep(Duration::from_millis(20)).await;
+                        }
+                    })
+                    .await
+                    .context("real second READDIR response was not withheld")??;
+                    let started = timeout(Duration::from_secs(5), async {
+                        loop {
+                            if let Some(record) = client
+                                .log
+                                .records()?
+                                .into_iter()
+                                .filter(|record| {
+                                    record["event"] == "start"
+                                        && record["tool"] == "ssh_list_directory"
+                                })
+                                .nth(1)
+                            {
+                                return Ok::<_, anyhow::Error>(record);
+                            }
+                            sleep(Duration::from_millis(20)).await;
+                        }
+                    })
+                    .await
+                    .context("continued page start audit did not arrive")??;
+                    timeout(
+                        Duration::from_secs(5),
+                        handle.cancel(Some("directory acceptance cancellation".into())),
+                    )
+                    .await??;
+                    let finished = await_audit(&client.log, "finish", "cancelled").await?;
+                    ensure!(
+                        finished["tool"] == "ssh_list_directory"
+                            && finished["request_id"] == started["request_id"]
+                            && !finished["request_id"].is_null(),
+                        "cancellation audit was not correlated to the blocked page"
+                    );
+                    // No helper teardown/kill precedes this observation: actual
+                    // cancellation must close the relay input and real server.
+                    relay.wait_server_exit().await?;
+                } else {
+                    relay.disconnect_server().await?;
+                    // Production emits this only after registry and credits
+                    // are released; process death alone is not that barrier.
+                    await_audit(&client.log, "directory_cursor_error", "connection_lost").await?;
+                }
+                let (command, read) = tokio::join!(
+                    exec(&client, "printf CONTROLLED_CURSOR_PEER"),
+                    client.call("ssh_read_file", json!({"host":"plain","path":peer}))
+                );
+                ensure!(succeeded(&command?)?["stdout"] == "CONTROLLED_CURSOR_PEER");
+                ensure!(succeeded(&read?)?["content"] == "CURSOR_NATIVE_PEER");
+                ensure!(
+                    live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
+                    "directory failure replaced the healthy ordinary master"
+                );
+                // Crucially acquire replacement credit BEFORE presenting dead.
+                let replacement = client
+                    .call(
+                        "ssh_list_directory",
+                        json!({
+                            "host":"plain","path":directory,"max_entries":1000
+                        }),
+                    )
+                    .await?;
+                private_tokens.push(directory_token(
+                    succeeded(&replacement).context("replacement page")?,
+                )?);
+                let before_stale = directory_log_count(&normal_launches, "launched")?;
+                for _ in 0..2 {
+                    failed(
+                        &client
+                            .call(
+                                "ssh_list_directory",
+                                json!({
+                                    "host":"plain","path":directory,"continuation":dead
+                                }),
+                            )
+                            .await?,
+                        "not_found",
+                    )?;
+                }
+                ensure!(
+                    directory_log_count(&normal_launches, "launched")? == before_stale,
+                    "dead cursor launched a replacement subsystem"
+                );
+                let entries = drain_directory(
+                    &client,
+                    "plain",
+                    &directory,
+                    succeeded(&replacement)?.clone(),
+                    1000,
+                )
+                .await?;
+                ensure!(
+                    entries.len() == 3201,
+                    "replacement did not exhaust the real directory"
+                );
+                // Exhaustion must return the sole credit as well.
+                let again = client
+                    .call(
+                        "ssh_list_directory",
+                        json!({
+                            "host":"plain","path":directory,"max_entries":1000
+                        }),
+                    )
+                    .await?;
+                private_tokens.push(directory_token(
+                    succeeded(&again).context("page after exhaustion")?,
+                )?);
+                ensure!(
+                    drain_directory(
+                        &client,
+                        "plain",
+                        &directory,
+                        succeeded(&again)?.clone(),
+                        1000
+                    )
+                    .await?
+                    .len()
+                        == 3201
+                );
+                await_directory_log(&requests, "opendir \"", 2).await?;
+                let seen = relay
+                    .evidence
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("relay evidence poisoned"))?;
+                ensure!(
+                    seen.requests.iter().filter(|kind| **kind == 11).count() == 1,
+                    "failed cursor reopened its directory"
+                );
+                if cancel {
+                    ensure!(
+                        seen.dropped_directory_page
+                            && seen.readdirs >= 2
+                            && seen.readdir_ids.len() == seen.readdirs
+                    );
+                }
+                ensure!(
+                    fs::read_to_string(&relay.launches)?.lines().count() == 1,
+                    "controlled session was replayed"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            let owned = masters(&client.log);
+            let stopped = client.stop().await;
+            let gone = match owned {
+                Ok(owned) => assert_masters_gone(&owned).await,
+                Err(error) => Err(error),
+            };
+            cases?;
+            let log = stopped?;
+            let diagnostics = log.text();
+            ensure!(!diagnostics.contains(directory.to_str().context("directory path")?));
+            for token in private_tokens {
+                ensure!(
+                    !diagnostics.contains(&token),
+                    "directory token leaked into audit"
+                );
+            }
+            for record in log.final_records()?.iter().filter(|record| {
+                record["tool"] == "ssh_list_directory"
+                    || record["event"] == "directory_cursor_error"
+            }) {
+                for field in ["path", "filename", "continuation", "target", "content"] {
+                    ensure!(
+                        record.get(field).is_none(),
+                        "directory audit disclosed {field}"
+                    );
+                }
+            }
+            gone
+        }
+        .await;
+        let relayed = relay.stop().await;
+        let cleanup = fixture.stop().await;
+        scenario
+            .with_context(|| format!("controlled cursor cancel={cancel}; relay={relayed:?}"))?;
+        relayed?;
+        cleanup?;
+        work.close()?;
+    }
+    Ok(())
+}
+
 async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     let directory = fixture.root.path().join("list-'\";~$*\n");
     fs::create_dir(&directory)?;
@@ -2879,10 +3435,20 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
             args["max_entries"] = json!(limit);
         }
         let reply = client.call("ssh_list_directory", args).await?;
+        let data = succeeded(&reply)?;
         ensure!(
-            succeeded(&reply)? == &json!({"entries": &expected[..count], "truncated":truncated}),
+            data["entries"] == json!(&expected[..count]) && data["truncated"] == truncated,
             "listing lost bytes, reordered entries, fabricated metadata or misreported lookahead"
         );
+        let all = drain_directory(
+            client,
+            "plain",
+            &directory,
+            data.clone(),
+            limit.unwrap_or(200),
+        )
+        .await?;
+        ensure!(all == expected);
     }
     let empty = fixture.root.path().join("list-empty");
     fs::create_dir(&empty)?;
@@ -2907,20 +3473,21 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     ensure!(data["truncated"] == true);
     let entries = data["entries"].as_array().context("directory entries")?;
     ensure!(entries.len() == 1000);
-    let actual: Vec<_> = entries
+    let all = drain_directory(client, "plain", &directory, data.clone(), 1000).await?;
+    let actual: std::collections::BTreeSet<_> = all
         .iter()
-        .map(|entry| entry["name_base64"].as_str())
-        .collect();
-    let expected: Vec<_> = fs::read_dir(&directory)?
-        .take(1000)
-        .map(|entry| Ok(STANDARD.encode(entry?.file_name().as_bytes())))
+        .map(|entry| {
+            STANDARD
+                .decode(entry["name_base64"].as_str().context("listed raw name")?)
+                .map_err(Into::into)
+        })
+        .collect::<Result<_>>()?;
+    let expected: std::collections::BTreeSet<_> = fs::read_dir(&directory)?
+        .map(|entry| Ok(entry?.file_name().as_bytes().to_vec()))
         .collect::<Result<_>>()?;
     ensure!(
-        actual
-            == expected
-                .iter()
-                .map(|name| Some(name.as_str()))
-                .collect::<Vec<_>>()
+        actual == expected,
+        "paged listing lost or invented raw filenames"
     );
 
     let denied = fixture.root.path().join("list-denied");
@@ -2988,7 +3555,7 @@ async fn ssh_list_directory() -> Result<()> {
         let records = stopped?.final_records()?;
         for record in records.iter().filter(|record| record["tool"] == "ssh_list_directory") {
             ensure!(record["identity_role"] == "ordinary");
-            for field in ["path", "name", "name_base64", "metadata", "entries"] {
+            for field in ["path", "name", "name_base64", "metadata", "entries", "continuation", "expires_in_secs"] {
                 ensure!(record.get(field).is_none(), "listing audit disclosed {field}");
             }
         }
@@ -3031,6 +3598,119 @@ async fn ssh_list_directory() -> Result<()> {
         stopped?;
         gone
     }.await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix sftp-server and a non-root local account"]
+async fn ssh_directory_cursor_byte_budget() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let directory = fixture.root.path().join("directory-byte-budget");
+        fs::create_dir(&directory)?;
+        for index in 0..1505 {
+            let name = format!("entry-{index:04}-{}", "a".repeat(229));
+            ensure!(name.len() == 240);
+            fs::write(directory.join(name), b"")?;
+        }
+        let expected: std::collections::BTreeSet<_> = fs::read_dir(&directory)?
+            .map(|entry| Ok(entry?.file_name().as_bytes().to_vec()))
+            .collect::<Result<_>>()?;
+        ensure!(expected.len() == 1505);
+        let mut wire = WireServer::start(&fixture.config)?;
+        let cases = async {
+            wire.initialize().await?;
+            let mut continuation = None;
+            let mut tokens = std::collections::HashSet::new();
+            let mut actual = std::collections::BTreeSet::new();
+            let mut exhausted = false;
+            for page in 0..16 {
+                let mut args = json!({"host":"plain","path":directory,"max_entries":1000});
+                if let Some(token) = &continuation {
+                    args["continuation"] = json!(token);
+                }
+                let id = json!(page + 10);
+                let (frame, size) = wire
+                    .request_with_size(
+                        id.clone(),
+                        "tools/call",
+                        json!({"name":"ssh_list_directory","arguments":args}),
+                    )
+                    .await?;
+                ensure!(
+                    frame["id"] == id && frame.get("error").is_none(),
+                    "unexpected JSON-RPC directory response"
+                );
+                ensure!(
+                    size <= 1_048_576 + 2048,
+                    "actual directory reply exceeded byte budget: {size}"
+                );
+                let result = &frame["result"];
+                let reply = &result["structuredContent"];
+                ensure!(
+                    serde_json::from_str::<Value>(
+                        result["content"][0]["text"]
+                            .as_str()
+                            .context("directory compatibility text")?,
+                    )? == *reply,
+                    "directory result representations disagree"
+                );
+                ensure!(!result["isError"].as_bool().unwrap_or(false));
+                let data = succeeded(reply)?;
+                let entries = data["entries"].as_array().context("byte-budget entries")?;
+                ensure!(
+                    !entries.is_empty() && entries.len() <= 1000,
+                    "byte-budget page made no bounded progress"
+                );
+                if page == 0 {
+                    ensure!(
+                        entries.len() < 1000 && data["truncated"] == true,
+                        "first page did not exercise byte rather than entry-count limit"
+                    );
+                }
+                for entry in entries {
+                    let raw = STANDARD.decode(
+                        entry["name_base64"]
+                            .as_str()
+                            .context("byte-budget raw filename")?,
+                    )?;
+                    ensure!(actual.insert(raw), "byte lookahead duplicated a filename");
+                }
+                if data["truncated"] == false {
+                    ensure!(
+                        data.get("continuation").is_none() && data.get("expires_in_secs").is_none()
+                    );
+                    exhausted = true;
+                    break;
+                }
+                let token = directory_token(data)?;
+                ensure!(
+                    tokens.insert(token.clone()),
+                    "byte-budget token did not rotate"
+                );
+                continuation = Some(token);
+            }
+            ensure!(exhausted, "byte-budget listing did not reach EOF");
+            ensure!(
+                actual == expected,
+                "byte lookahead lost or invented raw filenames"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&wire.log);
+        let stopped = wire.stop(None).await;
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        cases?;
+        stopped?;
+        gone
+    }
+    .await;
     let cleanup = fixture.stop().await;
     scenario?;
     cleanup

@@ -9,35 +9,43 @@
 //!
 //! Atomic replacement uses a new mode-0600 inode, not destination metadata, and
 //! promises atomic visibility rather than durability or concurrent-writer safety.
-//! The empty sibling stage briefly has server-default permissions before chmod.
+//! The exclusive OPEN creates the sibling stage with mode 0600.
 //! Cancellation or uncertain acknowledgements can leave `.estus-replace-*`
 //! orphans: never replay replacement or remove an unproven staging pathname.
+//!
+//! Directory continuations retain one pinned READDIR stream and its native lease.
+//! A cursor owner, not a request task, owns bounded close and idle cancellation;
+//! request admission is never retained between pages.
 use std::{
+    collections::HashMap,
     fmt::Write as _,
     future::Future,
     io::{self, SeekFrom},
     os::unix::ffi::OsStrExt,
+    panic::AssertUnwindSafe,
     pin::Pin,
+    sync::{Arc, Mutex, MutexGuard},
     task::{Context, Poll},
     time::Duration,
 };
 
 use bytes::BytesMut;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use openssh::{Session, Stdio};
 use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions, metadata::Permissions};
 use openssh_sftp_error::SftpErrorKind;
 use tokio::{
     io::{AsyncRead, AsyncSeekExt, AsyncWrite, ReadBuf},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
 };
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::{
     filedata::{
-        ListData, ListSpec, MkdirData, MkdirSpec, RawRead, ReadData, ReadSpec, RemoveDirectoryData,
-        RemoveDirectorySpec, RemoveFileData, RemoveFileSpec, RenameData, RenameSpec, ReplaceData,
-        ReplaceSpec, StatSpec, WriteData, WriteSpec, encode, verify_script,
+        DIRECTORY_CURSORS_PER_TARGET, DirectoryLimits, ListData, ListSpec, MkdirData, MkdirSpec,
+        RawRead, ReadData, ReadSpec, RemoveDirectoryData, RemoveDirectorySpec, RemoveFileData,
+        RemoveFileSpec, RenameData, RenameSpec, ReplaceData, ReplaceSpec, StatSpec, WriteData,
+        WriteSpec, encode, verify_script,
     },
     filemeta::{ListEntry, StatData, metadata_data},
     reply::{ToolError, ToolReply},
@@ -176,6 +184,7 @@ struct ChannelStream<T> {
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
     // Field drop order matters: signal only after the inner pipe is released.
     _released: oneshot::Sender<()>,
+    closed: Option<CancellationToken>,
 }
 
 impl<T> ChannelStream<T> {
@@ -186,6 +195,7 @@ impl<T> ChannelStream<T> {
                 inner,
                 cancelled: Box::pin(cancel.clone().cancelled_owned()),
                 _released: released,
+                closed: None,
             },
             receiver,
         )
@@ -193,6 +203,14 @@ impl<T> ChannelStream<T> {
 
     fn interrupted(&mut self, cx: &mut Context<'_>) -> bool {
         self.cancelled.as_mut().poll(cx).is_ready()
+    }
+}
+
+impl<T> Drop for ChannelStream<T> {
+    fn drop(&mut self) {
+        if let Some(closed) = &self.closed {
+            closed.cancel();
+        }
     }
 }
 
@@ -205,7 +223,19 @@ impl<T: AsyncRead + Unpin> AsyncRead for ChannelStream<T> {
         if self.interrupted(cx) {
             return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
         }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let capacity = buf.remaining();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(&result, Poll::Ready(Err(_)))
+            || (matches!(&result, Poll::Ready(Ok(())))
+                && capacity != 0
+                && buf.filled().len() == before)
+        {
+            if let Some(closed) = &self.closed {
+                closed.cancel();
+            }
+        }
+        result
     }
 }
 
@@ -640,43 +670,6 @@ async fn stat_sftp(sftp: Sftp, spec: StatSpec<'_>) -> Result<StatData, Failure> 
     combine_close(result, close)
 }
 
-async fn list_sftp(sftp: Sftp, mut spec: ListSpec<'_>) -> Result<ListData, Failure> {
-    let result = async {
-        let dir = {
-            let mut fs = sftp.fs();
-            fs.open_dir(spec.path).await.map_err(sftp_failure)?
-        };
-        let stream = dir.read_dir();
-        tokio::pin!(stream);
-        let mut data = ListData::empty();
-        while let Some(entry) = stream.next().await {
-            let entry = entry.map_err(sftp_failure)?;
-            let bytes = entry.filename().as_os_str().as_bytes();
-            if matches!(bytes, b"." | b"..") {
-                continue;
-            }
-            if data.entries.len() == spec.max_entries {
-                data.truncated = true;
-                break;
-            }
-            let entry = ListEntry::from_filename(entry.filename().as_os_str(), entry.metadata());
-            if !data.push(entry, &mut spec) {
-                break;
-            }
-        }
-        Ok(data)
-    }
-    .await;
-    // ReadDir has no explicit close API: its drop schedules the library-owned
-    // directory close. Drop the stream first, then await all protocol work via
-    // Sftp::close under the same bounded cleanup used by other file operations.
-    let close = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
-        .await
-        .map_err(|_| Failure::cleanup())
-        .and_then(|result| result.map_err(sftp_failure));
-    combine_close(result, close)
-}
-
 fn combine_close<T>(result: Result<T, Failure>, close: Result<(), Failure>) -> Result<T, Failure> {
     match (result, close) {
         (Ok(value), Ok(())) => Ok(value),
@@ -876,12 +869,658 @@ pub(crate) async fn stat(
     run_sftp(session, context, |sftp| stat_sftp(sftp, spec)).await
 }
 
-pub(crate) async fn list(
-    session: &Session,
-    spec: ListSpec<'_>,
-    context: FileContext<'_>,
-) -> FileOutcome<ListData> {
-    run_sftp(session, context, |sftp| list_sftp(sftp, spec)).await
+/// Session-local, single-use capabilities. The registry owns only dispatch
+/// handles; each owner task owns its stream, lease, idle deadline and cleanup.
+pub(crate) struct DirectoryStore {
+    shared: Arc<DirectoryShared>,
+}
+
+struct DirectoryShared {
+    limits: DirectoryLimits,
+    stopping: CancellationToken,
+    registry: Mutex<DirectoryRegistry>,
+}
+
+#[derive(Default)]
+struct DirectoryRegistry {
+    owners: HashMap<String, DirectoryOwner>,
+    idle: HashMap<String, IdleDirectory>,
+}
+
+struct DirectoryOwner {
+    host: String,
+    destination: String,
+    role: crate::config::IdentityRole,
+    path: String,
+    retained: bool,
+    sender: mpsc::Sender<DirectoryPage>,
+    done: CancellationToken,
+}
+
+struct IdleDirectory {
+    owner: String,
+    expires: tokio::time::Instant,
+}
+
+struct DirectoryPage {
+    max_entries: usize,
+    remaining_bytes: usize,
+    deadline: tokio::time::Instant,
+    cancel: CancellationToken,
+    shutdown: CancellationToken,
+    progress: crate::progress::Reporter,
+    reply: oneshot::Sender<ToolReply<ListData>>,
+}
+
+fn directory_lock(shared: &DirectoryShared) -> MutexGuard<'_, DirectoryRegistry> {
+    // Recover ownership records on unwind so shutdown can still await cleanup.
+    shared
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn directory_missing() -> ToolError {
+    ToolError::new("not_found", "Directory continuation was not found", false)
+}
+
+fn directory_control(code: &'static str) -> Failure {
+    Failure {
+        error: match code {
+            "timeout" => ToolError::new("timeout", "SFTP file operation deadline exceeded", false),
+            _ => ToolError::new("cancelled", "SFTP file operation cancelled", false),
+        },
+        check_master: false,
+    }
+}
+
+fn directory_token() -> Result<String, Failure> {
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).map_err(|_| Failure::io())?;
+    Ok(format!("{:032x}", u128::from_be_bytes(bytes)))
+}
+
+impl DirectoryStore {
+    pub(crate) fn new(limits: DirectoryLimits, shutdown: CancellationToken) -> Self {
+        Self {
+            shared: Arc::new(DirectoryShared {
+                limits,
+                stopping: shutdown.child_token(),
+                registry: Mutex::new(DirectoryRegistry::default()),
+            }),
+        }
+    }
+
+    pub(crate) async fn page(
+        &self,
+        pool: &Arc<crate::ssh::Pool>,
+        target: crate::config::ResolvedTarget<'_>,
+        spec: ListSpec<'_>,
+        continuation: Option<&str>,
+        context: FileContext<'_>,
+    ) -> ToolReply<ListData> {
+        if context.ct.is_cancelled()
+            || context.shutdown.is_cancelled()
+            || self.shared.stopping.is_cancelled()
+        {
+            return ToolReply::failure(directory_control("cancelled").error);
+        }
+        if tokio::time::Instant::now() >= context.deadline {
+            return ToolReply::failure(directory_control("timeout").error);
+        }
+        // Dropping the caller wakes the owner even if the caller's request
+        // cancellation token itself was never cancelled.
+        let cancel = context.ct.child_token();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let (reply, response) = oneshot::channel();
+        let request = DirectoryPage {
+            max_entries: spec.max_entries,
+            remaining_bytes: spec.remaining_bytes,
+            deadline: context.deadline,
+            cancel,
+            shutdown: context.shutdown.clone(),
+            progress: context.progress,
+            reply,
+        };
+        if let Some(token) = continuation {
+            let dispatched = {
+                let mut registry = directory_lock(&self.shared);
+                let Some(idle) = registry.idle.get(token) else {
+                    return ToolReply::failure(directory_missing());
+                };
+                if idle.expires <= tokio::time::Instant::now() {
+                    return ToolReply::failure(directory_missing());
+                }
+                let Some(owner) = registry.owners.get(&idle.owner) else {
+                    return ToolReply::failure(directory_missing());
+                };
+                if owner.host != target.name
+                    || owner.destination != target.destination
+                    || owner.role != target.role
+                    || owner.path != spec.path
+                {
+                    return ToolReply::failure(ToolError::new(
+                        "invalid_argument",
+                        "Directory continuation identity does not match",
+                        false,
+                    ));
+                }
+                // No await or second admission boundary between consumption and
+                // dispatch. Concurrent users can never dispatch the same token.
+                let result = owner.sender.try_send(request);
+                registry.idle.remove(token);
+                result.is_ok()
+            };
+            if !dispatched {
+                return ToolReply::failure(directory_missing());
+            }
+        } else {
+            let lease = match pool
+                .acquire(
+                    target.name,
+                    target.destination,
+                    target.role,
+                    context.deadline,
+                    &request.cancel,
+                )
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => return ToolReply::failure(error),
+            };
+            let id = match directory_token() {
+                Ok(id) => id,
+                Err(failure) => return ToolReply::failure(failure.error),
+            };
+            let (sender, receiver) = mpsc::channel(1);
+            let done = CancellationToken::new();
+            let path = spec.path.to_owned();
+            {
+                let mut registry = directory_lock(&self.shared);
+                if self.shared.stopping.is_cancelled() {
+                    return ToolReply::failure(directory_control("cancelled").error);
+                }
+                if registry.owners.contains_key(&id) {
+                    return ToolReply::failure(Failure::io().error);
+                }
+                registry.owners.insert(
+                    id.clone(),
+                    DirectoryOwner {
+                        host: target.name.to_owned(),
+                        destination: target.destination.to_owned(),
+                        role: target.role,
+                        path: path.clone(),
+                        retained: false,
+                        sender,
+                        done: done.clone(),
+                    },
+                );
+            }
+            let shared = Arc::clone(&self.shared);
+            // This owner is never aborted. In particular it does not inherit
+            // the server's ordinary global request-admission permit.
+            let recovery_shared = Arc::downgrade(&shared);
+            let recovery_id = id.clone();
+            let recovery_done = done.clone();
+            tokio::spawn(async move {
+                let outcome = AssertUnwindSafe(directory_owner(
+                    shared, id, path, lease, receiver, request, done,
+                ))
+                .catch_unwind()
+                .await;
+                if outcome.is_err() {
+                    // The failed future has dropped its channel and lease.
+                    // Never leave shutdown waiting on an un-signalled owner.
+                    if let Some(shared) = recovery_shared.upgrade() {
+                        let mut registry = directory_lock(&shared);
+                        registry.idle.retain(|_, idle| idle.owner != recovery_id);
+                        registry.owners.remove(&recovery_id);
+                    }
+                    recovery_done.cancel();
+                    crate::audit::emit(&serde_json::json!({
+                        "event":"directory_cursor_error",
+                        "error_code":"owner_panicked",
+                        "remote_state_unknown":true,
+                    }));
+                }
+            });
+        }
+        response.await.unwrap_or_else(|_| {
+            ToolReply::failure(ToolError::new(
+                "io_error",
+                "Directory owner cleanup was interrupted",
+                true,
+            ))
+        })
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.shared.stopping.cancel();
+        let owners: Vec<_> = directory_lock(&self.shared)
+            .owners
+            .values()
+            .map(|owner| owner.done.clone())
+            .collect();
+        for done in owners {
+            done.cancelled().await;
+        }
+    }
+}
+
+impl Drop for DirectoryStore {
+    fn drop(&mut self) {
+        self.shared.stopping.cancel();
+    }
+}
+
+struct DirectoryChannel {
+    child: Option<openssh::Child<Arc<Session>>>,
+    sftp: Option<Sftp>,
+    stream: Option<Pin<Box<openssh_sftp_client::fs::ReadDir>>>,
+    pending: Option<ListEntry>,
+    cancel: CancellationToken,
+    closed: CancellationToken,
+    released: [Option<oneshot::Receiver<()>>; 2],
+    drain: Option<tokio::task::JoinHandle<io::Result<u64>>>,
+    pump: Option<tokio::task::JoinHandle<io::Result<u64>>>,
+    dispatched: bool,
+}
+
+impl DirectoryChannel {
+    fn new() -> Self {
+        Self {
+            child: None,
+            sftp: None,
+            stream: None,
+            pending: None,
+            cancel: CancellationToken::new(),
+            closed: CancellationToken::new(),
+            released: [None, None],
+            drain: None,
+            pump: None,
+            dispatched: false,
+        }
+    }
+
+    async fn open(
+        &mut self,
+        lease: &crate::ssh::Lease,
+        path: &str,
+        progress: &crate::progress::Reporter,
+    ) -> Result<(), Failure> {
+        self.dispatched = true;
+        self.child = Some(
+            Session::to_subsystem(lease.owned_session(), "sftp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .await
+                .map_err(ssh_failure)?,
+        );
+        progress.stage(crate::progress::Stage::SftpOpened);
+        let child = self.child.as_mut().ok_or_else(Failure::io)?;
+        let stdin = child.stdin().take().ok_or_else(Failure::io)?;
+        let mut stdout = child.stdout().take().ok_or_else(Failure::io)?;
+        let mut stderr = child.stderr().take().ok_or_else(Failure::io)?;
+        let (stdin, input_released) = ChannelStream::new(stdin, &self.cancel);
+        // The SFTP library stops polling stdout when it has no outstanding
+        // requests. A bounded pump keeps observing real pipe EOF while idle,
+        // without issuing another READDIR or probing/reopening the channel.
+        let (reader, mut writer) = tokio::io::duplex(64 * 1024);
+        let cancel = self.cancel.clone();
+        let closed = self.closed.clone();
+        self.pump = Some(tokio::spawn(async move {
+            let _closed_on_drop = closed.drop_guard();
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => Ok(0),
+                result = tokio::io::copy(&mut stdout, &mut writer) => result,
+            }
+        }));
+        let (mut stdout, output_released) = ChannelStream::new(reader, &self.cancel);
+        stdout.closed = Some(self.closed.clone());
+        self.released = [Some(input_released), Some(output_released)];
+        self.drain = Some(tokio::spawn(async move {
+            tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await
+        }));
+        self.sftp = Some(
+            Sftp::new(stdin, stdout, SftpOptions::default())
+                .await
+                .map_err(sftp_failure)?,
+        );
+        progress.stage(crate::progress::Stage::SftpReady);
+        let dir = self
+            .sftp
+            .as_ref()
+            .ok_or_else(Failure::io)?
+            .fs()
+            .open_dir(path)
+            .await
+            .map_err(sftp_failure)?;
+        self.stream = Some(Box::pin(dir.read_dir()));
+        Ok(())
+    }
+
+    async fn page(&mut self, mut spec: ListSpec<'_>) -> Result<ListData, Failure> {
+        let mut data = ListData::empty();
+        loop {
+            let entry = match self.pending.take() {
+                Some(entry) => entry,
+                None => {
+                    let stream = self.stream.as_mut().ok_or_else(Failure::io)?;
+                    let Some(entry) = stream.next().await else {
+                        return Ok(data);
+                    };
+                    let entry = entry.map_err(sftp_failure)?;
+                    let bytes = entry.filename().as_os_str().as_bytes();
+                    if matches!(bytes, b"." | b"..") {
+                        continue;
+                    }
+                    ListEntry::from_filename(entry.filename().as_os_str(), entry.metadata())
+                }
+            };
+            if data.entries.len() == spec.max_entries {
+                self.pending = Some(entry);
+                data.truncated = true;
+                return Ok(data);
+            }
+            if let Err(entry) = data.push(entry, &mut spec) {
+                if data.entries.is_empty()
+                    || crate::wire::duplicated_size(&entry)
+                        .ok()
+                        .is_none_or(|cost| cost > crate::filedata::DIRECTORY_PAGE_BYTES)
+                {
+                    return Err(Failure {
+                        error: ToolError::new(
+                            "resource_limit",
+                            "Directory entry exceeds the page payload limit",
+                            false,
+                        ),
+                        check_master: false,
+                    });
+                }
+                self.pending = Some(entry);
+                return Ok(data);
+            }
+        }
+    }
+
+    async fn close(&mut self, graceful: bool) -> Result<(), Failure> {
+        // Dropping ReadDir schedules CLOSE. Sftp::close acknowledges the
+        // library's queued work before native child/session ownership is lost.
+        self.stream.take();
+        self.pending.take();
+        let mut result = Ok(());
+        if let Some(sftp) = self.sftp.take() {
+            if graceful {
+                result = tokio::time::timeout(CLEANUP_TIMEOUT, sftp.close())
+                    .await
+                    .map_err(|_| Failure::cleanup())
+                    .and_then(|result| result.map_err(sftp_failure));
+            } else {
+                drop(sftp);
+            }
+        }
+        if graceful && result.is_ok() {
+            if let Some(child) = self.child.take() {
+                result = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
+                    .await
+                    .map_err(|_| Failure::cleanup())
+                    .and_then(|result| result.map_err(ssh_failure))
+                    .and_then(|status| {
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(Failure::io())
+                        }
+                    });
+            }
+        }
+        let cleanup = close_channel(
+            &self.cancel,
+            self.child.take(),
+            std::mem::take(&mut self.released),
+        )
+        .await;
+        for mut drain in [self.pump.take(), self.drain.take()].into_iter().flatten() {
+            match tokio::time::timeout(CLEANUP_TIMEOUT, &mut drain).await {
+                Ok(Ok(Ok(_))) => {}
+                Ok(_) => result = combine_close(result, Err(Failure::io())),
+                Err(_) => {
+                    drain.abort();
+                    let _ = drain.await;
+                    result = combine_close(result, Err(Failure::cleanup()));
+                }
+            }
+        }
+        combine_close(result, cleanup)
+    }
+}
+
+impl Drop for DirectoryChannel {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        for drain in [self.pump.take(), self.drain.take()].into_iter().flatten() {
+            drain.abort();
+        }
+    }
+}
+
+/// Reserve only after positive lookahead; small exhausted listings need no
+/// retained-cursor credit. Busy and closing owners keep their reservation.
+fn publish_directory(shared: &DirectoryShared, id: &str) -> Result<String, Failure> {
+    let token = directory_token()?;
+    let mut registry = directory_lock(shared);
+    if shared.stopping.is_cancelled() {
+        return Err(directory_control("cancelled"));
+    }
+    let owner = registry.owners.get(id).ok_or_else(Failure::io)?;
+    if !owner.retained {
+        let total = registry
+            .owners
+            .values()
+            .filter(|owner| owner.retained)
+            .count();
+        let target = registry
+            .owners
+            .values()
+            .filter(|other| other.retained && other.host == owner.host && other.role == owner.role)
+            .count();
+        if total >= shared.limits.max_cursors || target >= DIRECTORY_CURSORS_PER_TARGET {
+            return Err(Failure {
+                error: ToolError::new("resource_limit", "Directory cursor limit reached", false),
+                check_master: false,
+            });
+        }
+    }
+    if registry.idle.contains_key(&token) {
+        return Err(Failure::io());
+    }
+    registry
+        .owners
+        .get_mut(id)
+        .ok_or_else(Failure::io)?
+        .retained = true;
+    registry.idle.insert(
+        token.clone(),
+        IdleDirectory {
+            owner: id.to_owned(),
+            expires: tokio::time::Instant::now()
+                + Duration::from_secs(shared.limits.idle_timeout_secs),
+        },
+    );
+    Ok(token)
+}
+
+async fn directory_owner(
+    shared: Arc<DirectoryShared>,
+    id: String,
+    path: String,
+    lease: crate::ssh::Lease,
+    mut receiver: mpsc::Receiver<DirectoryPage>,
+    first: DirectoryPage,
+    done: CancellationToken,
+) {
+    let mut channel = DirectoryChannel::new();
+    let mut request = first;
+    let mut initialized = false;
+    let mut terminal;
+    let final_reply;
+    loop {
+        let operation = async {
+            if !initialized {
+                channel.open(&lease, &path, &request.progress).await?;
+                initialized = true;
+            }
+            channel
+                .page(ListSpec {
+                    path: &path,
+                    max_entries: request.max_entries,
+                    remaining_bytes: request.remaining_bytes,
+                })
+                .await
+        };
+        let result = tokio::select! {
+            biased;
+            () = request.cancel.cancelled() => Err(directory_control("cancelled")),
+            () = request.shutdown.cancelled() => Err(directory_control("cancelled")),
+            () = shared.stopping.cancelled() => Err(directory_control("cancelled")),
+            () = tokio::time::sleep_until(request.deadline) => Err(directory_control("timeout")),
+            result = operation => result,
+        };
+        let result = if channel.closed.is_cancelled() && result.is_ok() {
+            Err(Failure {
+                error: ToolError::new("connection_lost", "SFTP channel connection was lost", false),
+                check_master: true,
+            })
+        } else {
+            result
+        };
+        if result.is_ok() {
+            request
+                .progress
+                .stage(crate::progress::Stage::SftpAcknowledged);
+        }
+        request.progress.stop();
+        match result {
+            Ok(mut data) if data.truncated => match publish_directory(&shared, &id) {
+                Ok(token) => {
+                    data.set_continuation(token, shared.limits.idle_timeout_secs);
+                    if request.reply.send(ToolReply::success(data)).is_err() {
+                        terminal = Ok(None);
+                        final_reply = None;
+                        break;
+                    }
+                }
+                Err(failure) => {
+                    terminal = Err(failure);
+                    final_reply = Some(request.reply);
+                    break;
+                }
+            },
+            result => {
+                terminal = result.map(|data| Some(data));
+                final_reply = Some(request.reply);
+                break;
+            }
+        }
+        drop(request.cancel);
+        drop(request.shutdown);
+        drop(request.progress);
+        // No request context or admission permit survives this idle wait.
+        // The bounded stdout pump observes EOF even when the SFTP library is
+        // waiting for another request; there is no polling or reconnection.
+        let idle_deadline =
+            tokio::time::Instant::now() + Duration::from_secs(shared.limits.idle_timeout_secs);
+        let next = tokio::select! {
+            biased;
+            () = shared.stopping.cancelled() => None,
+            () = channel.closed.cancelled() => None,
+            next = receiver.recv() => next,
+            () = tokio::time::sleep_until(idle_deadline) => None,
+        };
+        match next {
+            Some(next) => request = next,
+            None => {
+                terminal = if channel.closed.is_cancelled() {
+                    Err(Failure {
+                        error: ToolError::new(
+                            "connection_lost",
+                            "SFTP channel connection was lost",
+                            false,
+                        ),
+                        check_master: true,
+                    })
+                } else {
+                    Ok(None)
+                };
+                final_reply = None;
+                break;
+            }
+        }
+    }
+    // Invalidate capabilities before any potentially slow close, but keep the
+    // credit and lease until acknowledged/bounded cleanup has completed.
+    directory_lock(&shared)
+        .idle
+        .retain(|_, idle| idle.owner != id);
+    let graceful = terminal.is_ok() && !channel.closed.is_cancelled();
+    let cleanup = channel.close(graceful).await;
+    terminal = combine_close(terminal, cleanup);
+    let reply = match terminal {
+        Ok(data) => data.map(ToolReply::success),
+        Err(mut failure) => {
+            if channel.dispatched
+                && matches!(
+                    failure.error.code,
+                    "timeout" | "cancelled" | "connection_lost"
+                )
+            {
+                failure.error.remote_state_unknown = true;
+            }
+            if failure.check_master
+                && matches!(lease.check_health().await, crate::ssh::MasterHealth::Lost)
+            {
+                lease.invalidate();
+            }
+            Some(ToolReply::failure(failure.error))
+        }
+    };
+    drop(channel);
+    drop(lease);
+    directory_lock(&shared).owners.remove(&id);
+    done.cancel();
+    if final_reply.is_none()
+        && let Some(error) = reply.as_ref().and_then(|reply| reply.error.as_ref())
+    {
+        crate::audit::emit(&serde_json::json!({
+            "event":"directory_cursor_error",
+            "error_code":error.code,
+            "remote_state_unknown":error.remote_state_unknown,
+        }));
+    }
+    if let (Some(sender), Some(reply)) = (final_reply, reply) {
+        let _ = sender.send(reply);
+    }
+}
+
+async fn close_channel<S>(
+    cancel: &CancellationToken,
+    child: Option<openssh::Child<S>>,
+    released: [Option<oneshot::Receiver<()>>; 2],
+) -> Result<(), Failure> {
+    cancel.cancel();
+    tokio::time::timeout(CLEANUP_TIMEOUT, async {
+        if let Some(child) = child {
+            let _ = child.disconnect().await;
+        }
+        for receiver in released.into_iter().flatten() {
+            let _ = receiver.await;
+        }
+    })
+    .await
+    .map_err(|_| Failure::cleanup())
 }
 
 async fn run_sftp<T, F, Fut>(
@@ -984,16 +1623,7 @@ where
     context.progress.stop();
     // Operation futures and every File/Sftp handle have now been dropped. Wake
     // blocked protocol reads before disconnecting ONLY this child, not its master.
-    cancel.cancel();
-    let cleanup = async {
-        if let Some(child) = child.take() {
-            let _ = child.disconnect().await;
-        }
-        for receiver in released.into_iter().flatten() {
-            let _ = receiver.await;
-        }
-    };
-    let cleanup_timed_out = tokio::time::timeout(CLEANUP_TIMEOUT, cleanup)
+    let cleanup_timed_out = close_channel(&cancel, child.take(), released)
         .await
         .is_err();
     match result {

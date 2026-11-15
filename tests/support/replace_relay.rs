@@ -24,6 +24,7 @@ pub enum Fault {
     None,
     OpenAck,
     RenameAck,
+    DirectoryPageAck,
 }
 
 #[derive(Default, Debug)]
@@ -33,11 +34,15 @@ pub struct Evidence {
     pub renames: usize,
     pub dropped_success: bool,
     pub dropped_open: bool,
+    pub readdirs: usize,
+    pub readdir_ids: Vec<u32>,
+    pub dropped_directory_page: bool,
     pub staged_partial: bool,
     pub writes: usize,
     pub rename_index: Option<usize>,
     rename_id: Option<u32>,
     open_id: Option<u32>,
+    directory_open_ids: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -215,8 +220,10 @@ impl Relay {
                 nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
             )?;
         }
+        // Do not wait on the input copier after genuine server stdout EOF:
+        // that would hold the SSH stdout open until the client closes first.
         let script = format!(
-            "echo launch >> {}; exec 3<&0; cat <&3 > {} & cat < {}; wait",
+            "echo launch >> {}; exec 3<&0; cat <&3 > {} & exec cat < {}",
             launches.display(),
             requests.display(),
             responses.display(),
@@ -321,6 +328,15 @@ impl Relay {
                             seen.open_id = Some(open.id);
                             seen.opens.push(open);
                         }
+                        if body[0] == 11 {
+                            let id = uint32(&mut &body[1..])?;
+                            seen.directory_open_ids.push(id);
+                        }
+                        if body[0] == 12 {
+                            let id = uint32(&mut &body[1..])?;
+                            seen.readdirs += 1;
+                            seen.readdir_ids.push(id);
+                        }
                         if body[0] == 6 {
                             seen.writes += 1;
                             if let Some(oracle) = &oracle {
@@ -407,28 +423,30 @@ impl Relay {
                                 !string(&mut fields)?.is_empty() && fields.is_empty(),
                                 "invalid genuine HANDLE response"
                             );
-                            let open = seen
-                                .opens
-                                .iter_mut()
-                                .find(|open| open.id == id)
-                                .context("HANDLE without stage OPEN")?;
-                            ensure!(open.initial_mode.is_none(), "replayed stage HANDLE");
-                            // The real server has created the file, but the client cannot
-                            // chmod/write until this genuine HANDLE is forwarded below.
-                            let mut file = fs::File::open(&open.path)?;
-                            let metadata = file.metadata()?;
-                            ensure!(metadata.is_file(), "stage is not a regular file");
-                            let mut first_byte = [0; 1];
-                            ensure!(
-                                file.read(&mut first_byte)? == 0,
-                                "stage initially contains data"
-                            );
-                            open.initial_mode = Some(metadata.mode() & 0o7777);
-                            open.initial_len = Some(metadata.len());
-                            ensure!(
-                                open.initial_mode == Some(0o600) && open.initial_len == Some(0),
-                                "stage exposed before chmod/write: {open:?}"
-                            );
+                            if let Some(open) = seen.opens.iter_mut().find(|open| open.id == id) {
+                                ensure!(open.initial_mode.is_none(), "replayed stage HANDLE");
+                                // The real server has created the file, but the client cannot
+                                // chmod/write until this genuine HANDLE is forwarded below.
+                                let mut file = fs::File::open(&open.path)?;
+                                let metadata = file.metadata()?;
+                                ensure!(metadata.is_file(), "stage is not a regular file");
+                                let mut first_byte = [0; 1];
+                                ensure!(
+                                    file.read(&mut first_byte)? == 0,
+                                    "stage initially contains data"
+                                );
+                                open.initial_mode = Some(metadata.mode() & 0o7777);
+                                open.initial_len = Some(metadata.len());
+                                ensure!(
+                                    open.initial_mode == Some(0o600) && open.initial_len == Some(0),
+                                    "stage exposed before chmod/write: {open:?}"
+                                );
+                            } else {
+                                ensure!(
+                                    seen.directory_open_ids.contains(&id),
+                                    "HANDLE without stage OPEN or OPENDIR"
+                                );
+                            }
                         }
                         if matches!(fault, Fault::OpenAck)
                             && body[0] == 102
@@ -449,6 +467,20 @@ impl Relay {
                             );
                             ensure!(!seen.dropped_success, "replayed rename STATUS");
                             seen.dropped_success = true;
+                            true
+                        } else if matches!(fault, Fault::DirectoryPageAck)
+                            && body[0] == 104
+                            && body.len() >= 9
+                            && seen.readdir_ids.get(1)
+                                == Some(&u32::from_be_bytes(body[1..5].try_into()?))
+                        {
+                            ensure!(!seen.dropped_directory_page, "replayed directory NAME");
+                            ensure!(
+                                u32::from_be_bytes(body[5..9].try_into()?) > 0,
+                                "second READDIR returned an empty NAME"
+                            );
+                            // Observe only a genuine second READDIR page, never a fabricated reply.
+                            seen.dropped_directory_page = true;
                             true
                         } else {
                             false
@@ -472,8 +504,27 @@ impl Relay {
         })
     }
 
+    /// Disconnect only the directly owned real server, never a remembered PID.
+    pub async fn disconnect_server(&mut self) -> Result<()> {
+        let child = self.children.last_mut().context("real sftp-server")?;
+        if child.try_wait()?.is_none() {
+            child.start_kill().context("disconnect real sftp-server")?;
+        }
+        self.wait_server_exit().await
+    }
+
+    /// Prove channel EOF closed the server before teardown can kill it.
+    pub async fn wait_server_exit(&mut self) -> Result<()> {
+        let child = self.children.last_mut().context("real sftp-server")?;
+        timeout(Duration::from_secs(5), child.wait())
+            .await
+            .context("real sftp-server did not exit")?
+            .context("wait for real sftp-server")?;
+        Ok(())
+    }
+
     pub async fn stop(mut self) -> Result<()> {
-        // A still-live task is normal while the deliberately discarded STATUS is pending.
+        // A still-live task is normal while a deliberately discarded response is pending.
         let task_result = if self.task.is_finished() {
             Some(
                 (&mut self.task)

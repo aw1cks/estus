@@ -61,6 +61,7 @@ struct State {
     tasks: TaskTracker,
     local_tasks: TaskTracker,
     outputs: OutputStore,
+    directories: Option<files::DirectoryStore>,
     progress: crate::progress::Registry,
     automation: Arc<Semaphore>,
     automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
@@ -413,6 +414,9 @@ impl Estus {
             shutdown.clone(),
         );
         let outputs = OutputStore::new(config.output_limits(), shutdown.clone());
+        let directories = tools
+            .contains(ToolKey::Builtin(ToolId::ListDirectory))
+            .then(|| files::DirectoryStore::new(config.directory_limits(), shutdown.clone()));
         Ok(Self {
             tool_router,
             state: Arc::new(State {
@@ -430,6 +434,7 @@ impl Estus {
                 tasks: TaskTracker::new(),
                 local_tasks: TaskTracker::new(),
                 outputs,
+                directories,
                 progress: crate::progress::Registry::default(),
             }),
         })
@@ -447,6 +452,9 @@ impl Estus {
         // its existing independent bound. An unkillable OS child can delay shutdown.
         tokio::join!(self.state.local_tasks.wait(), async {
             let _ = tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()).await;
+            if let Some(directories) = &self.state.directories {
+                directories.shutdown().await;
+            }
             self.state.pool.shutdown().await;
         },);
         self.state.outputs.shutdown().await;
@@ -1207,8 +1215,8 @@ impl Estus {
 
     #[tool(
         name = "ssh_list_directory",
-        description = "List a literal UTF-8 directory path over an independent ordinary SFTP channel. max_entries defaults to 200 (1–1000); the complete 16 MiB reply budget can shorten it further. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 always preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. truncated means another entry was observed, not a continuation cursor or snapshot. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Timeout/cancellation closes only this channel; remote completion is not guaranteed.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
+        description = "List a literal UTF-8 directory path over an ordinary SFTP enumeration. max_entries defaults to 200 (1–1000); bounded page-entry bytes and the complete 16 MiB reply budget can shorten a page. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. A truncated page returns a session-owned single-use continuation plus idle expiry; continue with the identical logical host/path and use the new token from each page. Expired, foreign or consumed tokens fail; no silent restart. This is not a filesystem snapshot: mutation remains server-defined. Retained cursors are bounded and close on exhaustion, expiry, active cancellation, connection loss or shutdown. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Remote completion is not guaranteed on interruption.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = false),
         input_schema = schema_for_type::<ListRequest>(),
         output_schema = schema_for_type::<ToolReply<ListData>>()
     )]
@@ -1860,31 +1868,23 @@ impl State {
             }
         };
         let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = files::list(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
+        let reply = self
+            .directories
+            .as_ref()
+            .expect("published directory listing owns its bounded store")
+            .page(
+                &self.pool,
+                target,
+                spec,
+                request.continuation.as_deref(),
+                FileContext {
+                    deadline,
+                    ct: &ct,
+                    shutdown: &self.shutdown,
+                    progress,
+                },
+            )
+            .await;
         audit.finish(None, reply.error.as_ref());
         reply
     }

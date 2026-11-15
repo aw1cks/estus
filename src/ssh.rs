@@ -123,6 +123,11 @@ impl Lease {
         &self.session
     }
 
+    /// Keep the native session alive with an independently owned subsystem child.
+    pub(crate) fn owned_session(&self) -> Arc<Session> {
+        Arc::clone(&self.session)
+    }
+
     pub(crate) async fn check_health(&self) -> MasterHealth {
         match timeout_at(Instant::now() + CLEANUP, self.session.check()).await {
             Ok(Ok(())) => MasterHealth::Available,
