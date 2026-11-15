@@ -208,7 +208,7 @@ impl Estus {
         }
         // This is the explicit publication inventory. Each entry binds native
         // SDK metadata and its callable handler to a target-policy identity.
-        let routes: [(ToolId, ToolRoute<Self>); 14] = [
+        let mut routes: [(ToolId, ToolRoute<Self>); 14] = [
             (
                 ToolId::Targets,
                 (Self::ssh_targets_tool_attr(), Self::ssh_targets).into_tool_route(),
@@ -274,6 +274,36 @@ impl Estus {
                 (Self::ssh_sudo_tool_attr(), Self::ssh_sudo).into_tool_route(),
             ),
         ];
+        for (id, route) in &mut routes {
+            if *id == ToolId::Targets {
+                continue;
+            }
+            // SDK schemas are shared; only this server's copy gets its resolved
+            // immutable limits. Null optional values remain valid schema values.
+            let schema = Arc::make_mut(&mut route.attr.input_schema);
+            let properties = schema
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("builtin request schemas have object properties");
+            for (name, maximum) in [
+                ("timeout_secs", config.limits().max_timeout_secs),
+                ("max_bytes", config.limits().max_file_bytes),
+            ] {
+                if let Some(property) = properties
+                    .get_mut(name)
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    property.insert("maximum".into(), maximum.into());
+                }
+            }
+            if *id == ToolId::ReplaceFile {
+                properties
+                    .get_mut("overwrite")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .expect("replacement requires explicit overwrite consent")
+                    .insert("const".into(), true.into());
+            }
+        }
         let command_output_schema = routes
             .iter()
             .find(|(id, _)| *id == ToolId::Exec)

@@ -90,6 +90,18 @@ The native Nix package prefixes `PATH` with its pinned OpenSSH, leaving explicit
 CLI, environment and TOML selections free to override that default. It does not
 set `ESTUS_SSH`; an environment default would incorrectly outrank TOML.
 
+## Builtin input contracts
+
+Tool discovery publishes nonempty executable/path constraints, positive timeout
+and read-size bounds, listing pages of1–1000 entries, checksum/handle formats,
+and explicit replacement consent. Timeout/read-size maxima reflect this server's
+resolved configuration. First-argument constraints use JSON Schema2020-12
+`prefixItems`; empty later argv elements and empty file contents remain valid.
+
+Schemas do not grant authority or replace runtime validation. Combined UTF-8 byte
+limits, shell-escaping cost, actual-request-ID reply budgets and cross-field
+limits still apply at runtime; no byte limit is advertised as a character limit.
+
 ## Pinned Nix wheel build and acceptance
 
 Nix orchestrates the same PEP 517 build and metadata, with Rust 1.88 and the pinned

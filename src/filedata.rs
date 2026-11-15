@@ -27,13 +27,17 @@ pub(crate) enum Encoding {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) offset: u64,
+    #[schemars(range(min = 1))]
     pub(crate) max_bytes: Option<u64>,
     #[serde(default)]
     pub(crate) encoding: Encoding,
+    #[schemars(length(equal = 64), pattern(r"^[0-9A-Fa-f]{64}$"))]
     pub(crate) expected_content_sha256: Option<String>,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -60,12 +64,14 @@ pub(crate) struct ReadData {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WriteRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
     pub(crate) content: String,
     #[serde(default)]
     pub(crate) encoding: Encoding,
     #[serde(default)]
     pub(crate) overwrite: bool,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -85,7 +91,9 @@ pub(crate) struct WriteData {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MkdirRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -123,10 +131,13 @@ impl MkdirRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RenameRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) source: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) destination: String,
     #[serde(default)]
     pub(crate) overwrite: bool,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -173,7 +184,9 @@ impl RenameRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoveFileRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -209,7 +222,9 @@ impl RemoveFileRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoveDirectoryRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -250,12 +265,33 @@ impl RemoveDirectoryRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReplaceRequest {
     pub(crate) host: String,
+    #[schemars(
+        length(min = 1),
+        pattern(r"^[^\u0000]*$"),
+        transform = replacement_path_schema
+    )]
     pub(crate) path: String,
     pub(crate) content: String,
     #[serde(default)]
     pub(crate) encoding: Encoding,
     pub(crate) overwrite: bool,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
+}
+
+fn replacement_path_schema(schema: &mut schemars::Schema) {
+    // Exclude empty, "." and ".." final entries, including after a slash.
+    // Final line terminators are valid filename characters; ECMA-262 `$` may
+    // match before them, so do not classify those paths as invalid entries.
+    schema.insert(
+        "not".to_owned(),
+        serde_json::json!({
+            "allOf": [
+                {"pattern": r"(^|/)[.]{0,2}$"},
+                {"not": {"pattern": r"[\r\n\u2028\u2029]$"}}
+            ]
+        }),
+    );
 }
 
 #[derive(Debug)]
@@ -308,9 +344,11 @@ impl ReplaceRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct StatRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) follow_symlinks: bool,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 
@@ -324,8 +362,11 @@ pub(crate) struct StatSpec<'a> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListRequest {
     pub(crate) host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
+    #[schemars(range(min = 1, max = 1000))]
     pub(crate) max_entries: Option<u64>,
+    #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
 }
 

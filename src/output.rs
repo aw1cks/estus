@@ -105,9 +105,11 @@ impl OutputStream {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadOutputRequest {
+    #[schemars(length(equal = 32), pattern(r"^[0-9a-f]{32}$"))]
     pub handle: String,
     pub stream: OutputStream,
     pub offset: Option<u64>,
+    #[schemars(range(min = 1))]
     pub max_bytes: Option<u64>,
     #[serde(default)]
     pub encoding: Encoding,

@@ -31,11 +31,14 @@ impl Shell {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExecRequest {
     pub host: String,
+    #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub command: String,
     #[serde(default)]
     pub shell: Shell,
+    #[schemars(pattern(r"^/[^\u0000]*$"))]
     pub cwd: Option<String>,
     pub stdin: Option<String>,
+    #[schemars(range(min = 1))]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub retain_output: bool,
@@ -45,9 +48,16 @@ pub(crate) struct ExecRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunRequest {
     pub host: String,
+    #[schemars(
+        length(min = 1),
+        inner(pattern(r"^[^\u0000]*$")),
+        transform = executable_schema
+    )]
     pub argv: Vec<String>,
+    #[schemars(pattern(r"^/[^\u0000]*$"))]
     pub cwd: Option<String>,
     pub stdin: Option<String>,
+    #[schemars(range(min = 1))]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub retain_output: bool,
@@ -57,13 +67,53 @@ pub(crate) struct RunRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SudoRequest {
     pub host: String,
+    #[schemars(
+        length(min = 1),
+        inner(pattern(r"^[^\u0000]*$")),
+        transform = sudo_executable_schema
+    )]
     pub argv: Vec<String>,
     #[serde(default = "root_user")]
+    #[schemars(pattern(r"^[A-Za-z_]"), transform = named_user_schema)]
     pub user: String,
     pub stdin: Option<String>,
+    #[schemars(range(min = 1))]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub retain_output: bool,
+}
+
+// Draft 2020-12 prefixItems constrains only argv[0]; later arguments may be empty.
+// Each prefix schema includes the string/NUL constraints because `items` applies
+// only after the prefix, not to the executable itself.
+fn executable_schema(schema: &mut schemars::Schema) {
+    schema.insert(
+        "prefixItems".to_owned(),
+        serde_json::json!([{
+            "type": "string",
+            "minLength": 1,
+            "pattern": r"^[^\u0000]*$"
+        }]),
+    );
+}
+
+fn sudo_executable_schema(schema: &mut schemars::Schema) {
+    schema.insert(
+        "prefixItems".to_owned(),
+        serde_json::json!([{
+            "type": "string",
+            "pattern": r"^/[^\u0000]*[^/\u0000]$"
+        }]),
+    );
+}
+
+fn named_user_schema(schema: &mut schemars::Schema) {
+    // A forbidden-character check also rejects final newlines with ECMA-262
+    // regex engines, whose `$` may match before a final line terminator.
+    schema.insert(
+        "not".to_owned(),
+        serde_json::json!({"pattern": r"[^A-Za-z0-9_.-]"}),
+    );
 }
 
 fn root_user() -> String {

@@ -1456,6 +1456,248 @@ async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation() -> Result<()> {
+    for configured_limits in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("operator-private-schema.toml");
+        let probe = directory.path().join("must-not-probe-schema");
+        std::fs::write(
+            directory.path().join("replacement.conf"),
+            format!(
+                "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+                probe.display()
+            ),
+        )?;
+        let limits = if configured_limits {
+            "[limits]\nconnect_timeout_secs=1\noperation_timeout_secs=2\nmax_timeout_secs=3\nmax_file_bytes=8\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "profile='baseline'\n[ssh]\nconfig_file='replacement.conf'\n{limits}\
+                 [targets.allowed]\nssh_host='private-schema-backend.invalid'\n\
+                 [targets.allowed.sudo]\nmode='same-account'\nprograms=['/SCHEMA_INPUT_SECRET']\n"
+            ),
+        )?;
+        let max_timeout = if configured_limits { 3 } else { 600 };
+        let max_file_bytes = if configured_limits { 8 } else { 1_048_576 };
+        let handle = "0123456789abcdef0123456789abcdef";
+        let hash = "A".repeat(64);
+        let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
+        let scenario = async {
+            server.initialize().await?;
+            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
+            let listed = server.response(2).await?;
+            let tools = listed["result"]["tools"].as_array().context("published builtin schemas")?;
+            let mut names: Vec<_> = tools.iter()
+                .map(|tool| tool["name"].as_str().context("builtin name"))
+                .collect::<Result<_>>()?;
+            names.sort_unstable();
+            ensure!(names == [
+                "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file",
+                "ssh_read_output", "ssh_remove_directory", "ssh_remove_file",
+                "ssh_rename", "ssh_replace_file", "ssh_run", "ssh_stat",
+                "ssh_sudo", "ssh_targets", "ssh_write_file",
+            ]);
+            let mut id = 10;
+            for tool in tools {
+                let name = tool["name"].as_str().context("builtin name")?;
+                // Compile the actual consumer-visible schema, including its local
+                // references. Cargo disables both HTTP and file retrieval.
+                let validator = jsonschema::validator_for(&tool["inputSchema"])
+                    .with_context(|| format!("invalid published inputSchema for {name}"))?;
+                if name == "ssh_targets" {
+                    ensure!(validator.is_valid(&json!({})));
+                    ensure!(!validator.is_valid(&json!({"extra":true})));
+                    continue;
+                }
+                let mut base = if name == "ssh_read_output" {
+                    json!({"handle":handle,"stream":"stdout","max_bytes":1})
+                } else {
+                    profile_call_arguments(name, "unconfigured")
+                };
+                for field in ["path", "source", "destination"] {
+                    if base.get(field).is_some() {
+                        base[field] = json!(format!("/private/SCHEMA_INPUT_SECRET/{field}"));
+                    }
+                }
+                if base.get("content").is_some() {
+                    base["content"] = json!("");
+                }
+                if base.get("argv").is_some() {
+                    base["argv"] = json!(["/SCHEMA_INPUT_SECRET", ""]);
+                }
+                if name == "ssh_exec" {
+                    base["command"] = json!("SCHEMA_INPUT_SECRET");
+                }
+                let expected = if name == "ssh_read_output" { "not_found" } else { "policy_denied" };
+                let mut cases = vec![(base.clone(), true, expected)];
+                if name != "ssh_read_output" {
+                    for (seconds, valid) in [
+                        (0, false), (1, true), (max_timeout, true), (max_timeout + 1, false),
+                    ] {
+                        let mut arguments = base.clone();
+                        arguments["timeout_secs"] = json!(seconds);
+                        cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
+                    }
+                    // A value accepted under defaults must not bypass a smaller
+                    // resolved operator limit in the published schema.
+                    let mut arguments = base.clone();
+                    arguments["timeout_secs"] = json!(4);
+                    cases.push((arguments, !configured_limits, if configured_limits { "invalid_argument" } else { expected }));
+                }
+                for field in ["path", "source", "destination"] {
+                    if base.get(field).is_some() {
+                        for invalid in ["", "SCHEMA_INPUT_SECRET\0path"] {
+                            let mut arguments = base.clone();
+                            arguments[field] = json!(invalid);
+                            cases.push((arguments, false, "invalid_argument"));
+                        }
+                    }
+                }
+                if matches!(name, "ssh_run" | "ssh_sudo") {
+                    for invalid in [json!([]), json!([""]), json!(["/SCHEMA_INPUT_SECRET", "bad\0argument"])] {
+                        let mut arguments = base.clone();
+                        arguments["argv"] = invalid;
+                        cases.push((arguments, false, "invalid_argument"));
+                    }
+                }
+                if name == "ssh_list_directory" {
+                    for (entries, valid) in [(0, false), (1, true), (1000, true), (1001, false)] {
+                        let mut arguments = base.clone();
+                        arguments["max_entries"] = json!(entries);
+                        cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
+                    }
+                }
+                if matches!(name, "ssh_read_file" | "ssh_read_output") {
+                    for (bytes, valid) in [
+                        (0, false), (1, true), (max_file_bytes, true), (max_file_bytes + 1, false),
+                        (9, !configured_limits),
+                    ] {
+                        let mut arguments = base.clone();
+                        arguments["max_bytes"] = json!(bytes);
+                        cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
+                    }
+                    let mut arguments = base.clone();
+                    arguments["offset"] = json!(u64::MAX);
+                    cases.push((arguments, true, expected));
+                }
+                if name == "ssh_read_file" {
+                    for (digest, valid) in [
+                        (hash.clone(), true), (String::new(), false),
+                        ("a".repeat(63), false), ("a".repeat(65), false), ("g".repeat(64), false),
+                    ] {
+                        let mut arguments = base.clone();
+                        arguments["expected_content_sha256"] = json!(digest);
+                        cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
+                    }
+                }
+                if name == "ssh_read_output" {
+                    for invalid in ["".to_owned(), "a".repeat(31), "a".repeat(33), "F".repeat(32), "g".repeat(32)] {
+                        let mut arguments = base.clone();
+                        arguments["handle"] = json!(invalid);
+                        cases.push((arguments, false, "invalid_argument"));
+                    }
+                }
+                if name == "ssh_replace_file" {
+                    let mut arguments = base.clone();
+                    arguments["overwrite"] = json!(false);
+                    cases.push((arguments, false, "invalid_argument"));
+                    let mut arguments = base.clone();
+                    arguments.as_object_mut().context("replace arguments")?.remove("overwrite");
+                    cases.push((arguments, false, "invalid_params"));
+                }
+                if configured_limits && matches!(name, "ssh_run" | "ssh_write_file" | "ssh_replace_file") {
+                    let mut arguments = base.clone();
+                    let field = if name == "ssh_run" { "stdin" } else { "content" };
+                    // JSON Schema string lengths count characters, not UTF-8
+                    // bytes. Runtime byte budgets remain authoritative.
+                    arguments[field] = json!("λ".repeat(5));
+                    cases.push((arguments, true, "invalid_argument"));
+                }
+                for (index, (mut arguments, schema_valid, code)) in cases.into_iter().enumerate() {
+                    // Let invalid inputs reach their validator: an unconfigured
+                    // host must not mask a missing limit check with policy denial.
+                    if name != "ssh_read_output" && matches!(code, "invalid_argument" | "invalid_params") {
+                        arguments["host"] = json!("allowed");
+                    }
+                    ensure!(
+                        validator.is_valid(&arguments) == schema_valid,
+                        "{name} case {index}: published schema acceptance differs (configured limits: {configured_limits})"
+                    );
+                    // Dispatch is tested independently, even for schema-invalid
+                    // requests: publishing a schema does not enforce it.
+                    server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                        "params":{"name":name,"arguments":arguments}})).await?;
+                    let response = server.response(id).await?;
+                    if code == "invalid_params" {
+                        ensure!(response["error"]["code"] == -32602, "{name} case {index}: {response}");
+                        ensure!(response.get("result").is_none());
+                    } else {
+                        ensure!(response.get("error").is_none(), "{name} case {index}: {response}");
+                        ensure!(response["result"]["isError"] == true, "{name} case {index}: {response}");
+                        let structured = &response["result"]["structuredContent"];
+                        ensure!(structured["data"].is_null());
+                        ensure!(structured["error"]["code"] == code, "{name} case {index}: {response}");
+                        ensure!(structured["error"]["remote_state_unknown"] == false);
+                        let text: Value = serde_json::from_str(
+                            response["result"]["content"][0]["text"].as_str().context("schema acceptance error text")?
+                        )?;
+                        ensure!(text == *structured);
+                    }
+                    let encoded = serde_json::to_string(&response)?;
+                    for private in ["SCHEMA_INPUT_SECRET", "private-schema-backend", handle, hash.as_str()] {
+                        ensure!(!encoded.contains(private), "{name} case {index}: private error data");
+                    }
+                    ensure!(!probe.exists(), "{name} case {index}: schema acceptance probed SSH");
+                    id += 1;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+            let record: Value = serde_json::from_slice(line)?;
+            ensure!(
+                record["event"] != "master_start",
+                "schema acceptance launched SSH"
+            );
+            if record["tool"] == "ssh_read_output" {
+                ensure!(matches!(record["event"].as_str(), Some("start" | "finish")));
+            } else {
+                ensure!(
+                    record["event"] == "reject",
+                    "schema acceptance passed pre-dispatch rejection: {record}"
+                );
+            }
+        }
+        let audit = std::str::from_utf8(&stderr)?;
+        for private in [
+            "SCHEMA_INPUT_SECRET",
+            "private-schema-backend",
+            handle,
+            hash.as_str(),
+            directory
+                .path()
+                .to_str()
+                .context("private schema directory")?,
+        ] {
+            ensure!(
+                !audit.contains(private),
+                "schema acceptance leaked private diagnostics"
+            );
+        }
+        ensure!(!probe.exists());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Result<()> {
     let (mut server, directory) = server_with_config(
         "profile = 'read-only-files'\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
