@@ -21,7 +21,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/hardware_slots_list.schema.json", role_path = "/etc/estus/roles/hardware_slots_list", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/hardware_slots_list.schema.json", role_path = "/etc/estus/hardware_slots_list.schema.roles/hardware_slots_list", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = {  }
 limits = { timeout_secs = 30 }

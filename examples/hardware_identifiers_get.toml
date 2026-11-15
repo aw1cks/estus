@@ -23,7 +23,7 @@ authority = "automation:catalog"
 effects = ["read"]
 # Typed disclosure requires uncensored projection events; do not enable without
 # separate sensitive-read approval and private Runner scratch/event handling.
-execution = { kind = "ansible_role", snapshot = "/etc/estus/hardware_identifiers_get.schema.json", role_path = "/etc/estus/roles/hardware_identifiers_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/hardware_identifiers_get.schema.json", role_path = "/etc/estus/hardware_identifiers_get.schema.roles/hardware_identifiers_get", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = {  }
 limits = { timeout_secs = 30 }

@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/pci_iommu_group_get.schema.json", role_path = "/etc/estus/roles/pci_iommu_group_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/pci_iommu_group_get.schema.json", role_path = "/etc/estus/pci_iommu_group_get.schema.roles/pci_iommu_group_get", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3", address = "0000:00:00.0" }
 input_map = {}
 limits = { timeout_secs = 30 }

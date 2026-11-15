@@ -29,7 +29,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/sysctl_set_runtime.schema.json", role_path = "/etc/estus/roles/sysctl_set_runtime", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/sysctl_set_runtime.schema.json", role_path = "/etc/estus/sysctl_set_runtime.schema.roles/sysctl_set_runtime", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "key" = "key", "value" = "value" }
 limits = { timeout_secs = 40 }

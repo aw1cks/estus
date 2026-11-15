@@ -28,7 +28,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read","runtime_write","availability"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_channels_set.schema.json", "role_path" = "/etc/estus/roles/nic_channels_set", "no_log" = false }
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_channels_set.schema.json", "role_path" = "/etc/estus/nic_channels_set.schema.roles/nic_channels_set", "no_log" = false }
 fixed_args = { target_python = "/usr/bin/python3", operator_policy = { interface = "queue0", mac = "52:54:00:12:34:59", driver = "veth", allow_runtime_tuning = true } }
 input_map = { interface = "interface", rx = "rx" }
 limits = { timeout_secs = 40 }

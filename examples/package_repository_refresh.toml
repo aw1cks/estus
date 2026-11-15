@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["persistent_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/package_repository_refresh.schema.json", role_path = "/etc/estus/roles/package_repository_refresh", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/package_repository_refresh.schema.json", role_path = "/etc/estus/package_repository_refresh.schema.roles/package_repository_refresh", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = {  }
 limits = { timeout_secs = 60 }

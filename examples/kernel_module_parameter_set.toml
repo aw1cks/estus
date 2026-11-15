@@ -39,7 +39,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "runtime_write"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/kernel_module_parameter_set.schema.json", role_path = "/etc/estus/roles/kernel_module_parameter_set", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/kernel_module_parameter_set.schema.json", role_path = "/etc/estus/kernel_module_parameter_set.schema.roles/kernel_module_parameter_set", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "name" = "name", "parameter" = "parameter", "value" = "value" }
 limits = { timeout_secs = 60 }

@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/nic_coalesce_get.schema.json", role_path = "/etc/estus/roles/nic_coalesce_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/nic_coalesce_get.schema.json", role_path = "/etc/estus/nic_coalesce_get.schema.roles/nic_coalesce_get", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "interface" = "interface" }
 limits = { timeout_secs = 30 }

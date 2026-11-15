@@ -22,7 +22,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/cgroup_sample.schema.json", role_path = "/etc/estus/roles/cgroup_sample", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/cgroup_sample.schema.json", role_path = "/etc/estus/cgroup_sample.schema.roles/cgroup_sample", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
 input_map = { "duration_ms" = "duration_ms", "samples" = "samples" }
 limits = { timeout_secs = 40 }

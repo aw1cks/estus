@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 use crate::module_schema;
 
 const INVALID: &str = "unsupported_role_contract";
-const DEPENDENCIES: &str = "Role dependencies can execute before upstream role argument-spec validation. Rust prevalidation is the approval boundary, not upstream execution order; importing this contract does not execute tasks or dependencies or certify their behavior.";
+const DEPENDENCIES: &str = "Role dependencies can execute before upstream role argument-spec validation. Rust prevalidation is the approval boundary, not upstream execution order. The v2 content approval covers the complete reviewed role search root and every searchable selected-runtime collection; declared role paths outside those roots are rejected. Importing never executes tasks or certifies their behavior, and reviewed controller code is not sandboxed.";
 
 fn identifier(value: &str) -> bool {
     !value.is_empty()

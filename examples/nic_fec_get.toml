@@ -21,7 +21,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_fec_get.schema.json", "role_path" = "/etc/estus/roles/nic_fec_get", "no_log" = false }
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_fec_get.schema.json", "role_path" = "/etc/estus/nic_fec_get.schema.roles/nic_fec_get", "no_log" = false }
 fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "fec0","mac" = "52:54:00:12:34:59","driver" = "netdevsim"}}
 input_map = {"interface" = "interface"}
 limits = { timeout_secs = 40 }

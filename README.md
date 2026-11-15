@@ -480,15 +480,30 @@ estus schema verify-role observe.role.json --input observe.request.json
 ```
 
 Collection roles resolve only inside that runtime's selected collections. A
-standalone role requires its exact directory on both commands; its basename must
-match the role name:
+standalone import takes the authoring role directory, whose basename must match
+the role name. Verification uses the persisted reviewed bundle instead:
 
 ```sh
 estus schema import-role observe --role-path /etc/estus/roles/observe \
   --output observe.role.json --schema observe.inputs.json
 estus schema verify-role observe.role.json \
-  --role-path /etc/estus/roles/observe
+  --role-path "$(pwd)/observe.role.roles/observe"
 ```
+
+Role snapshots now use schema2. Imports copy the complete role parent once into
+a private snapshot-adjacent `.roles` bundle. Review every sibling made available
+there; startup and each call verify that same bundle, Ansible Core and all
+searchable collection content. Declared missing/external role dependencies fail
+closed. Catalog preparation shares one reviewed bundle across its selected roles.
+
+Set `execution.role_path` to `bundle_root/<role>` from the snapshot, never the
+original authoring source. Existing approvals require explicit reimport/review
+and configuration migration. Absolute bundle paths are deployment-specific;
+relocation requires explicit reimport. No request copies or refreshes approvals.
+Rebuild the paired Nix automation runtime with the updated application before
+reimporting: helper identity is checked, and mixed old/new artifacts fail closed.
+Reviewed controller code remains trusted, not sandboxed; external resources it
+reads are not universally attested.
 
 `--schema` supplies a reviewed closed JSON Schema when public role metadata
 exposes no argspec entry, for example:

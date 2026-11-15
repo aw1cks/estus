@@ -290,6 +290,12 @@ enum RoleError {
     RoleContentLimit,
     RoleContentFailed,
     RoleContentSymlink,
+    RoleDependencyInvalid,
+    RoleDependencyOutsideBundle,
+    RoleDependencyNotFound,
+    RoleCollectionSourceInvalid,
+    RoleCollectionDependencyInvalid,
+    RoleCollectionDependencyNotFound,
     #[serde(untagged)]
     Health(HealthError),
 }
@@ -311,6 +317,12 @@ impl RoleError {
             Self::RoleContentLimit => "role_content_limit",
             Self::RoleContentFailed => "role_content_failed",
             Self::RoleContentSymlink => "role_content_symlink",
+            Self::RoleDependencyInvalid => "role_dependency_invalid",
+            Self::RoleDependencyOutsideBundle => "role_dependency_outside_bundle",
+            Self::RoleDependencyNotFound => "role_dependency_not_found",
+            Self::RoleCollectionSourceInvalid => "role_collection_source_invalid",
+            Self::RoleCollectionDependencyInvalid => "role_collection_dependency_invalid",
+            Self::RoleCollectionDependencyNotFound => "role_collection_dependency_not_found",
             Self::Health(error) => error.code(),
         }
     }

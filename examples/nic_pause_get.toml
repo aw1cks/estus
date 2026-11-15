@@ -21,7 +21,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_pause_get.schema.json", "role_path" = "/etc/estus/roles/nic_pause_get", "no_log" = false }
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_pause_get.schema.json", "role_path" = "/etc/estus/nic_pause_get.schema.roles/nic_pause_get", "no_log" = false }
 fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "pause0","mac" = "52:54:00:12:34:58","driver" = "e1000e"}}
 input_map = {"interface" = "interface"}
 limits = { timeout_secs = 40 }

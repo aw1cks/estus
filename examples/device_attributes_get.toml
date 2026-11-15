@@ -22,7 +22,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/device_attributes_get.schema.json", role_path = "/etc/estus/roles/device_attributes_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/device_attributes_get.schema.json", role_path = "/etc/estus/device_attributes_get.schema.roles/device_attributes_get", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "reviewed_devices" = { "loopback" = { "class" = "net", "name" = "lo", "attributes" = ["mtu", "operstate", "address"] } } }
 input_map = { "device" = "device", "attributes" = "attributes" }
 limits = { timeout_secs = 20 }

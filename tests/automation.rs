@@ -1524,7 +1524,11 @@ fn role_verify_command(fixture: &Local, snapshot: &Path, source: &Path) -> Resul
         .args(["schema", "verify-role"])
         .arg(snapshot)
         .arg("--role-path")
-        .arg(source);
+        .arg(
+            snapshot
+                .with_extension("roles")
+                .join(source.file_name().context("role name")?),
+        );
     Ok(command)
 }
 
@@ -1542,8 +1546,21 @@ fn role_no_effects(fixture: &Local) -> Result<()> {
 }
 
 fn role_snapshot(fixture: &Local, path: &Path) -> Result<Value> {
-    let bytes = fs::read(path)?;
-    let text = std::str::from_utf8(&bytes)?;
+    let mut document: Value = serde_json::from_slice(&fs::read(path)?)?;
+    ensure!(
+        document["schema"] == 2,
+        "role approval needs explicit reimport"
+    );
+    let bundle_root = document
+        .as_object_mut()
+        .context("snapshot object")?
+        .remove("bundle_root");
+    if let Some(root) = &bundle_root {
+        ensure!(Path::new(root.as_str().context("bundle root")?).is_absolute());
+    }
+    // The v2 source boundary is intentionally persisted; public contract data
+    // must still exclude source payloads and unrelated private runtime paths.
+    let text = serde_json::to_string(&document)?;
     for private in [
         SECRET,
         fixture.root.path().to_str().context("UTF-8 fixture")?,
@@ -1554,7 +1571,13 @@ fn role_snapshot(fixture: &Local, path: &Path) -> Result<Value> {
             "role snapshot disclosed private source content"
         );
     }
-    serde_json::from_slice(&bytes).context("role snapshot")
+    if let Some(root) = bundle_root {
+        document
+            .as_object_mut()
+            .context("snapshot object")?
+            .insert("bundle_root".into(), root);
+    }
+    Ok(document)
 }
 
 #[tokio::test]
@@ -1749,7 +1772,10 @@ async fn real_role_schema_argspec_aliases_required_defaults_entrypoints_and_drif
         "defaults/main.yml",
         "meta/argument_specs.yml",
     ] {
-        let path = role.join(relative);
+        let path = snapshot
+            .with_extension("roles")
+            .join("acceptance")
+            .join(relative);
         let original = fs::read(&path)?;
         let mut changed = original.clone();
         changed.extend_from_slice(b"\n# acceptance content drift\n");
@@ -2019,6 +2045,19 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
             "collection_info":{"namespace":"acceptance","name":"tools","version":"1.0.0"}
         }))?,
     )?;
+    // An unused searchable collection may advertise an unavailable dependency.
+    // Its installed bytes still belong to every role approval, but availability
+    // is required only when a reviewed role actually selects that collection.
+    let unused = roots.join("acceptance/unused");
+    fs::create_dir_all(unused.join("roles/helper/tasks"))?;
+    fs::write(unused.join("roles/helper/tasks/main.yml"), "[]\n")?;
+    fs::write(
+        unused.join("MANIFEST.json"),
+        serde_json::to_vec(&json!({"collection_info":{
+            "namespace":"acceptance","name":"unused","version":"1.0.0",
+            "dependencies":{"acceptance.unavailable":">=1.0.0"}
+        }}))?,
+    )?;
     let fixture = configured_runtime(&runtime, false)?;
     let role = standalone_role(
         &fixture,
@@ -2029,6 +2068,10 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
     )?;
     let selected = collection.join("roles/probe");
     fs::rename(role, &selected)?;
+    fs::rename(
+        fixture.root.path().join("roles/acceptance_dependency"),
+        collection.join("roles/acceptance_dependency"),
+    )?;
     let inside = collection.join("review.json");
     let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command
@@ -2054,6 +2097,48 @@ async fn real_role_schema_collection_identity_and_content_drift() -> Result<()> 
     let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
     command.args(["schema", "verify-role"]).arg(&snapshot);
     schema_report(&fixture, &output(command).await?, true)?;
+    // Merely installed, unused content remains covered: changing only that
+    // collection invalidates an otherwise unchanged selected-role approval.
+    let unused_task = unused.join("roles/helper/tasks/main.yml");
+    fs::write(&unused_task, "[]\n# unused but searchable source changed\n")?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
+    command.args(["schema", "verify-role"]).arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
+    fs::write(&unused_task, "[]\n")?;
+    let metadata = selected.join("meta/main.yml");
+    let original_metadata = fs::read(&metadata)?;
+    for declared in [
+        "collections:\n  - acceptance.unused\n",
+        "dependencies:\n  - role: acceptance.unused.helper\n",
+    ] {
+        fs::write(&metadata, declared)?;
+        let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
+        command.args(["schema", "verify-role"]).arg(&snapshot);
+        let rejected = output(command).await?;
+        ensure!(
+            schema_report(&fixture, &rejected, false)?["error_code"]
+                == "role_collection_dependency_not_found"
+        );
+    }
+    fs::write(&metadata, original_metadata)?;
+    let manifest_path = collection.join("MANIFEST.json");
+    let original_manifest = fs::read(&manifest_path)?;
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&json!({"collection_info":{
+            "namespace":"acceptance","name":"tools","version":"1.0.0",
+            "dependencies":{"acceptance.unused":">=1.0.0"}
+        }}))?,
+    )?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
+    command.args(["schema", "verify-role"]).arg(&snapshot);
+    let rejected = output(command).await?;
+    ensure!(
+        schema_report(&fixture, &rejected, false)?["error_code"]
+            == "role_collection_dependency_not_found"
+    );
+    fs::write(&manifest_path, original_manifest)?;
     fs::write(
         selected.join("tasks/main.yml"),
         "[]\n# changed implementation\n",
@@ -2151,5 +2236,87 @@ async fn real_role_schema_rejects_output_inside_source_and_symlinked_parent() ->
     ensure!(value["contract"]["schema"]["required"] == json!(["token"]));
     let verified = output(role_verify_command(&fixture, &snapshot, &role)?).await?;
     schema_report(&fixture, &verified, true)?;
+    role_no_effects(&fixture)
+}
+
+#[tokio::test]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no network"]
+async fn real_role_schema_bundle_rejects_external_dependencies_and_old_approvals() -> Result<()> {
+    let fixture = configured_runtime(&real_runtime()?, false)?;
+    let role = standalone_role(
+        &fixture,
+        "bounded",
+        Some("argument_specs:\n  main:\n    options: {}\n"),
+    )?;
+    let snapshot = fixture.root.path().join("bounded.json");
+    for (metadata, code) in [
+        (
+            "dependencies:\n  - role: /tmp/outside\n",
+            "role_dependency_outside_bundle",
+        ),
+        (
+            "dependencies:\n  - role: ../outside\n",
+            "role_dependency_outside_bundle",
+        ),
+        (
+            "dependencies:\n  - role: '{{ outside }}'\n",
+            "role_dependency_outside_bundle",
+        ),
+        (
+            "dependencies:\n  - role: missing_role\n",
+            "role_dependency_not_found",
+        ),
+        (
+            "collections:\n  - estus_missing.collection\n",
+            "role_collection_dependency_not_found",
+        ),
+    ] {
+        fs::write(role.join("meta/main.yml"), metadata)?;
+        let rejected = output(role_import_command(
+            &fixture, "bounded", &role, "main", &snapshot,
+        )?)
+        .await?;
+        ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == code);
+        ensure!(!snapshot.exists() && !snapshot.with_extension("roles").exists());
+        role_no_effects(&fixture)?;
+    }
+    fs::write(
+        role.join("meta/main.yml"),
+        "dependencies:\n  - role: acceptance_dependency\n",
+    )?;
+    let imported = output(role_import_command(
+        &fixture, "bounded", &role, "main", &snapshot,
+    )?)
+    .await?;
+    schema_report(&fixture, &imported, true)?;
+    // Editing authoring input does not silently refresh the persisted approval.
+    fs::write(
+        role.join("tasks/main.yml"),
+        "[]\n# changed original, not bundle\n",
+    )?;
+    schema_report(
+        &fixture,
+        &output(role_verify_command(&fixture, &snapshot, &role)?).await?,
+        true,
+    )?;
+    let mut wrong_source = fixture.installed_command("ESTUS_TEST_BINARY")?;
+    wrong_source
+        .args(["schema", "verify-role"])
+        .arg(&snapshot)
+        .arg("--role-path")
+        .arg(&role);
+    let rejected = output(wrong_source).await?;
+    ensure!(
+        schema_report(&fixture, &rejected, false)?["error_code"] == "role_bundle_source_mismatch"
+    );
+    let old = fixture.root.path().join("old-role.json");
+    fs::write(&old, br#"{"schema":1}"#)?;
+    let mut command = fixture.installed_command("ESTUS_TEST_BINARY")?;
+    command.args(["schema", "verify-role"]).arg(old);
+    let rejected = output(command).await?;
+    ensure!(
+        schema_report(&fixture, &rejected, false)?["error_code"]
+            == "role_snapshot_reimport_required"
+    );
     role_no_effects(&fixture)
 }

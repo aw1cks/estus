@@ -21,7 +21,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = {"kind" = "ansible_role","snapshot" = "/etc/estus/nic_eee_get.schema.json","role_path" = "/etc/estus/roles/nic_eee_get","no_log" = false}
+execution = {"kind" = "ansible_role","snapshot" = "/etc/estus/nic_eee_get.schema.json","role_path" = "/etc/estus/nic_eee_get.schema.roles/nic_eee_get","no_log" = false}
 fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "model0","mac" = "52:54:00:12:34:5a","driver" = "estus_nic_model"}}
 input_map = {"interface" = "interface"}
 limits = {"timeout_secs" = 40}

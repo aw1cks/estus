@@ -22,7 +22,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/processes_list.schema.json", role_path = "/etc/estus/roles/processes_list", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/processes_list.schema.json", role_path = "/etc/estus/processes_list.schema.roles/processes_list", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "uid" = "uid", "name_contains" = "name_contains", "limit" = "limit" }
 limits = { timeout_secs = 20 }

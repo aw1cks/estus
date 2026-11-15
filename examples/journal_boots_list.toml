@@ -29,7 +29,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/journal_boots_list.schema.json", role_path = "/etc/estus/roles/journal_boots_list", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/journal_boots_list.schema.json", role_path = "/etc/estus/journal_boots_list.schema.roles/journal_boots_list", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "limit" = "limit" }
 limits = { timeout_secs = 40 }

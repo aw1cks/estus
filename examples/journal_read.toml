@@ -29,7 +29,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/journal_read.schema.json", role_path = "/etc/estus/roles/journal_read", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/journal_read.schema.json", role_path = "/etc/estus/journal_read.schema.roles/journal_read", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "unit" = "unit", "boot_id" = "boot_id", "since" = "since", "journal_until" = "until", "priority" = "priority", "cursor" = "cursor", "limit" = "limit" }
 limits = { timeout_secs = 40 }

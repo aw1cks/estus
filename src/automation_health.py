@@ -405,6 +405,113 @@ def import_document(module, roots):
     return entry, content, selected_collection
 
 
+def role_collection_trees(roots):
+    """Attest every installed collection made searchable, including additions."""
+    trees = []
+    entries = 0
+
+    def children(directory):
+        nonlocal entries
+        result = []
+        for child in directory.iterdir():
+            entries += 1
+            require(entries <= ENTRY_LIMIT, "role_content_limit")
+            result.append(child)
+        return sorted(result)
+
+    for index, root in enumerate(roots):
+        namespace_root = root / "ansible_collections"
+        require(namespace_root.is_dir(), "role_collection_source_invalid")
+        for namespace in children(namespace_root):
+            require(re.fullmatch(r"[a-z_][a-z0-9_]*", namespace.name)
+                    and namespace.is_dir(), "role_collection_source_invalid")
+            collections = children(namespace)
+            require(collections, "role_collection_source_invalid")
+            for collection in collections:
+                require(re.fullmatch(r"[a-z_][a-z0-9_]*", collection.name)
+                        and collection.is_dir(), "role_collection_source_invalid")
+                # Installation anchors may be links (notably Nix); interior
+                # links remain forbidden by the common bounded content walker.
+                trees.append(("collections/" + str(index) + "/" + namespace.name
+                              + "/" + collection.name, collection.resolve(strict=True)))
+    return trees
+
+
+def role_collection_dependencies(name, roots, checked):
+    """Validate manifest closure only for collections explicitly used by roles."""
+    pending = [name]
+    while pending:
+        name = pending.pop()
+        require(type(name) is str and re.fullmatch(
+            r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*", name),
+            "role_collection_dependency_invalid")
+        if name == "ansible.builtin" or name in checked:
+            continue
+        checked.add(name)
+        require(len(checked) <= ENTRY_LIMIT, "role_content_limit")
+        namespace, package = name.split(".")
+        directories = list(dict.fromkeys(
+            (root / "ansible_collections" / namespace / package).resolve(strict=True)
+            for root in roots if (root / "ansible_collections" / namespace / package).is_dir()))
+        require(directories, "role_collection_dependency_not_found")
+        for directory in directories:
+            manifest, _ = read_json(directory / "MANIFEST.json", DOCUMENT_LIMIT)
+            info = manifest.get("collection_info")
+            require(type(info) is dict, "role_collection_dependency_invalid")
+            dependencies = info.get("dependencies", {})
+            require(type(dependencies) is dict, "role_collection_dependency_invalid")
+            pending.extend(dependencies)
+            require(len(pending) <= ENTRY_LIMIT, "role_content_limit")
+
+
+def role_dependencies(directory, search_root, collection, roots, checked):
+    """Reject declared role paths outside the executable reviewed search roots."""
+    import yaml
+    related = []
+    for candidate in directory.glob("meta/main.*"):
+        if candidate.suffix not in (".yml", ".yaml", ".json"):
+            continue
+        require(not candidate.is_symlink() and candidate.stat().st_size <= DOCUMENT_LIMIT,
+                "role_dependency_invalid")
+        try:
+            metadata = yaml.safe_load(candidate.read_bytes())
+        except BaseException:
+            raise HealthFailure("role_dependency_invalid") from None
+        if metadata is None:
+            continue
+        require(type(metadata) is dict, "role_dependency_invalid")
+        collections = metadata.get("collections", [])
+        require(type(collections) is list, "role_collection_dependency_invalid")
+        for name in collections:
+            role_collection_dependencies(name, roots, checked)
+        dependencies = metadata.get("dependencies", [])
+        require(type(dependencies) is list, "role_dependency_invalid")
+        for dependency in dependencies:
+            name = dependency if type(dependency) is str else (
+                dependency.get("role", dependency.get("name"))
+                if type(dependency) is dict else None)
+            require(type(name) is str and re.fullmatch(
+                r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){0,2}", name)
+                and len(name.split(".")) in (1, 3), "role_dependency_outside_bundle")
+            if "." in name:
+                namespace, package, simple = name.split(".")
+                role_collection_dependencies(namespace + "." + package, roots, checked)
+                candidates = [root / "ansible_collections" / namespace / package / "roles" / simple
+                              for root in roots]
+            else:
+                candidates = [search_root / name]
+                if collection is not None:
+                    namespace, package = collection.split(".")
+                    candidates.extend(root / "ansible_collections" / namespace / package
+                                      / "roles" / name for root in roots)
+            present = [path for path in candidates if path.is_dir() and not path.is_symlink()]
+            require(present, "role_dependency_not_found")
+            dependency_collection = namespace + "." + package if "." in name else collection
+            related.extend((path.resolve(strict=True), path.parent.resolve(strict=True),
+                            dependency_collection) for path in present)
+    return related
+
+
 def role_content(role, entry_point, role_path, roots):
     """Resolve and attest role/Core/collection bytes without invoking ansible-doc."""
     require(isinstance(role, str) and len(role) <= 256 and re.fullmatch(
@@ -459,21 +566,40 @@ def role_content(role, entry_point, role_path, roots):
                 and not any(token in str(directory.parent) for token in (":", "$", "{{", "{%", "{#")),
                 "invalid_role_source")
         expected_path = directory
-        trees.append(("role", directory))
+        trees.append(("roles", directory.parent))
     require(directory.is_dir(), "role_not_found")
     tasks = [directory / "tasks" / (entry_point + suffix) for suffix in ("", ".yml", ".yaml")]
     present = [path for path in tasks if path.exists() or path.is_symlink()]
     require(len(present) == 1, "role_entry_point_not_found")
     require(not present[0].is_symlink() and present[0].is_file(), "role_content_failed")
+    trees.extend(role_collection_trees(roots))
     # Hash before ansible-doc reads metadata, bounding and rejecting unsafe tree
     # entries first. The common walker retains module hashes exactly as before.
     try:
-        domain = b"estus-role-content-v1\0" + role.encode("ascii") + b"\0" + entry_point.encode("ascii") + b"\0"
+        domain = b"estus-role-bundle-content-v2\0" + role.encode("ascii") + b"\0" + entry_point.encode("ascii") + b"\0"
         content = content_hash(trees, present[0], domain, skip_generated=False)
     except HealthFailure as error:
         raise HealthFailure(error.code.replace("module_", "role_", 1)) from None
     except (OSError, UnicodeError, ValueError):
         raise HealthFailure("role_content_failed") from None
+    # All searchable bytes above are approved, including unused collections.
+    # Availability checks apply only to the selected role and its declared
+    # dependency closure; an unused collection cannot execute a missing source.
+    checked_collections = set()
+    if collection is not None:
+        role_collection_dependencies(collection, roots, checked_collections)
+    pending = [(directory, directory.parent, collection)]
+    checked_roles = set()
+    while pending:
+        selected_directory, search_root, selected_collection_name = pending.pop()
+        key = selected_directory.resolve(strict=True)
+        if key in checked_roles:
+            continue
+        checked_roles.add(key)
+        require(len(checked_roles) <= ENTRY_LIMIT, "role_content_limit")
+        pending.extend(role_dependencies(
+            selected_directory, search_root, selected_collection_name, roots, checked_collections))
+        require(len(pending) <= ENTRY_LIMIT, "role_content_limit")
     return directory, expected_path, collection, content, selected_collection, trees
 
 

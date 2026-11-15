@@ -709,7 +709,8 @@ def validate(spec):
                 and 0 < len(expected["playbook"].encode("utf-8")) <= 4096)
         absolute(expected["project_root"])
     elif "role" in expected:
-        keys(expected, ("identity", "collection", "content_sha256", "role", "entry_point", "role_path"))
+        keys(expected, ("identity", "collection", "content_sha256", "role", "entry_point",
+                        "role_path", "bundle_root"))
         require(type(expected["role"]) is str and re.fullmatch(
             r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){0,2}", expected["role"])
                 and len(expected["role"].split(".")) in (1, 3))
@@ -717,6 +718,9 @@ def validate(spec):
             r"[A-Za-z_][A-Za-z0-9_]{0,127}", expected["entry_point"]))
         if expected["role_path"] is not None:
             absolute(expected["role_path"])
+            absolute(expected["bundle_root"])
+        else:
+            require(expected["bundle_root"] is None)
     else:
         keys(expected, ("identity", "collection", "content_sha256", "source", "module"))
         require(type(expected["module"]) is str and len(expected["module"]) <= 256 and re.fullmatch(
@@ -772,6 +776,10 @@ def selected_runtime(spec, workspace):
         directory, _, _, content, collection, _ = namespace["role_content"](
             expected["role"], expected["entry_point"], expected["role_path"], roots)
         require(content == expected["content_sha256"] and collection == expected["collection"])
+        if expected["bundle_root"] is not None:
+            root = absolute(expected["bundle_root"]).resolve(strict=True)
+            require(directory.parent == root)
+            expected["bundle_root"] = str(root)
         if expected["role_path"] is not None:
             # Use the exact verified parent, not a lexical path that Ansible
             # could expand or split differently from the content verifier.
@@ -954,8 +962,10 @@ def layout(workspace, spec, roots, selected_path):
                      "strategy", "terminal", "test", "vars"):
             environment["ANSIBLE_" + kind.upper() + "_PLUGINS"] = str(root / (kind + "_plugins"))
     if role:
+        # This is the entire root hashed under the reviewed v2 content contract,
+        # never the original authoring source or an ambient/default role path.
         environment["ANSIBLE_ROLES_PATH"] = (
-            str(Path(expected["role_path"]).parent) if expected["role_path"] is not None
+            expected["bundle_root"] if expected["bundle_root"] is not None
             else str(workspace / "no-roles"))
     agent = spec["agent"]
     socket = (os.environ.get("SSH_AUTH_SOCK") if agent["mode"] == "inherit"

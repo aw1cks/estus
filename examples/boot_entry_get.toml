@@ -39,7 +39,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_entry_get.schema.json", role_path = "/etc/estus/roles/boot_entry_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_entry_get.schema.json", role_path = "/etc/estus/boot_entry_get.schema.roles/boot_entry_get", no_log = false }
 # Sensitive values are intentionally returned to this separately approved capability.
 # no_log=true would censor the typed projection; review MCP result-retention policy.
 fixed_args = { target_python = "/usr/bin/python3" }

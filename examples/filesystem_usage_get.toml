@@ -22,7 +22,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/filesystem_usage_get.schema.json", role_path = "/etc/estus/roles/filesystem_usage_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/filesystem_usage_get.schema.json", role_path = "/etc/estus/filesystem_usage_get.schema.roles/filesystem_usage_get", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "configured_paths" = { "data" = "/var/lib/estus-catalog" } }
 input_map = { "path_id" = "path_id" }
 limits = { timeout_secs = 20 }

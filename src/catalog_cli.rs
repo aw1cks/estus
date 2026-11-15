@@ -454,6 +454,8 @@ async fn prepare(
             .as_table_mut()
             .ok_or("catalog_definition_invalid")?;
         let mut imports = Vec::with_capacity(tools.len());
+        let mut reviewed_bundle: Option<PathBuf> = None;
+        let mut authoring_parent: Option<PathBuf> = None;
         for (name, mut definition) in tools {
             if !catalog.manifest().tools.contains_key(&name) || configured.contains_key(&name) {
                 return Err("catalog_tool_unknown_or_collision");
@@ -484,6 +486,31 @@ async fn prepare(
                 return Err("catalog_definition_invalid");
             }
             let snapshot = output.path.join("snapshots").join(format!("{name}.json"));
+            let parent =
+                std::fs::canonicalize(role_path.parent().ok_or("catalog_definition_invalid")?)
+                    .map_err(|_| "catalog_definition_invalid")?;
+            if authoring_parent
+                .as_ref()
+                .is_some_and(|selected| selected != &parent)
+            {
+                return Err("catalog_role_search_root_mismatch");
+            }
+            let root = match &reviewed_bundle {
+                Some(root) => root,
+                None => {
+                    let root = crate::role_import::author_bundle(&name, &role_path, &snapshot)?;
+                    authoring_parent = Some(parent);
+                    reviewed_bundle.insert(root)
+                }
+            };
+            let role_path = root.join(&name);
+            execution.insert(
+                "role_path".into(),
+                role_path
+                    .to_str()
+                    .ok_or("catalog_output_unavailable")?
+                    .into(),
+            );
             execution.insert(
                 "snapshot".into(),
                 snapshot

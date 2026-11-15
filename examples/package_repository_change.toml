@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["persistent_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/package_repository_change.schema.json", role_path = "/etc/estus/roles/package_repository_change", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/package_repository_change.schema.json", role_path = "/etc/estus/package_repository_change.schema.roles/package_repository_change", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "approved_sources" = { "primary" = "deb [signed-by=/usr/share/keyrings/estus-catalog.gpg] file:/opt/estus-catalog/repo-a ./", "alternate" = "deb [signed-by=/usr/share/keyrings/estus-catalog.gpg] file:/opt/estus-catalog/repo-b ./" } }
 input_map = { "repository" = "repository" }
 limits = { timeout_secs = 60 }

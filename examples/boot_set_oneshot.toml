@@ -39,7 +39,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "runtime_write"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_set_oneshot.schema.json", role_path = "/etc/estus/roles/boot_set_oneshot", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_set_oneshot.schema.json", role_path = "/etc/estus/boot_set_oneshot.schema.roles/boot_set_oneshot", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "entry_id" = "entry_id" }
 limits = { timeout_secs = 60 }

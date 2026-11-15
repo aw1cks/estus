@@ -28,7 +28,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read","runtime_write","availability"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_rss_set.schema.json", "role_path" = "/etc/estus/roles/nic_rss_set", "no_log" = false }
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/nic_rss_set.schema.json", "role_path" = "/etc/estus/nic_rss_set.schema.roles/nic_rss_set", "no_log" = false }
 fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "tune0","mac" = "52:54:00:12:34:57","driver" = "virtio_net","allow_runtime_tuning" = true}}
 input_map = { interface = "interface", preset = "preset" }
 limits = { timeout_secs = 40 }

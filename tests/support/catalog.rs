@@ -346,6 +346,17 @@ impl Binding {
             report["binding_validated"] == true,
             "catalog overlay was not reviewed"
         );
+        let reviewed: Value = serde_json::from_slice(&fs::read(&snapshot)?)?;
+        ensure!(
+            reviewed["schema"] == 2,
+            "role approval requires explicit reimport"
+        );
+        let role = PathBuf::from(
+            reviewed["bundle_root"]
+                .as_str()
+                .context("reviewed bundle root")?,
+        )
+        .join(name);
         let execution = tool
             .get_mut("execution")
             .and_then(toml::Value::as_table_mut)

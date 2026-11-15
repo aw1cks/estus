@@ -291,3 +291,84 @@ async fn preparation_rejects_fifo_ssh_config_without_hanging_or_partial_output()
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no SSH"]
+fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<()> {
+    let runtime = std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
+        .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned installed runtime")?;
+    let root = tempfile::tempdir()?;
+    let export = root.path().join("export");
+    let output = invoke(&[
+        "export".as_ref(),
+        "--tool".as_ref(),
+        "pressure_get".as_ref(),
+        "--tool".as_ref(),
+        "memory_stats".as_ref(),
+        "--output".as_ref(),
+        export.as_os_str(),
+    ])?;
+    ensure!(output.status.success(), "fixture export failed");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let site = root.path().join("site.toml");
+    std::fs::write(
+        &site,
+        format!(
+            "profile='actions-only'\n[targets.server]\nssh_host='private-alias'\n[automation]\nruntime={runtime:?}\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
+        ),
+    )?;
+    let prepared = root.path().join("prepared");
+    let output = Command::new(test_binary())
+        .args(["catalog", "--root"])
+        .arg(assets())
+        .args(["prepare", "--site"])
+        .arg(&site)
+        .arg("--definitions")
+        .arg(export.join("tools.toml"))
+        .arg("--output")
+        .arg(&prepared)
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_SSH_CONFIG")
+        .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"))
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "real catalog preparation failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(prepared.join("estus.toml"))?)?;
+    let mut approved_root = None;
+    for name in ["pressure_get", "memory_stats"] {
+        let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            prepared.join(format!("snapshots/{name}.json")),
+        )?)?;
+        ensure!(snapshot["schema"] == 2);
+        let bundle =
+            std::path::PathBuf::from(snapshot["bundle_root"].as_str().context("bundle root")?);
+        if let Some(root) = &approved_root {
+            ensure!(
+                root == &bundle,
+                "catalog preparation duplicated the shared role parent"
+            );
+        }
+        approved_root = Some(bundle.clone());
+        ensure!(
+            config["tools"][name]["execution"]["role_path"].as_str() == bundle.join(name).to_str()
+        );
+        ensure!(bundle.join("pressure_get/tasks/main.yml").is_file());
+        ensure!(bundle.join("memory_stats/tasks/main.yml").is_file());
+    }
+    let bundles = std::fs::read_dir(prepared.join("snapshots"))?
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "roles"))
+        .count();
+    ensure!(
+        bundles == 1,
+        "catalog preparation copied its role parent more than once"
+    );
+    Ok(())
+}

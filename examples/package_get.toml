@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/package_get.schema.json", role_path = "/etc/estus/roles/package_get", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/package_get.schema.json", role_path = "/etc/estus/package_get.schema.roles/package_get", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "approved_packages" = ["estus-catalog-base", "estus-catalog-demo"] }
 input_map = { "package" = "package" }
 limits = { timeout_secs = 30 }

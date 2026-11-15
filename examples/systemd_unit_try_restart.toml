@@ -32,7 +32,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_unit_try_restart.schema.json", role_path = "/etc/estus/roles/systemd_unit_try_restart", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_unit_try_restart.schema.json", role_path = "/etc/estus/systemd_unit_try_restart.schema.roles/systemd_unit_try_restart", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
 input_map = { "unit" = "unit" }
 limits = { timeout_secs = 60 }

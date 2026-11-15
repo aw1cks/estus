@@ -3,6 +3,8 @@
 # Export this tool's input_schema/fixed_args/input_map as overlay.json, then run:
 # estus --config app_config.toml schema import-role app_config --role-path /etc/estus/roles/app_config --overlay overlay.json --output /etc/estus/app_config.schema.json
 # Import is offline and never runs tasks. Enable only after reviewing the snapshot.
+# V2 import copies the entire source parent once to app_config.schema.roles.
+# Review that bundle and its siblings; execution.role_path below uses only the approved copy.
 # Provision /var/lib/estus/runner mode 0700 owned by the MCP account.
 # The SSH account must own /srv/example-app; no become or service operation occurs.
 # MCP: {"host":"server","inputs":{"instance":"frontend","config":{"banner":"Hello 雪","enabled":true,"port":8080}}}
@@ -28,7 +30,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["persistent_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/app_config.schema.json", role_path = "/etc/estus/roles/app_config", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/app_config.schema.json", role_path = "/etc/estus/app_config.schema.roles/app_config", no_log = false }
 fixed_args = { config_root = "/srv/example-app" }
 input_map = { instance = "instance", config = "config" }
 limits = { timeout_secs = 30 }

@@ -1,5 +1,10 @@
 //! Reviewed role contracts for offline authoring and fixed execution activation.
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, DirBuilder, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
 
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -22,7 +27,7 @@ pub(crate) struct ImportArgs {
     role: String,
     #[arg(long, default_value = "main")]
     entry_point: String,
-    /// Exact standalone role directory; collection roles use the selected runtime.
+    /// Standalone source role. Its complete parent is copied into a reviewed bundle.
     #[arg(long)]
     role_path: Option<PathBuf>,
     #[arg(long)]
@@ -33,6 +38,8 @@ pub(crate) struct ImportArgs {
     /// Reviewed JSON input_schema, fixed_args and input_map.
     #[arg(long)]
     overlay: Option<PathBuf>,
+    #[arg(skip)]
+    reviewed_bundle: bool,
 }
 
 impl ImportArgs {
@@ -49,6 +56,7 @@ impl ImportArgs {
             output,
             explicit_schema: None,
             overlay: Some(overlay),
+            reviewed_bundle: true,
         }
     }
 }
@@ -56,7 +64,7 @@ impl ImportArgs {
 #[derive(Args)]
 pub(crate) struct VerifyArgs {
     snapshot: PathBuf,
-    /// Repeat the exact standalone source reference; no ambient role lookup.
+    /// Exact role inside the persisted reviewed bundle, not the original authoring source.
     #[arg(long)]
     role_path: Option<PathBuf>,
     #[arg(long)]
@@ -88,6 +96,8 @@ struct Snapshot {
     runtime: RuntimeIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     collection: Option<RuntimeCollection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_root: Option<PathBuf>,
     content_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     explicit_schema: Option<Value>,
@@ -105,6 +115,7 @@ fn digest(snapshot: &Snapshot) -> Result<String, &'static str> {
         snapshot.source,
         &snapshot.runtime,
         &snapshot.collection,
+        &snapshot.bundle_root,
         &snapshot.content_sha256,
         &snapshot.explicit_schema,
         &snapshot.contract,
@@ -122,10 +133,13 @@ fn hash(value: &str) -> bool {
 }
 
 fn read_snapshot(path: &Path) -> Result<Snapshot, &'static str> {
-    let snapshot: Snapshot = serde_json::from_value(read_json(path, SNAPSHOT_LIMIT)?)
-        .map_err(|_| "invalid_schema_snapshot")?;
-    if snapshot.schema != 1
-        || !role_schema::valid_role(&snapshot.role)
+    let value = read_json(path, SNAPSHOT_LIMIT)?;
+    if value.get("schema").and_then(Value::as_u64) != Some(2) {
+        return Err("role_snapshot_reimport_required");
+    }
+    let snapshot: Snapshot =
+        serde_json::from_value(value).map_err(|_| "invalid_schema_snapshot")?;
+    if !role_schema::valid_role(&snapshot.role)
         || !role_schema::valid_entry_point(&snapshot.entry_point)
         || (snapshot.source == Source::Collection)
             != role_schema::is_collection_role(&snapshot.role)
@@ -136,6 +150,17 @@ fn read_snapshot(path: &Path) -> Result<Snapshot, &'static str> {
             .as_ref()
             .is_some_and(|c| !automation::valid_collection(c))
         || (snapshot.source == Source::Collection) != snapshot.collection.is_some()
+        || (snapshot.source == Source::Directory) != snapshot.bundle_root.is_some()
+        || snapshot.bundle_root.as_ref().is_some_and(|root| {
+            !root.is_absolute()
+                || root.to_str().is_none_or(|s| {
+                    s.len() > 4096
+                        || s.contains('\0')
+                        || [":", "$", "{{", "{%", "{#"]
+                            .iter()
+                            .any(|token| s.contains(token))
+                })
+        })
         || snapshot.schema_sha256 != digest(&snapshot)?
     {
         return Err("invalid_schema_snapshot");
@@ -150,6 +175,7 @@ pub(crate) struct ReviewedRole {
     pub runtime: RuntimeIdentity,
     pub collection: Option<RuntimeCollection>,
     pub content_sha256: String,
+    pub bundle_root: Option<PathBuf>,
     pub contract: Value,
     pub binding: Option<Value>,
     source: Source,
@@ -164,6 +190,7 @@ pub(crate) fn load_reviewed(path: &Path) -> Result<ReviewedRole, &'static str> {
         runtime: snapshot.runtime,
         collection: snapshot.collection,
         content_sha256: snapshot.content_sha256,
+        bundle_root: snapshot.bundle_root,
         contract: snapshot.contract,
         binding: snapshot.binding,
         source: snapshot.source,
@@ -180,11 +207,18 @@ pub(crate) async fn verify_reviewed(
     if source(&reviewed.role, &reviewed.entry_point, role_path)? != reviewed.source {
         return Err("invalid_role_source");
     }
+    let approved_path = reviewed
+        .bundle_root
+        .as_ref()
+        .map(|root| root.join(&reviewed.role));
+    if role_path != approved_path.as_deref() {
+        return Err("role_bundle_source_mismatch");
+    }
     let observed = automation::import_role(
         runtime,
         &reviewed.role,
         &reviewed.entry_point,
-        role_path,
+        approved_path.as_deref(),
         None,
         context,
     )
@@ -373,6 +407,7 @@ struct Previous {
 }
 
 struct Prepared {
+    bundle: Option<RoleBundle>,
     role: String,
     entry_point: String,
     source: Source,
@@ -391,25 +426,169 @@ fn output_path(path: &Path) -> Result<PathBuf, &'static str> {
         .unwrap_or(Path::new("."));
     let parent = std::fs::canonicalize(parent).map_err(|_| "schema_output_failed")?;
     let output = parent.join(path.file_name().ok_or("schema_output_failed")?);
-    if output
-        .to_str()
-        .is_none_or(|value| value.len() > 4096 || value.contains('\0'))
-    {
+    if output.to_str().is_none_or(|value| {
+        value.len() > 4096
+            || value.contains('\0')
+            || [":", "$", "{{", "{%", "{#"]
+                .iter()
+                .any(|token| value.contains(token))
+    }) {
         return Err("schema_output_failed");
     }
     Ok(output)
+}
+
+/// An authoring-only copy. Failed imports remove only the directory they created.
+struct RoleBundle {
+    root: PathBuf,
+    published: bool,
+}
+
+impl Drop for RoleBundle {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn bundle_root(snapshot: &Path) -> PathBuf {
+    snapshot.with_extension("roles")
+}
+pub(crate) fn author_bundle(
+    role: &str,
+    source: &Path,
+    snapshot: &Path,
+) -> Result<PathBuf, &'static str> {
+    let mut bundle = copy_bundle(role, source, snapshot)?;
+    bundle.published = true;
+    Ok(bundle.root.clone())
+}
+
+fn copy_bundle(role: &str, source: &Path, output: &Path) -> Result<RoleBundle, &'static str> {
+    let selected = fs::canonicalize(source).map_err(|_| "invalid_role_source")?;
+    let parent = selected.parent().ok_or("invalid_role_source")?;
+    if selected.file_name().and_then(|name| name.to_str()) != Some(role)
+        || !selected.is_dir()
+        || parent.to_str().is_none_or(|s| {
+            [":", "$", "{{", "{%", "{#"]
+                .iter()
+                .any(|token| s.contains(token))
+        })
+    {
+        return Err("invalid_role_source");
+    }
+    if output.starts_with(parent) {
+        return Err("role_output_inside_source");
+    }
+    let root = bundle_root(output);
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(|_| "role_bundle_output_exists_or_failed")?;
+    let bundle = RoleBundle {
+        root,
+        published: false,
+    };
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    copy_role_tree(parent, &bundle.root, 0, &mut entries, &mut bytes)?;
+    Ok(bundle)
+}
+
+fn copy_role_tree(
+    source: &Path,
+    destination: &Path,
+    depth: usize,
+    entries: &mut usize,
+    bytes: &mut u64,
+) -> Result<(), &'static str> {
+    if depth > 32 {
+        return Err("role_content_limit");
+    }
+    for entry in fs::read_dir(source).map_err(|_| "role_content_failed")? {
+        let entry = entry.map_err(|_| "role_content_failed")?;
+        *entries += 1;
+        if *entries > 50_000 {
+            return Err("role_content_limit");
+        }
+        let kind = entry.file_type().map_err(|_| "role_content_failed")?;
+        let target = destination.join(entry.file_name());
+        if kind.is_symlink() {
+            return Err("role_content_symlink");
+        }
+        if kind.is_dir() {
+            DirBuilder::new()
+                .mode(0o700)
+                .create(&target)
+                .map_err(|_| "role_bundle_output_failed")?;
+            copy_role_tree(&entry.path(), &target, depth + 1, entries, bytes)?;
+        } else if kind.is_file() {
+            let mut input = OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(entry.path())
+                .map_err(|_| "role_content_failed")?;
+            let metadata = input.metadata().map_err(|_| "role_content_failed")?;
+            if !metadata.is_file() {
+                return Err("role_content_failed");
+            }
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600 | (metadata.permissions().mode() & 0o100))
+                .open(target)
+                .map_err(|_| "role_bundle_output_failed")?;
+            let mut size = 0u64;
+            let mut buffer = [0u8; 65_536];
+            loop {
+                let read = input.read(&mut buffer).map_err(|_| "role_content_failed")?;
+                if read == 0 {
+                    break;
+                }
+                size += read as u64;
+                *bytes += read as u64;
+                if size > 32 * 1024 * 1024 || *bytes > 256 * 1024 * 1024 {
+                    return Err("role_content_limit");
+                }
+                output
+                    .write_all(&buffer[..read])
+                    .map_err(|_| "role_bundle_output_failed")?;
+            }
+        } else {
+            return Err("role_content_failed");
+        }
+    }
+    Ok(())
 }
 
 fn prepare(command: Command) -> Result<Prepared, &'static str> {
     match command {
         Command::Import(args) => {
             let source = source(&args.role, &args.entry_point, args.role_path.as_deref())?;
+            let output = output_path(&args.output)?;
+            if fs::symlink_metadata(&output).is_ok() {
+                return Err("schema_output_exists_or_failed");
+            }
+            let bundle = if args.reviewed_bundle {
+                None
+            } else {
+                args.role_path
+                    .as_deref()
+                    .map(|path| copy_bundle(&args.role, path, &output))
+                    .transpose()?
+            };
+            let role_path = match &bundle {
+                Some(bundle) => Some(bundle.root.join(&args.role)),
+                None => args.role_path,
+            };
             Ok(Prepared {
+                bundle,
                 role: args.role,
                 entry_point: args.entry_point,
                 source,
-                role_path: args.role_path,
-                output: Some(output_path(&args.output)?),
+                role_path,
+                output: Some(output),
                 previous: None,
                 explicit_schema: args
                     .explicit_schema
@@ -433,7 +612,15 @@ fn prepare(command: Command) -> Result<Prepared, &'static str> {
                 Some(path) => Some(read_json(&path, INPUT_LIMIT)?),
                 None => previous.binding,
             };
+            let approved_path = previous
+                .bundle_root
+                .as_ref()
+                .map(|root| root.join(&previous.role));
+            if args.role_path != approved_path {
+                return Err("role_bundle_source_mismatch");
+            }
             Ok(Prepared {
+                bundle: None,
                 role: previous.role,
                 entry_point: previous.entry_point,
                 source,
@@ -480,7 +667,7 @@ pub(crate) async fn perform_with_reference(
         )
         .ok_or("invalid_timeout")?;
     // Started file work is joined even on interruption, like module authoring.
-    let prepared = tokio::task::spawn_blocking(move || prepare(command))
+    let mut prepared = tokio::task::spawn_blocking(move || prepare(command))
         .await
         .map_err(|_| "schema_file_unavailable")??;
     stopped(&shutdown, deadline)?;
@@ -522,12 +709,17 @@ pub(crate) async fn perform_with_reference(
     let report = Report::validated(prepared.binding.is_some(), prepared.input.is_some());
     if let Some(output) = prepared.output {
         let mut snapshot = Snapshot {
-            schema: 1,
+            schema: 2,
             role: prepared.role,
             entry_point: prepared.entry_point,
             source: prepared.source,
             runtime: observed.identity,
             collection: observed.collection,
+            bundle_root: prepared
+                .role_path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .map(Path::to_path_buf),
             content_sha256: observed.content_sha256,
             explicit_schema: prepared.explicit_schema,
             contract,
@@ -553,6 +745,9 @@ pub(crate) async fn perform_with_reference(
         tokio::task::spawn_blocking(move || write_document(&output, &snapshot))
             .await
             .map_err(|_| "schema_output_failed")??;
+        if let Some(bundle) = &mut prepared.bundle {
+            bundle.published = true;
+        }
     }
     Ok(report)
 }
@@ -590,5 +785,58 @@ mod tests {
             "input_map": {}
         });
         validate_overlay(&overlay).unwrap();
+    }
+
+    #[test]
+    fn old_role_approval_requires_explicit_reimport() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = directory.path().join("reviewed.json");
+        fs::write(&snapshot, br#"{"schema":1}"#).unwrap();
+        assert_eq!(
+            read_snapshot(&snapshot).err(),
+            Some("role_snapshot_reimport_required")
+        );
+    }
+
+    #[test]
+    fn authoring_copies_siblings_once_and_failure_removes_only_owned_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("sources");
+        fs::create_dir_all(source.join("entry/tasks")).unwrap();
+        fs::create_dir_all(source.join("dependency/tasks")).unwrap();
+        fs::write(source.join("entry/tasks/main.yml"), "[]\n").unwrap();
+        fs::write(
+            source.join("dependency/tasks/main.yml"),
+            "[]\n# dependency\n",
+        )
+        .unwrap();
+        let output = directory.path().join("reviewed.json");
+        let bundle = copy_bundle("entry", &source.join("entry"), &output).unwrap();
+        assert_eq!(
+            fs::read(bundle.root.join("dependency/tasks/main.yml")).unwrap(),
+            b"[]\n# dependency\n",
+        );
+        fs::write(source.join("dependency/tasks/main.yml"), "changed\n").unwrap();
+        assert_eq!(
+            fs::read(bundle.root.join("dependency/tasks/main.yml")).unwrap(),
+            b"[]\n# dependency\n",
+        );
+        assert_eq!(
+            copy_bundle("entry", &source.join("entry"), &output).err(),
+            Some("role_bundle_output_exists_or_failed"),
+        );
+        drop(bundle);
+        assert!(!bundle_root(&output).exists());
+        std::os::unix::fs::symlink(
+            source.join("entry/tasks/main.yml"),
+            source.join("dependency/linked.yml"),
+        )
+        .unwrap();
+        assert_eq!(
+            copy_bundle("entry", &source.join("entry"), &output).err(),
+            Some("role_content_symlink"),
+        );
+        assert!(!bundle_root(&output).exists());
+        assert!(source.join("entry/tasks/main.yml").exists());
     }
 }

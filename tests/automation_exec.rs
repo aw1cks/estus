@@ -1834,7 +1834,7 @@ async fn real_host_summary_acceptance() -> Result<()> {
         let report: Value = serde_json::from_slice(&imported.stdout)?;
         ensure!(report["binding_validated"] == true, "host_summary overlay was not reviewed");
         example["tools"]["host_summary"]["execution"]["snapshot"] = text(&snapshot)?.into();
-        example["tools"]["host_summary"]["execution"]["role_path"] = text(&role)?.into();
+        example["tools"]["host_summary"]["execution"]["role_path"] = text(&approved_role(&snapshot, "host_summary")?)?.into();
         example["tools"]["host_summary"]["targets"] = table(json!(["plain"]))?;
         config.insert("tools".into(), example["tools"].clone());
         let mut automation = example["automation"].as_table().context("example automation table")?.clone();
@@ -2603,7 +2603,10 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
             .and_then(toml::Value::as_table_mut)
             .context("CPU execution table")?;
         execution.insert("snapshot".into(), text(&snapshot)?.into());
-        execution.insert("role_path".into(), text(&role)?.into());
+        execution.insert(
+            "role_path".into(),
+            text(&approved_role(&snapshot, "cpu_stats")?)?.into(),
+        );
         tool.insert("targets".into(), table(json!(["plain"]))?);
         config.insert("tools".into(), example["tools"].clone());
         let mut automation = example["automation"]
@@ -3354,7 +3357,10 @@ async fn real_memory_stats_acceptance() -> Result<()> {
             .and_then(toml::Value::as_table_mut)
             .context("memory execution table")?;
         execution.insert("snapshot".into(), text(&snapshot)?.into());
-        execution.insert("role_path".into(), text(&role)?.into());
+        execution.insert(
+            "role_path".into(),
+            text(&approved_role(&snapshot, "memory_stats")?)?.into(),
+        );
         tool.insert("targets".into(), table(json!(["plain"]))?);
         config.insert("tools".into(), example["tools"].clone());
         let mut automation = example["automation"]
@@ -4108,6 +4114,20 @@ fn write_role(parent: &Path, name: &str, tasks: &str) -> Result<PathBuf> {
     Ok(role)
 }
 
+fn approved_role(snapshot: &Path, role: &str) -> Result<PathBuf> {
+    let document: Value = serde_json::from_slice(&fs::read(snapshot)?)?;
+    ensure!(
+        document["schema"] == 2,
+        "role approval needs explicit reimport"
+    );
+    Ok(PathBuf::from(
+        document["bundle_root"]
+            .as_str()
+            .context("reviewed bundle root")?,
+    )
+    .join(role))
+}
+
 async fn import_reviewed_role(a: &Acceptance, role: &Path, overlay: &Value) -> Result<PathBuf> {
     let name = role
         .file_name()
@@ -4298,11 +4318,16 @@ async fn configure_roles(a: &Acceptance) -> Result<PathBuf> {
     let mut tools = toml::map::Map::new();
     let mut enabled = Vec::new();
     for (name, role, overlay, result, no_log) in definitions {
-        let snapshot = import_reviewed_role(a, &role, &overlay).await?;
+        let authoring_source = if name == "summary" {
+            aliased_parent.join(&name)
+        } else {
+            role
+        };
+        let snapshot = import_reviewed_role(a, &authoring_source, &overlay).await?;
         let mut binding = json!({"description":"Reviewed real SSH role acceptance","revision":"1",
             "authority":"automation","effects":["persistent_write","read"],"targets":["plain"],
             "execution":{"kind":"ansible_role","snapshot":text(&snapshot)?,
-                "role_path":text(&if name == "summary" { aliased_parent.join(&name) } else { role })?,"no_log":no_log},
+                "role_path":text(&approved_role(&snapshot, &name)?)?,"no_log":no_log},
             "result":result,"limits":{"timeout_secs":12}});
         for key in ["input_schema", "fixed_args", "input_map"] {
             binding[key] = overlay[key].clone();
@@ -4503,8 +4528,10 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
             && censored["data"]["projection"] == json!({"status":"censored"}));
         // Keep the marker-writing workload executable: running drifted content
         // must fail this test, not look like a pre-dispatch refusal.
-        let source = roles.join("drift/tasks/main.yml");
-        let mut changed = fs::read(&source)?;
+        let snapshot = a.fixture.root.path().join("role-drift-reviewed.json");
+        let source = approved_role(&snapshot, "drift")?.join("tasks/main.yml");
+        let original = fs::read(&source)?;
+        let mut changed = original.clone();
         changed.extend_from_slice(b"\n# post-startup source drift\n");
         fs::write(&source, changed)?;
         let response = server.request(236,"tools/call",json!({"name":"drift",
@@ -4515,6 +4542,63 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
             "post-startup source drift was not refused before dispatch: {response}");
         ensure!(!a.fixture.root.path().join("drift-marker").exists());
         a.clean()?;
+        fs::write(&source, original)?;
+        // Mutate only the sibling dependency in the persisted approved bundle.
+        // Both a new startup and the already-active server must refuse it
+        // before the dependency's observable target write.
+        let snapshot = a.fixture.root.path().join("role-app_config-reviewed.json");
+        let bundle = approved_role(&snapshot, "app_config")?;
+        let dependency = bundle.parent().context("reviewed search root")?
+            .join("dependency/tasks/main.yml");
+        let original = fs::read(&dependency)?;
+        let dependency_marker = a.fixture.root.path().join("dependency-ran");
+        fs::remove_file(&dependency_marker)?;
+        let mut changed = original.clone();
+        changed.extend_from_slice(b"\n# changed sibling dependency executable source\n");
+        fs::write(&dependency, changed)?;
+        let rejected = server.request(240, "tools/call", json!({"name":"app_config",
+            "arguments":{"host":"plain","inputs":inputs}})).await?;
+        ensure!(rejected["result"]["structuredContent"]["error"]["code"].is_string()
+            && rejected["result"]["structuredContent"]["error"]["remote_state_unknown"] == false,
+            "sibling drift reached execution: {rejected}");
+        let mut startup = support::server_command(&a.fixture.config)?;
+        let rejected = support::run(&mut startup).await?;
+        ensure!(!rejected.status.success(), "startup accepted sibling dependency drift");
+        ensure!(!dependency_marker.exists(), "drifted sibling dependency executed");
+        fs::write(&dependency, original)?;
+        a.clean()?;
+        for (id, mutation) in [(241, "missing"), (242, "outside"), (243, "unexpected")] {
+            let original = fs::read(&dependency)?;
+            let unexpected = bundle.parent().context("reviewed search root")?.join("unexpected.yml");
+            match mutation {
+                "missing" => fs::remove_file(&dependency)?,
+                "outside" => {
+                    fs::remove_file(&dependency)?;
+                    std::os::unix::fs::symlink(
+                        roles.join("dependency/tasks/main.yml"), &dependency)?;
+                }
+                "unexpected" => fs::write(&unexpected, "[]\n")?,
+                _ => unreachable!(),
+            }
+            let rejected = server.request(id, "tools/call", json!({"name":"app_config",
+                "arguments":{"host":"plain","inputs":inputs}})).await?;
+            ensure!(rejected["result"]["structuredContent"]["error"]["code"].is_string()
+                && rejected["result"]["structuredContent"]["error"]["remote_state_unknown"] == false,
+                "{mutation} bundle content reached execution: {rejected}");
+            let mut startup = support::server_command(&a.fixture.config)?;
+            let rejected = support::run(&mut startup).await?;
+            ensure!(!rejected.status.success(), "startup accepted {mutation} bundle content");
+            ensure!(!dependency_marker.exists(), "{mutation} bundle content executed dependency");
+            if mutation == "unexpected" {
+                fs::remove_file(unexpected)?;
+            } else {
+                if mutation == "outside" {
+                    fs::remove_file(&dependency)?;
+                }
+                fs::write(&dependency, original)?;
+            }
+            a.clean()?;
+        }
         Ok(())
     }.await;
     let cleanup = a.stop(server).await;

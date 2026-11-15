@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/process_fds_list.schema.json", role_path = "/etc/estus/roles/process_fds_list", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/process_fds_list.schema.json", role_path = "/etc/estus/process_fds_list.schema.roles/process_fds_list", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "pid" = "pid", "boot_id" = "boot_id", "start_ticks" = "start_ticks", "limit" = "limit" }
 limits = { timeout_secs = 20 }

@@ -23,7 +23,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_units_list.schema.json", role_path = "/etc/estus/roles/systemd_units_list", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_units_list.schema.json", role_path = "/etc/estus/systemd_units_list.schema.roles/systemd_units_list", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "unit_pattern" = "estus-fixture*" }
 input_map = { "view" = "view", "unit_type" = "unit_type", "state" = "state" }
 limits = { timeout_secs = 60 }

@@ -582,6 +582,7 @@ impl ReviewedContent {
                 role: &reviewed.role,
                 entry_point: &reviewed.entry_point,
                 role_path: role_path.as_deref(),
+                bundle_root: reviewed.bundle_root.as_deref(),
             }),
             Self::Playbook {
                 reviewed,
@@ -639,6 +640,7 @@ struct RoleContent<'a> {
     role: &'a str,
     entry_point: &'a str,
     role_path: Option<&'a Path>,
+    bundle_root: Option<&'a Path>,
 }
 
 #[derive(Serialize)]

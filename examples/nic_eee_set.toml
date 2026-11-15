@@ -29,7 +29,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read","runtime_write","availability"]
-execution = {"kind" = "ansible_role","snapshot" = "/etc/estus/nic_eee_set.schema.json","role_path" = "/etc/estus/roles/nic_eee_set","no_log" = false}
+execution = {"kind" = "ansible_role","snapshot" = "/etc/estus/nic_eee_set.schema.json","role_path" = "/etc/estus/nic_eee_set.schema.roles/nic_eee_set","no_log" = false}
 fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "model0","mac" = "52:54:00:12:34:5a","driver" = "estus_nic_model","allow_runtime_tuning" = true}}
 input_map = {"interface" = "interface","enabled" = "enabled","tx_lpi_timer_us" = "tx_lpi_timer_us"}
 limits = {"timeout_secs" = 40}

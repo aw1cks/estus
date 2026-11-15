@@ -29,7 +29,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/network_address_add.schema.json", "role_path" = "/etc/estus/roles/network_address_add", "no_log" = false }
+execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/network_address_add.schema.json", "role_path" = "/etc/estus/network_address_add.schema.roles/network_address_add", "no_log" = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
 input_map = { "interface" = "interface", "address" = "address" }
 limits = { timeout_secs = 30 }

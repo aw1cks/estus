@@ -22,7 +22,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/storage_raid_status.schema.json", role_path = "/etc/estus/roles/storage_raid_status", no_log = false }
+execution = { kind = "ansible_role", snapshot = "/etc/estus/storage_raid_status.schema.json", role_path = "/etc/estus/storage_raid_status.schema.roles/storage_raid_status", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { device = "device" }
 limits = { timeout_secs = 30 }
