@@ -1106,7 +1106,9 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
         // Copy the exact fixture's existing identity/program policy, not a wider
         // test-only sudo policy. The fixture owns this additional config's path.
         let config = fixture.config.with_file_name("sudo-bound-actions.toml");
-        let baseline = std::fs::read_to_string(&fixture.config)?;
+        let mut baseline: toml::Table = toml::from_str(&std::fs::read_to_string(&fixture.config)?)?;
+        baseline.remove("profile");
+        let baseline = toml::to_string(&baseline)?;
         std::fs::write(
             &config,
             format!(

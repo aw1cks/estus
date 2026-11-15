@@ -759,6 +759,8 @@ fn inspect(site: &Path, root: Option<PathBuf>) -> Result<Value, &'static str> {
         .collect();
     Ok(
         json!({"scope":"named_tools","global_native_execution":config.tool_enabled(crate::config::ToolId::Exec),
+        "global_native_file_read":config.tool_enabled(crate::config::ToolId::ReadFile),
+        "global_native_file_write":config.tool_enabled(crate::config::ToolId::WriteFile),
         "runtime_verification":"not_performed","tools":tools}),
     )
 }

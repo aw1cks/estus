@@ -499,7 +499,10 @@ async fn doctor_native_selected_ssh_executable_is_shared_with_native_tools() -> 
         let config = fs::read_to_string(&fixture.config)?;
         fs::write(
             &fixture.config,
-            config.replacen("[ssh]\n", "[ssh]\nexecutable = 'selected ssh'\n", 1),
+            format!(
+                "profile = 'baseline'\n{}",
+                config.replacen("[ssh]\n", "[ssh]\nexecutable = 'selected ssh'\n", 1)
+            ),
         )?;
         let empty_path = fixture.root.path().join("empty-path");
         fs::create_dir(&empty_path)?;

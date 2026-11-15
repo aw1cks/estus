@@ -169,7 +169,7 @@ fn inspect_honors_explicit_catalog_root_without_ambient_configuration() -> Resul
         serde_json::from_slice(&std::fs::read(assets().join("catalog.json"))?)?;
     let pin = serde_json::to_string(&manifest["version"])?;
     let mut text = format!(
-        "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n",
+        "tool_presets=['linux-health']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n",
         pin
     );
     for name in ["cpu_stats", "memory_stats", "pressure_get"] {
@@ -187,34 +187,47 @@ result={{kind="command"}}
 "#
         ));
     }
-    std::fs::write(&site, &text)?;
-    let output = Command::new(test_binary())
-        .args(["catalog", "--root"])
-        .arg(assets())
-        .args(["inspect", "--site"])
-        .arg(&site)
-        .env_remove("ESTUS_CATALOG_ROOT")
-        .env_remove("ESTUS_CONFIG")
-        .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"))
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "explicit-root inspect failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(
-        report["global_native_execution"] == false,
-        "actions-only widened native exposure"
-    );
-    ensure!(
-        report["tools"]
-            .as_array()
-            .context("resolved tools")?
-            .iter()
-            .all(|v| v["enabled"] == true && v["targets"][0]["permitted"] == true),
-        "inspect did not resolve the requested preset"
-    );
+    for (profile, execution, file_read, file_write, bindings) in [
+        (None, false, false, false, true),
+        (Some("baseline"), true, true, true, true),
+        (Some("read-only-files"), false, true, false, false),
+        (Some("files-only"), false, true, true, false),
+    ] {
+        let selected = profile.map_or_else(
+            || text.clone(),
+            |profile| format!("profile='{profile}'\n{text}"),
+        );
+        std::fs::write(&site, selected)?;
+        let output = Command::new(test_binary())
+            .args(["catalog", "--root"])
+            .arg(assets())
+            .args(["inspect", "--site"])
+            .arg(&site)
+            .env_remove("ESTUS_CATALOG_ROOT")
+            .env_remove("ESTUS_CONFIG")
+            .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"))
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "explicit-root inspect failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        ensure!(
+            report["global_native_execution"] == execution
+                && report["global_native_file_read"] == file_read
+                && report["global_native_file_write"] == file_write,
+            "inspection disagrees with global exposure for {profile:?}"
+        );
+        ensure!(
+            report["tools"]
+                .as_array()
+                .context("resolved tools")?
+                .iter()
+                .all(|v| v["enabled"] == bindings && v["targets"][0]["permitted"] == bindings),
+            "inspect did not resolve named authority for {profile:?}"
+        );
+    }
     let outdated = text.replacen(&format!("\nversion={pin}\n"), "\nversion=\"1\"\n", 1);
     std::fs::write(&site, outdated)?;
     let rejected = Command::new(test_binary())

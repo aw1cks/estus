@@ -249,25 +249,11 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
         let listed = server.response(2).await?;
         let tools = listed["result"]["tools"].as_array().context("tools list")?;
-        ensure!(tools.iter().any(|tool| tool["name"] == "ssh_targets"));
-        ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
         let mut names: Vec<&str> = tools.iter()
-            .map(|tool| tool["name"].as_str().context("baseline tool name"))
+            .map(|tool| tool["name"].as_str().context("default tool name"))
             .collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == [
-            "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file", "ssh_read_output", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_run",
-            "ssh_stat", "ssh_targets", "ssh_write_file",
-        ], "omitting a profile changed the baseline inventory");
-        let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
-            .context("run absent from legacy discovery")?;
-        ensure!(run["annotations"]["readOnlyHint"] == false);
-        ensure!(run["annotations"]["destructiveHint"] == true);
-        ensure!(run["annotations"]["idempotentHint"] == false);
-        let write = tools.iter().find(|tool| tool["name"] == "ssh_write_file")
-            .context("write absent from legacy discovery")?;
-        ensure!(write["annotations"]["readOnlyHint"] == false);
-        ensure!(write["annotations"]["destructiveHint"] == true);
+        ensure!(names == ["ssh_read_output", "ssh_targets"], "omitted profile exposed native routes");
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
@@ -279,12 +265,18 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         ensure!(text == result["structuredContent"]);
         server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{"extra":true}}})).await?;
         ensure!(server.response(4).await?["error"]["code"] == -32602);
-        server.send(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ssh_sudo","arguments":{}}})).await?;
-        ensure!(server.response(5).await?.get("error").is_some());
-        server.send(json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
-            "params":{"name":"ssh_run","arguments":{"host":"DO_NOT_CONNECT.invalid","argv":["true"]}}})).await?;
-        let denied = server.response(6).await?;
-        ensure!(denied["result"]["structuredContent"]["error"]["code"] == "policy_denied");
+        for (index, tool) in [
+            "ssh_exec", "ssh_run", "ssh_sudo", "ssh_read_file", "ssh_stat",
+            "ssh_list_directory", "ssh_write_file", "ssh_mkdir", "ssh_rename",
+            "ssh_replace_file", "ssh_remove_file", "ssh_remove_directory",
+        ].into_iter().enumerate() {
+            let id = 5 + index as u64;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":tool,"arguments":profile_call_arguments(tool, "DO_NOT_CONNECT.invalid")}})).await?;
+            let denied = server.response(id).await?;
+            ensure!(denied["error"]["code"] == -32602, "{tool}: {denied}");
+            ensure!(denied.get("result").is_none());
+        }
         Ok::<_, anyhow::Error>(())
     }.await;
     let finished = server.finish().await;
@@ -336,6 +328,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
         std::fs::write(
             &path,
             indoc::indoc! {"
+            profile = 'baseline'
             [ssh]
             config_file = 'ssh-private-marker.conf'
             [limits]
@@ -742,6 +735,7 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
     std::fs::write(
         &path,
         indoc::indoc! {"
+            profile = 'baseline'
             [limits]
             max_file_bytes = 64
             [targets.allowed]
@@ -845,6 +839,7 @@ async fn accepted_sudo_keeps_validated_identifiers_on_transport_failure() -> Res
     std::fs::write(
         &path,
         indoc::indoc! {"
+            profile = 'baseline'
             [targets.allowed]
             ssh_host = 'never-connected.invalid'
             [targets.allowed.sudo]
@@ -911,6 +906,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
     std::fs::write(
         &path,
         indoc::indoc! {"
+            profile = 'baseline'
             [targets.allowed]
             ssh_host = 'encoded-command.invalid'
             [targets.allowed.sudo]
@@ -1059,9 +1055,12 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable() -> Result<()> {
     const MESSAGE_LIMIT: usize = 16_777_216;
-    let mut server = Server::start(&[])?;
+    let (mut server, _directory) = server_with_config("profile = 'baseline'\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})).await?;
+        let listed = server.response(3).await?;
+        let tools = listed["result"]["tools"].as_array().context("budget tool catalog")?;
         for (name, arguments) in [
             (
                 "ssh_exec",
@@ -1096,6 +1095,7 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
         ] {
+            ensure!(tools.iter().any(|tool| tool["name"] == name), "{name}: budget route absent");
             // Each full-size wire boundary has its own bounded deadline; adding
             // independent cases must not turn this into a suite-speed assertion.
             timeout(Duration::from_secs(20), async {
@@ -1235,7 +1235,7 @@ fn no_remote_dispatch(stderr: &[u8]) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Result<()> {
-    let (mut server, directory) = local_only_server()?;
+    let (mut server, directory) = server_with_config("profile = 'baseline'\n[targets]\n")?;
     let scenario = async {
         server.send(modern_request(json!("discover"), "server/discover", json!({}), MODERN_VERSION)).await?;
         let discovered = server.response_with_id(&json!("discover")).await?.0;
@@ -1419,7 +1419,7 @@ async fn malformed_input_is_isolated_and_following_requests_still_correlate() ->
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Result<()> {
     for incomplete_json in [false, true] {
-        let (mut server, directory) = local_only_server()?;
+        let (mut server, directory) = server_with_config("profile = 'baseline'\n[targets]\n")?;
         let scenario = async {
             server.initialize().await?;
             let mut frame = serde_json::to_vec(&json!({
@@ -1457,8 +1457,9 @@ async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Result<()> {
-    let (mut server, directory) =
-        server_with_config("[limits]\nmax_file_bytes=33554432\n[targets]\n")?;
+    let (mut server, directory) = server_with_config(
+        "profile = 'read-only-files'\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
+    )?;
     let scenario = async {
         server.initialize().await?;
         for (index, (arguments, code)) in [
@@ -1568,7 +1569,7 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
-    let (mut server, directory) = local_only_server()?;
+    let (mut server, directory) = server_with_config("profile = 'read-only-files'\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
         for (index, (arguments, code)) in [
@@ -1645,7 +1646,7 @@ async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
-    let (mut server, directory) = local_only_server()?;
+    let (mut server, directory) = server_with_config("profile = 'read-only-files'\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
         for (index, (arguments, code)) in [
@@ -1731,6 +1732,7 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
     let (mut server, directory) = server_with_config(indoc::indoc! {"
+        profile = 'files-only'
         [limits]
         max_file_bytes = 4
         [targets]
@@ -1831,6 +1833,7 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
     std::fs::write(
         &path,
         indoc::indoc! {"
+            profile = 'files-only'
             [ssh]
             config_file = 'replacement.conf'
             [limits]
@@ -1987,6 +1990,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
         std::fs::write(
             &path,
             indoc::indoc! {"
+            profile = 'files-only'
             [ssh]
             config_file = 'replacement.conf'
             [limits]
@@ -2229,6 +2233,7 @@ async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()>
     std::fs::write(
         &path,
         indoc::indoc! {"
+        profile = 'baseline'
         [targets.one]
         ssh_host = 'private-empty-policy.invalid'
         [targets.one.sudo]
@@ -2409,9 +2414,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                     "sudo" => {
                         "[targets.one]\nssh_host = 'private-backend.invalid'\nprofile = 'baseline'\n[targets.one.sudo]\nmode = 'same-account'\n"
                     }
-                    "ordinary" => {
-                        "[targets.one]\nssh_host = 'private-backend.invalid'\nprofile = 'baseline'\n"
-                    }
+                    "ordinary" => "[targets.one]\nssh_host = 'private-backend.invalid'\n",
                     _ => "[targets]\n",
                 };
                 std::fs::write(
@@ -2455,6 +2458,13 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                         names == expected_routes,
                         "{profile}/{target_kind}/{modern}: {names:?}"
                     );
+                    for tool in listed["result"]["tools"].as_array().context("profile annotations")? {
+                        if tool["name"] == "ssh_run" || tool["name"] == "ssh_write_file" {
+                            ensure!(tool["annotations"]["readOnlyHint"] == false);
+                            ensure!(tool["annotations"]["destructiveHint"] == true);
+                            ensure!(tool["annotations"]["idempotentHint"] == false);
+                        }
+                    }
                     let params = json!({"name":"ssh_targets","arguments":{}});
                     let request = if modern {
                         modern_request(json!(3), "tools/call", params, MODERN_VERSION)
@@ -2930,7 +2940,8 @@ fn binding_public_only(bytes: &[u8]) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() -> Result<()> {
-    let (mut server, directory) = named_tools_server(NAMED_TOOL_CONFIG)?;
+    let config = NAMED_TOOL_CONFIG.replacen("profile = \"actions-only\"\n", "", 1);
+    let (mut server, directory) = named_tools_server(&config)?;
     let scenario = async {
         server.initialize().await?;
         server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
@@ -2996,7 +3007,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         }
         std::fs::write(
             directory.path().join("operator.toml"),
-            NAMED_TOOL_CONFIG
+            config
                 .replace("[\"observe_account\", \"change_account\"]", "[\"disabled_account\"]")
                 .replace("review-1", "review-99"),
         )?;
@@ -4877,6 +4888,7 @@ async fn remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
         std::fs::write(
             &path,
             indoc::indoc! {"
+            profile = 'files-only'
             [ssh]
             config_file = 'replacement.conf'
             [limits]
@@ -5166,6 +5178,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
         std::fs::write(
             &config,
             indoc::indoc! {"
+                profile = 'files-only'
                 [ssh]
                 config_file = 'replacement.conf'
                 [limits]
@@ -5575,8 +5588,24 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result<()> {
     const MESSAGE_LIMIT: usize = 16_777_216;
-    let mut server = Server::start(&[])?;
+    let (mut server, _directory) = server_with_config("profile = 'files-only'\n[targets]\n")?;
     let scenario = timeout(Duration::from_secs(20), async {
+        server
+            .send(modern_request(
+                json!(3),
+                "tools/list",
+                json!({}),
+                MODERN_VERSION,
+            ))
+            .await?;
+        let listed = server.response(3).await?;
+        ensure!(
+            listed["result"]["tools"]
+                .as_array()
+                .context("replace budget tool catalog")?
+                .iter()
+                .any(|tool| tool["name"] == "ssh_replace_file")
+        );
         let mut request = modern_request(
             json!(""),
             "tools/call",

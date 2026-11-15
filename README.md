@@ -27,6 +27,14 @@ set `destination_policy = "open"` at the TOML root and omit the targets table.
 Combining open mode with any targets table is rejected. Otherwise only exact
 configured logical names are accepted; backend aliases do not grant authority.
 
+The global exposure profile now defaults to `actions-only`: reviewed named tools
+plus discovery/output retrieval, without generic native execution or file tools.
+Set `profile = "baseline"` explicitly for generic SSH commands, or select
+`read-only-files`/`files-only` for deliberate generic file access. Named-tool
+selection does not grant or restrict those separate native capabilities.
+An omitted target profile inherits the global ceiling; it does not force
+`actions-only` onto a target under an explicit global file profile.
+
 ## Base wheel
 
 Build a platform wheel and source archive with Python 3.14 and Rust 1.88 or newer:
@@ -794,8 +802,9 @@ directories. Relative site paths retain the supplied site's directory even
 when the site file is a symlink.
 
 `inspect` explains resolved named-tool exposure and per-target permission,
-including whether the global profile permits native execution. It does not
-verify runtime health or remote capabilities; use `doctor` for explicit health
+including the global native command-execution, file-read and file-write exposure
+booleans. These are global ceilings, not additional per-target grants. Inspection
+does not verify runtime health or remote capabilities; use `doctor` for explicit health
 checks. Review snapshots before using the generated configuration. Existing
 manual `schema import-role` authoring remains supported.
 
@@ -813,11 +822,12 @@ inventory changes advance that version (the NIC model additions advance 3 to 6).
 Review existing pins rather than silently adopting an upgrade. Source/runtime/
 overlay drift still invalidates snapshots; startup never refreshes approval.
 
-Existing `profile` remains the exposure ceiling, **not** a task preset:
-`actions-only` permits named tools without generic native execution;
-`read-only-files` and `files-only` exclude all named bindings. The existing
-`baseline` default is unchanged and can expose native execution even with a
-small `enabled_tools` list. Profiles are not OS/account sandboxes.
+`profile` is the exposure ceiling, **not** a task preset. Its default is now
+`actions-only`, permitting selected named tools without generic native execution
+or file access. Explicit `baseline` additionally permits generic native tools;
+`read-only-files` and `files-only` exclude all named bindings. A small
+`enabled_tools` list never narrows an explicitly selected native profile.
+Profiles are not OS/account sandboxes.
 
 Privileged/sensitive entries require separately configured `automation:catalog`
 authority where declared, never an inferred native sudo grant. Typed sensitive

@@ -6468,7 +6468,7 @@ async fn ssh_output_exact_ranges_permissions_and_local_reads() -> Result<()> {
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))?;
         let config = fixture.root.path().join("output.toml");
         fs::write(&config, format!(
-            "[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nper_stream_bytes = 64\ntotal_bytes = 128\nmax_handles = 1\n[targets.plain]\nssh_host = 'plain'\n",
+            "profile = 'baseline'\n[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nper_stream_bytes = 64\ntotal_bytes = 128\nmax_handles = 1\n[targets.plain]\nssh_host = 'plain'\n",
             serde_json::to_string(&fixture.ssh_config.to_string_lossy())?,
         ))?;
         let mut command = support::server_command(&config)?;
@@ -6563,7 +6563,7 @@ async fn ssh_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result
             else { fs::create_dir(&temporary)?; }
             let config = fixture.root.path().join(format!("output-{mode}.toml"));
             fs::write(&config, format!(
-                "[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nenabled = {}\nper_stream_bytes = 8\ntotal_bytes = 16\nmax_handles = 1\nttl_secs = {}\n[targets.plain]\nssh_host = 'plain'\n",
+                "profile = 'baseline'\n[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nenabled = {}\nper_stream_bytes = 8\ntotal_bytes = 16\nmax_handles = 1\nttl_secs = {}\n[targets.plain]\nssh_host = 'plain'\n",
                 serde_json::to_string(&fixture.ssh_config.to_string_lossy())?,
                 mode != "disabled", if mode == "expiry" { 1 } else { 300 },
             ))?;
@@ -6659,6 +6659,7 @@ async fn ssh_output_argv_named_native_and_remote_script() -> Result<()> {
         let printf = binding_program("printf")?;
         let config = fixture.root.path().join("output-bindings.toml");
         fs::write(&config, formatdoc! {r#"
+            profile = "baseline"
             enabled_tools = ["retained_native", "retained_script"]
             [ssh]
             config_file = {ssh_config}

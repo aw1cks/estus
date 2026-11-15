@@ -302,6 +302,17 @@ async fn native_startup_ignores_absent_bad_and_disabled_runtime_references() -> 
     let mut baseline = Server::start(missing.command()?)?;
     let expected = baseline.catalog().await?;
     baseline.stop().await?;
+    let mut names: Vec<_> = expected["tools"]
+        .as_array()
+        .context("default tool list")?
+        .iter()
+        .map(|tool| tool["name"].as_str().context("tool name"))
+        .collect::<Result<_>>()?;
+    names.sort_unstable();
+    ensure!(
+        names == ["ssh_read_output", "ssh_targets"],
+        "omitted profile exposed native authority: {names:?}"
+    );
     for reference in [
         "relative-private-invalid",
         "/AUTOMATION_PRIVATE_SENTINEL/no-runtime",

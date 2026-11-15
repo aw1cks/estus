@@ -208,7 +208,7 @@ pub(crate) struct Config {
     automation: Automation,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Document {
     profile: Profile,
@@ -224,6 +224,28 @@ struct Document {
     catalog: CatalogSettings,
     controller: Controller,
     automation: Automation,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            // Target profile omission still uses Profile::default (Baseline),
+            // which imposes no additional restriction on this global ceiling.
+            profile: Profile::ActionsOnly,
+            destination_policy: TargetMode::default(),
+            ssh: Ssh::default(),
+            limits: Limits::default(),
+            output: crate::output::Limits::default(),
+            targets: None,
+            tools: BTreeMap::new(),
+            enabled_tools: Vec::new(),
+            tool_presets: Vec::new(),
+            disabled_tools: Vec::new(),
+            catalog: CatalogSettings::default(),
+            controller: Controller::default(),
+            automation: Automation::default(),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -2647,7 +2669,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
             }
         }
         // The operator-only restriction must not close native open-host mode.
-        let open = load_text("destination_policy='open'", &[]).unwrap();
+        let open = load_text("profile='baseline'\ndestination_policy='open'", &[]).unwrap();
         assert_eq!(
             open.resolve("user@host", ToolId::Exec).unwrap().destination,
             "user@host",
@@ -3114,7 +3136,7 @@ result = { kind = "command" }
     #[test]
     fn discovery_intersects_target_policy_with_enabled_catalog() {
         let config = load_text(
-            "[targets.one]\nssh_host='private'\n[targets.one.sudo]\nmode='same-account'",
+            "profile='baseline'\n[targets.one]\nssh_host='private'\n[targets.one.sudo]\nmode='same-account'",
             &[],
         )
         .unwrap();
@@ -3136,7 +3158,7 @@ result = { kind = "command" }
     #[test]
     fn empty_program_policy_keeps_global_sudo_but_excludes_target_permission() {
         let config = load_text(
-            "[targets.one]\nssh_host='private'\n[targets.one.sudo]\n\
+            "profile='baseline'\n[targets.one]\nssh_host='private'\n[targets.one.sudo]\n\
              mode='same-account'\nprograms=[]",
             &[],
         )
@@ -3151,8 +3173,8 @@ result = { kind = "command" }
     }
 
     #[test]
-    fn omitted_and_explicit_baseline_preserve_publication_and_identity_policy() {
-        for root in ["", "profile='baseline'\n"] {
+    fn omitted_profile_closes_generic_authority_and_explicit_baseline_preserves_it() {
+        for (root, native_allowed) in [("", false), ("profile='baseline'\n", true)] {
             let config = load_text(
                 &format!(
                     "{root}[targets.one]\nssh_host='ordinary'\n\
@@ -3164,7 +3186,27 @@ result = { kind = "command" }
             .unwrap();
             let mut tools = catalog();
             tools.retain(|id| config.tool_enabled(builtin(id)));
-            assert_eq!(tools.entries.len(), 8);
+            assert_eq!(tools.entries.len(), if native_allowed { 8 } else { 1 });
+            if !native_allowed {
+                for entry in catalog().entries {
+                    if builtin(entry.id) != ToolId::Targets {
+                        assert_eq!(
+                            config.resolve("one", builtin(entry.id)).err().unwrap().code,
+                            "policy_denied"
+                        );
+                    }
+                }
+                assert!(
+                    config
+                        .resolve_sudo("one", "service", "/usr/bin/id")
+                        .is_err()
+                );
+                assert_eq!(
+                    serde_json::to_value(config.targets(&tools)).unwrap()["targets"][0]["permitted_operations"],
+                    serde_json::json!([])
+                );
+                continue;
+            }
             for entry in &tools.entries {
                 if !matches!(builtin(entry.id), ToolId::Targets | ToolId::Sudo) {
                     let resolved = config.resolve("one", builtin(entry.id)).unwrap();
@@ -3313,7 +3355,7 @@ result = { kind = "command" }
     #[test]
     fn restrictive_targets_do_not_hide_baseline_routes_or_authorize_sudo() {
         let config = load_text(
-            "[targets.reader]\nssh_host='private-reader'\nprofile='read-only-files'\n\
+            "profile='baseline'\n[targets.reader]\nssh_host='private-reader'\nprofile='read-only-files'\n\
              [targets.reader.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n\
              [targets.files]\nssh_host='private-files'\nprofile='files-only'\n\
              [targets.files.sudo]\nmode='same-account'\n\
@@ -3379,7 +3421,7 @@ result = { kind = "command" }
         assert!(empty.tool_enabled(ToolId::WriteFile));
         assert!(empty.tool_enabled(ToolId::Targets));
         assert!(empty.resolve("anything", ToolId::ReadFile).is_err());
-        let baseline_empty = load_text("[targets]", &[]).unwrap();
+        let baseline_empty = load_text("profile='baseline'\n[targets]", &[]).unwrap();
         assert!(baseline_empty.tool_enabled(ToolId::Exec));
         assert!(baseline_empty.tool_enabled(ToolId::WriteFile));
         assert!(!baseline_empty.tool_enabled(ToolId::Sudo));
@@ -3530,7 +3572,7 @@ result={{kind="controller_command"}}
                 "{source}"
             );
         }
-        let open = load_text("destination_policy='open'", &[]).unwrap();
+        let open = load_text("profile='baseline'\ndestination_policy='open'", &[]).unwrap();
         assert!(open.resolve("user@example", ToolId::Exec).is_ok());
         let discovery = serde_json::to_value(open.targets(&catalog())).unwrap();
         assert_eq!(discovery["mode"], "open");
@@ -3548,6 +3590,7 @@ result={{kind="controller_command"}}
     fn discovery_sorts_supplied_names_and_targets_without_exposing_aliases() {
         let config = load_text(
             r#"
+profile = "baseline"
 [targets.zebra]
 ssh_host = "ordinary-secret"
 [targets.zebra.sudo]
@@ -3706,6 +3749,7 @@ mode = "same-account"
     fn metadata_is_advisory_and_empty_program_allowlists_do_not_advertise_sudo() {
         let config = load_text(
             r#"
+profile = "baseline"
 [targets.disabled]
 ssh_host='private-ordinary'
 description='sudo is available'
@@ -4356,7 +4400,11 @@ programs=['/private/program']
 
     #[test]
     fn configured_dispatch_never_accepts_aliases_and_open_dispatch_is_validated() {
-        let config = load_text("[targets.logical]\nssh_host='ordinary-alias'", &[]).unwrap();
+        let config = load_text(
+            "profile='baseline'\n[targets.logical]\nssh_host='ordinary-alias'",
+            &[],
+        )
+        .unwrap();
         let resolved = config.resolve("logical", ToolId::Exec).unwrap();
         assert_eq!(
             (resolved.name, resolved.destination, resolved.role),
@@ -4373,7 +4421,7 @@ programs=['/private/program']
             empty.resolve("anything", ToolId::Exec).err().unwrap().code,
             "policy_denied"
         );
-        let open = load_text("destination_policy='open'", &[]).unwrap();
+        let open = load_text("profile='baseline'\ndestination_policy='open'", &[]).unwrap();
         let resolved = open.resolve("user@example", ToolId::Exec).unwrap();
         assert_eq!(
             (resolved.name, resolved.destination),
@@ -4399,6 +4447,7 @@ programs=['/private/program']
     fn sudo_dispatch_uses_exact_policy_and_the_configured_role() {
         let config = load_text(
             r#"
+profile = "baseline"
 [targets.same]
 ssh_host = "ordinary"
 [targets.same.sudo]

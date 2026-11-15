@@ -599,6 +599,8 @@ impl Fixture {
     pub fn write_server_config(&self, path: &Path, ssh_config: &Path) -> Result<()> {
         let ssh_path = serde_json::to_string(&ssh_config.to_string_lossy())?;
         let mut config = formatdoc! {"
+            profile = 'baseline'
+
             [ssh]
             config_file = {ssh_path}
 

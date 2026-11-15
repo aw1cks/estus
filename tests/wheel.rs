@@ -414,18 +414,35 @@ async fn installed_wheel_channels() -> Result<()> {
         };
         let listed = checked(launch(false).args(["catalog", "list", "--json"])).await?;
         let listing: Value = serde_json::from_slice(&listed.stdout)?;
-        ensure!(listing["schema"] == 1 && listing["tools"].is_array(),
-            "{channel} invalid catalog listing: {listing}");
+        ensure!(
+            listing["schema"] == 1 && listing["tools"].is_array(),
+            "{channel} invalid catalog listing: {listing}"
+        );
         let export = installed.root.path().join(format!("catalog-{channel}"));
-        checked(launch(false).args(["catalog", "export", "--preset", "linux-health", "--output"]).arg(&export)).await?;
+        checked(
+            launch(false)
+                .args(["catalog", "export", "--preset", "linux-health", "--output"])
+                .arg(&export),
+        )
+        .await?;
         let definitions: toml::Table = fs::read_to_string(export.join("tools.toml"))?.parse()?;
-        ensure!(definitions["tools"].as_table().is_some_and(|tools| tools.len() == 3),
-            "{channel} health export is incomplete");
+        ensure!(
+            definitions["tools"]
+                .as_table()
+                .is_some_and(|tools| tools.len() == 3),
+            "{channel} health export is incomplete"
+        );
         for name in ["cpu_stats", "memory_stats", "pressure_get"] {
-            ensure!(export.join(format!("roles/{name}/tasks/main.yml")).is_file()
-                && export.join(format!("roles/{name}/files/collector.py")).is_file()
-                && export.join(format!("overlays/{name}.json")).is_file(),
-                "{channel} health export is missing production assets for {name}");
+            ensure!(
+                export
+                    .join(format!("roles/{name}/tasks/main.yml"))
+                    .is_file()
+                    && export
+                        .join(format!("roles/{name}/files/collector.py"))
+                        .is_file()
+                    && export.join(format!("overlays/{name}.json")).is_file(),
+                "{channel} health export is missing production assets for {name}"
+            );
         }
         for signal in [None, Some(Signal::SIGINT), Some(Signal::SIGTERM)] {
             let mut command = launch(false);
@@ -440,6 +457,17 @@ async fn installed_wheel_channels() -> Result<()> {
                 .with_context(|| format!("{channel} {signal:?} shutdown"));
             let observed = observed?;
             stopped?;
+            let mut names: Vec<_> = observed
+                .as_array()
+                .context("default tool list")?
+                .iter()
+                .map(|tool| tool["name"].as_str().context("tool name"))
+                .collect::<Result<_>>()?;
+            names.sort_unstable();
+            ensure!(
+                names == ["ssh_read_output", "ssh_targets"],
+                "{channel} omitted profile exposed native authority: {names:?}"
+            );
             if let Some(expected) = &expected {
                 ensure!(&observed == expected, "channel catalog diverged");
             } else {
@@ -608,36 +636,62 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     );
     let mut seen = std::collections::BTreeSet::new();
     for member in listing.lines() {
-        ensure!(!member.starts_with('/') && !member.contains('\\')
-            && !member.split('/').any(|part| part == ".." || part == ".")
-            && seen.insert(member), "unsafe or duplicate wheel member: {member}");
+        ensure!(
+            !member.starts_with('/')
+                && !member.contains('\\')
+                && !member.split('/').any(|part| part == ".." || part == ".")
+                && seen.insert(member),
+            "unsafe or duplicate wheel member: {member}"
+        );
     }
-    checked(command(&unzip).arg("-q").arg(&wheel).arg("estus/_catalog/*")
-        .arg("-d").arg(root.path())).await?;
+    checked(
+        command(&unzip)
+            .arg("-q")
+            .arg(&wheel)
+            .arg("estus/_catalog/*")
+            .arg("-d")
+            .arg(root.path()),
+    )
+    .await?;
     let assets = workspace.join("estus/_catalog");
     let catalog = catalog_assets::Catalog::load(Some(&assets)).map_err(anyhow::Error::msg)?;
     for name in catalog.manifest().tools.keys() {
         catalog.definition(name).map_err(anyhow::Error::msg)?;
-        catalog.copy_role(name, &workspace.join(format!("role-{name}")))
+        catalog
+            .copy_role(name, &workspace.join(format!("role-{name}")))
             .map_err(anyhow::Error::msg)?;
     }
-    for member in listing.lines().filter_map(|member| member.strip_prefix("estus/_catalog/")) {
-        if member.is_empty() || member.ends_with('/') { continue; }
+    for member in listing
+        .lines()
+        .filter_map(|member| member.strip_prefix("estus/_catalog/"))
+    {
+        if member.is_empty() || member.ends_with('/') {
+            continue;
+        }
         let parts: Vec<_> = member.split('/').collect();
         let permitted = match parts.as_slice() {
             ["catalog.json"] => true,
-            [definition] => definition.strip_suffix(".toml")
+            [definition] => definition
+                .strip_suffix(".toml")
                 .is_some_and(|name| catalog.manifest().tools.contains_key(name)),
             ["roles", name, directory, rest @ ..] => {
                 catalog.manifest().tools.contains_key(*name)
-                    && matches!(*directory, "tasks" | "meta" | "files" | "defaults" | "vars" | "handlers")
+                    && matches!(
+                        *directory,
+                        "tasks" | "meta" | "files" | "defaults" | "vars" | "handlers"
+                    )
                     && !rest.is_empty()
-                    && Path::new(member).extension().and_then(|ext| ext.to_str())
+                    && Path::new(member)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
                         .is_some_and(|ext| matches!(ext, "yml" | "yaml" | "py" | "json" | "toml"))
             }
             _ => false,
         };
-        ensure!(permitted && !member.contains("__pycache__"), "unexpected wheel catalog asset: {member}");
+        ensure!(
+            permitted && !member.contains("__pycache__"),
+            "unexpected wheel catalog asset: {member}"
+        );
     }
     let mut metadata_members = listing.lines().filter(|line| {
         line.strip_suffix("/WHEEL").is_some_and(|parent| {
