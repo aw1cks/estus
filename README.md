@@ -20,6 +20,13 @@ Move the setting to `[ssh] executable = "/path/to/ssh"` (preserving any existing
 `config_file` in that table), or use the shared `ESTUS_SSH` environment variable.
 The selection now applies to native SSH, doctor and automation alike.
 
+Destination authority is closed by default: no configuration, an omitted targets
+table and an empty `[targets]` table all authorize no remote destination.
+Configurations that deliberately accept caller-selected SSH destinations must
+set `destination_policy = "open"` at the TOML root and omit the targets table.
+Combining open mode with any targets table is rejected. Otherwise only exact
+configured logical names are accepted; backend aliases do not grant authority.
+
 ## Base wheel
 
 Build a platform wheel and source archive with Python 3.14 and Rust 1.88 or newer:

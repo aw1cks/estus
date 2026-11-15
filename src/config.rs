@@ -212,6 +212,7 @@ pub(crate) struct Config {
 #[serde(default, deny_unknown_fields)]
 struct Document {
     profile: Profile,
+    destination_policy: TargetMode,
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
@@ -651,10 +652,11 @@ struct DiscoveryLimits {
     max_response_bytes: usize,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum TargetMode {
     Open,
+    #[default]
     Configured,
 }
 
@@ -796,6 +798,21 @@ impl Config {
         } else {
             (Document::default(), cwd.to_path_buf())
         };
+
+        // Omission never grants destination authority. None is the resolved
+        // representation of explicit open mode only, not a document default.
+        match document.destination_policy {
+            TargetMode::Configured => {
+                document.targets.get_or_insert_with(BTreeMap::new);
+            }
+            TargetMode::Open if document.targets.is_some() => {
+                return Err(invalid(
+                    "destination_policy",
+                    "open mode must not include a targets table",
+                ));
+            }
+            TargetMode::Open => {}
+        }
 
         if let Some(root) = catalog_root {
             document.catalog.root = Some(root);
@@ -1901,6 +1918,7 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
         "config",
         &[
             "profile",
+            "destination_policy",
             "ssh",
             "limits",
             "targets",
@@ -1928,6 +1946,11 @@ fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     }
     if let Some(value) = root.get("profile") {
         validate_profile(value, "profile")?;
+    }
+    if let Some(value) = root.get("destination_policy")
+        && !matches!(value.as_str(), Some("configured" | "open"))
+    {
+        return Err(invalid("destination_policy", "must be configured or open"));
     }
     if let Some(value) = root.get("output") {
         let output = table(
@@ -2624,7 +2647,7 @@ input_schema={{type='object',additionalProperties=false,required=[],properties={
             }
         }
         // The operator-only restriction must not close native open-host mode.
-        let open = load_text("", &[]).unwrap();
+        let open = load_text("destination_policy='open'", &[]).unwrap();
         assert_eq!(
             open.resolve("user@host", ToolId::Exec).unwrap().destination,
             "user@host",
@@ -3327,7 +3350,7 @@ result = { kind = "command" }
 
     #[test]
     fn profile_policy_preserves_open_validation_closed_targets_and_resolver_boundaries() {
-        let open = load_text("profile='read-only-files'", &[]).unwrap();
+        let open = load_text("destination_policy='open'\nprofile='read-only-files'", &[]).unwrap();
         let resolved = open.resolve("user@example", ToolId::ReadFile).unwrap();
         assert_eq!(resolved.destination, "user@example");
         assert_eq!(resolved.role, IdentityRole::Ordinary);
@@ -3491,15 +3514,34 @@ result={{kind="controller_command"}}
     }
 
     #[test]
-    fn missing_and_present_empty_targets_are_distinct() {
-        let open = load_text("", &[]).unwrap();
-        let open = serde_json::to_value(open.targets(&catalog())).unwrap();
-        assert_eq!(open["mode"], "open");
-        assert_eq!(open["targets"], serde_json::json!([]));
-        let empty = load_text("[targets]", &[]).unwrap();
-        let empty = serde_json::to_value(empty.targets(&catalog())).unwrap();
-        assert_eq!(empty["mode"], "configured");
-        assert_eq!(empty["targets"], serde_json::json!([]));
+    fn missing_and_empty_targets_are_closed_and_open_mode_is_explicit() {
+        for source in ["", "[targets]", "destination_policy='configured'"] {
+            let config = load_text(source, &[]).unwrap();
+            let discovery = serde_json::to_value(config.targets(&catalog())).unwrap();
+            assert_eq!(discovery["mode"], "configured", "{source}");
+            assert_eq!(discovery["targets"], serde_json::json!([]), "{source}");
+            assert_eq!(
+                config
+                    .resolve("user@example", ToolId::Exec)
+                    .err()
+                    .unwrap()
+                    .code,
+                "policy_denied",
+                "{source}"
+            );
+        }
+        let open = load_text("destination_policy='open'", &[]).unwrap();
+        assert!(open.resolve("user@example", ToolId::Exec).is_ok());
+        let discovery = serde_json::to_value(open.targets(&catalog())).unwrap();
+        assert_eq!(discovery["mode"], "open");
+        for source in [
+            "destination_policy='open'\n[targets]",
+            "destination_policy='open'\n[targets.one]\nssh_host='one'",
+            "destination_policy='unknown'",
+            "destination_policy=true",
+        ] {
+            assert!(load_text(source, &[]).is_err(), "{source}");
+        }
     }
 
     #[test]
@@ -4293,7 +4335,7 @@ programs=['/private/program']
         )
         .unwrap();
         let config = Config::load_with(cli(), dir.path(), |_| None).unwrap();
-        assert!(config.targets.is_none());
+        assert!(config.targets.as_ref().is_some_and(BTreeMap::is_empty));
     }
 
     #[cfg(unix)]
@@ -4331,7 +4373,7 @@ programs=['/private/program']
             empty.resolve("anything", ToolId::Exec).err().unwrap().code,
             "policy_denied"
         );
-        let open = load_text("", &[]).unwrap();
+        let open = load_text("destination_policy='open'", &[]).unwrap();
         let resolved = open.resolve("user@example", ToolId::Exec).unwrap();
         assert_eq!(
             (resolved.name, resolved.destination),

@@ -271,7 +271,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
-        ensure!(discovery_data(result, "open")?["targets"] == json!([]));
+        ensure!(discovery_data(result, "configured")?["targets"] == json!([]));
         ensure!(result["isError"] != true);
         let content = result["content"].as_array().context("text compatibility content")?;
         ensure!(content.len() == 1);
@@ -281,11 +281,16 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         ensure!(server.response(4).await?["error"]["code"] == -32602);
         server.send(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ssh_sudo","arguments":{}}})).await?;
         ensure!(server.response(5).await?.get("error").is_some());
+        server.send(json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+            "params":{"name":"ssh_run","arguments":{"host":"DO_NOT_CONNECT.invalid","argv":["true"]}}})).await?;
+        let denied = server.response(6).await?;
+        ensure!(denied["result"]["structuredContent"]["error"]["code"] == "policy_denied");
         Ok::<_, anyhow::Error>(())
     }.await;
     let finished = server.finish().await;
     scenario?;
-    let (status, _) = finished?;
+    let (status, stderr) = finished?;
+    no_remote_dispatch(&stderr)?;
     ensure!(status.success(), "server exit status: {status}");
     Ok(())
 }
@@ -1137,7 +1142,7 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
         let targets = server.response(2).await?;
         ensure!(targets["result"]["isError"] != true);
         ensure!(
-            discovery_data(&targets["result"], "open")?["targets"] == json!([]),
+            discovery_data(&targets["result"], "configured")?["targets"] == json!([]),
             "normal discovery failed after budget rejection"
         );
         Ok::<_, anyhow::Error>(())
@@ -5603,7 +5608,7 @@ async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result
             ))
             .await?;
         let healthy = server.response(2).await?;
-        ensure!(discovery_data(&healthy["result"], "open")?["targets"] == json!([]));
+        ensure!(discovery_data(&healthy["result"], "configured")?["targets"] == json!([]));
         Ok::<_, anyhow::Error>(())
     })
     .await
