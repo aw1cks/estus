@@ -180,16 +180,71 @@ pub(crate) struct DoctorArgs {
 
 // Only fixed schema paths and fixed reasons enter diagnostics. In particular, neither
 // TOML's error Display/source nor unknown field/target names are safe to render.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, serde::Serialize)]
 #[error("{field}: {reason}")]
 pub(crate) struct ConfigError {
+    #[serde(rename = "schema_path")]
     field: &'static str,
+    #[serde(rename = "message")]
     reason: &'static str,
+    code: &'static str,
+    phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<SourceLocation>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SourceLocation {
+    line: usize,
+    column: usize,
 }
 
 impl ConfigError {
     pub(crate) fn new(field: &'static str, reason: &'static str) -> Self {
-        Self { field, reason }
+        Self {
+            field,
+            reason,
+            code: "invalid_config",
+            phase: "config_validation",
+            location: None,
+        }
+    }
+
+    pub(crate) fn with_cause(mut self, code: &'static str, phase: &'static str) -> Self {
+        self.code = code;
+        self.phase = phase;
+        self
+    }
+
+    pub(crate) fn toml_syntax(text: &str, error: &toml::de::Error) -> Self {
+        let location = error
+            .span()
+            .and_then(|span| text.get(..span.start))
+            .map(|prefix| SourceLocation {
+                line: prefix.bytes().filter(|byte| *byte == b'\n').count() + 1,
+                column: prefix
+                    .rsplit('\n')
+                    .next()
+                    .map_or(1, |line| line.chars().count() + 1),
+            });
+        Self {
+            location,
+            ..Self::new("config", "invalid TOML syntax or duplicate key")
+                .with_cause("invalid_toml", "config_parse")
+        }
+    }
+
+    pub(crate) fn record(&self) -> impl serde::Serialize + '_ {
+        #[derive(serde::Serialize)]
+        struct Record<'a> {
+            event: &'static str,
+            #[serde(flatten)]
+            diagnostic: &'a ConfigError,
+        }
+        Record {
+            event: "error",
+            diagnostic: self,
+        }
     }
 }
 
@@ -816,8 +871,8 @@ impl Config {
             let mut text = String::new();
             file.read_to_string(&mut text)
                 .map_err(|_| invalid("config", "cannot read explicitly selected TOML file"))?;
-            let value: toml::Value = toml::from_str(&text)
-                .map_err(|_| invalid("config", "invalid TOML syntax or duplicate key"))?;
+            let value: toml::Value =
+                toml::from_str(&text).map_err(|error| ConfigError::toml_syntax(&text, &error))?;
             validate_schema(&value)?;
             let document = value
                 .try_into::<Document>()

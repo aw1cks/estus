@@ -60,14 +60,22 @@ fn main() -> ExitCode {
     let Ok(_diagnostics) = audit::start() else {
         return ExitCode::FAILURE;
     };
-    let mut matches = config::Cli::command().get_matches();
+    let mut matches = match config::Cli::command()
+        .mut_args(|argument| argument.hide_env_values(true))
+        .try_get_matches()
+    {
+        Ok(matches) => matches,
+        Err(error) => return cli_error(error),
+    };
     let explicit_config =
         matches.value_source("config") == Some(clap::parser::ValueSource::CommandLine);
     let explicit_ssh = ["ssh", "ssh_config"]
         .into_iter()
         .any(|name| matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine));
-    let mut cli =
-        config::Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit());
+    let mut cli = match config::Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(error) => return cli_error(error),
+    };
     drop(matches);
     let command = match cli.command.take() {
         Some(config::CliCommand::Catalog(args)) => {
@@ -198,33 +206,40 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
     };
     let activated = match activated {
         Ok(activated) if !shutdown.is_cancelled() => activated,
-        _ => return fail("automation_runtime_unavailable"),
+        Ok(_) => return fail_phase("cancelled", "activation", "automation"),
+        Err(error) => return invalid_config(&error),
     };
     if config.automation_required() && !activated {
         let shutdown = CancellationToken::new();
         let duration = match config.timeout(None) {
             Ok(duration) => duration,
-            Err(_) => return fail("automation_runtime_unavailable"),
-        };
-        let Some(deadline) = tokio::time::Instant::now().checked_add(duration) else {
-            return fail("automation_runtime_unavailable");
-        };
-        let verification = async {
-            match config.automation_runtime() {
-                Ok(reference) => {
-                    automation::check(
-                        reference,
-                        automation::RuntimeContext {
-                            deadline,
-                            ct: &shutdown,
-                            shutdown: &shutdown,
-                        },
-                    )
-                    .await
-                }
-                Err(_) => automation::RuntimeCheck::failed("runtime_unavailable"),
+            Err(error) => {
+                return fail_phase(error.code, "runtime_verification", "limits.timeout_secs");
             }
         };
+        let Some(deadline) = tokio::time::Instant::now().checked_add(duration) else {
+            return fail_phase(
+                "invalid_timeout",
+                "runtime_verification",
+                "limits.timeout_secs",
+            );
+        };
+        let reference = match config.automation_runtime() {
+            Ok(reference) => reference,
+            Err(error) => {
+                return invalid_config(
+                    &error.with_cause("runtime_unavailable", "runtime_selection"),
+                );
+            }
+        };
+        let verification = automation::check(
+            reference,
+            automation::RuntimeContext {
+                deadline,
+                ct: &shutdown,
+                shutdown: &shutdown,
+            },
+        );
         tokio::pin!(verification);
         let health = tokio::select! {
             health = &mut verification => health,
@@ -238,7 +253,11 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
             },
         };
         if !health.is_passed() {
-            return fail("automation_runtime_unavailable");
+            return fail_phase(
+                health.error_code.unwrap_or("runtime_unavailable"),
+                "runtime_verification",
+                "automation.runtime",
+            );
         }
     }
     let application = match server::Estus::new(config) {
@@ -251,11 +270,7 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
 }
 
 fn invalid_config(error: &config::ConfigError) -> ExitCode {
-    audit::emit(&serde_json::json!({
-        "event": "error",
-        "code": "invalid_config",
-        "message": error.to_string(),
-    }));
+    audit::emit(&error.record());
     ExitCode::FAILURE
 }
 
@@ -331,6 +346,31 @@ impl AsyncRead for EofStdin {
         }
         result
     }
+}
+
+fn cli_error(error: clap::Error) -> ExitCode {
+    if matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    ) {
+        return if error.print().is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        };
+    }
+    audit::emit(&serde_json::json!({
+        "event":"error", "code":"invalid_cli_arguments",
+        "phase":"cli_parse", "schema_path":"cli",
+    }));
+    ExitCode::from(2)
+}
+
+fn fail_phase(code: &'static str, phase: &'static str, schema_path: &'static str) -> ExitCode {
+    audit::emit(&serde_json::json!({
+        "event":"error", "code":code, "phase":phase, "schema_path":schema_path,
+    }));
+    ExitCode::FAILURE
 }
 
 fn fail(code: &str) -> ExitCode {

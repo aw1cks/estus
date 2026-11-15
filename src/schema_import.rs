@@ -1,4 +1,7 @@
 //! Explicit, offline authoring commands. Importing never registers or executes a tool.
+//! Failed CLI reports retain a fixed cause code and the last entered authoring phase;
+//! successful reports omit diagnostic fields. File parsing is `schema_preparation`,
+//! distinct from semantic binding/input validation, and never renders source errors.
 use std::fs::{OpenOptions, Permissions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -130,6 +133,8 @@ pub(crate) struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     binding_validated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_validated: Option<bool>,
@@ -140,22 +145,28 @@ impl Report {
         Self {
             ok: true,
             error_code: None,
+            phase: None,
             binding_validated: Some(binding),
             input_validated: Some(input),
         }
     }
 
-    fn failed(code: &'static str) -> Self {
+    pub(crate) fn failed(code: &'static str, phase: &'static str) -> Self {
         Self {
             ok: false,
             error_code: Some(code),
+            phase: Some(phase),
             binding_validated: None,
             input_validated: None,
         }
     }
 
+    pub(crate) fn failure(&self) -> Option<(&'static str, &'static str)> {
+        self.error_code.zip(self.phase)
+    }
+
     pub(crate) async fn publish(self) -> u8 {
-        // Only fixed keys, booleans and fixed error codes enter this report.
+        // Only fixed keys, booleans, error codes and phases enter this report.
         let Ok(mut bytes) = serde_json::to_vec(&self) else {
             return 1;
         };
@@ -169,7 +180,7 @@ impl Report {
             Ok(Ok(())) => u8::from(!self.ok),
             _ => {
                 crate::audit::emit(
-                    &serde_json::json!({"event":"error","code":"schema_output_failed"}),
+                    &serde_json::json!({"event":"error","code":"schema_output_failed","phase":"schema_output"}),
                 );
                 1
             }
@@ -303,9 +314,10 @@ pub(crate) fn stopped(
 }
 
 pub(crate) async fn run(config: Config, args: SchemaArgs, shutdown: CancellationToken) -> Report {
-    match perform(config, args, shutdown).await {
+    let mut phase = "schema_validation";
+    match perform(config, args, shutdown, &mut phase).await {
         Ok(report) => report,
-        Err(code) => Report::failed(code),
+        Err(code) => Report::failed(code, phase),
     }
 }
 
@@ -313,43 +325,44 @@ async fn perform(
     config: Config,
     args: SchemaArgs,
     shutdown: CancellationToken,
+    phase: &mut &'static str,
 ) -> Result<Report, &'static str> {
     let command = match args.command {
         SchemaCommand::ImportRole(role) => {
-            return crate::role_import::perform(
+            return Ok(crate::role_import::perform(
                 config,
                 crate::role_import::Command::Import(role),
                 args.timeout_secs,
                 shutdown,
             )
-            .await;
+            .await);
         }
         SchemaCommand::VerifyRole(role) => {
-            return crate::role_import::perform(
+            return Ok(crate::role_import::perform(
                 config,
                 crate::role_import::Command::Verify(role),
                 args.timeout_secs,
                 shutdown,
             )
-            .await;
+            .await);
         }
         SchemaCommand::ImportPlaybook(playbook) => {
-            return crate::playbook_import::perform(
+            return Ok(crate::playbook_import::perform(
                 config,
                 crate::playbook_import::Command::Import(playbook),
                 args.timeout_secs,
                 shutdown,
             )
-            .await;
+            .await);
         }
         SchemaCommand::VerifyPlaybook(playbook) => {
-            return crate::playbook_import::perform(
+            return Ok(crate::playbook_import::perform(
                 config,
                 crate::playbook_import::Command::Verify(playbook),
                 args.timeout_secs,
                 shutdown,
             )
-            .await;
+            .await);
         }
         command => command,
     };
@@ -363,6 +376,7 @@ async fn perform(
         .automation_runtime()
         .map_err(|_| "runtime_unavailable")?;
     // Join filesystem work even when interrupted: dropping blocking I/O is not cancellation.
+    *phase = "schema_preparation";
     let command = tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
         match command {
             SchemaCommand::Import {
@@ -410,6 +424,7 @@ async fn perform(
     .map_err(|_| "schema_file_unavailable")??;
     let (module, output, previous, binding, input) = command;
     stopped(&shutdown, deadline)?;
+    *phase = "runtime_import";
     let observed = automation::import_module(
         reference,
         &module,
@@ -421,7 +436,9 @@ async fn perform(
     )
     .await?;
     stopped(&shutdown, deadline)?;
+    *phase = "schema_conversion";
     let contract = module_schema::import_document(&observed.document)?;
+    *phase = "schema_verification";
     if let Some(previous) = &previous
         && (previous.runtime != observed.identity
             || previous.collection != observed.collection
@@ -432,20 +449,25 @@ async fn perform(
     }
     let binding = binding.or_else(|| previous.and_then(|p| p.binding));
     if let Some(overlay) = &binding {
+        *phase = "binding_validation";
         let compiled = module_schema::compile_binding(&contract, overlay)?;
         if let Some(input) = &input {
+            *phase = "input_validation";
             compiled.prepare(input)?;
         }
     } else if input.is_some() {
+        *phase = "binding_validation";
         return Err("schema_binding_required");
     }
     let report = Report {
         ok: true,
         error_code: None,
+        phase: None,
         binding_validated: Some(binding.is_some()),
         input_validated: Some(input.is_some()),
     };
     if let Some(output) = output {
+        *phase = "schema_write";
         let mut snapshot = Snapshot {
             schema: 1,
             module,

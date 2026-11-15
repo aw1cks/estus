@@ -1,4 +1,6 @@
 //! Operator-only ordinary SSH/SFTP negotiation; never a model-callable capability.
+//! Only checks with a cause include a fixed phase; successful and unattempted checks
+//! without a cause keep their existing shape. Backend diagnostics remain private.
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -30,6 +32,8 @@ struct Check {
     status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'static str>,
 }
 
 impl Check {
@@ -37,18 +41,21 @@ impl Check {
         Self {
             status: Status::Passed,
             error_code: None,
+            phase: None,
         }
     }
-    fn failed(code: &'static str) -> Self {
+    fn failed(code: &'static str, phase: &'static str) -> Self {
         Self {
             status: Status::Failed,
             error_code: Some(code),
+            phase: Some(phase),
         }
     }
-    fn untested(code: Option<&'static str>) -> Self {
+    fn untested(code: Option<&'static str>, phase: &'static str) -> Self {
         Self {
             status: Status::NotTested,
             error_code: code,
+            phase: code.map(|_| phase),
         }
     }
 }
@@ -62,13 +69,23 @@ struct TargetReport {
 }
 
 #[derive(Serialize)]
+struct RuntimeReport {
+    #[serde(flatten)]
+    check: RuntimeCheck,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'static str>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct Report {
     ok: bool,
     targets: Vec<TargetReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    runtime: Option<RuntimeCheck>,
+    runtime: Option<RuntimeReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'static str>,
     #[serde(skip)]
     exit: u8,
 }
@@ -80,6 +97,7 @@ impl Report {
             targets: Vec::new(),
             runtime: None,
             error_code: Some(code),
+            phase: Some("doctor_validation"),
             exit: 2,
         }
     }
@@ -108,7 +126,7 @@ impl Report {
         } else {
             encoded.0.clear();
             encoded.0.extend_from_slice(
-                b"{\"ok\":false,\"targets\":[],\"error_code\":\"diagnostic_report_limit\"}\n",
+                b"{\"ok\":false,\"targets\":[],\"error_code\":\"diagnostic_report_limit\",\"phase\":\"doctor_output\"}\n",
             );
             1
         };
@@ -127,7 +145,7 @@ impl Report {
             Ok(Ok(())) => exit,
             _ => {
                 crate::audit::emit(
-                    &serde_json::json!({"event":"error","code":"doctor_output_failed"}),
+                    &serde_json::json!({"event":"error","code":"doctor_output_failed","phase":"doctor_output"}),
                 );
                 1
             }
@@ -166,7 +184,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
         return Report::invalid("invalid_timeout");
     };
     let runtime = if let Some(kind) = args.runtime {
-        Some(match kind {
+        let check = match kind {
             crate::config::RuntimeKind::Ansible => {
                 if let Some(code) = stopped(&shutdown, deadline) {
                     RuntimeCheck::not_tested(code)
@@ -187,20 +205,24 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
                     }
                 }
             }
-        })
+        };
+        let phase = (!check.is_passed()).then_some("runtime_check");
+        Some(RuntimeReport { check, phase })
     } else {
         None
     };
     let mut targets = Vec::with_capacity(selected.len());
-    let mut ok = runtime.as_ref().is_none_or(RuntimeCheck::is_passed);
+    let mut ok = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.check.is_passed());
     for name in selected {
         if let Some(code) = stopped(&shutdown, deadline) {
             ok = false;
             targets.push(TargetReport {
                 target: name,
-                ssh: Check::untested(Some(code)),
-                sftp: Check::untested(Some(code)),
-                sudo: Check::untested(None),
+                ssh: Check::untested(Some(code), "ssh_connect"),
+                sftp: Check::untested(Some(code), "sftp_probe"),
+                sudo: Check::untested(None, "sudo_probe"),
             });
             continue;
         }
@@ -239,7 +261,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
                 let sftp = match outcome.reply.error {
                     Some(error) => {
                         ok = false;
-                        Check::failed(error.code)
+                        Check::failed(error.code, "sftp_probe")
                     }
                     None => Check::passed(),
                 };
@@ -247,7 +269,10 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
             }
             Err(error) => {
                 ok = false;
-                (Check::failed(error.code), Check::untested(None))
+                (
+                    Check::failed(error.code, "ssh_connect"),
+                    Check::untested(None, "sftp_probe"),
+                )
             }
         };
         pool.shutdown().await;
@@ -255,7 +280,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
             target: name,
             ssh,
             sftp,
-            sudo: Check::untested(None),
+            sudo: Check::untested(None, "sudo_probe"),
         });
     }
     Report {
@@ -263,6 +288,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
         targets,
         runtime,
         error_code: None,
+        phase: None,
         exit: if ok { 0 } else { 1 },
     }
 }
@@ -276,13 +302,14 @@ mod tests {
         let mut report = Report {
             ok: true,
             error_code: None,
+            phase: None,
             runtime: None,
             exit: 0,
             targets: vec![TargetReport {
                 target: "site-\"\\\n☃".into(),
                 ssh: Check::passed(),
                 sftp: Check::passed(),
-                sudo: Check::untested(None),
+                sudo: Check::untested(None, "sudo_probe"),
             }],
         };
         let base = serde_json::to_vec(&report).unwrap().len() + 1;
@@ -304,6 +331,7 @@ mod tests {
             value,
             serde_json::json!({
                 "ok": false, "targets": [], "error_code": "diagnostic_report_limit",
+                "phase": "doctor_output",
             })
         );
     }

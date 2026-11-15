@@ -797,9 +797,9 @@ impl Bindings {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let check_interrupted = || {
             if ct.is_cancelled() {
-                Err(invalid("cancelled"))
+                Err(invalid("cancelled").with_cause("cancelled", "activation"))
             } else if tokio::time::Instant::now() >= deadline {
-                Err(invalid("timeout"))
+                Err(invalid("timeout").with_cause("timeout", "activation"))
             } else {
                 Ok(())
             }
@@ -826,15 +826,18 @@ impl Bindings {
         let prepared = tokio::task::spawn_blocking(move || {
             let reviewed = match source {
                 AnsibleSource::Role { path } => ReviewedContent::Role {
-                    reviewed: crate::role_import::load_reviewed(&snapshot).map_err(invalid)?,
+                    reviewed: crate::role_import::load_reviewed(&snapshot)
+                        .map_err(|code| invalid(code).with_cause(code, "role_snapshot"))?,
                     role_path: path,
                 },
                 AnsibleSource::Module => ReviewedContent::Module {
-                    reviewed: crate::schema_import::load_reviewed(&snapshot).map_err(invalid)?,
+                    reviewed: crate::schema_import::load_reviewed(&snapshot)
+                        .map_err(|code| invalid(code).with_cause(code, "module_snapshot"))?,
                     source: String::new(),
                 },
                 AnsibleSource::Playbook { project_root } => ReviewedContent::Playbook {
-                    reviewed: crate::playbook_import::load_reviewed(&snapshot).map_err(invalid)?,
+                    reviewed: crate::playbook_import::load_reviewed(&snapshot)
+                        .map_err(|code| invalid(code).with_cause(code, "playbook_snapshot"))?,
                     project_root,
                 },
             };
@@ -857,13 +860,15 @@ impl Bindings {
                     crate::playbook_import::compile_binding(reviewed.contract(), &overlay)
                 }
             }
-            .map_err(invalid)?;
+            .map_err(|code| invalid(code).with_cause(code, "binding_compilation"))?;
             Ok((reviewed, compiled))
         })
         .await;
         check_interrupted()?;
-        let (mut reviewed, compiled) =
-            prepared.map_err(|_| invalid("Automation activation preparation failed"))??;
+        let (mut reviewed, compiled) = prepared.map_err(|_| {
+            invalid("Automation activation preparation failed")
+                .with_cause("activation_preparation_failed", "activation_preparation")
+        })??;
         let context = crate::automation::RuntimeContext {
             deadline,
             ct,
@@ -873,7 +878,7 @@ impl Bindings {
             ReviewedContent::Module { reviewed, source } => {
                 *source = crate::schema_import::verify_reviewed(reviewed, runtime.clone(), context)
                     .await
-                    .map_err(invalid)?;
+                    .map_err(|code| invalid(code).with_cause(code, "module_verification"))?;
             }
             ReviewedContent::Role {
                 reviewed,
@@ -886,7 +891,7 @@ impl Bindings {
                     context,
                 )
                 .await
-                .map_err(invalid)?;
+                .map_err(|code| invalid(code).with_cause(code, "role_verification"))?;
             }
             ReviewedContent::Playbook {
                 reviewed,
@@ -899,16 +904,20 @@ impl Bindings {
                     context,
                 )
                 .await
-                .map_err(invalid)?;
+                .map_err(|code| invalid(code).with_cause(code, "playbook_verification"))?;
             }
         }
         check_interrupted()?;
         let selected = tokio::task::spawn_blocking(move || {
-            crate::automation::runner_runtime(runtime, root, agent_socket).map_err(invalid)
+            crate::automation::runner_runtime(runtime, root, agent_socket)
+                .map_err(|code| invalid(code).with_cause(code, "runtime_selection"))
         })
         .await;
         check_interrupted()?;
-        let selected = selected.map_err(|_| invalid("Automation runtime preparation failed"))??;
+        let selected = selected.map_err(|_| {
+            invalid("Automation runtime preparation failed")
+                .with_cause("runtime_preparation_failed", "runtime_selection")
+        })??;
         *plan = Some(Box::new(AutomationPlan {
             reviewed,
             binding: compiled,

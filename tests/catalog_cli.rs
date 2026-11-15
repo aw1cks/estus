@@ -19,6 +19,81 @@ fn invoke(arguments: &[&std::ffi::OsStr]) -> Result<Output> {
 }
 
 #[test]
+fn site_failures_preserve_safe_causes_locations_and_output_cleanup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let exported = root.path().join("exported");
+    let output = invoke(&[
+        "export".as_ref(),
+        "--tool".as_ref(),
+        "pressure_get".as_ref(),
+        "--output".as_ref(),
+        exported.as_os_str(),
+    ])?;
+    ensure!(output.status.success());
+    let site = root.path().join("DO_NOT_REFLECT-site.toml");
+    for (index, (text, code, phase, field)) in [
+        (
+            "[ssh]\nDO_NOT_REFLECT_KEY='DO_NOT_REFLECT_VALUE'",
+            "invalid_config",
+            "config_validation",
+            "ssh",
+        ),
+        (
+            "# DO_NOT_REFLECT_SOURCE\n[ssh]\nexecutable = @",
+            "invalid_toml",
+            "config_parse",
+            "config",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        std::fs::write(&site, text)?;
+        for prepare in [false, true] {
+            let destination = root.path().join(format!("prepared-{index}"));
+            let mut args: Vec<&std::ffi::OsStr> = vec![
+                if prepare {
+                    "prepare".as_ref()
+                } else {
+                    "inspect".as_ref()
+                },
+                "--site".as_ref(),
+                site.as_os_str(),
+            ];
+            let definitions = exported.join("tools.toml");
+            if prepare {
+                args.extend([
+                    "--definitions".as_ref(),
+                    definitions.as_os_str(),
+                    "--output".as_ref(),
+                    destination.as_os_str(),
+                ]);
+            }
+            let output = invoke(&args)?;
+            ensure!(
+                output.status.code() == Some(2)
+                    && output.stdout.is_empty()
+                    && !destination.exists()
+            );
+            let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+            ensure!(
+                diagnostic["code"] == code
+                    && diagnostic["phase"] == phase
+                    && diagnostic["schema_path"] == field,
+                "catalog discarded safe cause context: {diagnostic}"
+            );
+            if code == "invalid_toml" {
+                ensure!(
+                    diagnostic["location"]["line"] == 3 && diagnostic["location"]["column"] == 14
+                );
+            }
+            ensure!(!String::from_utf8_lossy(&output.stderr).contains("DO_NOT_REFLECT"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()> {
     let output = invoke(&["list".as_ref(), "--json".as_ref()])?;
     ensure!(
@@ -469,6 +544,33 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         .context("config UTF8")?
         .into();
     std::fs::write(&valid_site, toml::to_string(&valid_document)?)?;
+    let missing_site = root.path().join("DO_NOT_REFLECT-missing-runtime.toml");
+    let mut missing_document = valid_document.clone();
+    missing_document["automation"]["runtime"] = "/DO_NOT_REFLECT_MISSING_RUNTIME".into();
+    std::fs::write(&missing_site, toml::to_string(&missing_document)?)?;
+    let failed_output = root.path().join("failed-runtime");
+    let rejected = Command::new(&binary)
+        .args(["catalog", "--root"])
+        .arg(assets())
+        .args(["prepare", "--site"])
+        .arg(&missing_site)
+        .arg("--definitions")
+        .arg(export.join("tools.toml"))
+        .arg("--output")
+        .arg(&failed_output)
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_SSH")
+        .env_remove("ESTUS_SSH_CONFIG")
+        .output()?;
+    ensure!(
+        rejected.status.code() == Some(2) && rejected.stdout.is_empty() && !failed_output.exists()
+    );
+    let diagnostic: serde_json::Value = serde_json::from_slice(&rejected.stderr)?;
+    ensure!(
+        diagnostic["code"] == "runtime_unavailable" && diagnostic["phase"] == "runtime_import",
+        "catalog swallowed the role authoring failure: {diagnostic}"
+    );
+    ensure!(!String::from_utf8_lossy(&rejected.stderr).contains("DO_NOT_REFLECT"));
     for invalid_config in [false, true] {
         let rejected_output = root.path().join(if invalid_config {
             "bad-config"

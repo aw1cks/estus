@@ -709,12 +709,29 @@ async fn discovery_metadata_exact_caps_respect_aggregate_and_response_wire_bound
 #[tokio::test]
 async fn invalid_configuration_fails_before_mcp_without_echoing_secrets() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("operator.toml");
-    for text in [
-        "[ssh]\nsecret_marker='secret_marker'",
-        "[limits]\noperation_timeout_secs='secret_marker'",
-        "[targets.secret_marker]\nssh_host='ordinary'\n[targets.secret_marker.sudo]\nmode='secret_marker'",
-        "secret_marker = [broken",
+    let path = dir.path().join("operator-secret_marker.toml");
+    for (text, code, location) in [
+        (
+            "[ssh]\nsecret_marker='secret_marker'",
+            "invalid_config",
+            None,
+        ),
+        (
+            "[limits]\noperation_timeout_secs='secret_marker'",
+            "invalid_config",
+            None,
+        ),
+        (
+            "[targets.secret_marker]\nssh_host='ordinary'\n[targets.secret_marker.sudo]\nmode='secret_marker'",
+            "invalid_config",
+            None,
+        ),
+        (
+            "[ssh]\n# secret_marker\nmax_idle_secs = @",
+            "invalid_toml",
+            Some((3, 17)),
+        ),
+        ("# secret_marker\n\"雪\" = @", "invalid_toml", Some((2, 7))),
     ] {
         std::fs::write(&path, text)?;
         let output = timeout(
@@ -722,15 +739,62 @@ async fn invalid_configuration_fails_before_mcp_without_echoing_secrets() -> Res
             command(&["--config", path.to_str().context("config path")?]).output(),
         )
         .await??;
-        ensure!(!output.status.success());
-        ensure!(
-            output.stdout.is_empty(),
-            "invalid configuration started a protocol session"
-        );
+        ensure!(output.status.code() == Some(1) && output.stdout.is_empty());
         ensure!(!String::from_utf8_lossy(&output.stderr).contains("secret_marker"));
         let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
-        ensure!(diagnostic["code"] == "invalid_config", "{diagnostic}");
+        ensure!(diagnostic["code"] == code, "{diagnostic}");
+        if let Some((line, column)) = location {
+            ensure!(
+                diagnostic["phase"] == "config_parse"
+                    && diagnostic["schema_path"] == "config"
+                    && diagnostic["location"] == json!({"line":line,"column":column}),
+                "syntax location was lost: {diagnostic}"
+            );
+        } else {
+            ensure!(diagnostic["phase"] == "config_validation");
+            if text.starts_with("[ssh]") {
+                ensure!(
+                    diagnostic["schema_path"] == "ssh",
+                    "unknown key lost its containing schema path: {diagnostic}"
+                );
+            }
+        }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_parse_errors_are_private_and_help_hides_environment_values() -> Result<()> {
+    for args in [
+        vec!["--secret_marker"],
+        vec![
+            "doctor",
+            "--runtime",
+            "ansible",
+            "--timeout-secs",
+            "secret_marker",
+        ],
+        vec!["catalog", "export", "--tool", "secret_marker"],
+    ] {
+        let output = command(&args).output().await?;
+        ensure!(output.status.code() == Some(2) && output.stdout.is_empty());
+        ensure!(!String::from_utf8_lossy(&output.stderr).contains("secret_marker"));
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(
+            diagnostic["code"] == "invalid_cli_arguments"
+                && diagnostic["phase"] == "cli_parse"
+                && diagnostic["schema_path"] == "cli"
+        );
+    }
+    let output = command(&["--help"])
+        .env("ESTUS_CONFIG", "/secret_marker/config")
+        .env("ESTUS_SSH", "/secret_marker/ssh")
+        .env("ESTUS_SSH_CONFIG", "/secret_marker/ssh-config")
+        .output()
+        .await?;
+    ensure!(output.status.success() && output.stderr.is_empty());
+    let help = std::str::from_utf8(&output.stdout)?;
+    ensure!(help.contains("--config") && !help.contains("secret_marker"));
     Ok(())
 }
 
@@ -1420,6 +1484,163 @@ async fn malformed_input_is_isolated_and_following_requests_still_correlate() ->
             .any(|bytes| bytes == b"MALFORMED_PAYLOAD_NO_ECHO")
     );
     no_remote_dispatch(&stderr)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_audit() -> Result<()>
+{
+    let (mut server, directory) = server_with_config(
+        "profile = 'baseline'\n[output]\nenabled = true\n[targets.fixture]\nssh_host = 'never-connected.invalid'\n[targets.fixture.sudo]\nmode = 'same-account'\nusers = ['root']\nprograms = ['/usr/bin/true']\n",
+    )?;
+    let cases = [
+        (
+            "ssh_targets",
+            json!({"A12_PRIVATE_UNKNOWN_KEY":"/private/A12_PRIVATE_VALUE"}),
+        ),
+        (
+            "ssh_exec",
+            json!({"host":"A12_PRIVATE_HOST","command":["A12_PRIVATE_VALUE"]}),
+        ),
+        ("ssh_exec", json!({"host":"A12_PRIVATE_HOST"})),
+        (
+            "ssh_sudo",
+            json!({
+                "host":"A12_PRIVATE_HOST","user":"A12_PRIVATE_USER",
+                "argv":["/private/A12_PRIVATE_PROGRAM",{"A12_PRIVATE_UNKNOWN_KEY":"A12_PRIVATE_VALUE"}]
+            }),
+        ),
+        (
+            "ssh_read_output",
+            json!({
+                "handle":"A12_PRIVATE_HANDLE","stream":"A12_PRIVATE_STREAM"
+            }),
+        ),
+    ];
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/list","params":{}
+            }))
+            .await?;
+        let listed = server.response(2).await?;
+        let tools = listed["result"]["tools"]
+            .as_array()
+            .context("published tools")?;
+        for (index, (name, arguments)) in cases.iter().enumerate() {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == *name)
+                .with_context(|| format!("published tool {name}"))?;
+            let validator = jsonschema::validator_for(&tool["inputSchema"])?;
+            ensure!(
+                !validator.is_valid(arguments),
+                "{name}: malformed arguments match published schema"
+            );
+            let id = 10 + index as u64;
+            server
+                .send(json!({
+                    "jsonrpc":"2.0","id":id,"method":"tools/call",
+                    "params":{"name":name,"arguments":arguments}
+                }))
+                .await?;
+            let response = server.response(id).await?;
+            ensure!(
+                response.get("result").is_none(),
+                "{name}: shape error became a tool result"
+            );
+            ensure!(
+                response["error"]
+                    == json!({
+                        "code":-32602,
+                        "message":"Arguments do not match the tool input schema",
+                        "data":{
+                            "code":"invalid_argument",
+                            "phase":"argument_shape",
+                            "schema_path":"arguments"
+                        }
+                    }),
+                "{name}: unsafe or incomplete argument diagnostic: {response}"
+            );
+            ensure!(
+                !response.to_string().contains("A12_PRIVATE"),
+                "{name}: reflected malformed input"
+            );
+        }
+        // Shape failures do not poison the session or change valid empty input.
+        let targets = tools
+            .iter()
+            .find(|tool| tool["name"] == "ssh_targets")
+            .context("targets tool")?;
+        ensure!(jsonschema::validator_for(&targets["inputSchema"])?.is_valid(&json!({})));
+        server
+            .send(json!({
+                "jsonrpc":"2.0","id":30,"method":"tools/call",
+                "params":{"name":"ssh_targets","arguments":{}}
+            }))
+            .await?;
+        let healthy = server.response(30).await?;
+        let discovered = discovery_data(&healthy["result"], "configured")?;
+        ensure!(
+            discovered["targets"][0]["name"] == "fixture"
+                && discovered["targets"]
+                    .as_array()
+                    .context("target inventory")?
+                    .len()
+                    == 1
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    let removed = directory.close();
+    scenario?;
+    let (status, stderr) = finished?;
+    removed?;
+    ensure!(status.success());
+    ensure!(
+        !std::str::from_utf8(&stderr)?.contains("A12_PRIVATE"),
+        "audit disclosed malformed arguments"
+    );
+    let mut rejected = vec![false; cases.len()];
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["event"] != "master_start",
+            "shape rejection launched SSH"
+        );
+        for (index, (name, _)) in cases.iter().enumerate() {
+            if record["request_id"] == 10 + index as u64 {
+                ensure!(!rejected[index], "duplicate shape rejection audit");
+                ensure!(
+                    record["event"] == "reject" && record["tool"] == *name,
+                    "{record}"
+                );
+                ensure!(record["error_code"] == "invalid_argument");
+                ensure!(record["remote_state_unknown"] == false);
+                ensure!(
+                    record["identity_role"]
+                        == if *name == "ssh_sudo" {
+                            "elevated"
+                        } else {
+                            "ordinary"
+                        }
+                );
+                for field in ["host", "user", "program", "binding_revision", "executor"] {
+                    ensure!(
+                        record.get(field).is_none(),
+                        "shape rejection retained {field}: {record}"
+                    );
+                }
+                rejected[index] = true;
+            }
+        }
+    }
+    ensure!(
+        rejected.into_iter().all(|seen| seen),
+        "missing shape rejection audit"
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3112,11 +3333,8 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
                 "profile"
             };
             ensure!(
-                diagnostic["message"]
-                    .as_str()
-                    .context("configuration diagnostic")?
-                    .starts_with(&format!("{field}:")),
-                "wrong profile diagnostic field: {diagnostic}"
+                diagnostic["schema_path"] == field && diagnostic["phase"] == "config_validation",
+                "wrong profile diagnostic context: {diagnostic}"
             );
         }
     }

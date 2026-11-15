@@ -182,13 +182,19 @@ fn report(output: &Output, exit: i32) -> Result<Value> {
             .as_object()
             .context("report")?
             .keys()
-            .all(|key| matches!(key.as_str(), "ok" | "targets" | "runtime" | "error_code"))
+            .all(|key| matches!(
+                key.as_str(),
+                "ok" | "targets" | "runtime" | "error_code" | "phase"
+            ))
     );
     Ok(value)
 }
 
 fn runtime_failed(value: &Value, code: &str) -> Result<()> {
-    ensure!(value["runtime"] == json!({"kind":"ansible", "status":"failed", "error_code":code}));
+    ensure!(
+        value["runtime"]
+            == json!({"kind":"ansible", "status":"failed", "error_code":code,"phase":"runtime_check"})
+    );
     Ok(())
 }
 
@@ -357,7 +363,12 @@ async fn required_missing_runtime_fails_before_mcp_but_doctor_can_report_it() ->
     let startup = output(fixture.command()?).await?;
     ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
     let error: Value = serde_json::from_slice(&startup.stderr)?;
-    ensure!(error["event"] == "error" && error["code"] == "automation_runtime_unavailable");
+    ensure!(
+        error["event"] == "error"
+            && error["code"] == "runtime_unavailable"
+            && error["phase"] == "runtime_verification"
+            && error["schema_path"] == "automation.runtime"
+    );
     fixture.private(&startup)?;
     let checked = output(fixture.doctor()?).await?;
     runtime_failed(&report(&checked, 1)?, "runtime_unavailable")?;
@@ -385,7 +396,10 @@ async fn doctor_runtime_only_and_invalid_targets_are_private_and_network_free() 
         } else {
             "invalid_target_selection"
         };
-        ensure!(report(&rejected, 2)? == json!({"ok":false,"targets":[],"error_code":expected}));
+        ensure!(
+            report(&rejected, 2)?
+                == json!({"ok":false,"targets":[],"error_code":expected,"phase":"doctor_validation"})
+        );
         fixture.private(&rejected)?;
     }
     let mut target_only = fixture.command()?;
@@ -393,7 +407,7 @@ async fn doctor_runtime_only_and_invalid_targets_are_private_and_network_free() 
     let rejected = output(target_only).await?;
     ensure!(
         report(&rejected, 2)?
-            == json!({"ok":false,"targets":[],"error_code":"invalid_target_selection"})
+            == json!({"ok":false,"targets":[],"error_code":"invalid_target_selection","phase":"doctor_validation"})
     );
     fixture.private(&rejected)
 }
@@ -865,7 +879,12 @@ async fn real_runtime_rejects_manifest_version_health_hash_and_collection_drift(
         let startup = output(required.command()?).await?;
         ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
         let error: Value = serde_json::from_slice(&startup.stderr)?;
-        ensure!(error["code"] == "automation_runtime_unavailable");
+        ensure!(
+            error["event"] == "error"
+                && error["code"] == code
+                && error["phase"] == "runtime_verification"
+                && error["schema_path"] == "automation.runtime"
+        );
         required.private(&startup)?;
     }
     ensure!(
@@ -884,6 +903,27 @@ fn schema_report(fixture: &Local, output: &Output, ok: bool) -> Result<Value> {
     );
     ensure!(output.stderr.is_empty());
     ensure!(value["ok"] == ok, "schema report: {value}");
+    if ok {
+        ensure!(value.get("phase").is_none() && value.get("error_code").is_none());
+    } else {
+        ensure!(value.as_object().context("failure object")?.len() == 3);
+        ensure!(value["error_code"].as_str().is_some_and(|code| {
+            !code.is_empty() && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        }));
+        ensure!(matches!(
+            value["phase"].as_str(),
+            Some(
+                "schema_validation"
+                    | "schema_preparation"
+                    | "runtime_import"
+                    | "schema_conversion"
+                    | "schema_verification"
+                    | "binding_validation"
+                    | "input_validation"
+                    | "schema_write"
+            )
+        ));
+    }
     Ok(value)
 }
 
@@ -898,6 +938,7 @@ async fn schema_authoring_rejects_invalid_names_and_duplicate_json_without_runti
         .arg(&destination);
     let rejected = output(command).await?;
     ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_module_name");
+    ensure!(schema_report(&fixture, &rejected, false)?["phase"] == "schema_preparation");
     ensure!(!destination.exists());
     let overlay = fixture.root.path().join("overlay.json");
     fs::write(
@@ -913,7 +954,99 @@ async fn schema_authoring_rejects_invalid_names_and_duplicate_json_without_runti
         .arg(&overlay);
     let rejected = output(command).await?;
     ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "invalid_schema_json");
+    ensure!(schema_report(&fixture, &rejected, false)?["phase"] == "schema_preparation");
     ensure!(!destination.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn schema_workflow_read_failures_retain_phase_without_private_json_or_paths() -> Result<()> {
+    let fixture = Local::new("")?;
+    let snapshot = fixture.root.path().join(format!("{SECRET}.json"));
+    for bytes in [
+        format!(r#"{{"{SECRET}":"{SECRET}","#),
+        format!(r#"{{"{SECRET}":1,"{SECRET}":2}}"#),
+    ] {
+        fs::write(&snapshot, bytes)?;
+        for workflow in ["verify", "verify-role", "verify-playbook"] {
+            let mut command = fixture.command()?;
+            command.args(["schema", workflow]).arg(&snapshot);
+            if workflow == "verify-playbook" {
+                command.arg("--project-root").arg(fixture.root.path());
+            }
+            let rejected = output(command).await?;
+            ensure!(
+                schema_report(&fixture, &rejected, false)?
+                    == json!({
+                        "ok":false, "error_code":"invalid_schema_json",
+                        "phase":"schema_preparation"
+                    })
+            );
+        }
+    }
+    ensure!(!fixture.marker.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn schema_workflow_runtime_failures_retain_safe_cause_and_phase() -> Result<()> {
+    let fixture = Local::new("")?;
+    let destination = fixture.root.path().join("review.json");
+    for (workflow, name) in [
+        ("import", "ansible.builtin.ping"),
+        ("import-role", "estus_missing.collection.role"),
+    ] {
+        let mut command = fixture.command()?;
+        command
+            .args(["schema", workflow, name])
+            .arg("--output")
+            .arg(&destination);
+        let rejected = output(command).await?;
+        ensure!(
+            schema_report(&fixture, &rejected, false)?
+                == json!({
+                    "ok":false, "error_code":"runtime_unavailable", "phase":"runtime_import"
+                })
+        );
+        ensure!(!destination.exists());
+    }
+    let schema = fixture.root.path().join("input-schema.json");
+    fs::write(
+        &schema,
+        serde_json::to_vec(&json!({
+            "type":"object", "properties":{}, "required":[], "additionalProperties":false
+        }))?,
+    )?;
+    let overlay = fixture.root.path().join("overlay.json");
+    fs::write(
+        &overlay,
+        serde_json::to_vec(&json!({"AUTOMATION_PRIVATE_SENTINEL":SECRET}))?,
+    )?;
+    for invalid_binding in [false, true] {
+        let mut command = fixture.command()?;
+        command
+            .args(["schema", "import-playbook", "site.yml"])
+            .arg("--project-root")
+            .arg(fixture.root.path())
+            .arg("--input-schema")
+            .arg(&schema)
+            .arg("--output")
+            .arg(&destination);
+        if invalid_binding {
+            command.arg("--overlay").arg(&overlay);
+        }
+        let rejected = output(command).await?;
+        ensure!(
+            schema_report(&fixture, &rejected, false)?
+                == if invalid_binding {
+                    json!({"ok":false,"error_code":"invalid_binding_schema","phase":"binding_validation"})
+                } else {
+                    json!({"ok":false,"error_code":"runtime_unavailable","phase":"runtime_import"})
+                }
+        );
+        ensure!(!destination.exists());
+    }
+    ensure!(!fixture.marker.exists());
     Ok(())
 }
 
@@ -953,8 +1086,11 @@ async fn real_schema_import_review_and_fixed_binding_validation_never_execute() 
 
     for (request, valid) in [
         (json!({"follow":false}), true),
-        (json!({"follow":true,"path":"/fixed-override"}), false),
-        (json!({"follow":"false"}), false),
+        (
+            json!({"follow":true,"AUTOMATION_PRIVATE_SENTINEL":SECRET}),
+            false,
+        ),
+        (json!({"follow":SECRET}), false),
     ] {
         fs::write(&input, serde_json::to_vec(&request)?)?;
         let mut command = fixture.command()?;
@@ -967,6 +1103,8 @@ async fn real_schema_import_review_and_fixed_binding_validation_never_execute() 
         let report = schema_report(&fixture, &checked, valid)?;
         if valid {
             ensure!(report["input_validated"] == true);
+        } else {
+            ensure!(report["phase"] == "input_validation");
         }
     }
     // An import never replaces a previously reviewed file.
@@ -1067,6 +1205,7 @@ async fn real_schema_verify_detects_implementation_drift_without_documentation_c
     command.args(["schema", "verify"]).arg(&snapshot);
     let rejected = output(command).await?;
     ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
+    ensure!(schema_report(&fixture, &rejected, false)?["phase"] == "schema_verification");
     Ok(())
 }
 
@@ -1148,7 +1287,12 @@ mod wheel {
         let startup = output(required.installed_command("ESTUS_TEST_BASE_WHEEL_BINARY")?).await?;
         ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
         let error: Value = serde_json::from_slice(&startup.stderr)?;
-        ensure!(error["event"] == "error" && error["code"] == "automation_runtime_unavailable");
+        ensure!(
+            error["event"] == "error"
+                && error["code"] == "runtime_import_failed"
+                && error["phase"] == "runtime_verification"
+                && error["schema_path"] == "automation.runtime"
+        );
         required.private(&startup)
     }
 
@@ -1199,7 +1343,12 @@ mod wheel {
             let startup = output(command).await?;
             ensure!(startup.status.code() == Some(1) && startup.stdout.is_empty());
             let error: Value = serde_json::from_slice(&startup.stderr)?;
-            ensure!(error["code"] == "automation_runtime_unavailable");
+            ensure!(
+                error["event"] == "error"
+                    && error["code"] == "runtime_unavailable"
+                    && error["phase"] == "runtime_verification"
+                    && error["schema_path"] == "automation.runtime"
+            );
             broken.private(&startup)?;
         }
         Ok(())
@@ -1793,6 +1942,7 @@ async fn real_role_schema_argspec_aliases_required_defaults_entrypoints_and_drif
         fs::write(&path, changed)?;
         let rejected = output(role_verify_command(&fixture, &snapshot, &role)?).await?;
         ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "schema_drift");
+        ensure!(schema_report(&fixture, &rejected, false)?["phase"] == "schema_verification");
         fs::write(&path, original)?;
     }
     let verified = output(role_verify_command(&fixture, &snapshot, &role)?).await?;
@@ -1819,6 +1969,7 @@ async fn real_role_schema_missing_argspec_explicit_nested_schema_and_conditional
     )?)
     .await?;
     ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == "role_schema_required");
+    ensure!(schema_report(&fixture, &rejected, false)?["phase"] == "schema_conversion");
     ensure!(!snapshot.exists());
     let explicit = json!({"type":"object","properties":{
         "mode":{"type":"string","enum":["basic","advanced"]},
@@ -2288,6 +2439,7 @@ async fn real_role_schema_bundle_rejects_external_dependencies_and_old_approvals
         )?)
         .await?;
         ensure!(schema_report(&fixture, &rejected, false)?["error_code"] == code);
+        ensure!(schema_report(&fixture, &rejected, false)?["phase"] == "runtime_import");
         ensure!(!snapshot.exists() && !snapshot.with_extension("roles").exists());
         role_no_effects(&fixture)?;
     }

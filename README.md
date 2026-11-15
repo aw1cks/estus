@@ -431,6 +431,16 @@ After application cleanup and runtime shutdown, diagnostic draining gets at
 most100ms. A still-blocked diagnostic-only thread is abandoned at process exit;
 remaining records may be lost. Audit is not a durable or complete execution log.
 
+Operator failures retain fixed cause codes and failing phases. Configuration
+failures also expose fixed `schema_path` context and, for malformed TOML when
+available, one-based line/column locations (columns count Unicode characters).
+Catalog and startup wrappers preserve these safe causes instead of replacing
+them with generic failures. CLI parse errors never echo rejected arguments;
+help hides environment values. Malformed MCP arguments carry separate fixed
+`argument_shape` diagnostics. None of these surfaces render source snippets,
+unknown keys, private paths, request values or backend stderr.
+
+
 Rejected requests omit sudo user/program identifiers, including validation,
 policy, admission and pre-dispatch cancellation failures. Accepted native sudo
 operations retain validated user/program identifiers in start/finish records;

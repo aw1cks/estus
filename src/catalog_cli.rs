@@ -12,6 +12,39 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{catalog_assets::Catalog, config::Config};
 
+#[derive(Debug)]
+enum Failure {
+    Code {
+        code: &'static str,
+        phase: Option<&'static str>,
+    },
+    Config(crate::config::ConfigError),
+}
+
+impl From<&'static str> for Failure {
+    fn from(code: &'static str) -> Self {
+        Self::Code { code, phase: None }
+    }
+}
+
+impl From<crate::config::ConfigError> for Failure {
+    fn from(error: crate::config::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+
+impl Failure {
+    fn publish(self, operation: &'static str) -> u8 {
+        match self {
+            Self::Config(error) => crate::audit::emit(&error.record()),
+            Self::Code { code, phase } => crate::audit::emit(
+                &json!({"event":"error","code":code,"phase":phase.unwrap_or(operation)}),
+            ),
+        }
+        2
+    }
+}
+
 #[derive(Args)]
 pub(crate) struct CatalogArgs {
     /// Explicit installed asset directory; no fallback if it is invalid.
@@ -196,7 +229,7 @@ fn trusted_output_parent(path: &Path) -> Result<File, &'static str> {
     Ok(directory)
 }
 
-fn read_toml(path: &Path) -> Result<toml::Table, &'static str> {
+fn read_toml(path: &Path) -> Result<toml::Table, Failure> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)
@@ -207,16 +240,17 @@ fn read_toml(path: &Path) -> Result<toml::Table, &'static str> {
         .map_err(|_| "catalog_definition_unavailable")?
         .is_file()
     {
-        return Err("catalog_definition_unavailable");
+        return Err("catalog_definition_unavailable".into());
     }
     let mut text = String::new();
     file.take(1_048_577)
         .read_to_string(&mut text)
         .map_err(|_| "catalog_definition_invalid")?;
     if text.len() > 1_048_576 {
-        return Err("catalog_definition_limit");
+        return Err("catalog_definition_limit".into());
     }
-    toml::from_str(&text).map_err(|_| "catalog_definition_invalid")
+    toml::from_str(&text)
+        .map_err(|error| crate::config::ConfigError::toml_syntax(&text, &error).into())
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<File, &'static str> {
@@ -437,7 +471,7 @@ async fn prepare(
     path: PathBuf,
     cli: crate::config::Cli,
     shutdown: CancellationToken,
-) -> Result<Value, &'static str> {
+) -> Result<Value, Failure> {
     let version = catalog.manifest().version.clone();
     let work = tokio::task::spawn_blocking(move || {
         let site = if site.is_absolute() {
@@ -454,14 +488,14 @@ async fn prepare(
         )?;
         let mut exported = read_toml(&definitions)?;
         if exported.len() != 1 {
-            return Err("catalog_definition_invalid");
+            return Err("catalog_definition_invalid".into());
         }
         let tools = exported
             .remove("tools")
             .and_then(|v| v.as_table().cloned())
             .ok_or("catalog_definition_invalid")?;
         if tools.is_empty() || tools.len() > 32 {
-            return Err("catalog_selection_limit");
+            return Err("catalog_selection_limit".into());
         }
         let output = PrivateOutput::create(&path)?;
         for directory in ["overlays", "snapshots"] {
@@ -480,7 +514,7 @@ async fn prepare(
         let mut authoring_parent: Option<PathBuf> = None;
         for (name, mut definition) in tools {
             if !catalog.manifest().tools.contains_key(&name) || configured.contains_key(&name) {
-                return Err("catalog_tool_unknown_or_collision");
+                return Err("catalog_tool_unknown_or_collision".into());
             }
             if !targets.is_empty() {
                 definition
@@ -496,7 +530,7 @@ async fn prepare(
                 .and_then(toml::Value::as_table_mut)
                 .ok_or("catalog_definition_invalid")?;
             if execution.get("kind").and_then(toml::Value::as_str) != Some("ansible_role") {
-                return Err("catalog_definition_invalid");
+                return Err("catalog_definition_invalid".into());
             }
             let role_path = PathBuf::from(
                 execution
@@ -505,7 +539,7 @@ async fn prepare(
                     .ok_or("catalog_definition_invalid")?,
             );
             if !role_path.is_absolute() {
-                return Err("catalog_definition_invalid");
+                return Err("catalog_definition_invalid".into());
             }
             let snapshot = output.path.join("snapshots").join(format!("{name}.json"));
             let parent =
@@ -515,7 +549,7 @@ async fn prepare(
                 .as_ref()
                 .is_some_and(|selected| selected != &parent)
             {
-                return Err("catalog_role_search_root_mismatch");
+                return Err("catalog_role_search_root_mismatch".into());
             }
             let root = match &reviewed_bundle {
                 Some(root) => root,
@@ -576,7 +610,7 @@ async fn prepare(
         if let Some(value) = catalog_config.get("version")
             && value.as_str() != Some(version.as_str())
         {
-            return Err("catalog_version_mismatch");
+            return Err("catalog_version_mismatch".into());
         }
         catalog_config.insert("version".into(), version.into());
         if pin_root {
@@ -596,8 +630,7 @@ async fn prepare(
                 .map_err(|_| "catalog_output_invalid")?
                 .as_bytes(),
         )?;
-        let config = Config::from_file_with_catalog_root(cli, config_path, None)
-            .map_err(|_| "catalog_site_policy_invalid")?;
+        let config = Config::from_file_with_catalog_root(cli, config_path, None)?;
         // Publish the effective absolute SSH selection, not the lower-priority
         // site values. Keep the exclusively created file handle while updating
         // this still-private output; failure drops the complete owned directory.
@@ -630,19 +663,17 @@ async fn prepare(
         config_file
             .write_all(text.as_bytes())
             .map_err(|_| "catalog_output_unavailable")?;
-        Ok::<_, &'static str>((output, config, imports))
+        Ok::<_, Failure>((output, config, imports))
     })
     .await
     .map_err(|_| "catalog_output_unavailable")??;
     let (output, config, imports) = work;
     for (name, role_path, overlay, snapshot, authority) in &imports {
         if shutdown.is_cancelled() {
-            return Err("cancelled");
+            return Err("cancelled".into());
         }
-        let reference = config
-            .catalog_runtime(authority)
-            .map_err(|_| "catalog_site_policy_invalid")?;
-        crate::role_import::perform_with_reference(
+        let reference = config.catalog_runtime(authority)?;
+        let report = crate::role_import::perform_with_reference(
             &config,
             crate::role_import::Command::Import(crate::role_import::ImportArgs::reviewed(
                 name.clone(),
@@ -654,10 +685,16 @@ async fn prepare(
             shutdown.clone(),
             reference,
         )
-        .await?;
+        .await;
+        if let Some((code, phase)) = report.failure() {
+            return Err(Failure::Code {
+                code,
+                phase: Some(phase),
+            });
+        }
     }
     if shutdown.is_cancelled() {
-        return Err("cancelled");
+        return Err("cancelled".into());
     }
     let report = json!({"ok":true,"prepared":imports.len(),"activated":false});
     output.finish();
@@ -669,6 +706,12 @@ pub(crate) async fn run(
     cli: crate::config::Cli,
     shutdown: CancellationToken,
 ) -> u8 {
+    let phase = match &args.command {
+        CatalogCommand::List { .. } => "catalog_list",
+        CatalogCommand::Inspect { .. } => "catalog_inspection",
+        CatalogCommand::Export { .. } => "catalog_export",
+        CatalogCommand::Prepare { .. } => "catalog_preparation",
+    };
     let explicit_root = args.root.is_some();
     let root = args.root;
     let command = args.command;
@@ -706,23 +749,26 @@ pub(crate) async fn run(
                 _ => None,
             }
         };
-        Catalog::load(root.as_deref()).map(|catalog| (catalog, command))
+        Catalog::load(root.as_deref())
+            .map(|catalog| (catalog, command))
+            .map_err(Failure::from)
     })
     .await;
     let result = match loaded {
         Ok(Ok((catalog, command))) if !shutdown.is_cancelled() => match command {
             CatalogCommand::List { json } => {
                 match tokio::task::spawn_blocking(move || describe(&catalog, json)).await {
-                    Ok(value) => value,
-                    Err(_) => Err("catalog_unavailable"),
+                    Ok(value) => value.map_err(Failure::from),
+                    Err(_) => Err("catalog_unavailable".into()),
                 }
             }
             CatalogCommand::Inspect { site } => {
                 let root = explicit_root.then(|| catalog.root().to_path_buf());
                 match tokio::task::spawn_blocking(move || inspect(site, root, cli)).await {
-                    Ok(value) => value
-                        .and_then(|v| serde_json::to_vec(&v).map_err(|_| "catalog_output_invalid")),
-                    Err(_) => Err("catalog_definition_invalid"),
+                    Ok(value) => value.and_then(|v| {
+                        serde_json::to_vec(&v).map_err(|_| Failure::from("catalog_output_invalid"))
+                    }),
+                    Err(_) => Err("catalog_definition_invalid".into()),
                 }
             }
             CatalogCommand::Export {
@@ -733,11 +779,10 @@ pub(crate) async fn run(
                 match tokio::task::spawn_blocking(move || export(&catalog, tools, presets, &output))
                     .await
                 {
-                    Ok(Ok(value)) => {
-                        serde_json::to_vec(&value).map_err(|_| "catalog_output_invalid")
-                    }
-                    Ok(Err(error)) => Err(error),
-                    Err(_) => Err("catalog_output_unavailable"),
+                    Ok(Ok(value)) => serde_json::to_vec(&value)
+                        .map_err(|_| Failure::from("catalog_output_invalid")),
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(_) => Err("catalog_output_unavailable".into()),
                 }
             }
             CatalogCommand::Prepare {
@@ -763,15 +808,17 @@ pub(crate) async fn run(
                     _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
                         shutdown.cancel();
                         let _ = operation.as_mut().await;
-                        Err("catalog_prepare_timeout")
+                        Err("catalog_prepare_timeout".into())
                     }
                 }
-                .and_then(|v| serde_json::to_vec(&v).map_err(|_| "catalog_output_invalid"))
+                .and_then(|v| {
+                    serde_json::to_vec(&v).map_err(|_| Failure::from("catalog_output_invalid"))
+                })
             }
         },
         Ok(Err(error)) => Err(error),
-        Ok(Ok(_)) => Err("cancelled"),
-        Err(_) => Err("catalog_unavailable"),
+        Ok(Ok(_)) => Err("cancelled".into()),
+        Err(_) => Err("catalog_unavailable".into()),
     };
     match result {
         Ok(mut bytes) if !shutdown.is_cancelled() => {
@@ -784,14 +831,8 @@ pub(crate) async fn run(
                 2
             }
         }
-        Ok(_) => {
-            eprintln!("catalog: cancelled");
-            2
-        }
-        Err(code) => {
-            eprintln!("catalog: {code}");
-            2
-        }
+        Ok(_) => Failure::from("cancelled").publish(phase),
+        Err(error) => error.publish(phase),
     }
 }
 
@@ -799,9 +840,8 @@ fn inspect(
     site: PathBuf,
     root: Option<PathBuf>,
     cli: crate::config::Cli,
-) -> Result<Value, &'static str> {
-    let config = Config::from_file_with_catalog_root(cli, site, root)
-        .map_err(|_| "catalog_site_policy_invalid")?;
+) -> Result<Value, Failure> {
+    let config = Config::from_file_with_catalog_root(cli, site, root)?;
     let tools: Vec<_> = config
         .bindings()
         .entries()

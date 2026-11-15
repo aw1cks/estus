@@ -104,7 +104,14 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, Estus>> for Argume
                 executor: None,
             };
             metadata.reject(Instant::now(), &error);
-            ErrorData::invalid_params(error.message, None)
+            ErrorData::invalid_params(
+                error.message,
+                Some(serde_json::json!({
+                    "code": "invalid_argument",
+                    "phase": "argument_shape",
+                    "schema_path": "arguments",
+                })),
+            )
         })
     }
 }

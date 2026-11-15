@@ -645,10 +645,11 @@ pub(crate) async fn perform(
     command: Command,
     timeout_secs: Option<u64>,
     shutdown: CancellationToken,
-) -> Result<Report, &'static str> {
-    let reference = config
-        .automation_runtime()
-        .map_err(|_| "runtime_unavailable")?;
+) -> Report {
+    let reference = match config.automation_runtime() {
+        Ok(reference) => reference,
+        Err(_) => return Report::failed("runtime_unavailable", "runtime_selection"),
+    };
     perform_with_reference(&config, command, timeout_secs, shutdown, reference).await
 }
 
@@ -658,6 +659,31 @@ pub(crate) async fn perform_with_reference(
     timeout_secs: Option<u64>,
     shutdown: CancellationToken,
     reference: Option<PathBuf>,
+) -> Report {
+    let mut phase = "schema_validation";
+    match perform_tracked(
+        config,
+        command,
+        timeout_secs,
+        shutdown,
+        reference,
+        &mut phase,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(code) => Report::failed(code, phase),
+    }
+}
+
+// CLI and catalog callers receive the same retained failure phase.
+async fn perform_tracked(
+    config: &Config,
+    command: Command,
+    timeout_secs: Option<u64>,
+    shutdown: CancellationToken,
+    reference: Option<PathBuf>,
+    phase: &mut &'static str,
 ) -> Result<Report, &'static str> {
     let deadline = tokio::time::Instant::now()
         .checked_add(
@@ -667,10 +693,12 @@ pub(crate) async fn perform_with_reference(
         )
         .ok_or("invalid_timeout")?;
     // Started file work is joined even on interruption, like module authoring.
+    *phase = "schema_preparation";
     let mut prepared = tokio::task::spawn_blocking(move || prepare(command))
         .await
         .map_err(|_| "schema_file_unavailable")??;
     stopped(&shutdown, deadline)?;
+    *phase = "runtime_import";
     let observed = automation::import_role(
         reference,
         &prepared.role,
@@ -685,11 +713,13 @@ pub(crate) async fn perform_with_reference(
     )
     .await?;
     stopped(&shutdown, deadline)?;
+    *phase = "schema_conversion";
     let contract = role_schema::import_document(
         &observed.document,
         &prepared.entry_point,
         prepared.explicit_schema.as_ref(),
     )?;
+    *phase = "schema_verification";
     if let Some(previous) = &prepared.previous
         && (previous.runtime != observed.identity
             || previous.collection != observed.collection
@@ -699,15 +729,19 @@ pub(crate) async fn perform_with_reference(
         return Err("schema_drift");
     }
     if let Some(binding) = &prepared.binding {
+        *phase = "binding_validation";
         let compiled = compile_binding(&contract, binding)?;
         if let Some(input) = &prepared.input {
+            *phase = "input_validation";
             compiled.prepare(input)?;
         }
     } else if prepared.input.is_some() {
+        *phase = "binding_validation";
         return Err("schema_binding_required");
     }
     let report = Report::validated(prepared.binding.is_some(), prepared.input.is_some());
     if let Some(output) = prepared.output {
+        *phase = "schema_write";
         let mut snapshot = Snapshot {
             schema: 2,
             role: prepared.role,

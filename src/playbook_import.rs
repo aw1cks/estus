@@ -237,7 +237,7 @@ struct Prepared {
     input: Option<Value>,
 }
 
-fn prepare(command: Command) -> Result<Prepared, &'static str> {
+fn prepare(command: Command, phase: &mut &'static str) -> Result<Prepared, &'static str> {
     let prepared = match command {
         Command::Import(args) => Prepared {
             playbook: args.playbook,
@@ -280,11 +280,14 @@ fn prepare(command: Command) -> Result<Prepared, &'static str> {
         return Err("invalid_playbook");
     }
     if let Some(binding) = &prepared.binding {
+        *phase = "binding_validation";
         let compiled = compile_binding(&prepared.contract, binding)?;
         if let Some(input) = &prepared.input {
+            *phase = "input_validation";
             compiled.prepare(input)?;
         }
     } else if prepared.input.is_some() {
+        *phase = "binding_validation";
         return Err("schema_binding_required");
     }
     Ok(prepared)
@@ -295,6 +298,20 @@ pub(crate) async fn perform(
     command: Command,
     timeout_secs: Option<u64>,
     shutdown: CancellationToken,
+) -> Report {
+    let mut phase = "schema_validation";
+    match perform_tracked(config, command, timeout_secs, shutdown, &mut phase).await {
+        Ok(report) => report,
+        Err(code) => Report::failed(code, phase),
+    }
+}
+
+async fn perform_tracked(
+    config: Config,
+    command: Command,
+    timeout_secs: Option<u64>,
+    shutdown: CancellationToken,
+    phase: &mut &'static str,
 ) -> Result<Report, &'static str> {
     let deadline = tokio::time::Instant::now()
         .checked_add(
@@ -306,10 +323,18 @@ pub(crate) async fn perform(
     let runtime = config
         .automation_runtime()
         .map_err(|_| "runtime_unavailable")?;
-    let prepared = tokio::task::spawn_blocking(move || prepare(command))
-        .await
-        .map_err(|_| "schema_file_unavailable")??;
+    *phase = "schema_preparation";
+    let (prepared, preparation_phase) = tokio::task::spawn_blocking(move || {
+        let mut phase = "schema_preparation";
+        let result = prepare(command, &mut phase);
+        (result, phase)
+    })
+    .await
+    .map_err(|_| "schema_file_unavailable")?;
+    *phase = preparation_phase;
+    let prepared = prepared?;
     stopped(&shutdown, deadline)?;
+    *phase = "runtime_import";
     let observed = automation::import_playbook(
         runtime,
         &prepared.playbook,
@@ -323,6 +348,7 @@ pub(crate) async fn perform(
     )
     .await?;
     stopped(&shutdown, deadline)?;
+    *phase = "schema_verification";
     if observed.document["playbook"].as_str() != Some(&prepared.playbook) {
         return Err("runtime_protocol_error");
     }
@@ -333,6 +359,7 @@ pub(crate) async fn perform(
     }
     let report = Report::validated(prepared.binding.is_some(), prepared.input.is_some());
     if prepared.output {
+        *phase = "schema_write";
         let mut snapshot = Snapshot {
             schema: 1,
             playbook: prepared.playbook,

@@ -101,7 +101,7 @@ fn report(output: &Output, exit: i32) -> Result<Value> {
     ensure!(
         object
             .keys()
-            .all(|key| matches!(key.as_str(), "ok" | "targets" | "error_code"))
+            .all(|key| matches!(key.as_str(), "ok" | "targets" | "error_code" | "phase"))
     );
     ensure!(value["ok"] == (exit == 0));
     for target in value["targets"].as_array().context("target array")? {
@@ -116,7 +116,7 @@ fn report(output: &Output, exit: i32) -> Result<Value> {
             ensure!(
                 check
                     .keys()
-                    .all(|key| matches!(key.as_str(), "status" | "error_code"))
+                    .all(|key| matches!(key.as_str(), "status" | "error_code" | "phase"))
             );
             ensure!(matches!(
                 check.get("status").and_then(Value::as_str),
@@ -124,6 +124,17 @@ fn report(output: &Output, exit: i32) -> Result<Value> {
             ));
             if let Some(code) = check.get("error_code") {
                 fixed_code(code)?;
+                ensure!(
+                    check.get("phase").and_then(Value::as_str)
+                        == Some(match name {
+                            "ssh" => "ssh_connect",
+                            "sftp" => "sftp_probe",
+                            _ => "sudo_probe",
+                        })
+                );
+            }
+            if !check.contains_key("error_code") {
+                ensure!(!check.contains_key("phase"));
             }
         }
         ensure!(target["sudo"] == json!({"status":"not_tested"}));
@@ -167,14 +178,22 @@ fn private(output: &Output, secrets: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn config_error(output: &Output) -> Result<()> {
+fn config_error(output: &Output, code: &str) -> Result<()> {
     ensure!(output.status.code() == Some(2));
     ensure!(
         output.stdout.is_empty(),
         "invalid config entered doctor/MCP output"
     );
     let error: Value = serde_json::from_slice(&output.stderr)?;
-    ensure!(error["event"] == "error" && error["code"] == "invalid_config");
+    ensure!(error["event"] == "error" && error["code"] == code);
+    ensure!(
+        error["phase"]
+            == if code == "invalid_toml" {
+                "config_parse"
+            } else {
+                "config_validation"
+            }
+    );
     ensure!(error["message"].is_string());
     Ok(())
 }
@@ -233,11 +252,14 @@ impl Local {
             ensure!(error.kind() == std::io::ErrorKind::BrokenPipe);
         }
         let output = child.finish().await?;
-        if code == "invalid_config" {
-            config_error(&output)?;
+        if matches!(code, "invalid_config" | "invalid_toml") {
+            config_error(&output, code)?;
         } else {
             let value = report(&output, 2)?;
-            ensure!(value == json!({"ok":false,"targets":[],"error_code":code}));
+            ensure!(
+                value
+                    == json!({"ok":false,"targets":[],"error_code":code,"phase":"doctor_validation"})
+            );
         }
         private(
             &output,
@@ -302,14 +324,23 @@ async fn doctor_invalid_selections_are_network_free_private_and_not_mcp() -> Res
 
 #[tokio::test]
 async fn doctor_config_errors_are_private_and_do_not_dispatch() -> Result<()> {
-    for body in [
-        "PRIVATE_UNKNOWN_D01 = 'PRIVATE_ALIAS_D01'\n",
-        "[targets.allowed]\nssh_host = 'PRIVATE_ALIAS_D01'\nPRIVATE_UNKNOWN_D01 = true\n",
-        "[targets.allowed]\nssh_host = ['PRIVATE_ALIAS_D01']\n",
-        "[targets.allowed\nPRIVATE_UNKNOWN_D01",
+    for (body, code) in [
+        (
+            "PRIVATE_UNKNOWN_D01 = 'PRIVATE_ALIAS_D01'\n",
+            "invalid_config",
+        ),
+        (
+            "[targets.allowed]\nssh_host = 'PRIVATE_ALIAS_D01'\nPRIVATE_UNKNOWN_D01 = true\n",
+            "invalid_config",
+        ),
+        (
+            "[targets.allowed]\nssh_host = ['PRIVATE_ALIAS_D01']\n",
+            "invalid_config",
+        ),
+        ("[targets.allowed\nPRIVATE_UNKNOWN_D01", "invalid_toml"),
     ] {
         Local::new(body)?
-            .invalid(&["--target", "allowed"], "invalid_config")
+            .invalid(&["--target", "allowed"], code)
             .await?;
     }
     let fixture = Local::new("[targets.allowed]\nssh_host = 'PRIVATE_ALIAS_D01'\n")?;
@@ -320,7 +351,7 @@ async fn doctor_config_errors_are_private_and_do_not_dispatch() -> Result<()> {
         let output = Doctor::start(command(&path, &["--target", "allowed"])?)?
             .finish()
             .await?;
-        config_error(&output)?;
+        config_error(&output, "invalid_config")?;
         private(&output, &[&path.to_string_lossy(), "PRIVATE_UNKNOWN_D01"])?;
     }
     ensure!(!fixture.marker.exists());
@@ -664,7 +695,7 @@ async fn doctor_native_unknown_host_key_is_not_enrolled_or_repaired() -> Result<
         let value = report(&output, 1)?;
         ensure!(
             value["targets"][0]["ssh"]
-                == json!({"status":"failed","error_code":"ssh_connect_failed"})
+                == json!({"status":"failed","error_code":"ssh_connect_failed","phase":"ssh_connect"})
         );
         ensure!(value["targets"][0]["sftp"]["status"] == "not_tested");
         cleaned(&output).await?;
@@ -715,7 +746,7 @@ async fn doctor_native_shared_deadline_and_signals_finalize_owned_masters() -> R
             ensure!(value["targets"][0]["target"] == "alpha");
             ensure!(value["targets"][0]["ssh"] == json!({"status":"passed"}));
             ensure!(value["targets"][0]["sftp"]["error_code"] == cause);
-            ensure!(value["targets"][1] == json!({"target":"beta","ssh":{"status":"not_tested","error_code":cause},"sftp":{"status":"not_tested","error_code":cause},"sudo":{"status":"not_tested"}}));
+            ensure!(value["targets"][1] == json!({"target":"beta","ssh":{"status":"not_tested","error_code":cause,"phase":"ssh_connect"},"sftp":{"status":"not_tested","error_code":cause,"phase":"sftp_probe"},"sudo":{"status":"not_tested"}}));
             ensure!(cleaned(&output).await? == 1);
             fixture.await_authentications(auth + 1).await?;
             no_commands(&fixture, &logs)?;
@@ -743,7 +774,7 @@ async fn doctor_explicit_ssh_config_errors_never_fall_back_to_environment() -> R
             .arg(&path)
             .env("ESTUS_SSH_CONFIG", &fixture.ssh);
         let output = Doctor::start(command)?.finish().await?;
-        config_error(&output)?;
+        config_error(&output, "invalid_config")?;
         private(
             &output,
             &[

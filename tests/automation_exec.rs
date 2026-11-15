@@ -4693,6 +4693,14 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
         let mut startup = support::server_command(&a.fixture.config)?;
         let rejected = support::run(&mut startup).await?;
         ensure!(!rejected.status.success(), "startup accepted sibling dependency drift");
+        let diagnostic: Value = serde_json::from_slice(&rejected.stderr)?;
+        ensure!(rejected.stdout.is_empty()
+            && diagnostic["code"] == "schema_drift"
+            && diagnostic["phase"] == "role_verification"
+            && diagnostic["schema_path"] == "tools",
+            "startup swallowed the reviewed-role drift cause: {diagnostic}");
+        ensure!(!std::str::from_utf8(&rejected.stderr)?.contains(&text(&dependency)?));
+        a.private(std::str::from_utf8(&rejected.stderr)?)?;
         ensure!(!dependency_marker.exists(), "drifted sibling dependency executed");
         fs::write(&dependency, original)?;
         a.clean()?;
@@ -4717,6 +4725,13 @@ async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
             let mut startup = support::server_command(&a.fixture.config)?;
             let rejected = support::run(&mut startup).await?;
             ensure!(!rejected.status.success(), "startup accepted {mutation} bundle content");
+            let diagnostic: Value = serde_json::from_slice(&rejected.stderr)?;
+            ensure!(rejected.stdout.is_empty()
+                && diagnostic["phase"] == "role_verification"
+                && diagnostic["code"].as_str().is_some_and(|code|
+                    !matches!(code, "invalid_config" | "automation_runtime_unavailable")),
+                "startup discarded the {mutation} bundle failure phase: {diagnostic}");
+            a.private(std::str::from_utf8(&rejected.stderr)?)?;
             ensure!(!dependency_marker.exists(), "{mutation} bundle content executed dependency");
             if mutation == "unexpected" {
                 fs::remove_file(unexpected)?;
