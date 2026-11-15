@@ -466,6 +466,15 @@ execution controls remain reserved. The documented `free_form` pseudo-option is
 not a named argument: imports mark it unbindable and retain a review note. Use
 typed named parameters such as `argv`; unspecified types elsewhere still fail.
 
+Integer-declared backend arguments are normalized recursively: decoded integral
+numbers such as `2.0` become integer `2`, including nested objects/arrays and
+aliases. Fractional values are rejected, never truncated; strings and booleans
+are not coerced. Existing schema limits and the exact-integer magnitude ceiling
+of ±9,007,199,254,740,991 still apply. Number-declared arguments retain their type.
+Normalization preserves the decoded JSON value, not every original decimal
+spelling; ordinary correctly rounded JSON decoding can round precise fractions
+before validation. Exact-decimal transport semantics are not claimed.
+
 Content digests detect changes to the selected Ansible/module collection source
 trees; they are not a sandbox, an immutable-environment attestation, or protection
 against a same-user attacker replacing trusted files. Mutable content can still

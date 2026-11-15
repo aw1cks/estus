@@ -2479,6 +2479,7 @@ async fn cpu_stats_session(
         for (id, inputs, sample_ms, limit) in [
             (100, json!({}), 0, 8),
             (101, json!({"sample_ms":100,"limit":2}), 100, 2),
+            (102, json!({"sample_ms":100.0,"limit":2.0}), 100, 2),
         ] {
             let before = observe_cpu_stats(fixture).await?;
             let reply = server
@@ -2556,6 +2557,10 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
             (
                 "tasks/main.yml",
                 include_str!("../examples/roles/cpu_stats/tasks/main.yml"),
+            ),
+            (
+                "files/collector.py",
+                include_str!("../examples/roles/cpu_stats/files/collector.py"),
             ),
         ] {
             let path = role.join(file);

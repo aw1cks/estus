@@ -14,6 +14,7 @@ const INPUT: &str = "invalid_binding_arguments";
 const LIMIT: usize = 256 * 1024;
 const DEPTH: usize = 32;
 const NODES: usize = 8192;
+const MAX_EXACT_INTEGER: i64 = 9_007_199_254_740_991;
 const RESERVED: &[&str] = &[
     "host",
     "timeout_secs",
@@ -93,7 +94,7 @@ pub(crate) fn bounded(value: &Value) -> bool {
             Value::Number(n) => {
                 *bytes <= LIMIT
                     && n.as_f64()
-                        .is_some_and(|n| n.abs() <= 9_007_199_254_740_991.0)
+                        .is_some_and(|n| n.abs() <= MAX_EXACT_INTEGER as f64)
             }
             _ => *bytes <= LIMIT,
         }
@@ -534,12 +535,25 @@ fn check_schema_node(schema: &Value, projection: bool) -> Result<(), &'static st
     Ok(())
 }
 
-fn integral(value: &Value) -> bool {
-    value.is_i64()
-        || value.is_u64()
-        || value
-            .as_f64()
-            .is_some_and(|n| n.is_finite() && n.fract() == 0.0)
+// Preserve the decoded JSON value, not the original decimal spelling. This
+// shares bounded()'s existing exact-integer range and never truncates a fraction.
+fn canonical_integer(value: &Value) -> Option<i64> {
+    if let Some(integer) = value.as_i64() {
+        return (-MAX_EXACT_INTEGER..=MAX_EXACT_INTEGER)
+            .contains(&integer)
+            .then_some(integer);
+    }
+    if value.is_u64() {
+        return None;
+    }
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.abs() > MAX_EXACT_INTEGER as f64 || number.fract() != 0.0 {
+        return None;
+    }
+    // The checked range is exactly representable in binary64 and within i64,
+    // so this cast cannot saturate or lose integer precision.
+    let integer = number as i64;
+    (integer as f64 == number).then_some(integer)
 }
 
 fn equal(left: &Value, right: &Value) -> bool {
@@ -564,7 +578,7 @@ pub(crate) fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), 
             "object" => input.is_object(),
             "array" => input.is_array(),
             "string" => input.is_string(),
-            "integer" => integral(input),
+            "integer" => canonical_integer(input).is_some(),
             "number" => input.is_number(),
             "boolean" => input.is_boolean(),
             "null" => input.is_null(),
@@ -612,7 +626,7 @@ pub(crate) fn validate(schema: &Value, value: &Value) -> Result<(), &'static str
             "object" => value.is_object(),
             "array" => value.is_array(),
             "string" => value.is_string(),
-            "integer" => integral(value),
+            "integer" => canonical_integer(value).is_some(),
             "number" => value.is_number(),
             "boolean" => value.is_boolean(),
             "null" => value.is_null(),
@@ -780,6 +794,9 @@ fn check_aliases(schema: &Value, aliases: &Aliases) -> Result<(), &'static str> 
 }
 
 fn canonicalize(schema: &Value, aliases: &Aliases, value: &Value) -> Result<Value, &'static str> {
+    if schema.get("type").and_then(Value::as_str) == Some("integer") {
+        return canonical_integer(value).map(Value::from).ok_or(INPUT);
+    }
     match value {
         Value::Object(values) => {
             let props = schema
@@ -1350,5 +1367,186 @@ mod named_arguments {
             }}}))
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod integer_normalization {
+    use super::*;
+
+    fn binding(kind: &str) -> CompiledModuleBinding {
+        let schema = json!({
+            "type":"object",
+            "properties":{"value":{"type":kind}},
+            "required":["value"],
+            "additionalProperties":false
+        });
+        compile_binding(
+            &import_explicit_schema(&schema).unwrap(),
+            &json!({
+                "input_schema":schema,
+                "fixed_args":{},
+                "input_map":{"value":"value"}
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn integral_json_spellings_serialize_as_consumer_integers() {
+        let binding = binding("integer");
+        let schema = json!({"type":"integer"});
+        for (source, expected) in [
+            ("2", "2"),
+            ("2.0", "2"),
+            ("2e0", "2"),
+            ("20e-1", "2"),
+            ("2E+3", "2000"),
+            ("-2.0", "-2"),
+            ("0", "0"),
+            ("-0", "0"),
+            ("-0.0", "0"),
+            ("-0e20", "0"),
+            ("9007199254740990.0", "9007199254740990"),
+            ("9007199254740991", "9007199254740991"),
+            ("9007199254740991.0", "9007199254740991"),
+            ("-9007199254740991.0", "-9007199254740991"),
+            ("9.007199254740991e15", "9007199254740991"),
+            ("9007199254740991000e-3", "9007199254740991"),
+            ("0.00000000000000000002e20", "2"),
+            ("1000000000000000000000000000000e-30", "1"),
+        ] {
+            let value: Value = serde_json::from_str(source).unwrap();
+            assert!(validate_input_shape(&schema, &value).is_ok(), "{source}");
+            assert!(validate(&schema, &value).is_ok(), "{source}");
+            let prepared = binding.prepare(&json!({"value":value})).unwrap();
+            assert_eq!(
+                serde_json::to_string(&prepared).unwrap(),
+                format!(r#"{{"value":{expected}}}"#),
+                "{source}"
+            );
+            assert!(prepared["value"].is_i64(), "{source}");
+        }
+        // Exercise the unsigned constructor, not only parsed integer tokens.
+        let prepared = binding
+            .prepare(&json!({"value":9_007_199_254_740_991u64}))
+            .unwrap();
+        assert_eq!(prepared["value"].as_u64(), Some(9_007_199_254_740_991));
+    }
+
+    #[test]
+    fn integer_representation_boundary_is_shared_by_validation_and_preparation() {
+        let binding = binding("integer");
+        let schema = json!({"type":"integer"});
+        let mut invalid = vec![
+            json!(i64::MIN),
+            json!(i64::MAX),
+            json!(u64::MAX),
+            json!("2.0"),
+            json!(true),
+            json!(null),
+        ];
+        for source in [
+            "2.5",
+            "-2.5",
+            "25e-1",
+            "1e-100",
+            "9007199254740992",
+            "9007199254740992.0",
+            "9007199254740993",
+            "9.007199254740992e15",
+            "-9007199254740992.0",
+            "9223372036854775808.0",
+            "18446744073709551616.0",
+            "1e100",
+        ] {
+            invalid.push(serde_json::from_str(source).unwrap());
+        }
+        for value in invalid {
+            assert_eq!(validate_input_shape(&schema, &value), Err(INPUT), "{value}");
+            assert_eq!(validate(&schema, &value), Err(INPUT), "{value}");
+            assert_eq!(
+                canonicalize(&schema, &Aliases::default(), &value),
+                Err(INPUT),
+                "{value}"
+            );
+            assert_eq!(binding.prepare(&json!({"value":value})), Err(INPUT));
+        }
+    }
+
+    #[test]
+    fn number_and_string_nodes_keep_their_representations() {
+        for (kind, source, expected) in [
+            ("number", "2.0", r#"{"value":2.0}"#),
+            ("number", "-0.0", r#"{"value":-0.0}"#),
+            ("number", "2.5", r#"{"value":2.5}"#),
+            ("number", "2.000", r#"{"value":2.0}"#),
+            ("string", r#""2.0""#, r#"{"value":"2.0"}"#),
+        ] {
+            let value: Value = serde_json::from_str(source).unwrap();
+            let prepared = binding(kind).prepare(&json!({"value":value})).unwrap();
+            assert_eq!(serde_json::to_string(&prepared).unwrap(), expected);
+        }
+        // A public integer constraint does not change a backend number node.
+        let schema = json!({"type":"object","properties":{"value":{"type":"number"}},
+            "additionalProperties":false});
+        let binding = compile_binding(
+            &import_explicit_schema(&schema).unwrap(),
+            &json!({
+                "input_schema":{"type":"object","properties":{"value":{"type":"integer"}},
+                    "additionalProperties":false},
+                "fixed_args":{},"input_map":{"value":"value"}
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&binding.prepare(&json!({"value":2.0})).unwrap()).unwrap(),
+            r#"{"value":2.0}"#
+        );
+    }
+
+    #[test]
+    fn nested_aliases_and_fixed_arguments_normalize_before_serialization() {
+        let contract = import_document(&json!({"doc":{"options":{
+            "entries":{"type":"list","elements":"dict","aliases":["rows"],"suboptions":{
+                "limits":{"type":"dict","aliases":["caps"],"suboptions":{
+                    "tasks_max":{"type":"int","aliases":["tasks"]},
+                    "ratio":{"type":"float"},
+                    "label":{"type":"str"},
+                    "counts":{"type":"list","elements":"int","aliases":["totals"]}
+                }}
+            }},
+            "limit":{"type":"int","aliases":["count"],"choices":[2]}
+        }}}))
+        .unwrap();
+        let overlay = json!({
+            "input_schema":{"type":"object","properties":{
+                "values":{"type":"array","items":{"type":"object","properties":{
+                    "caps":{"type":"object","properties":{
+                        "tasks":{"type":"integer"},"ratio":{"type":"number"},
+                        "label":{"type":"string"},
+                        "totals":{"type":"array","items":{"type":"integer"}}
+                    },"additionalProperties":false}
+                },"additionalProperties":false}}
+            },"additionalProperties":false},
+            "fixed_args":{"count":2.0},"input_map":{"rows":"values"}
+        });
+        let input = json!({"values":[{"caps":{
+            "tasks":8.0,"ratio":2.0,"label":"8.0","totals":[2.0,-0.0,3e1]
+        }}]});
+        let expected = r#"{"entries":[{"limits":{"counts":[2,0,30],"label":"8.0","ratio":2.0,"tasks_max":8}}],"limit":2}"#;
+        let binding = compile_binding(&contract, &overlay).unwrap();
+        assert_eq!(
+            serde_json::to_string(&binding.prepare(&input).unwrap()).unwrap(),
+            expected
+        );
+        let mut invalid = input;
+        invalid["values"][0]["caps"]["tasks"] = json!(8.5);
+        assert_eq!(binding.prepare(&invalid), Err(INPUT));
+        for value in [json!(2.5), json!(9_007_199_254_740_992u64)] {
+            let mut invalid = overlay.clone();
+            invalid["fixed_args"]["count"] = value;
+            assert!(compile_binding(&contract, &invalid).is_err());
+        }
     }
 }

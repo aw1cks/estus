@@ -19,6 +19,19 @@ async fn systemd_unit_set_runtime_limits_real_acceptance() -> Result<()> {
         ensure!(value["properties"]["MemoryMax"] == "67108864" && value["properties"]["TasksMax"] == "32", "actual limits readback missing");
         let oracle = guest.shell("set -eu; test \"$(systemctl show estus-fixture.service -p MemoryMax --value)\" = 67108864; test \"$(systemctl show estus-fixture.service -p TasksMax --value)\" = 32; test \"$(systemctl show estus-fixture.service -p CPUQuotaPerSecUSec --value)\" = 250ms; test ! -e /etc/systemd/system.control/estus-fixture.service.d; test -d /run/systemd/system.control/estus-fixture.service.d; systemctl is-active --quiet estus-fixture.service").await?;
         ensure!(oracle.status.success(), "runtime limits were not effective/nonpersistent");
+        let reply = binding
+            .call(json!({"unit":"estus-fixture.service","limits":{"tasks_max":8.0}}))
+            .await?;
+        let value = catalog::projection(&reply)?;
+        ensure!(
+            value["requested_limits"]["tasks_max"].as_u64() == Some(8)
+                && value["properties"]["TasksMax"] == "8",
+            "integral float did not reach the collector as an integer"
+        );
+        let oracle = guest
+            .shell("test \"$(systemctl show estus-fixture.service -p TasksMax --value)\" = 8; systemctl is-active --quiet estus-fixture.service")
+            .await?;
+        ensure!(oracle.status.success(), "TasksMax=8 was not effective");
         Ok(())
     }.await;
     let cleanup = guest.stop().await;
