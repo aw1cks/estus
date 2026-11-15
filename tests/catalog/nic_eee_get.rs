@@ -59,7 +59,7 @@ async fn nic_eee_get() -> Result<()> {
 
 #[test]
 fn eee_parser_preserves_configuration_active_and_unknown_timer() -> Result<()> {
-    for tool in ["nic_eee_get"] {
+    for tool in ["nic_eee_get", "nic_eee_set"] {
         for (status, enabled, active) in [
             ("disabled", false, false),
             ("inactive", true, false),
@@ -140,7 +140,7 @@ fn eee_parsers_refuse_ambiguous_missing_nonfinite_and_unbounded_data() -> Result
     for constant in ["NaN", "Infinity", "-Infinity"] {
         invalid.push(text.replace("\"tx-lpi\":100", &format!("\"tx-lpi\":{constant}")));
     }
-    for tool in ["nic_eee_get"] {
+    for tool in ["nic_eee_get", "nic_eee_set"] {
         for text in &invalid {
             assert_eq!(
                 payload::call(tool, "parse_eee", json!([text]))?,

@@ -678,6 +678,11 @@ qualify virtual-driver configuration, not physical error correction.
 configuration. Enabled and negotiated-active are separate; an LPI-off hidden
 Tx LPI timer is omitted rather than invented. No tuning permission is granted.
 
+`nic_eee_set` separately approves an enabled flag and a 0–1000000 microsecond
+Tx LPI timer, always requesting Tx LPI on. It reads back configuration, skips
+no-op writes and never retries or rolls back. The model stays inactive even when
+enabled; rejected writes, readback mismatches and partial effects are tested.
+
 ### Review and prepare a site configuration
 
 Export creates private **inert** `tools.toml`, role sources and exact JSON
@@ -696,7 +701,7 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "4"
+version = "5"
 
 [targets.server]
 ssh_host = "server-ordinary"

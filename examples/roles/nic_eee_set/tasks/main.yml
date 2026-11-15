@@ -1,0 +1,16 @@
+---
+- name: Observe reviewed bounded synthetic model EEE state
+  ansible.builtin.command:
+    argv:
+      - '{{ target_python }}'
+      - '-I'
+      - '-c'
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/collector.py', rstrip=False) }}"
+      - '{{ {"interface": interface, "enabled": enabled, "tx_lpi_timer_us": tx_lpi_timer_us} | to_json }}'
+      - '{{ operator_policy | to_json }}'
+    expand_argument_vars: false
+  register: nic_observation
+  changed_when: (nic_observation.stdout | from_json).changed
+- name: Publish typed synthetic model EEE result
+  ansible.builtin.set_fact:
+    mcp_result: '{{ nic_observation.stdout | from_json }}'

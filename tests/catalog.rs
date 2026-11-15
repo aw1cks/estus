@@ -103,6 +103,7 @@ mod tools {
     mod nic_coalesce_get;
     mod nic_coalesce_set;
     mod nic_eee_get;
+    mod nic_eee_set;
     mod nic_features_get;
     mod nic_features_set;
     mod nic_fec_get;
