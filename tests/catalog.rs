@@ -5,6 +5,8 @@ mod catalog;
 #[path = "support/payload.rs"]
 mod payload;
 mod support;
+#[path = "support/nic_model.rs"]
+mod nic_model;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ESTUS_TEST_CATALOG_VM and pinned Runner runtime"]

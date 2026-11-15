@@ -36,6 +36,22 @@ let
               INSTALL_MOD_PATH="$out" INSTALL_MOD_DIR=extra DEPMOD=true modules_install
           '';
         };
+        nicModelModule = pkgs.stdenv.mkDerivation {
+          pname = "estus-nic-model";
+          version = "1";
+          src = pkgs.writeTextDir "estus_nic_model.c" (builtins.readFile ./catalog-nic-model.c);
+          nativeBuildInputs = kernel.moduleBuildDependencies;
+          buildPhase = ''
+            printf 'obj-m := estus_nic_model.o\n' > Makefile
+            make -C ${kernel.dev}/lib/modules/${kernel.modDirVersion}/build M="$PWD" \
+              ${lib.escapeShellArgs config.boot.kernelPackages.kernelModuleMakeFlags} modules
+          '';
+          installPhase = ''
+            make -C ${kernel.dev}/lib/modules/${kernel.modDirVersion}/build M="$PWD" \
+              ${lib.escapeShellArgs config.boot.kernelPackages.kernelModuleMakeFlags} \
+              INSTALL_MOD_PATH="$out" INSTALL_MOD_DIR=extra DEPMOD=true modules_install
+          '';
+        };
         tools = [ pkgs.coreutils pkgs.bash config.systemd.package pkgs.iproute2 pkgs.ethtool
           pkgs.util-linux pkgs.pciutils pkgs.kmod pkgs.procps pkgs.dmidecode
           pkgs.iputils pkgs.traceroute pkgs.bind pkgs.gnugrep pkgs.gnused pkgs.findutils
@@ -96,7 +112,7 @@ let
         boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "9p" "9pnet_virtio" ];
         boot.kernelModules = [ "dummy" "estus_catalog" ]
           ++ lib.optionals lab [ "md_mod" "raid1" "e1000e" "nvme" "veth" ];
-        boot.extraModulePackages = [ testModule ];
+        boot.extraModulePackages = [ testModule ] ++ lib.optionals lab [ nicModelModule ];
         boot.kernelParams = [ "console=ttyS0" "psi=1" "intel_iommu=on" ];
         boot.loader.systemd-boot.enable = true;
         boot.loader.timeout = 0;
@@ -223,6 +239,8 @@ let
               done
               ip link set fec0 address 52:54:00:12:34:59
               ethtool --set-fec fec0 encoding off
+              # Fixed platform-backed software fixture: no address or route.
+              modprobe estus_nic_model
             ''}
             # Runtime unit files are in a standard search path, outside /etc;
             # persistent mask/unmask can therefore be exercised honestly.

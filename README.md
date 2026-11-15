@@ -780,11 +780,14 @@ Fast parser tests use stdlib Python from Nix check inputs, not Ansible.
 
 The isolated lab qualifies selected Virtio/veth/e1000e controls, Linux
 `netdevsim` FEC configuration, Linux MD RAID1 and virtual NVMe-reported telemetry.
-It does not qualify arbitrary drivers, physical media, wire-level pause behavior
-or physical FEC. EEE and transceiver observations remain unavailable on the
-current virtual devices; physical confirmation is not required for supported
-virtual setting/readback paths. Site-specific deployment procedures remain
-unqualified, without placeholders.
+Its additional lab-only `estus_nic_model` interface `model0` provides synthetic
+EEE state and SFF-8472 EEPROM data through real kernel ethtool callbacks. Native
+Rust tests exercise permissions, configuration, fault injection and module
+lifetime; no address or management route is assigned to this interface.
+
+This is software API/decoding qualification, not physical power savings, peer
+negotiation, optical accuracy, physical FEC or wire-level pause proof. Physical
+confirmation remains deferred; site-specific procedures remain unqualified.
 
 ## Catalog policy: facts first
 
