@@ -1,7 +1,7 @@
 //! Installed catalog discovery and explicit offline authoring; never target execution.
 use std::collections::BTreeSet;
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,26 @@ pub(crate) struct CatalogArgs {
     root: Option<PathBuf>,
     #[command(subcommand)]
     command: CatalogCommand,
+}
+
+impl CatalogArgs {
+    pub(crate) fn validate_global_options(
+        &self,
+        explicit_config: bool,
+        explicit_ssh: bool,
+    ) -> Result<(), &'static str> {
+        let offline = matches!(
+            &self.command,
+            CatalogCommand::List { .. } | CatalogCommand::Export { .. }
+        );
+        if offline && (explicit_config || explicit_ssh) {
+            return Err("catalog_option_not_applicable");
+        }
+        if !offline && explicit_config {
+            return Err("catalog_config_site_conflict");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand)]
@@ -199,7 +219,7 @@ fn read_toml(path: &Path) -> Result<toml::Table, &'static str> {
     toml::from_str(&text).map_err(|_| "catalog_definition_invalid")
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
+fn write_private(path: &Path, bytes: &[u8]) -> Result<File, &'static str> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -207,7 +227,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
         .open(path)
         .map_err(|_| "catalog_output_unavailable")?;
     file.write_all(bytes)
-        .map_err(|_| "catalog_output_unavailable")
+        .map_err(|_| "catalog_output_unavailable")?;
+    Ok(file)
 }
 
 fn overlay(definition: &toml::Value) -> Result<Value, &'static str> {
@@ -414,6 +435,7 @@ async fn prepare(
     definitions: PathBuf,
     targets: Vec<String>,
     path: PathBuf,
+    cli: crate::config::Cli,
     shutdown: CancellationToken,
 ) -> Result<Value, &'static str> {
     let version = catalog.manifest().version.clone();
@@ -568,13 +590,46 @@ async fn prepare(
             );
         }
         let config_path = output.path.join("estus.toml");
-        write_private(
+        let mut config_file = write_private(
             &config_path,
             toml::to_string_pretty(&document)
                 .map_err(|_| "catalog_output_invalid")?
                 .as_bytes(),
         )?;
-        let config = Config::from_file(config_path).map_err(|_| "catalog_site_policy_invalid")?;
+        let config = Config::from_file_with_catalog_root(cli, config_path, None)
+            .map_err(|_| "catalog_site_policy_invalid")?;
+        // Publish the effective absolute SSH selection, not the lower-priority
+        // site values. Keep the exclusively created file handle while updating
+        // this still-private output; failure drops the complete owned directory.
+        let ssh = document
+            .entry("ssh")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or("catalog_definition_invalid")?;
+        ssh.insert(
+            "executable".into(),
+            config
+                .ssh_executable()
+                .to_str()
+                .ok_or("catalog_ssh_path_not_utf8")?
+                .into(),
+        );
+        if let Some(path) = config.ssh_config() {
+            ssh.insert(
+                "config_file".into(),
+                path.to_str().ok_or("catalog_ssh_path_not_utf8")?.into(),
+            );
+        }
+        let text = toml::to_string_pretty(&document).map_err(|_| "catalog_output_invalid")?;
+        config_file
+            .rewind()
+            .map_err(|_| "catalog_output_unavailable")?;
+        config_file
+            .set_len(0)
+            .map_err(|_| "catalog_output_unavailable")?;
+        config_file
+            .write_all(text.as_bytes())
+            .map_err(|_| "catalog_output_unavailable")?;
         Ok::<_, &'static str>((output, config, imports))
     })
     .await
@@ -609,7 +664,11 @@ async fn prepare(
     Ok(report)
 }
 
-pub(crate) async fn run(args: CatalogArgs, shutdown: CancellationToken) -> u8 {
+pub(crate) async fn run(
+    args: CatalogArgs,
+    cli: crate::config::Cli,
+    shutdown: CancellationToken,
+) -> u8 {
     let explicit_root = args.root.is_some();
     let root = args.root;
     let command = args.command;
@@ -660,7 +719,7 @@ pub(crate) async fn run(args: CatalogArgs, shutdown: CancellationToken) -> u8 {
             }
             CatalogCommand::Inspect { site } => {
                 let root = explicit_root.then(|| catalog.root().to_path_buf());
-                match tokio::task::spawn_blocking(move || inspect(&site, root)).await {
+                match tokio::task::spawn_blocking(move || inspect(site, root, cli)).await {
                     Ok(value) => value
                         .and_then(|v| serde_json::to_vec(&v).map_err(|_| "catalog_output_invalid")),
                     Err(_) => Err("catalog_definition_invalid"),
@@ -695,6 +754,7 @@ pub(crate) async fn run(args: CatalogArgs, shutdown: CancellationToken) -> u8 {
                     definitions,
                     targets,
                     output,
+                    cli,
                     shutdown.clone(),
                 );
                 tokio::pin!(operation);
@@ -735,8 +795,12 @@ pub(crate) async fn run(args: CatalogArgs, shutdown: CancellationToken) -> u8 {
     }
 }
 
-fn inspect(site: &Path, root: Option<PathBuf>) -> Result<Value, &'static str> {
-    let config = Config::from_file_with_catalog_root(site.to_path_buf(), root)
+fn inspect(
+    site: PathBuf,
+    root: Option<PathBuf>,
+    cli: crate::config::Cli,
+) -> Result<Value, &'static str> {
+    let config = Config::from_file_with_catalog_root(cli, site, root)
         .map_err(|_| "catalog_site_policy_invalid")?;
     let tools: Vec<_> = config
         .bindings()

@@ -246,6 +246,128 @@ result={{kind="command"}}
     Ok(())
 }
 
+#[test]
+fn global_catalog_options_are_honored_or_rejected_without_reflecting_values() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let binary = std::fs::canonicalize(test_binary())?;
+    let launch = root.path().join("launch");
+    let policy = root.path().join("policy");
+    std::fs::create_dir(&launch)?;
+    std::fs::create_dir(&policy)?;
+    std::os::unix::fs::symlink(&binary, launch.join("cli-ssh"))?;
+    std::fs::write(launch.join("cli.conf"), "# selected CLI configuration\n")?;
+    let site = policy.join("site.toml");
+    std::fs::write(
+        &site,
+        "[ssh]\nexecutable='missing-site-ssh'\nconfig_file='missing-site.conf'\n[targets]\n",
+    )?;
+    let base = || {
+        let mut command = Command::new(&binary);
+        command
+            .current_dir(&launch)
+            .env("ESTUS_CONFIG", "/missing/ambient-config")
+            .env("ESTUS_SSH", "/missing/ambient-ssh")
+            .env("ESTUS_SSH_CONFIG", "/missing/ambient-ssh-config");
+        command
+    };
+    // Both placements retain CLI provenance and resolve against launch cwd.
+    for trailing in [false, true] {
+        let mut command = base();
+        if !trailing {
+            command.args(["--ssh", "cli-ssh", "--ssh-config", "cli.conf"]);
+        }
+        command
+            .args(["catalog", "--root"])
+            .arg(assets())
+            .args(["inspect", "--site"])
+            .arg(&site);
+        if trailing {
+            command.args(["--ssh", "cli-ssh", "--ssh-config", "cli.conf"]);
+        }
+        let output = command.output()?;
+        ensure!(
+            output.status.success(),
+            "CLI overrides did not beat environment/site: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        ensure!(report["tools"] == serde_json::json!([]));
+    }
+    for invalid_config in [false, true] {
+        let output = base()
+            .args(["catalog", "--root"])
+            .arg(assets())
+            .args(["inspect", "--site"])
+            .arg(&site)
+            .args([
+                "--ssh",
+                if invalid_config {
+                    "cli-ssh"
+                } else {
+                    "DO_NOT_REFLECT_INVALID_SSH"
+                },
+                "--ssh-config",
+                if invalid_config {
+                    "DO_NOT_REFLECT_INVALID_CONFIG"
+                } else {
+                    "cli.conf"
+                },
+            ])
+            .output()?;
+        ensure!(
+            !output.status.success() && output.stdout.is_empty(),
+            "invalid explicit override fell back"
+        );
+        ensure!(
+            !output.stderr.is_empty(),
+            "invalid override produced no diagnostic"
+        );
+        ensure!(!String::from_utf8_lossy(&output.stderr).contains("DO_NOT_REFLECT"));
+    }
+    for trailing in [false, true] {
+        let mut command = base();
+        if !trailing {
+            command.args(["--config", "DO_NOT_REFLECT_CONFLICT"]);
+        }
+        command
+            .args(["catalog", "--root"])
+            .arg(assets())
+            .args(["inspect", "--site"])
+            .arg(&site);
+        if trailing {
+            command.args(["--config", "DO_NOT_REFLECT_CONFLICT"]);
+        }
+        let output = command.output()?;
+        ensure!(!output.status.success() && output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(error["error_code"] == "catalog_config_site_conflict");
+        ensure!(!String::from_utf8_lossy(&output.stderr).contains("DO_NOT_REFLECT"));
+    }
+    for export in [false, true] {
+        for option in ["--config", "--ssh", "--ssh-config"] {
+            let destination = root.path().join("must-not-export");
+            let mut command = base();
+            command
+                .args([option, "DO_NOT_REFLECT_OFFLINE"])
+                .args(["catalog", "--root"])
+                .arg(assets());
+            if export {
+                command
+                    .args(["export", "--tool", "pressure_get", "--output"])
+                    .arg(&destination);
+            } else {
+                command.args(["list", "--json"]);
+            }
+            let output = command.output()?;
+            ensure!(!output.status.success() && output.stdout.is_empty() && !destination.exists());
+            let error: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+            ensure!(error["error_code"] == "catalog_option_not_applicable");
+            ensure!(!String::from_utf8_lossy(&output.stderr).contains("DO_NOT_REFLECT"));
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preparation_rejects_fifo_ssh_config_without_hanging_or_partial_output() -> Result<()> {
     use std::time::Duration;
@@ -325,14 +447,71 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace)?;
     let site = root.path().join("site.toml");
+    let launch = root.path().canonicalize()?;
+    let binary = std::fs::canonicalize(test_binary())?;
+    std::os::unix::fs::symlink(&binary, launch.join("cli-ssh"))?;
+    std::fs::write(
+        launch.join("cli.conf"),
+        "# prepared effective configuration\n",
+    )?;
     std::fs::write(
         &site,
         format!(
-            "profile='actions-only'\n[targets.server]\nssh_host='private-alias'\n[automation]\nruntime={runtime:?}\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
+            "profile='actions-only'\n[ssh]\nexecutable='missing-site-ssh'\nconfig_file='missing-site.conf'\n[targets.server]\nssh_host='private-alias'\n[automation]\nruntime={runtime:?}\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
         ),
     )?;
+    let valid_site = root.path().join("valid-site.toml");
+    let mut valid_document: toml::Value = toml::from_str(&std::fs::read_to_string(&site)?)?;
+    valid_document["ssh"]["executable"] = binary.to_str().context("binary UTF8")?.into();
+    valid_document["ssh"]["config_file"] = launch
+        .join("cli.conf")
+        .to_str()
+        .context("config UTF8")?
+        .into();
+    std::fs::write(&valid_site, toml::to_string(&valid_document)?)?;
+    for invalid_config in [false, true] {
+        let rejected_output = root.path().join(if invalid_config {
+            "bad-config"
+        } else {
+            "bad-executable"
+        });
+        let rejected = Command::new(&binary)
+            .current_dir(&launch)
+            .args(["catalog", "--root"])
+            .arg(assets())
+            .args(["prepare", "--site"])
+            .arg(&valid_site)
+            .arg("--definitions")
+            .arg(export.join("tools.toml"))
+            .arg("--output")
+            .arg(&rejected_output)
+            .args([
+                "--ssh",
+                if invalid_config {
+                    "cli-ssh"
+                } else {
+                    "DO_NOT_REFLECT_BAD_PREPARE_SSH"
+                },
+                "--ssh-config",
+                if invalid_config {
+                    "DO_NOT_REFLECT_BAD_PREPARE_CONFIG"
+                } else {
+                    "cli.conf"
+                },
+            ])
+            .env_remove("ESTUS_CONFIG")
+            .env("ESTUS_SSH", &binary)
+            .env("ESTUS_SSH_CONFIG", launch.join("cli.conf"))
+            .output()?;
+        ensure!(
+            !rejected.status.success() && !rejected_output.exists(),
+            "prepare ignored an invalid explicit override or retained partial output"
+        );
+        ensure!(!String::from_utf8_lossy(&rejected.stderr).contains("DO_NOT_REFLECT"));
+    }
     let prepared = root.path().join("prepared");
-    let output = Command::new(test_binary())
+    let output = Command::new(&binary)
+        .current_dir(&launch)
         .args(["catalog", "--root"])
         .arg(assets())
         .args(["prepare", "--site"])
@@ -341,9 +520,10 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         .arg(export.join("tools.toml"))
         .arg("--output")
         .arg(&prepared)
-        .env_remove("ESTUS_CONFIG")
-        .env_remove("ESTUS_SSH_CONFIG")
-        .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"))
+        .args(["--ssh", "cli-ssh", "--ssh-config", "cli.conf"])
+        .env("ESTUS_CONFIG", "/missing/ambient-config")
+        .env("ESTUS_SSH_CONFIG", "/missing/ambient-ssh-config")
+        .env("ESTUS_SSH", "/missing/ambient-ssh")
         .output()?;
     ensure!(
         output.status.success(),
@@ -353,6 +533,24 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     );
     let config: toml::Value =
         toml::from_str(&std::fs::read_to_string(prepared.join("estus.toml"))?)?;
+    ensure!(
+        config["ssh"]["executable"].as_str() == launch.join("cli-ssh").to_str()
+            && config["ssh"]["config_file"].as_str() == launch.join("cli.conf").to_str(),
+        "prepared output lost the effective CLI selection or used the wrong path base"
+    );
+    let inspected = Command::new(&binary)
+        .current_dir(&export)
+        .args(["catalog", "inspect", "--site"])
+        .arg(prepared.join("estus.toml"))
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_SSH")
+        .env_remove("ESTUS_SSH_CONFIG")
+        .output()?;
+    ensure!(
+        inspected.status.success(),
+        "prepared SSH selection did not survive a different launch cwd: {}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
     let mut approved_root = None;
     for name in ["pressure_get", "memory_stats"] {
         let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(

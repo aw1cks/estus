@@ -801,6 +801,26 @@ controlled by the account/root, not foreign-owned or non-sticky shared writable
 directories. Relative site paths retain the supplied site's directory even
 when the site file is a symlink.
 
+`inspect` and `prepare` honor the shared SSH selection precedence: explicit
+`--ssh`/`--ssh-config`, then their environment variables, then site settings
+(and PATH for an otherwise unspecified executable). CLI/environment relative
+paths use the launch directory; site-relative paths use the site's directory.
+An explicit `--config` conflicts with `--site` and is rejected; ambient
+`ESTUS_CONFIG` does not replace the explicit site.
+
+Preparation pins the effective executable and replacement SSH configuration as
+absolute paths in `estus.toml`. A subsequent launch without overrides therefore
+uses that selection even from another directory. Later CLI/environment overrides
+still follow the normal precedence; clear them when using the pinned values.
+The SSH configuration's contents remain operator-managed, not snapshotted.
+
+Named automation authorities keep their separate SSH configuration files; the
+shared executable selection still applies.
+
+Offline `list`/`export` ignore ambient configuration/SSH variables and need no SSH
+or Ansible. Explicit `--config`, `--ssh` or `--ssh-config` on those commands is
+rejected rather than silently ignored.
+
 `inspect` explains resolved named-tool exposure and per-target permission,
 including the global native command-execution, file-read and file-write exposure
 booleans. These are global ceilings, not additional per-target grants. Inspection

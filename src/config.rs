@@ -1284,32 +1284,17 @@ impl Config {
         &self.bindings
     }
 
-    pub(crate) fn from_file(path: PathBuf) -> Result<Self, ConfigError> {
-        Self::load(Cli {
-            config: Some(path),
-            ssh_config: None,
-            ssh: None,
-            command: None,
-        })
-    }
-
     pub(crate) fn from_file_with_catalog_root(
+        mut cli: Cli,
         path: PathBuf,
         root: Option<PathBuf>,
     ) -> Result<Self, ConfigError> {
         let cwd = std::env::current_dir()
             .map_err(|_| invalid("config", "cannot determine launch directory"))?;
-        Self::load_with_catalog_root(
-            Cli {
-                config: Some(path),
-                ssh_config: None,
-                ssh: None,
-                command: None,
-            },
-            &cwd,
-            |key| std::env::var_os(key),
-            root,
-        )
+        // --site is the explicit catalog document. The caller rejects an
+        // explicit --config conflict; ambient ESTUS_CONFIG does not replace it.
+        cli.config = Some(path);
+        Self::load_with_catalog_root(cli, &cwd, |key| std::env::var_os(key), root)
     }
 
     /// Import against exactly the runtime used by this authority at activation.

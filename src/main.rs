@@ -36,11 +36,16 @@ use std::{
     task::{Context, Poll},
 };
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use rmcp::ServiceExt;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
+
+enum Diagnostic {
+    Doctor(config::DoctorArgs),
+    Schema(schema_import::SchemaArgs),
+}
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
@@ -55,10 +60,22 @@ fn main() -> ExitCode {
     let Ok(_diagnostics) = audit::start() else {
         return ExitCode::FAILURE;
     };
-    let mut cli = config::Cli::parse();
+    let mut matches = config::Cli::command().get_matches();
+    let explicit_config =
+        matches.value_source("config") == Some(clap::parser::ValueSource::CommandLine);
+    let explicit_ssh = ["ssh", "ssh_config"]
+        .into_iter()
+        .any(|name| matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine));
+    let mut cli =
+        config::Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit());
+    drop(matches);
     let command = match cli.command.take() {
-        Some(config::CliCommand::Catalog(args)) => return standalone_catalog(args),
-        other => other,
+        Some(config::CliCommand::Catalog(args)) => {
+            return standalone_catalog(args, cli, explicit_config, explicit_ssh);
+        }
+        Some(config::CliCommand::Doctor(args)) => Some(Diagnostic::Doctor(args)),
+        Some(config::CliCommand::Schema(args)) => Some(Diagnostic::Schema(args)),
+        None => None,
     };
     let diagnostic = command.is_some();
     let config = match config::Config::load(cli) {
@@ -86,7 +103,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn standalone_catalog(args: catalog_cli::CatalogArgs) -> ExitCode {
+fn standalone_catalog(
+    args: catalog_cli::CatalogArgs,
+    cli: config::Cli,
+    explicit_config: bool,
+    explicit_ssh: bool,
+) -> ExitCode {
+    if let Err(code) = args.validate_global_options(explicit_config, explicit_ssh) {
+        audit::emit(&serde_json::json!({"ok":false,"error_code":code}));
+        return ExitCode::from(2);
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -102,7 +128,7 @@ fn standalone_catalog(args: catalog_cli::CatalogArgs) -> ExitCode {
             return fail("signal_setup_failed");
         };
         let shutdown = CancellationToken::new();
-        let operation = catalog_cli::run(args, shutdown.clone());
+        let operation = catalog_cli::run(args, cli, shutdown.clone());
         tokio::pin!(operation);
         let status = tokio::select! {
             status = &mut operation => status,
@@ -115,7 +141,7 @@ fn standalone_catalog(args: catalog_cli::CatalogArgs) -> ExitCode {
     status
 }
 
-async fn run(mut config: config::Config, command: Option<config::CliCommand>) -> ExitCode {
+async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCode {
     let (Ok(mut interrupt), Ok(mut terminate)) = (
         signal(SignalKind::interrupt()),
         signal(SignalKind::terminate()),
@@ -126,19 +152,18 @@ async fn run(mut config: config::Config, command: Option<config::CliCommand>) ->
         let shutdown = CancellationToken::new();
         let operation = async {
             match command {
-                config::CliCommand::Doctor(args) => {
+                Diagnostic::Doctor(args) => {
                     doctor::run(config, args, shutdown.clone())
                         .await
                         .publish()
                         .await
                 }
-                config::CliCommand::Schema(args) => {
+                Diagnostic::Schema(args) => {
                     schema_import::run(config, args, shutdown.clone())
                         .await
                         .publish()
                         .await
                 }
-                config::CliCommand::Catalog(args) => catalog_cli::run(args, shutdown.clone()).await,
             }
         };
         tokio::pin!(operation);
