@@ -1,6 +1,5 @@
 include Cargo.toml Cargo.lock setup.py
 recursive-include src *.rs *.py
-recursive-include vendor/openssh-sftp-protocol *
 include examples/catalog.json
 include examples/boot_clear_oneshot.toml
 recursive-include examples/roles/boot_clear_oneshot *.yml *.yaml *.py *.json *.toml

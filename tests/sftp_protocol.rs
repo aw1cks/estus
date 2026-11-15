@@ -1,4 +1,4 @@
-//! Regressions for the narrowly patched upstream SFTP response decoder.
+//! Regressions for lossless Unix filename decoding in the upstream SFTP protocol.
 use std::os::unix::ffi::OsStrExt;
 
 use openssh_sftp_protocol::{

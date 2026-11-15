@@ -1278,6 +1278,9 @@ The separate `.#automation-msrv` output supplies the optional pinned Ansible run
 see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
 That health check verifies imports and identity, not Ansible workload execution.
 
+SFTP uses the published `openssh-sftp-protocol` 0.26.1 release for lossless Unix
+filename handling; no vendored protocol fork is required.
+
 ## CI coverage
 
 The generated workflow (`nix/ci.nix`; regenerate with
