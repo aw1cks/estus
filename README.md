@@ -674,6 +674,10 @@ with driver readback and an honest no-op receipt. The lab uses Linux
 `netdevsim` as `fec0`, separate from its management interface. These tools
 qualify virtual-driver configuration, not physical error correction.
 
+`nic_eee_get` is individually opt-in and reads the software model's EEE
+configuration. Enabled and negotiated-active are separate; an LPI-off hidden
+Tx LPI timer is omitted rather than invented. No tuning permission is granted.
+
 ### Review and prepare a site configuration
 
 Export creates private **inert** `tools.toml`, role sources and exact JSON
@@ -692,7 +696,7 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "3"
+version = "4"
 
 [targets.server]
 ssh_host = "server-ordinary"

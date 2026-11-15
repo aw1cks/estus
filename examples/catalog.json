@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "3",
+  "version": "4",
   "presets": {
     "linux-health": [
       "cpu_stats",
@@ -590,6 +590,18 @@
         "linux",
         "python3",
         "ansible"
+      ]
+    },
+    "nic_eee_get": {
+      "definition": "nic_eee_get.toml",
+      "role": "roles/nic_eee_get",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "ansible",
+        "ethtool",
+        "estus_nic_model"
       ]
     },
     "nic_features_get": {
