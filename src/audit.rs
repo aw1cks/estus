@@ -1,4 +1,13 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    io::{self, Write},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use rmcp::model::RequestId;
 use serde::Serialize;
@@ -8,17 +17,173 @@ use crate::{
     reply::{ControllerError, ControllerReply, GroupCleanup, ToolError},
 };
 
-/// Best-effort JSON diagnostics; stderr failure must never interrupt cleanup.
-pub(crate) fn emit(record: &impl Serialize) {
-    use std::io::Write;
+// These bounds include serialization, queued records and the in-flight write:
+// at most 64 records, each retaining at most 4096 bytes (256 KiB total).
+const MAX_RECORDS: usize = 64;
+const MAX_RECORD_BYTES: usize = 4096;
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
+static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
 
-    // Serialize before locking stderr, so a failed serialization cannot leave a
-    // partial record or hold the output lock while invoking Serialize code.
-    let line = serde_json::to_string(record);
-    let line = line
-        .as_deref()
-        .unwrap_or(r#"{"event":"diagnostic_error","error_code":"serialization_failed"}"#);
-    let _ = writeln!(std::io::stderr().lock(), "{line}");
+#[derive(Default)]
+struct Delivery {
+    retained: AtomicUsize,
+    dropped: AtomicU64,
+    closing: AtomicBool,
+}
+
+impl Delivery {
+    fn lost(&self) {
+        let _ = self
+            .dropped
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_add(1))
+            });
+    }
+}
+
+struct PendingRecord {
+    line: Vec<u8>,
+    delivery: Arc<Delivery>,
+}
+
+impl Write for PendingRecord {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // Leave space for the newline in this record's fixed allocation.
+        if bytes.len() > MAX_RECORD_BYTES - 1 - self.line.len() {
+            return Err(io::Error::other("diagnostic record limit"));
+        }
+        self.line.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for PendingRecord {
+    fn drop(&mut self) {
+        self.delivery.retained.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+enum Message {
+    Record(PendingRecord),
+    Wake,
+}
+
+struct Diagnostics {
+    sender: SyncSender<Message>,
+    delivery: Arc<Delivery>,
+}
+
+impl Diagnostics {
+    fn emit(&self, record: &impl Serialize) {
+        if self.delivery.closing.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .delivery
+            .retained
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < MAX_RECORDS).then_some(n + 1)
+            })
+            .is_err()
+        {
+            self.delivery.lost();
+            return;
+        }
+        let mut pending = PendingRecord {
+            line: Vec::with_capacity(MAX_RECORD_BYTES),
+            delivery: Arc::clone(&self.delivery),
+        };
+        if serde_json::to_writer(&mut pending, record).is_err() {
+            self.delivery.lost();
+            // Wake an idle writer to report serialization/size loss as well.
+            let _ = self.sender.try_send(Message::Wake);
+            return;
+        }
+        pending.line.push(b'\n');
+        if self.sender.try_send(Message::Record(pending)).is_err() {
+            self.delivery.lost();
+        }
+    }
+}
+
+/// Owns only diagnostics, never requests, admission permits or cleanup work.
+pub(crate) struct Writer {
+    done: Receiver<()>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// Initialize once, before any application diagnostics or async work.
+pub(crate) fn start() -> io::Result<Writer> {
+    let (sender, receiver) = mpsc::sync_channel(MAX_RECORDS);
+    let (finished, done) = mpsc::sync_channel(1);
+    let delivery = Arc::new(Delivery::default());
+    let writer_delivery = Arc::clone(&delivery);
+    let thread = std::thread::Builder::new()
+        .name("estus-diagnostics".into())
+        .spawn(move || {
+            let stderr = io::stderr();
+            let mut next = receiver.recv().ok();
+            while let Some(message) = next {
+                // Lock only while writing: CLI parsing may also use stderr.
+                let result = (|| -> io::Result<()> {
+                    let mut output = stderr.lock();
+                    if let Message::Record(record) = message {
+                        output.write_all(&record.line)?;
+                    }
+                    let dropped = writer_delivery.dropped.swap(0, Ordering::Relaxed);
+                    if dropped != 0 {
+                        writeln!(
+                            output,
+                            "{{\"event\":\"diagnostic_loss\",\"dropped_records\":{dropped}}}"
+                        )?;
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    // A closed/broken sink is terminal; never retry or block callers.
+                    break;
+                }
+                next = if writer_delivery.closing.load(Ordering::Acquire) {
+                    receiver.try_recv().ok()
+                } else {
+                    receiver.recv().ok()
+                };
+            }
+            let _ = finished.send(());
+        })?;
+    let _ = DIAGNOSTICS.set(Diagnostics { sender, delivery });
+    Ok(Writer {
+        done,
+        thread: Some(thread),
+    })
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Some(diagnostics) = DIAGNOSTICS.get() {
+            diagnostics.delivery.closing.store(true, Ordering::Release);
+            // A full queue already wakes the writer; an empty queue needs this.
+            let _ = diagnostics.sender.try_send(Message::Wake);
+        }
+        if self.done.recv_timeout(SHUTDOWN_GRACE).is_ok()
+            && let Some(thread) = self.thread.take()
+        {
+            let _ = thread.join();
+        }
+        // A blocked OS write cannot be cancelled safely. Detach after the grace;
+        // process exit terminates this diagnostic-only thread.
+    }
+}
+
+/// Best-effort JSON diagnostics; never wait for stderr or queue capacity.
+pub(crate) fn emit(record: &impl Serialize) {
+    if let Some(diagnostics) = DIAGNOSTICS.get() {
+        diagnostics.emit(record);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -233,6 +398,43 @@ fn millis(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_diagnostics_are_dropped_whole_and_capacity_recovers() {
+        let (sender, receiver) = mpsc::sync_channel(MAX_RECORDS);
+        let delivery = Arc::new(Delivery::default());
+        let diagnostics = Diagnostics {
+            sender,
+            delivery: Arc::clone(&delivery),
+        };
+        diagnostics.emit(&serde_json::json!({"private": "\n".repeat(MAX_RECORD_BYTES)}));
+        assert!(matches!(receiver.try_recv(), Ok(Message::Wake)));
+        assert_eq!(delivery.retained.load(Ordering::Relaxed), 0);
+        assert_eq!(delivery.dropped.load(Ordering::Relaxed), 1);
+        for sequence in 0..MAX_RECORDS {
+            diagnostics.emit(&serde_json::json!({"sequence": sequence}));
+        }
+        diagnostics.emit(&serde_json::json!({"overflow": true}));
+        assert_eq!(delivery.dropped.load(Ordering::Relaxed), 2);
+        for sequence in 0..MAX_RECORDS {
+            let Message::Record(record) = receiver.try_recv().unwrap() else {
+                panic!("expected a complete diagnostic");
+            };
+            assert!(record.line.len() <= MAX_RECORD_BYTES);
+            assert_eq!(record.line.last(), Some(&b'\n'));
+            let value: serde_json::Value = serde_json::from_slice(&record.line).unwrap();
+            assert_eq!(value["sequence"], sequence);
+        }
+        assert_eq!(delivery.retained.load(Ordering::Relaxed), 0);
+        diagnostics.emit(&serde_json::json!({"recovered": true}));
+        let Message::Record(record) = receiver.try_recv().unwrap() else {
+            panic!("expected recovered delivery");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&record.line).unwrap()["recovered"],
+            true
+        );
+    }
 
     #[test]
     fn controller_records_exclude_remote_and_private_identity_even_on_drop_path() {

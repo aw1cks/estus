@@ -351,6 +351,20 @@ not output retrieval, proof of completion, replay, or a background-task API.
 `nix run .#runner-progress-acceptance-msrv` separately exercises the selected real
 Runner environment; it is not a prerequisite for native progress.
 
+## Best-effort audit delivery
+
+JSON diagnostics on stderr use a dedicated writer, independent of request and
+cleanup owners. Producers never wait for stderr or queue capacity. At most64
+records of4096 bytes each (256KiB total, including serialization and the in-flight
+record) are retained. Oversized/unserializable records and overflow are dropped
+whole; accepted records preserve enqueue order. When delivery resumes,
+`{"event":"diagnostic_loss","dropped_records":N}` reports accumulated loss.
+A closed/broken sink disables delivery without affecting execution.
+
+After application cleanup and runtime shutdown, diagnostic draining gets at
+most100ms. A still-blocked diagnostic-only thread is abandoned at process exit;
+remaining records may be lost. Audit is not a durable or complete execution log.
+
 ## Optional Ansible environment
 
 Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`

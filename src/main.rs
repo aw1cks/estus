@@ -52,6 +52,9 @@ fn main() -> ExitCode {
             Err(_) => ExitCode::FAILURE,
         };
     }
+    let Ok(_diagnostics) = audit::start() else {
+        return ExitCode::FAILURE;
+    };
     let mut cli = config::Cli::parse();
     let command = match cli.command.take() {
         Some(config::CliCommand::Catalog(args)) => return standalone_catalog(args),

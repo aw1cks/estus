@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -39,13 +39,18 @@ struct Server {
     child: Child,
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
-    stderr: JoinHandle<std::io::Result<()>>,
+    stderr: Option<JoinHandle<std::io::Result<()>>>,
+    error: Option<ChildStderr>,
     audit: Arc<Mutex<Vec<u8>>>,
     responses: BTreeMap<u64, Value>,
 }
 
 impl Server {
     async fn start(fixture: &Fixture) -> Result<Self> {
+        Self::start_with_stderr(fixture, true).await
+    }
+
+    async fn start_with_stderr(fixture: &Fixture, drain: bool) -> Result<Self> {
         let mut command = support::server_command(&fixture.config)?;
         command
             .env("UNREVIEWED_CONTROLLER_SECRET", AMBIENT_SECRET)
@@ -58,33 +63,24 @@ impl Server {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
         let input = child.stdin.take().context("server stdin")?;
         let output = BufReader::new(child.stdout.take().context("server stdout")?);
-        let mut error = child.stderr.take().context("server stderr")?;
+        let error = child.stderr.take().context("server stderr")?;
         let audit = Arc::new(Mutex::new(Vec::new()));
-        let captured = audit.clone();
-        let stderr = tokio::spawn(async move {
-            let mut buffer = [0; 4096];
-            loop {
-                let count = error.read(&mut buffer).await?;
-                if count == 0 {
-                    return Ok(());
-                }
-                captured
-                    .lock()
-                    .expect("audit lock")
-                    .extend_from_slice(&buffer[..count]);
-            }
-        });
         let mut server = Self {
             child,
             input: Some(input),
             output,
-            stderr,
+            stderr: None,
+            error: Some(error),
             audit,
             responses: BTreeMap::new(),
         };
+        if drain {
+            server.drain_stderr();
+        }
         server
             .send(
                 json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
@@ -102,6 +98,26 @@ impl Server {
             .send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .await?;
         Ok(server)
+    }
+
+    fn drain_stderr(&mut self) {
+        let Some(mut error) = self.error.take() else {
+            return;
+        };
+        let captured = Arc::clone(&self.audit);
+        self.stderr = Some(tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            loop {
+                let count = error.read(&mut buffer).await?;
+                if count == 0 {
+                    return Ok(());
+                }
+                captured
+                    .lock()
+                    .expect("audit lock")
+                    .extend_from_slice(&buffer[..count]);
+            }
+        }));
     }
 
     async fn send(&mut self, frame: Value) -> Result<()> {
@@ -217,7 +233,11 @@ impl Server {
                 "non-protocol shutdown output"
             );
         }
-        timeout(WAIT, self.stderr).await???;
+        // Deliberately held pipes stay undrained until the process has exited.
+        self.drain_stderr();
+        if let Some(stderr) = self.stderr.take() {
+            timeout(WAIT, stderr).await???;
+        }
         let stderr = self.audit.lock().expect("audit lock").clone();
         for line in stderr
             .split(|byte| *byte == b'\n')
@@ -225,7 +245,8 @@ impl Server {
         {
             let event: Value = serde_json::from_slice(line).context("non-JSON controller audit")?;
             ensure!(
-                event.get("remote_state_unknown").is_none(),
+                event["identity_role"] != "controller"
+                    || event.get("remote_state_unknown").is_none(),
                 "local audit claimed remote state"
             );
         }
@@ -547,6 +568,146 @@ wait_gate "$record/release-leader"
 printf 'leader completed\n'
 exit 0
 "#;
+
+async fn flood_audit(server: &mut Server) -> Result<()> {
+    // More than a MiB of diagnostics exceeds the supported hosts' pipe buffers
+    // and the bounded delivery queue. Requests remain sequential and bounded.
+    for id in 100..4196 {
+        server
+            .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let response = server.response(id).await?;
+        ensure!(
+            response["result"]["isError"] != true && response.get("error").is_none(),
+            "discovery stalled or failed under audit backpressure: {response}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "requires native process observation outside the Darwin build sandbox"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_backpressure_does_not_hold_cleanup_and_recovers_ordered_records() -> Result<()> {
+    let fixture = Fixture::new(GROUP_SCRIPT, 8192, 15)?;
+    let mut server = Server::start_with_stderr(&fixture, false).await?;
+    let scenario = async {
+        flood_audit(&mut server).await?;
+        server.call(2, arguments()).await?;
+        let records = fixture.ready(1, &mut server, 2).await?;
+        let leader = pid(&records[0], "leader")?;
+        let worker = pid(&records[0], "worker")?;
+        fs::write(records[0].join("release-leader"), b"release")?;
+        let frame = server.response(2).await?;
+        let result = envelope(&frame)?;
+        ensure!(result["error"].is_null(), "{result}");
+        cleaned(&result["data"])?;
+        fixture.gone(&[leader, worker]).await?;
+        ensure!(
+            fixture.process(leader).await?.is_none(),
+            "leader not reaped"
+        );
+        fixture.clean().await?;
+
+        server.drain_stderr();
+        timeout(WAIT, async {
+            loop {
+                {
+                    let audit = server.audit.lock().expect("audit lock");
+                    for line in audit.split_inclusive(|byte| *byte == b'\n') {
+                        if line.last() == Some(&b'\n') {
+                            let event: Value = serde_json::from_slice(line)?;
+                            if event["event"] == "diagnostic_loss" {
+                                ensure!(event["dropped_records"].as_u64().unwrap_or(0) > 0);
+                                return Ok::<_, anyhow::Error>(());
+                            }
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("audit loss not reported after draining")??;
+        // A later operation proves delivery recovers, not merely buffered bytes.
+        server
+            .send(json!({"jsonrpc":"2.0","id":5000,"method":"tools/call",
+                "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        server.response(5000).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if scenario.is_err() {
+        fixture.release_all()?;
+    }
+    let stopped = server.stop(false).await;
+    scenario?;
+    let audit = stopped?;
+    ensure!(
+        audit.last() == Some(&b'\n'),
+        "incomplete recovered diagnostic"
+    );
+    let mut last = 0;
+    let mut recovered = false;
+    for line in audit.split_inclusive(|byte| *byte == b'\n') {
+        let event: Value = serde_json::from_slice(line)?;
+        if event["tool"] == "ssh_targets" {
+            let id = event["request_id"].as_u64().context("discovery audit ID")?;
+            // Each request emits start then finish; both retain enqueue order.
+            ensure!(id >= last, "accepted diagnostics reordered");
+            last = id;
+            recovered |= id == 5000 && event["event"] == "finish";
+        }
+    }
+    ensure!(recovered, "diagnostics did not recover after draining");
+    Ok(())
+}
+
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "requires native process observation outside the Darwin build sandbox"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_blocked_and_closed_pipes_do_not_hold_shutdown_cleanup() -> Result<()> {
+    for closed in [false, true] {
+        let fixture = Fixture::new(GROUP_SCRIPT, 8192, 15)?;
+        let mut server = Server::start_with_stderr(&fixture, false).await?;
+        if closed {
+            drop(server.error.take());
+        }
+        let mut observed = Vec::new();
+        let scenario = async {
+            flood_audit(&mut server).await?;
+            server.call(2, arguments()).await?;
+            let records = fixture.ready(1, &mut server, 2).await?;
+            let leader = pid(&records[0], "leader")?;
+            let worker = pid(&records[0], "worker")?;
+            let (group, _) = fixture.process(leader).await?.context("live leader")?;
+            observed.extend([leader, worker, group]);
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if scenario.is_err() {
+            fixture.release_all()?;
+        }
+        // No stderr reader exists until after stop observes process exit.
+        let stopped = timeout(Duration::from_secs(5), server.stop(false)).await;
+        scenario?;
+        stopped.context("audit sink exceeded bounded server shutdown")??;
+        fixture.gone(&observed).await?;
+        ensure!(
+            fixture.process(observed[0]).await?.is_none()
+                && fixture.process(observed[2]).await?.is_none(),
+            "shutdown left unreaped direct children"
+        );
+        fixture.clean().await?;
+    }
+    Ok(())
+}
 
 #[cfg_attr(
     target_os = "macos",
