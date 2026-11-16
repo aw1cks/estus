@@ -129,16 +129,35 @@ Nix orchestrates the same PEP 517 build and metadata, with Rust 1.88 and the pin
 Python/build-backend inputs. It does not copy the native Nix wrapper into the wheel.
 
 ```sh
-nix build .#wheel
-uv tool install --python 3.14 ./result/estus-*.whl
-uvx --from ./result/estus-*.whl estus
-uv run --no-project --with ./result/estus-*.whl estus
+system=$(nix eval --impure --raw --expr builtins.currentSystem)
+mkdir -p nix/result/wheel
+nix build .#wheel --out-link "nix/result/wheel/$system"
+uv tool install --python 3.14 "./nix/result/wheel/$system"/estus-*.whl
+uvx --from "./nix/result/wheel/$system"/estus-*.whl estus
+uv run --no-project --with "./nix/result/wheel/$system"/estus-*.whl estus
 ```
 
 The producer declares macOS 11.0 for the arm64 Mach-O payload and manylinux glibc
 2.17 for Linux. These are build/audit baselines for our executable, not a promise
 that every optional dependency supports the same minimum OS. The wheel needs no
 Nix runtime; compatible Python and host OpenSSH remain external prerequisites.
+
+Project commands use explicit, ignored output links:
+
+| Link | Immutable output |
+| --- | --- |
+| `nix/result/native/default` | Native package |
+| `nix/result/native/msrv` | MSRV package |
+| `nix/result/wheel/<system>` | Portable wheel |
+| `nix/result/fixtures/<name>` | Fixture artifact |
+| `nix/result/acceptance/<name>` | Acceptance executable |
+
+Create each parent directory before `nix build --out-link`. Bare `nix build` still
+uses `./result`; this is a project convention, not a global Nix setting. CI uses
+`--no-link` where no persistent link is needed. Keep mutable disks, keys, private
+configuration and logs under `target/estus-dev/` (or another owned private runtime
+directory), not under output links. Reserve `dist/` for distributions. Existing
+local result/fixture links are not automatically migrated or removed.
 
 Run explicit installed acceptance as a non-root user with trusted temporary paths:
 

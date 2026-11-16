@@ -16,6 +16,8 @@
           src = sourceRoot;
           filter = path: type:
             path != "${toString sourceRoot}/fuzz"
+            && path != "${toString sourceRoot}/nix/result"
+            && !pkgs.lib.hasPrefix "${toString sourceRoot}/nix/result/" path
             && (craneLib.filterCargoSources path type
               || (pkgs.lib.hasPrefix "${toString sourceRoot}/src/" path
                 && pkgs.lib.hasSuffix ".py" path)

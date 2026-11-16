@@ -1,6 +1,7 @@
 /target/
 /result
 /result-*
+/nix/result/
 /fuzz/target/
 /fuzz/artifacts/
 /fuzz/coverage/

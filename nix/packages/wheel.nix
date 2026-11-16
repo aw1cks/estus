@@ -34,7 +34,8 @@ craneLib.mkCargoDerivation {
     src = sourceRoot;
     filter = path: type:
       let relative = lib.removePrefix "${toString sourceRoot}/" path;
-      in !builtins.elem relative [ "fuzz" "tests" ]
+      in !builtins.elem relative [ "fuzz" "tests" "nix/result" ]
+      && !lib.hasPrefix "nix/result/" relative
       && !lib.hasPrefix "tests/" relative && (
         craneLib.filterCargoSources path type
         || builtins.elem relative [ "pyproject.toml" "setup.py" "MANIFEST.in" "README.md" ]
