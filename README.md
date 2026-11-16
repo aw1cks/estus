@@ -1546,6 +1546,27 @@ This phase starts no MCP, SSH or fixture service. Use existing acceptance apps
 for their owned disposable fixtures; preparation does not create another fixture
 daemon or touch real hosts.
 
+### Immediate MCP launch
+
+After preparation, run:
+
+```sh
+./nix/scripts/estus-dev-launch.sh
+```
+
+The launcher resolves its own checkout, reads the successful preparation record
+and immediately `exec`s that artifact. It works from another cwd when invoked by
+its absolute path. Normal stdout is MCP JSON only; EOF/signals retain the native
+process lifecycle. It never builds, installs dependencies, provisions fixtures,
+refreshes approvals or restarts itself.
+
+Default launch uses the prepared no-target policy and clears inherited Estus
+configuration/SSH/runtime/catalog overrides. Deliberately select an existing
+reviewed operator or disposable-fixture policy with `--config PATH`; it is never
+inferred from ambient `ESTUS_CONFIG`. Missing preparation/configuration fails
+closed with an actionable stderr diagnostic. Editing sources does not rebuild or
+change the prepared artifact: run preparation again explicitly.
+
 ## CI coverage
 
 The generated workflow (`nix/ci.nix`; regenerate with
