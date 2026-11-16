@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::automation::{self, RuntimeCheck, RuntimeContext};
 use crate::{
     config::{Config, DoctorArgs, IdentityRole},
-    files::{self, FileContext},
+    filesystem::operations::{self, FileContext},
     ssh::Pool,
 };
 
@@ -248,7 +248,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
             .await
         {
             Ok(lease) => {
-                let outcome = files::probe(
+                let outcome = operations::probe(
                     lease.session(),
                     FileContext {
                         deadline,

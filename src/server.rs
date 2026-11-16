@@ -32,13 +32,15 @@ use crate::{
         ToolEntry, ToolId, ToolKey,
     },
     exec::{self, RunContext},
-    filedata::{
-        ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RemoveDirectoryData,
-        RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest, RenameData, RenameRequest,
-        ReplaceData, ReplaceRequest, StatRequest, WriteData, WriteRequest,
+    filesystem::{
+        data::{
+            ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest, RemoveDirectoryData,
+            RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest, RenameData, RenameRequest,
+            ReplaceData, ReplaceRequest, StatRequest, WriteData, WriteRequest,
+        },
+        metadata::StatData,
+        operations::{self, FileContext},
     },
-    filemeta::StatData,
-    files::{self, FileContext},
     output::{ReadOutputRequest, Store as OutputStore},
     reply::{CommandData, ControllerError, ControllerReply, Termination, ToolError, ToolReply},
     ssh::{MasterHealth, Pool},
@@ -61,7 +63,7 @@ struct State {
     tasks: TaskTracker,
     local_tasks: TaskTracker,
     outputs: OutputStore,
-    directories: Option<files::DirectoryStore>,
+    directories: Option<operations::DirectoryStore>,
     progress: crate::progress::Registry,
     automation: Arc<Semaphore>,
     automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
@@ -418,7 +420,7 @@ impl Estus {
         let outputs = OutputStore::new(config.output_limits(), shutdown.clone());
         let directories = tools
             .contains(ToolKey::Builtin(ToolId::ListDirectory))
-            .then(|| files::DirectoryStore::new(config.directory_limits(), shutdown.clone()));
+            .then(|| operations::DirectoryStore::new(config.directory_limits(), shutdown.clone()));
         Ok(Self {
             tool_router,
             state: Arc::new(State {
@@ -1637,7 +1639,7 @@ impl State {
             Ok(lease) => {
                 let reply = async {
                     let source = if let Some(script) = script {
-                        let outcome = files::read_script(
+                        let outcome = operations::read_script(
                             lease.session(),
                             &script.path,
                             &script.content_sha256,
@@ -1760,7 +1762,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::read(
+                let outcome = operations::read(
                     lease.session(),
                     spec,
                     FileContext {
@@ -1818,7 +1820,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::stat(
+                let outcome = operations::stat(
                     lease.session(),
                     spec,
                     FileContext {
@@ -1929,7 +1931,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::write(
+                let outcome = operations::write(
                     lease.session(),
                     spec,
                     FileContext {
@@ -1987,7 +1989,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::mkdir(
+                let outcome = operations::mkdir(
                     lease.session(),
                     spec,
                     FileContext {
@@ -2045,7 +2047,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::rename(
+                let outcome = operations::rename(
                     lease.session(),
                     spec,
                     FileContext {
@@ -2103,7 +2105,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::remove_file(
+                let outcome = operations::remove_file(
                     lease.session(),
                     spec,
                     FileContext {
@@ -2163,7 +2165,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::remove_directory(
+                let outcome = operations::remove_directory(
                     lease.session(),
                     spec,
                     FileContext {
@@ -2224,7 +2226,7 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let outcome = files::replace_file(
+                let outcome = operations::replace_file(
                     lease.session(),
                     spec,
                     FileContext {

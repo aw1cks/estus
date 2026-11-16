@@ -16,10 +16,10 @@ use openssh_sftp_protocol::{
 use serde::Deserialize;
 use serde_json::json;
 
-#[path = "../../src/filemeta.rs"]
-mod filemeta;
+#[path = "../../src/filesystem/metadata.rs"]
+mod metadata;
 
-use filemeta::{FileKind, ListEntry, StatData, metadata_data};
+use metadata::{FileKind, ListEntry, StatData, metadata_data};
 
 // The raw JSON cap bounds initial serde allocations. Check atom size and
 // multiplication before allocating the expanded filename.

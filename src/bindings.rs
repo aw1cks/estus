@@ -1375,7 +1375,7 @@ impl CompiledBinding {
                         .read_to_end(&mut bytes)
                         .map_err(|_| invalid("Controller source is unavailable"))?;
                     let source =
-                        crate::filedata::verify_script(bytes, true, &digest, max_bytes as usize)
+                        crate::filesystem::data::verify_script(bytes, true, &digest, max_bytes as usize)
                             .map_err(|_| invalid("Controller source verification failed"))?;
                     Some(Arc::new(ControllerPlan {
                         source: Cow::Owned(source),

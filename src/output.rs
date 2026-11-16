@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    filedata::{self, Encoding, RawRead, ReadData},
+    filesystem::data::{self, Encoding, RawRead, ReadData},
     reply::{OutputReceipt, StreamInfo, ToolError, ToolReply},
     wire::ReplyBudget,
 };
@@ -293,7 +293,7 @@ impl Store {
         max_file_bytes: u64,
         budget: ReplyBudget,
     ) -> ToolReply<ReadData> {
-        let max_bytes = match filedata::validate_read_range(
+        let max_bytes = match data::validate_read_range(
             request.max_bytes,
             request.encoding,
             max_file_bytes,
@@ -369,7 +369,7 @@ impl Store {
             if worker_cancel.is_cancelled() {
                 return Err(local_error("shutdown", "Output read cancelled"));
             }
-            filedata::encode_range(
+            data::encode_range(
                 RawRead {
                     bytes,
                     eof: available <= max_bytes as u64,

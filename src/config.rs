@@ -258,7 +258,7 @@ pub(crate) struct Config {
     ssh_executable: PathBuf,
     limits: Limits,
     output: crate::output::Limits,
-    directory: crate::filedata::DirectoryLimits,
+    directory: crate::filesystem::data::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
     bindings: Bindings,
     automation: Automation,
@@ -272,7 +272,7 @@ struct Document {
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
-    directory: crate::filedata::DirectoryLimits,
+    directory: crate::filesystem::data::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
@@ -293,7 +293,7 @@ impl Default for Document {
             ssh: Ssh::default(),
             limits: Limits::default(),
             output: crate::output::Limits::default(),
-            directory: crate::filedata::DirectoryLimits::default(),
+            directory: crate::filesystem::data::DirectoryLimits::default(),
             targets: None,
             tools: BTreeMap::new(),
             enabled_tools: Vec::new(),
@@ -1133,7 +1133,7 @@ impl Config {
         self.output
     }
 
-    pub(crate) fn directory_limits(&self) -> crate::filedata::DirectoryLimits {
+    pub(crate) fn directory_limits(&self) -> crate::filesystem::data::DirectoryLimits {
         self.directory
     }
 
@@ -1336,9 +1336,9 @@ impl Config {
                 max_encoded_command_bytes: MAX_COMMAND_BYTES,
                 max_response_bytes: MAX_RESPONSE_BYTES,
                 max_directory_cursors: self.directory.max_cursors,
-                max_directory_cursors_per_target: crate::filedata::DIRECTORY_CURSORS_PER_TARGET,
+                max_directory_cursors_per_target: crate::filesystem::data::DIRECTORY_CURSORS_PER_TARGET,
                 directory_cursor_idle_timeout_secs: self.directory.idle_timeout_secs,
-                max_directory_page_bytes: crate::filedata::DIRECTORY_PAGE_BYTES,
+                max_directory_page_bytes: crate::filesystem::data::DIRECTORY_PAGE_BYTES,
             },
         }
     }

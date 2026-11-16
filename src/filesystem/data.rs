@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::metadata::{FileKind, ListEntry, StatData};
 use crate::{
-    filemeta::{FileKind, ListEntry, StatData},
     reply::{ToolError, ToolReply},
     wire::{ReplyBudget, duplicated_size},
 };
@@ -811,7 +811,7 @@ pub(crate) fn verify_script(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filemeta::metadata_data;
+    use super::super::metadata::metadata_data;
     use rmcp::model::RequestId;
     use serde_json::json;
 

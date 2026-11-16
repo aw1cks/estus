@@ -40,15 +40,15 @@ use tokio::{
 };
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
-use crate::{
-    filedata::{
+use crate::reply::{ToolError, ToolReply};
+use super::{
+    data::{
         DIRECTORY_CURSORS_PER_TARGET, DirectoryLimits, ListData, ListSpec, MkdirData, MkdirSpec,
         RawRead, ReadData, ReadSpec, RemoveDirectoryData, RemoveDirectorySpec, RemoveFileData,
         RemoveFileSpec, RenameData, RenameSpec, ReplaceData, ReplaceSpec, StatSpec, WriteData,
         WriteSpec, encode, verify_script,
     },
-    filemeta::{ListEntry, StatData, metadata_data},
-    reply::{ToolError, ToolReply},
+    metadata::{ListEntry, StatData, metadata_data},
 };
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
@@ -729,7 +729,7 @@ pub(crate) async fn read_script(
         path,
         offset: 0,
         max_bytes,
-        encoding: crate::filedata::Encoding::Utf8,
+        encoding: super::data::Encoding::Utf8,
         expected_content_sha256: None,
     };
     let outcome = run_sftp(session, context, |sftp| {
@@ -1229,7 +1229,7 @@ impl DirectoryChannel {
                 if data.entries.is_empty()
                     || crate::wire::duplicated_size(&entry)
                         .ok()
-                        .is_none_or(|cost| cost > crate::filedata::DIRECTORY_PAGE_BYTES)
+                        .is_none_or(|cost| cost > super::data::DIRECTORY_PAGE_BYTES)
                 {
                     return Err(Failure {
                         error: ToolError::new(
