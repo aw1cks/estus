@@ -66,6 +66,27 @@ The base wheel does not depend on Ansible, install packages at startup, or enabl
 additional tools. An explicitly selected existing runtime bundle remains usable
 through the native application's configuration.
 
+Source archives select catalog definitions/roles through the manifest-driven build
+hook, not a second tool-name list in `MANIFEST.in`. They include required Rust
+sources, embedded helpers and the vendored SFTP client, while excluding generated
+caches, demonstrations, test fixtures, local plans and build outputs.
+
+The opt-in `source_distribution_roundtrip_preserves_manifest_selected_assets`
+wheel test builds sdists from a clean tracked-source export, extracts them outside
+the checkout, builds/installs wheels solely from those extracted sources and checks
+asset bytes against native installation. It repeats with one added valid catalog
+entry without editing the source manifest. Set `ESTUS_TEST_SOURCE_ARCHIVE`,
+`ESTUS_TEST_BUILD_PYTHON` (the pinned backend environment),
+`ESTUS_TEST_NATIVE_CATALOG` and an outside-Nix3.14 `ESTUS_TEST_PYTHON`, then run:
+
+```sh
+cargo test --test wheel source_distribution_roundtrip_preserves_manifest_selected_assets -- --ignored --exact
+```
+
+Building may fetch locked Cargo dependencies; installed catalog discovery/export
+needs neither network nor Ansible. This roundtrip qualifies the build host, not an
+older-OS runtime baseline.
+
 ## Local SSH executable
 
 Estus selects one local OpenSSH executable in this order:

@@ -23,6 +23,8 @@ def catalog_sources():
                 raise ValueError("symlink in catalog source")
             if source.is_file():
                 relative = source.relative_to(role)
+                if "__pycache__" in relative.parts or source.suffix in {".pyc", ".pyo"}:
+                    continue
                 if relative.parts[0] not in {"tasks", "meta", "files", "defaults", "vars", "handlers"} or source.suffix not in {".yml", ".yaml", ".py", ".json", ".toml"}:
                     raise ValueError("unexpected catalog source asset")
                 yield source, source.relative_to(root)

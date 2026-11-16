@@ -29,7 +29,7 @@ fn selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) -> Re
     let selection: Value = serde_json::from_slice(&fs::read(&path)?)?;
     ensure!(
         selection["schema"] == 2
-            && selection["version"] == "6"
+            && selection["version"] == canonical["version"]
             && selection["scope"] == "catalog_templates"
             && selection
                 .as_object()
@@ -720,6 +720,275 @@ async fn installed_wheel_channels() -> Result<()> {
     let root = installed.root.path().to_owned();
     installed.root.close()?;
     ensure!(!root.exists(), "owned wheel workspace survived cleanup");
+    Ok(())
+}
+
+fn artifact_file(directory: &Path, extension: &str) -> Result<PathBuf> {
+    let mut found = None;
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+            ensure!(found.is_none(), "ambiguous build artifact");
+            found = Some(path);
+        }
+    }
+    found.context("missing build artifact")
+}
+
+fn asset_bytes(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                visit(root, &entry.path(), files)?;
+            } else {
+                ensure!(kind.is_file(), "unexpected catalog asset type");
+                files.insert(
+                    entry.path().strip_prefix(root)?.to_owned(),
+                    fs::read(entry.path())?,
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, &mut files)?;
+    Ok(files)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires clean ESTUS_TEST_SOURCE_ARCHIVE, pinned ESTUS_TEST_BUILD_PYTHON, native ESTUS_TEST_NATIVE_CATALOG, Cargo and managed Python3.14"]
+async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> Result<()> {
+    let source_archive = input("ESTUS_TEST_SOURCE_ARCHIVE")?;
+    let build_python = input("ESTUS_TEST_BUILD_PYTHON")?;
+    let native = PathBuf::from(
+        std::env::var_os("ESTUS_TEST_NATIVE_CATALOG").context("set ESTUS_TEST_NATIVE_CATALOG")?,
+    );
+    ensure!(native.is_absolute() && native.is_dir());
+    let native_assets = asset_bytes(&native)?;
+    let installed = Installed::new()?;
+    let python = installed.python().await?;
+    let tar = find_program("tar")?;
+    let clean = installed.root.path().join("clean");
+    fs::create_dir(&clean)?;
+    checked(
+        Command::new(&tar)
+            .arg("-xf")
+            .arg(&source_archive)
+            .arg("-C")
+            .arg(&clean),
+    )
+    .await?;
+    ensure!(
+        clean.join("Cargo.toml").is_file() && !clean.join("python/estus.egg-info").exists(),
+        "source export is not clean"
+    );
+    let target = installed.root.path().join("cargo-target");
+    for additional in [false, true] {
+        let case = installed
+            .root
+            .path()
+            .join(if additional { "additional" } else { "baseline" });
+        fs::create_dir(&case)?;
+        let source = case.join("source");
+        copy_environment(&clean, &source)?;
+        let catalog = source.join("catalog");
+        let manifest_path = catalog.join("catalog.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+        let selected = if additional {
+            let name = "sdist_source_probe";
+            let mut template = manifest["tools"]["pressure_get"].clone();
+            template["definition"] = json!(format!("{name}.toml"));
+            template["role"] = json!(format!("roles/{name}"));
+            manifest["tools"][name] = template;
+            manifest["version"] = json!("6-sdist-probe");
+            fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+            let mut document: toml::Table =
+                toml::from_str(&fs::read_to_string(catalog.join("pressure_get.toml"))?)?;
+            let tools = document
+                .get_mut("tools")
+                .and_then(toml::Value::as_table_mut)
+                .context("source template tools")?;
+            let definition = tools
+                .remove("pressure_get")
+                .context("source template binding")?;
+            tools.insert(name.to_owned(), definition);
+            fs::write(
+                catalog.join(format!("{name}.toml")),
+                toml::to_string(&document)?,
+            )?;
+            copy_environment(
+                &catalog.join("roles/pressure_get"),
+                &catalog.join("roles").join(name),
+            )?;
+            name
+        } else {
+            "pressure_get"
+        };
+        let reviewed =
+            catalog_assets::Catalog::load(Some(&catalog)).map_err(|code| anyhow::anyhow!(code))?;
+        reviewed
+            .definition(selected)
+            .map_err(|code| anyhow::anyhow!(code))
+            .with_context(|| format!("source entry {selected}"))?;
+        let expected = asset_bytes(&catalog)?;
+        if !additional {
+            ensure!(
+                expected == native_assets,
+                "source and native approved assets disagree"
+            );
+        }
+        // These files exist in the disposable source but must never enter an artifact.
+        fs::write(catalog.join("private_state.json"), b"SDIST_PRIVATE_STATE")?;
+        let cache = catalog.join("roles/pressure_get/files/__pycache__");
+        fs::create_dir_all(&cache)?;
+        fs::write(
+            cache.join("collector.cpython-314.pyc"),
+            b"SDIST_PRIVATE_CACHE",
+        )?;
+        fs::write(source.join("ESTUS_REVIEW.md"), b"SDIST_PRIVATE_PLAN")?;
+        let sdists = case.join("sdists");
+        checked(
+            Command::new(&build_python)
+                .args(["-I", "-m", "build", "--sdist", "--no-isolation", "--outdir"])
+                .arg(&sdists)
+                .arg(&source),
+        )
+        .await?;
+        let unpacked = case.join("unpacked");
+        fs::create_dir(&unpacked)?;
+        checked(
+            Command::new(&tar)
+                .arg("-xf")
+                .arg(artifact_file(&sdists, "gz")?)
+                .arg("-C")
+                .arg(&unpacked),
+        )
+        .await?;
+        let mut roots = fs::read_dir(&unpacked)?;
+        let extracted = roots.next().context("sdist source root")??.path();
+        ensure!(
+            extracted.is_dir() && roots.next().is_none(),
+            "ambiguous sdist source root"
+        );
+        ensure!(
+            asset_bytes(&extracted.join("catalog"))? == expected,
+            "sdist lost approved bytes or included private/cache state"
+        );
+        for excluded in [
+            "tests",
+            "examples",
+            "fuzz",
+            "nix",
+            "target",
+            "dist",
+            "build",
+            "ESTUS_REVIEW.md",
+        ] {
+            ensure!(
+                !extracted.join(excluded).exists(),
+                "sdist included {excluded}"
+            );
+        }
+        for required in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "pyproject.toml",
+            "setup.py",
+            "src/main.rs",
+            "src/automation_runner.py",
+            "vendor/openssh-sftp-client/Cargo.toml",
+            "vendor/openssh-sftp-client/src/lib.rs",
+        ] {
+            ensure!(
+                extracted.join(required).is_file(),
+                "sdist omitted {required}"
+            );
+        }
+        let wheels = case.join("wheels");
+        checked(
+            Command::new(&build_python)
+                .args(["-I", "-m", "build", "--wheel", "--no-isolation", "--outdir"])
+                .arg(&wheels)
+                .arg(&extracted)
+                .env("CARGO_TARGET_DIR", &target),
+        )
+        .await?;
+        let venv = case.join("venv");
+        checked(
+            installed
+                .uv()
+                .arg("venv")
+                .arg("--python")
+                .arg(&python)
+                .arg(&venv),
+        )
+        .await?;
+        let interpreter = venv.join("bin/python");
+        checked(
+            installed
+                .uv()
+                .args(["pip", "install", "--offline", "--no-deps", "--python"])
+                .arg(&interpreter)
+                .arg(artifact_file(&wheels, "whl")?),
+        )
+        .await?;
+        let launcher = venv.join("bin/estus");
+        let listed = checked(
+            installed
+                .command(&launcher)
+                .args(["catalog", "list", "--json"])
+                .env("ESTUS_CATALOG_ROOT", case.join("untrusted-missing")),
+        )
+        .await?;
+        let listing: Value = serde_json::from_slice(&listed.stdout)?;
+        ensure!(listing["version"] == manifest["version"]);
+        let actual: std::collections::BTreeSet<_> = listing["tools"]
+            .as_array()
+            .context("installed tool inventory")?
+            .iter()
+            .map(|tool| tool["name"].as_str().context("tool name"))
+            .collect::<Result<_>>()?;
+        let expected_names: std::collections::BTreeSet<_> = manifest["tools"]
+            .as_object()
+            .context("source tool inventory")?
+            .keys()
+            .map(String::as_str)
+            .collect();
+        ensure!(
+            actual == expected_names,
+            "source-only roundtrip changed the inventory"
+        );
+        let location = checked(installed.command(&interpreter).args(["-I", "-c",
+            "from pathlib import Path; import estus; print(Path(estus.__file__).parent / '_catalog')"])).await?;
+        let location = PathBuf::from(std::str::from_utf8(&location.stdout)?.trim());
+        ensure!(
+            asset_bytes(&location)? == expected,
+            "installed source wheel changed approved assets"
+        );
+        let exported = case.join("exported");
+        let output = checked(
+            installed
+                .command(&launcher)
+                .args(["catalog", "export", "--tool", selected, "--output"])
+                .arg(&exported),
+        )
+        .await?;
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        ensure!(report["enabled"] == false && report["tools"] == json!([selected]));
+        selection_metadata(&exported, &manifest, &[selected])?;
+    }
+    let root = installed.root.path().to_owned();
+    installed.root.close()?;
+    ensure!(
+        !root.exists(),
+        "owned source roundtrip workspace survived cleanup"
+    );
     Ok(())
 }
 
