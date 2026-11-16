@@ -1576,6 +1576,32 @@ inferred from ambient `ESTUS_CONFIG`. Missing preparation/configuration fails
 closed with an actionable stderr diagnostic. Editing sources does not rebuild or
 change the prepared artifact: run preparation again explicitly.
 
+### Opt-in OMP client
+
+The tracked `.omp/mcp.json` invokes only the immediate launcher and is disabled
+by default. Open OMP at the checkout root (or select it with `omp --cwd`), prepare
+first, then deliberately add `estus-dev` to the active profile's `enabledServers`
+list and reload MCP. Preserve the profile's other configuration. Its
+`disabledServers` denylist still wins. No user-level configuration is changed by
+this repository.
+
+The entry uses a schema-valid boolean rather than environment-string enablement.
+Its 30,000 ms request timeout leaves headroom above the prepared policy's ten-second
+maximum and owned cleanup. `OMP_MCP_TIMEOUT_MS` overrides the entry process-wide;
+review that value and the client timeout when selecting a longer-running custom
+policy.
+
+OMP18.19.0 discards subprocess stderr and reports startup failure as generic EOF.
+For actionable setup/configuration diagnostics, run the launcher directly:
+
+```sh
+./nix/scripts/estus-dev-launch.sh </dev/null
+```
+
+Normal MCP execution remains client-owned; no build, proxy, detached service or
+automatic approval refresh is added. Private generated configuration stays under
+the ignored runtime area rather than in `.omp/mcp.json`.
+
 ## CI coverage
 
 The generated workflow (`nix/ci.nix`; regenerate with

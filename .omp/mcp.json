@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "estus-dev": {
+      "type": "stdio",
+      "enabled": false,
+      "command": "./nix/scripts/estus-dev-launch.sh",
+      "args": [],
+      "cwd": ".",
+      "timeout": 30000
+    }
+  }
+}
