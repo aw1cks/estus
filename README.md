@@ -1526,6 +1526,26 @@ That health check verifies imports and identity, not Ansible workload execution.
 SFTP uses the published `openssh-sftp-protocol` 0.26.1 release for lossless Unix
 filename handling; no vendored protocol fork is required.
 
+### Explicit development preparation
+
+From the checkout root (including checkouts whose path contains spaces):
+
+```sh
+nix run .#dev-prepare
+```
+
+The same `estus-dev-prepare` command is available in the default pinned devshell;
+`--project-root PATH` selects another Git checkout explicitly. Preparation builds
+the current native artifact into `nix/result/native/default`, then atomically
+publishes a private readiness record/config under `target/estus-dev/`. The config
+uses `actions-only`, no destinations, and a ten-second maximum operation timeout.
+A failed rebuild invalidates readiness rather than silently selecting the old
+result link. Source edits require another explicit preparation.
+
+This phase starts no MCP, SSH or fixture service. Use existing acceptance apps
+for their owned disposable fixtures; preparation does not create another fixture
+daemon or touch real hosts.
+
 ## CI coverage
 
 The generated workflow (`nix/ci.nix`; regenerate with

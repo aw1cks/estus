@@ -1,0 +1,10 @@
+# Native development preparation only: no configured destinations or fixtures.
+profile = "actions-only"
+destination_policy = "configured"
+
+[targets]
+
+[limits]
+connect_timeout_secs = 3
+operation_timeout_secs = 5
+max_timeout_secs = 10
