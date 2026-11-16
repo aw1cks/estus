@@ -14,9 +14,10 @@ pub(super) struct RawBinding {
     pub(super) authority: toml::Value,
     pub(super) effects: Vec<Effect>,
     pub(super) execution: RawExecution,
-    pub(super) input_schema: toml::Value,
+    pub(super) input_schema: Option<toml::Value>,
     pub(super) fixed_args: Option<toml::Value>,
     pub(super) input_map: Option<BTreeMap<String, String>>,
+    pub(super) argument_types: Option<toml::Value>,
     pub(super) result: RawResult,
     pub(super) limits: Option<RawLimits>,
 }
@@ -39,6 +40,15 @@ pub(super) enum RawExecution {
         interpreter: RawInterpreter,
         environment: Option<BTreeMap<String, String>>,
         cwd: Option<String>,
+    },
+    NativePayload {
+        snapshot: String,
+        source: String,
+        #[serde(default)]
+        no_log: bool,
+    },
+    AnsibleGeneric {
+        policy: crate::automation::generic::RawPolicy,
     },
     AnsibleModule {
         snapshot: String,
@@ -82,13 +92,20 @@ pub(super) enum RawSlot {
 pub(super) struct InputSlot {
     pub(super) input: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum RawResult {
     // Empty struct variants keep unknown-option rejection for tagged records.
     Command {},
     ControllerCommand {},
     AnsibleSummary {},
+    CapabilityProjection {
+        fields: BTreeMap<String, Vec<String>>,
+        schema: toml::Value,
+        max_bytes: usize,
+        max_items: usize,
+        max_depth: usize,
+    },
     AnsibleProjection {
         fields: BTreeMap<String, Vec<String>>,
         schema: toml::Value,

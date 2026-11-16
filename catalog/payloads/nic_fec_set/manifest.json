@@ -1,0 +1,359 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "reported_changed",
+  "source_sha256": "bfbf75ef2f8b671e7a94b409c2d0b7fba829cc112bd3455cc29694872b84087a",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "interface": {
+          "name": "interface"
+        },
+        "mode": {
+          "name": "mode"
+        }
+      }
+    },
+    {
+      "kind": "argument",
+      "name": "operator_policy",
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "enum": [
+            "/usr/bin/python3"
+          ]
+        },
+        "operator_policy": {
+          "type": "object",
+          "properties": {
+            "interface": {
+              "type": "string",
+              "enum": [
+                "fec0"
+              ]
+            },
+            "mac": {
+              "type": "string",
+              "enum": [
+                "52:54:00:12:34:59"
+              ]
+            },
+            "driver": {
+              "type": "string",
+              "enum": [
+                "netdevsim"
+              ]
+            },
+            "allow_runtime_tuning": {
+              "type": "boolean"
+            },
+            "modes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "rs"
+                ]
+              }
+            }
+          },
+          "required": [
+            "interface",
+            "mac",
+            "driver",
+            "allow_runtime_tuning",
+            "modes"
+          ],
+          "additionalProperties": false
+        },
+        "interface": {
+          "type": "string",
+          "enum": [
+            "fec0"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "rs"
+          ]
+        }
+      },
+      "required": [
+        "target_python",
+        "operator_policy",
+        "interface",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "operator_policy": {
+          "aliases": {},
+          "properties": {
+            "interface": {
+              "aliases": {},
+              "properties": {}
+            },
+            "mac": {
+              "aliases": {},
+              "properties": {}
+            },
+            "driver": {
+              "aliases": {},
+              "properties": {}
+            },
+            "allow_runtime_tuning": {
+              "aliases": {},
+              "properties": {}
+            },
+            "modes": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            }
+          }
+        },
+        "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "mode": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "enum": [
+              "fec0"
+            ],
+            "maxLength": 15
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "rs"
+            ],
+            "maxLength": 3
+          }
+        },
+        "required": [
+          "interface",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "operator_policy": {
+          "interface": "fec0",
+          "mac": "52:54:00:12:34:59",
+          "driver": "netdevsim",
+          "allow_runtime_tuning": true,
+          "modes": [
+            "off",
+            "rs"
+          ]
+        }
+      },
+      "input_map": {
+        "interface": "interface",
+        "mode": "mode"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "interface": [
+          "mcp_result",
+          "interface"
+        ],
+        "driver": [
+          "mcp_result",
+          "driver"
+        ],
+        "before": [
+          "mcp_result",
+          "before"
+        ],
+        "after": [
+          "mcp_result",
+          "after"
+        ],
+        "changed": [
+          "mcp_result",
+          "changed"
+        ],
+        "verified": [
+          "mcp_result",
+          "verified"
+        ],
+        "persistence": [
+          "mcp_result",
+          "persistence"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "enum": [
+              "fec0"
+            ],
+            "maxLength": 15
+          },
+          "driver": {
+            "type": "string",
+            "enum": [
+              "netdevsim"
+            ],
+            "maxLength": 32
+          },
+          "before": {
+            "type": "object",
+            "properties": {
+              "configured": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "off",
+                    "auto",
+                    "rs",
+                    "baser",
+                    "llrs"
+                  ],
+                  "maxLength": 5
+                },
+                "maxItems": 6
+              },
+              "active": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "off",
+                  "auto",
+                  "rs",
+                  "baser",
+                  "llrs"
+                ],
+                "maxLength": 5
+              }
+            },
+            "required": [
+              "configured",
+              "active"
+            ],
+            "additionalProperties": false
+          },
+          "after": {
+            "type": "object",
+            "properties": {
+              "configured": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "rs"
+                  ],
+                  "maxLength": 3
+                },
+                "maxItems": 1
+              },
+              "active": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "rs"
+                ],
+                "maxLength": 3
+              }
+            },
+            "required": [
+              "configured",
+              "active"
+            ],
+            "additionalProperties": false
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "verified": {
+            "type": "boolean",
+            "const": true
+          },
+          "persistence": {
+            "type": "string",
+            "const": "runtime_only",
+            "maxLength": 32
+          }
+        },
+        "required": [
+          "interface",
+          "driver",
+          "before",
+          "after",
+          "changed",
+          "verified",
+          "persistence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

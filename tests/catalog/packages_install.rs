@@ -71,8 +71,8 @@ fn failed_mutation_receipt(reply: &serde_json::Value) -> Result<()> {
         reply["data"]["status"] == "failed"
             && reply["data"]["complete"] == true
             && reply["data"]["changed"] == true
-            && reply["data"]["runner_rc"] == 2
-            && reply["error"]["code"] == "automation_failed"
+            && reply["data"]["runner_rc"] == 1
+            && reply["error"]["code"] == "payload_failed"
             && reply["data"]["projection"]["status"] == "unavailable",
         "failed package execution erased actual mutation or confused projection failure: {reply}"
     );

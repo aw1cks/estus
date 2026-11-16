@@ -102,7 +102,7 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
         String::from_utf8_lossy(&output.stderr)
     );
     let data: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(data["schema"] == 2 && data["version"] == "6");
+    ensure!(data["schema"] == 3 && data["version"] == "7");
     ensure!(
         data["presets"]["linux-health"]
             == serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"]),
@@ -180,7 +180,7 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(assets().join("catalog.json"))?)?;
     ensure!(
-        selection["schema"] == 2
+        selection["schema"] == 3
             && selection["version"] == manifest["version"]
             && selection["scope"] == "catalog_templates"
     );
@@ -199,13 +199,13 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
         "export generated authority or activation policy"
     );
     let pressure = &definitions["tools"]["pressure_get"];
-    let role = Path::new(
-        pressure["execution"]["role_path"]
+    let source = Path::new(
+        pressure["execution"]["source"]
             .as_str()
-            .context("role path")?,
+            .context("payload source")?,
     );
     ensure!(
-        role.is_absolute() && role.join("files/collector.py").is_file(),
+        source.is_absolute() && source.is_file(),
         "export did not retain the executable reviewed payload"
     );
     let overlay: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -623,9 +623,9 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     let output = invoke(&[
         "export".as_ref(),
         "--tool".as_ref(),
-        "pressure_get".as_ref(),
+        "host_summary".as_ref(),
         "--tool".as_ref(),
-        "memory_stats".as_ref(),
+        "hardware_system_get".as_ref(),
         "--output".as_ref(),
         export.as_os_str(),
     ])?;
@@ -765,7 +765,7 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         String::from_utf8_lossy(&inspected.stderr)
     );
     let mut approved_root = None;
-    for name in ["pressure_get", "memory_stats"] {
+    for name in ["host_summary", "hardware_system_get"] {
         let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(
             prepared.join(format!("snapshots/{name}.json")),
         )?)?;
@@ -782,8 +782,8 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         ensure!(
             config["tools"][name]["execution"]["role_path"].as_str() == bundle.join(name).to_str()
         );
-        ensure!(bundle.join("pressure_get/tasks/main.yml").is_file());
-        ensure!(bundle.join("memory_stats/tasks/main.yml").is_file());
+        ensure!(bundle.join("host_summary/tasks/main.yml").is_file());
+        ensure!(bundle.join("hardware_system_get/tasks/main.yml").is_file());
     }
     let bundles = std::fs::read_dir(prepared.join("snapshots"))?
         .collect::<std::io::Result<Vec<_>>>()?

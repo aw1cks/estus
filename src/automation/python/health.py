@@ -81,11 +81,14 @@ def load_manifest(root):
     for key in ("platform", "python", "ansible_core", "ansible_runner", "collection_bundle"):
         require(public_string(identity[key]))
     collections = identity["collections"]
-    require(type(collections) is list and len(collections) == 2)
+    require(type(collections) is list and 2 <= len(collections) <= 16)
     for entry in collections:
         exact_keys(entry, ("name", "version", "manifest_sha256"))
+        require(type(entry["name"]) is str and re.fullmatch(
+            r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*", entry["name"]))
         require(public_string(entry["version"]) and digest(entry["manifest_sha256"]))
-    require([entry["name"] for entry in collections] == ["ansible.posix", "community.general"])
+    names = [entry["name"] for entry in collections]
+    require(names == sorted(set(names)) and set(BASELINE_COLLECTIONS).issubset(names))
     return manifest
 
 
@@ -129,7 +132,8 @@ def check_collections(roots, expected):
     namespace = importlib.util.module_from_spec(spec)
     sys.modules["ansible_collections"] = namespace
     observed = []
-    for index, name in enumerate(BASELINE_COLLECTIONS):
+    names = [entry["name"] for entry in expected] if expected is not None else BASELINE_COLLECTIONS
+    for index, name in enumerate(names):
         namespace_name, collection_name = name.split(".")
         directories = [
             root / "ansible_collections" / namespace_name / collection_name for root in roots
@@ -423,6 +427,12 @@ def role_collection_trees(roots):
         namespace_root = root / "ansible_collections"
         require(namespace_root.is_dir(), "role_collection_source_invalid")
         for namespace in children(namespace_root):
+            if namespace.name == "__pycache__" or namespace.suffix in (".pyc", ".pyo"):
+                continue
+            if namespace.name in ("ansible_community.py", "ansible_release.py"):
+                require(namespace.is_file() and not namespace.is_symlink(),
+                        "role_collection_source_invalid")
+                continue
             require(re.fullmatch(r"[a-z_][a-z0-9_]*", namespace.name)
                     and namespace.is_dir(), "role_collection_source_invalid")
             collections = children(namespace)
@@ -740,6 +750,105 @@ def role_documentation(role, entry_point, role_path, output, roots):
     return document, content, selected_collection
 
 
+def generic_inventory(roots, documentation=False):
+    """Canonical module inventory plus the entire searchable runtime closure.
+
+    Documentation is deliberately not a prerequisite for generic execution.
+    Redirects and filesystem aliases are omitted, never authorized as identities.
+    """
+    import ansible
+    import ansible_runner
+    for name in tuple(sys.modules):
+        if name == "ansible_collections" or name.startswith("ansible_collections."):
+            del sys.modules[name]
+    from ansible.plugins.loader import module_loader, init_plugin_loader
+    init_plugin_loader()
+    core = Path(ansible.__file__).parent.resolve(strict=True)
+    trees = [("ansible", core), ("ansible_runner", Path(ansible_runner.__file__).parent.resolve(strict=True))]
+    trees.extend(role_collection_trees([root for root in roots
+                                        if (root / "ansible_collections").is_dir()]))
+    modules = {}
+    candidates = [("ansible.builtin", core / "modules")]
+    for label, directory in trees[2:]:
+        collection = ".".join(label.split("/")[-2:])
+        role_collection_dependencies(collection, roots, set())
+        candidates.append((collection, directory / "plugins" / "modules"))
+    for collection, directory in candidates:
+        if not directory.is_dir():
+            continue
+        for source in sorted(directory.rglob("*")):
+            if source.suffix not in (".py", ".ps1") or source.name.startswith("_"):
+                continue
+            relative = source.relative_to(directory).with_suffix("")
+            if any(not re.fullmatch(r"[a-z_][a-z0-9_]*", part) for part in relative.parts):
+                continue
+            fqcn = collection + "." + ".".join(relative.parts)
+            require(len(modules) < 16384, "module_output_limit")
+            resolved = module_loader.find_plugin_with_context(fqcn)
+            if (not resolved.resolved or resolved.resolved_fqcn != fqcn
+                    or Path(resolved.plugin_resolved_path).resolve(strict=True) != source.resolve(strict=True)):
+                continue
+            modules[fqcn] = {"collection": collection}
+    if documentation:
+        # Public discovery is captured once at explicit import/activation, never
+        # refreshed by a request. Opaque module option types need no converter.
+        output = BoundedOutput()
+        argv = sys.argv
+        summaries = {}
+        failure = "not_documented"
+        try:
+            os.environ["LC_ALL"] = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
+            os.environ["LANG"] = os.environ["LC_ALL"]
+            sys.argv = ["ansible-doc", "--list", "--json", "--type", "module"]
+            with contextlib.redirect_stdout(output):
+                try:
+                    runpy.run_module("ansible.cli.doc", run_name="__main__")
+                except SystemExit as error:
+                    require(error.code in (None, 0), "module_documentation_failed")
+            summaries = json.loads(output.getvalue(), object_pairs_hook=unique_object)
+            require(type(summaries) is dict, "module_documentation_failed")
+        except HealthFailure as error:
+            failure = error.code
+        except Exception:
+            failure = "module_documentation_failed"
+        finally:
+            sys.argv = argv
+        for fqcn, module in modules.items():
+            summary = summaries.get(fqcn)
+            if (type(summary) is str and summary.strip()
+                    and summary.strip() not in ("UNDOCUMENTED", "INVALID SHORT DESCRIPTION")):
+                raw = summary.strip().encode("utf-8")
+                module["documentation"] = {
+                    "status": "partial", "short_description": raw[:512].decode("utf-8", errors="ignore"),
+                    "reason": "summary_truncated" if len(raw) > 512 else "summary_only",
+                }
+            else:
+                module["documentation"] = {
+                    "status": "unavailable", "short_description": None, "reason": failure,
+                }
+    # This includes collection routing, action plugins and module utilities, not
+    # only selected module files. Addition of a module changes the generation.
+    content = content_hash(trees, core / "__init__.py", domain=b"estus-generic-inventory-v1\0")
+    # The installed Ansible distribution also exposes these Python metadata
+    # modules beside collection namespaces. They are not collections, but remain
+    # executable selected-runtime content and therefore participate in approval.
+    approved = hashlib.sha256(b"estus-generic-namespace-v1\0" + bytes.fromhex(content))
+    for index, root in enumerate(roots):
+        for name in ("ansible_community.py", "ansible_release.py"):
+            path = root / "ansible_collections" / name
+            if not path.exists() and not path.is_symlink():
+                continue
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+            with os.fdopen(os.open(path, flags), "rb") as stream:
+                require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "module_content_failed")
+                data = stream.read(DOCUMENT_LIMIT + 1)
+                require(len(data) <= DOCUMENT_LIMIT, "module_content_limit")
+            label = (str(index) + "/" + name).encode("ascii")
+            approved.update(len(label).to_bytes(4, "big") + label
+                            + len(data).to_bytes(8, "big") + data)
+    return {"modules": modules, "content_sha256": approved.hexdigest()}
+
+
 def main():
     try:
         # The controller captures stderr privately. Dependency chatter must not corrupt JSON.
@@ -748,7 +857,8 @@ def main():
         module = payload.pop("module", None)
         role = payload.pop("role", None)
         playbook = payload.pop("playbook", None)
-        require(sum(value is not None for value in (module, role, playbook)) <= 1)
+        inventory = payload.pop("inventory", None)
+        require(sum(value is not None for value in (module, role, playbook, inventory)) <= 1)
         with contextlib.redirect_stdout(sys.stderr):
             try:
                 identity, roots = check(payload, role_request=role is not None or playbook is not None)
@@ -758,6 +868,9 @@ def main():
                 raise
             if module is not None:
                 document, content, collection = import_document(module, roots)
+            if inventory is not None:
+                require(inventory is True)
+                inventory = generic_inventory(roots, documentation=True)
             elif role is not None:
                 exact_keys(role, ("name", "entry_point", "path", "output"))
                 document, content, collection = role_documentation(
@@ -774,6 +887,8 @@ def main():
             report.update(document=document, content_sha256=content, collection=collection)
         elif playbook is not None:
             report.update(document=document, content_sha256=content)
+        if inventory is not None:
+            report["inventory"] = inventory
     except HealthFailure as error:
         report = {"schema": 2, "status": "failed", "error_code": error.code}
     except BaseException:

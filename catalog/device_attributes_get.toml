@@ -1,28 +1,20 @@
-# Linux-only opt-in reviewed device_attributes_get; no implicit installs or escalation.
-# Copy roles/device_attributes_get to /etc/estus/roles/device_attributes_get; review all tasks and fixed allowlists.
-# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config device_attributes_get.toml schema import-role device_attributes_get --role-path /etc/estus/roles/device_attributes_get --overlay overlay.json --output /etc/estus/device_attributes_get.schema.json
-# Review snapshot before activation. Provision /var/lib/estus/runner mode 0700.
-# Requires installed optional automation runtime and /usr/bin/python3 on target.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/device_attributes_get/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["device_attributes_get"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.device_attributes_get]
 description = "Read reviewed net/block sysfs device attributes through operator logical aliases. No caller paths, arbitrary classes, privileged controls, reset, unbind or config-space reads. Symlink resolution stays below /sys/devices. Values are bounded text with missing/denied explicit, not hardware capability claims."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/device_attributes_get.schema.json", role_path = "/etc/estus/device_attributes_get.schema.roles/device_attributes_get", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/device_attributes_get.payload.json", source = "/etc/estus/payloads/device_attributes_get/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "reviewed_devices" = { "loopback" = { "class" = "net", "name" = "lo", "attributes" = ["mtu", "operstate", "address"] } } }
 input_map = { "device" = "device", "attributes" = "attributes" }
 limits = { timeout_secs = 20 }
@@ -32,7 +24,7 @@ required = ["device", "attributes"]
 additionalProperties = false
 properties = { "device" = { "type" = "string", "maxLength" = 32, "enum" = ["loopback"] }, "attributes" = { "type" = "array", "maxItems" = 3, "items" = { "type" = "string", "maxLength" = 32, "enum" = ["mtu", "operstate", "address"] } } }
 [tools.device_attributes_get.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "observed_at" = ["mcp_result", "observed_at"], "device" = ["mcp_result", "device"], "class" = ["mcp_result", "class"], "name" = ["mcp_result", "name"], "sysfs_path" = ["mcp_result", "sysfs_path"], "attributes" = ["mcp_result", "attributes"] }
 max_bytes = 4096
 max_items = 256

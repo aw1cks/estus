@@ -1,0 +1,231 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "fc9e626aaeba0beb9453fb826252b9799f3a1e4206891d2c95b6122ae98dff0a",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "entry_id": {
+          "name": "entry_id"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "description": "Operator-fixed absolute target Python, never caller-selected."
+        },
+        "entry_id": {
+          "type": "string",
+          "enum": [
+            "estus-current.conf",
+            "estus-alternate.conf"
+          ]
+        }
+      },
+      "required": [
+        "target_python",
+        "entry_id"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "entry_id": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "entry_id": {
+            "type": "string",
+            "enum": [
+              "estus-current.conf",
+              "estus-alternate.conf"
+            ],
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "entry_id": "entry_id"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boot_id": [
+          "mcp_result",
+          "boot_id"
+        ],
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "entry": [
+          "mcp_result",
+          "entry"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "unavailable": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "entry": {
+            "type": "object",
+            "properties": {
+              "entry_id": {
+                "type": "string",
+                "maxLength": 255
+              },
+              "source": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "type": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "command_line_sensitive": {
+                "type": "boolean"
+              },
+              "unknown": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "linux": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "efi": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "path": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "initrd": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 2048
+                }
+              },
+              "command_line": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "command_line_source": {
+                "type": "string",
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "entry_id",
+              "source",
+              "type",
+              "command_line_sensitive",
+              "unknown",
+              "command_line_source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "boot_id",
+          "source",
+          "unavailable",
+          "observed_at",
+          "entry"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

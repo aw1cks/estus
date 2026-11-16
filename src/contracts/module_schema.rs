@@ -120,6 +120,10 @@ struct Contract {
     aliases: Aliases,
     defaults: BTreeMap<String, Value>,
     review_required: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    opaque_options: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    choice_descriptions: BTreeMap<String, Value>,
 }
 
 /// Import the single entry returned by public `ansible-doc --json`.
@@ -149,6 +153,8 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
         .and_then(Value::as_object)
         .ok_or(INVALID)?;
     let mut defaults = BTreeMap::new();
+    let mut opaque_options = BTreeMap::new();
+    let mut choice_descriptions = BTreeMap::new();
     // Ansible documents free-form task syntax as a pseudo-option, not a named
     // module argument. This executor accepts named argument objects only.
     let free_form = doc
@@ -169,7 +175,9 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
                         )
                     })
             });
-    let (mut schema, aliases) = import_options(options, "", &mut defaults, free_form)?;
+    let (mut schema, aliases) = import_options(
+        options, "", &mut defaults, &mut opaque_options, &mut choice_descriptions, free_form,
+    )?;
     let mut prose = Vec::new();
     for key in ["description", "notes"] {
         if let Some(value) = doc.get(key) {
@@ -184,12 +192,17 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
     }
     check_schema(&schema, true)?;
     let mut result = serde_json::to_value(Contract {
-        schema, aliases, defaults,
+        schema, aliases, defaults, opaque_options, choice_descriptions,
         review_required: vec!["Public documentation is not the runtime argument specification and does not reliably expose required_if, mutual exclusions, coercions, or module-body constraints. Binding authors must review the preserved descriptions and supply conditional input_schema constraints or a narrower fixed/mapped surface; no prose rules are inferred or certified. Defaults are metadata only and are never injected.".to_owned()],
     }).map_err(|_| INVALID)?;
     if free_form {
         result["review_required"].as_array_mut().ok_or(INVALID)?.push(Value::String(
             "Free-form task syntax is not a named module argument and cannot be bound; review and expose only the documented typed named arguments.".to_owned()
+        ));
+    }
+    if result.get("opaque_options").is_some() {
+        result["review_required"].as_array_mut().ok_or(INVALID)?.push(Value::String(
+            "Documented raw options remain opaque and unbindable unless argument_types supplies an explicitly reviewed bounded representation. Fixed values require the same approval; omitted options and documentation defaults are not injected.".to_owned()
         ));
     }
     if !bounded(&result) {
@@ -201,41 +214,40 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
 /// Build the same contract for a reviewed, explicitly typed closed schema.
 /// Conditional predicates remain the existing schema checker's responsibility.
 pub(crate) fn import_explicit_schema(schema: &Value) -> Result<Value, &'static str> {
-    fn identity_aliases(schema: &Value) -> Result<Aliases, &'static str> {
-        let mut aliases = Aliases::default();
-        match schema.get("type").and_then(Value::as_str).ok_or(SCHEMA)? {
-            "object" => {
-                for (key, value) in schema
-                    .get("properties")
-                    .and_then(Value::as_object)
-                    .ok_or(SCHEMA)?
-                {
-                    aliases
-                        .properties
-                        .insert(key.clone(), identity_aliases(value)?);
-                }
-            }
-            "array" => {
-                aliases.items = Some(Box::new(identity_aliases(
-                    schema.get("items").ok_or(SCHEMA)?,
-                )?));
-            }
-            _ => (),
-        }
-        Ok(aliases)
-    }
     check_schema(schema, true)?;
     let result = serde_json::to_value(Contract {
         schema: schema.clone(),
         aliases: identity_aliases(schema)?,
         defaults: BTreeMap::new(),
         review_required: Vec::new(),
+        opaque_options: BTreeMap::new(),
+        choice_descriptions: BTreeMap::new(),
     })
     .map_err(|_| SCHEMA)?;
     if !bounded(&result) {
         return Err(SCHEMA);
     }
     Ok(result)
+}
+
+fn identity_aliases(schema: &Value) -> Result<Aliases, &'static str> {
+    let mut aliases = Aliases::default();
+    match schema.get("type").and_then(Value::as_str).ok_or(SCHEMA)? {
+        "object" => {
+            for (key, value) in schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or(SCHEMA)?
+            {
+                aliases.properties.insert(key.clone(), identity_aliases(value)?);
+            }
+        }
+        "array" => {
+            aliases.items = Some(Box::new(identity_aliases(schema.get("items").ok_or(SCHEMA)?)?));
+        }
+        _ => (),
+    }
+    Ok(aliases)
 }
 
 // Preserve prose for operator review, never classify it as validation authority.
@@ -257,6 +269,8 @@ fn import_options(
     options: &Map<String, Value>,
     path: &str,
     defaults: &mut BTreeMap<String, Value>,
+    opaque_options: &mut BTreeMap<String, Value>,
+    choice_descriptions: &mut BTreeMap<String, Value>,
     skip_free_form: bool,
 ) -> Result<(Value, Aliases), &'static str> {
     let mut properties = Map::new();
@@ -304,7 +318,9 @@ fn import_options(
             required.push(Value::String(key.clone()));
         }
         let kind = option.get("type").and_then(Value::as_str).ok_or(INVALID)?;
-        let (mut schema, node) = import_type(kind, option, &full, defaults)?;
+        let (mut schema, node) = import_type(
+            kind, option, &full, defaults, opaque_options, choice_descriptions,
+        )?;
         if let Some(prose) = option.get("description") {
             schema
                 .as_object_mut()
@@ -312,22 +328,46 @@ fn import_options(
                 .insert("description".to_owned(), Value::String(description(prose)?));
         }
         if let Some(choices) = option.get("choices") {
-            let choices = choices
-                .as_array()
-                .filter(|v| !v.is_empty())
-                .ok_or(INVALID)?;
+            let choices = match choices {
+                Value::Array(values) if !values.is_empty() => values.clone(),
+                Value::Object(values) if !values.is_empty() => {
+                    let choice_type = if kind == "list" {
+                        option.get("elements").and_then(Value::as_str).ok_or(INVALID)?
+                    } else {
+                        kind
+                    };
+                    let values = values.keys().map(|key| {
+                        match choice_type {
+                            "str" | "path" => Ok(Value::String(key.clone())),
+                            "bool" if key == "true" => Ok(Value::Bool(true)),
+                            "bool" if key == "false" => Ok(Value::Bool(false)),
+                            "int" | "float" => {
+                                let value: Value = serde_json::from_str(key).map_err(|_| INVALID)?;
+                                if !value.is_number() || value.to_string() != *key {
+                                    return Err(INVALID);
+                                }
+                                Ok(value)
+                            }
+                            _ => Err(INVALID),
+                        }
+                    }).collect::<Result<Vec<_>, _>>()?;
+                    choice_descriptions.insert(full.clone(), choices.clone());
+                    values
+                }
+                _ => return Err(INVALID),
+            };
             let target = if kind == "list" {
                 schema.get_mut("items").ok_or(INVALID)?
             } else {
                 &mut schema
             };
-            for choice in choices {
+            for choice in &choices {
                 validate(target, choice).map_err(|_| INVALID)?;
             }
             target
                 .as_object_mut()
                 .ok_or(INVALID)?
-                .insert("enum".to_owned(), Value::Array(choices.clone()));
+                .insert("enum".to_owned(), Value::Array(choices));
         }
         if let Some(values) = option.get("aliases") {
             for alias in values.as_array().ok_or(INVALID)? {
@@ -356,6 +396,8 @@ fn import_type(
     option: &Map<String, Value>,
     path: &str,
     defaults: &mut BTreeMap<String, Value>,
+    opaque_options: &mut BTreeMap<String, Value>,
+    choice_descriptions: &mut BTreeMap<String, Value>,
 ) -> Result<(Value, Aliases), &'static str> {
     let scalar = match kind {
         "str" | "path" => Some("string"),
@@ -371,6 +413,17 @@ fn import_type(
         return Ok((json!({"type":kind}), Aliases::default()));
     }
     match kind {
+        "raw" => {
+            if option.contains_key("suboptions") || option.contains_key("elements")
+                || option.contains_key("choices")
+            {
+                return Err(INVALID);
+            }
+            opaque_options.insert(path.to_owned(), Value::Object(option.clone()));
+            // An impossible schema preserves aliases/requiredness without accepting
+            // any unreviewed representation, including an empty object or null.
+            Ok((json!({"not": {}}), Aliases::default()))
+        }
         "dict" => {
             if option.contains_key("elements") {
                 return Err(INVALID);
@@ -379,7 +432,7 @@ fn import_type(
                 .get("suboptions")
                 .and_then(Value::as_object)
                 .ok_or(INVALID)?;
-            import_options(sub, path, defaults, false)
+            import_options(sub, path, defaults, opaque_options, choice_descriptions, false)
         }
         "list" => {
             let elements = option
@@ -391,7 +444,9 @@ fn import_type(
             }
             let mut item = option.clone();
             item.remove("elements");
-            let (schema, aliases) = import_type(elements, &item, &format!("{path}[]"), defaults)?;
+            let (schema, aliases) = import_type(
+                elements, &item, &format!("{path}[]"), defaults, opaque_options, choice_descriptions,
+            )?;
             Ok((
                 json!({"type":"array","items":schema}),
                 Aliases {
@@ -843,6 +898,8 @@ struct Overlay {
     input_schema: Value,
     fixed_args: Map<String, Value>,
     input_map: BTreeMap<String, String>,
+    #[serde(default)]
+    argument_types: BTreeMap<String, Value>,
 }
 
 /// Validate configuration shape without reading a reviewed snapshot or runtime.
@@ -852,6 +909,9 @@ pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
     }
     let overlay: Overlay = serde_json::from_value(overlay.clone()).map_err(|_| SCHEMA)?;
     check_schema(&overlay.input_schema, true)?;
+    for representation in overlay.argument_types.values() {
+        check_representation(representation)?;
+    }
     let public = overlay
         .input_schema
         .get("properties")
@@ -880,7 +940,7 @@ pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub(crate) struct CompiledModuleBinding {
+pub(crate) struct CapabilityBinding {
     contract: Contract,
     input_schema: Value,
     fixed_args: Map<String, Value>,
@@ -890,13 +950,26 @@ pub(crate) struct CompiledModuleBinding {
 pub(crate) fn compile_binding(
     contract: &Value,
     overlay: &Value,
-) -> Result<CompiledModuleBinding, &'static str> {
+) -> Result<CapabilityBinding, &'static str> {
     if !bounded(contract) || !bounded(overlay) {
         return Err(SCHEMA);
     }
-    let contract: Contract = serde_json::from_value(contract.clone()).map_err(|_| INVALID)?;
+    let mut contract: Contract = serde_json::from_value(contract.clone()).map_err(|_| INVALID)?;
     check_schema(&contract.schema, true)?;
     check_aliases(&contract.schema, &contract.aliases)?;
+    let overlay: Overlay = serde_json::from_value(overlay.clone()).map_err(|_| SCHEMA)?;
+    for (path, representation) in &overlay.argument_types {
+        if !contract.opaque_options.contains_key(path) {
+            return Err(SCHEMA);
+        }
+        check_representation(representation)?;
+        let (schema, aliases) = opaque_node(&mut contract.schema, &mut contract.aliases, path)?;
+        if schema.get("not") != Some(&json!({})) {
+            return Err(INVALID);
+        }
+        *schema = representation.clone();
+        *aliases = identity_aliases(representation)?;
+    }
     for path in contract.defaults.keys() {
         let mut schema = &contract.schema;
         for segment in path.split('.') {
@@ -912,7 +985,6 @@ pub(crate) fn compile_binding(
             }
         }
     }
-    let overlay: Overlay = serde_json::from_value(overlay.clone()).map_err(|_| SCHEMA)?;
     check_schema(&overlay.input_schema, true)?;
     let fixed = canonicalize(
         &contract.schema,
@@ -978,12 +1050,63 @@ pub(crate) fn compile_binding(
             }
         }
     }
-    Ok(CompiledModuleBinding {
+    Ok(CapabilityBinding {
         contract,
         input_schema: overlay.input_schema,
         fixed_args,
         input_map,
     })
+}
+
+fn opaque_node<'a>(
+    mut schema: &'a mut Value,
+    mut aliases: &'a mut Aliases,
+    path: &str,
+) -> Result<(&'a mut Value, &'a mut Aliases), &'static str> {
+    for segment in path.split('.') {
+        let (key, array) = segment.strip_suffix("[]").map_or((segment, false), |key| (key, true));
+        if !parameter(key) {
+            return Err(SCHEMA);
+        }
+        schema = schema.get_mut("properties").and_then(|props| props.get_mut(key)).ok_or(SCHEMA)?;
+        aliases = aliases.properties.get_mut(key).ok_or(SCHEMA)?;
+        if array {
+            schema = schema.get_mut("items").ok_or(SCHEMA)?;
+            aliases = aliases.items.as_deref_mut().ok_or(SCHEMA)?;
+        }
+    }
+    Ok((schema, aliases))
+}
+
+fn check_representation(schema: &Value) -> Result<(), &'static str> {
+    check_schema(schema, false)?;
+    let kind = schema.get("type").and_then(Value::as_str).ok_or(SCHEMA)?;
+    if let Some(value) = schema.get("const") {
+        return validate(schema, value).map_err(|_| SCHEMA);
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        for value in values {
+            validate(schema, value).map_err(|_| SCHEMA)?;
+        }
+        return Ok(());
+    }
+    match kind {
+        "boolean" | "null" => Ok(()),
+        "string" if schema.get("maxLength").is_some() => Ok(()),
+        "integer" | "number"
+            if (schema.get("minimum").is_some() || schema.get("exclusiveMinimum").is_some())
+                && (schema.get("maximum").is_some() || schema.get("exclusiveMaximum").is_some()) => Ok(()),
+        "array" if schema.get("maxItems").is_some() => {
+            check_representation(schema.get("items").ok_or(SCHEMA)?)
+        }
+        "object" => {
+            for child in schema.get("properties").and_then(Value::as_object).ok_or(SCHEMA)?.values() {
+                check_representation(child)?;
+            }
+            Ok(())
+        }
+        _ => Err(SCHEMA),
+    }
 }
 
 fn is_required(schema: &Value, key: &str) -> bool {
@@ -1057,7 +1180,7 @@ fn compatible(input: &Value, backend: &Value, aliases: &Aliases) -> Result<(), &
     Ok(())
 }
 
-impl CompiledModuleBinding {
+impl CapabilityBinding {
     pub(crate) fn prepare(&self, input: &Value) -> Result<Value, &'static str> {
         if !bounded(input) {
             return Err(INPUT);
@@ -1201,7 +1324,6 @@ mod tests {
     #[test]
     fn malformed_and_unsupported_semantics_fail_closed() {
         for option in [
-            json!({"type":"raw"}),
             json!({"type":"dict"}),
             json!({"type":"list"}),
             json!({"type":"str","required":"yes"}),
@@ -1374,7 +1496,7 @@ mod named_arguments {
 mod integer_normalization {
     use super::*;
 
-    fn binding(kind: &str) -> CompiledModuleBinding {
+    fn binding(kind: &str) -> CapabilityBinding {
         let schema = json!({
             "type":"object",
             "properties":{"value":{"type":kind}},
@@ -1548,5 +1670,89 @@ mod integer_normalization {
             invalid["fixed_args"]["count"] = value;
             assert!(compile_binding(&contract, &invalid).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod reviewed_opaque_options {
+    use super::*;
+
+    #[test]
+    fn raw_values_require_bounded_review_for_fixed_and_mapped_arguments() {
+        let contract = import_document(&json!({"doc":{"options":{
+            "path":{"type":"path","required":true},
+            "mode":{"type":"raw","aliases":["permissions"],"default":null}
+        }}})).unwrap();
+        let mut overlay = json!({
+            "input_schema":{"type":"object","properties":{},"additionalProperties":false},
+            "fixed_args":{"path":"/owned/file"},"input_map":{}
+        });
+        assert_eq!(compile_binding(&contract, &overlay).unwrap().prepare(&json!({})).unwrap(),
+            json!({"path":"/owned/file"}));
+        overlay["fixed_args"]["permissions"] = json!("0644");
+        assert!(compile_binding(&contract, &overlay).is_err());
+        overlay["argument_types"] = json!({"mode":{"type":"string"}});
+        assert!(compile_binding(&contract, &overlay).is_err());
+        overlay["argument_types"]["mode"] = json!({"type":"string","enum":["0600","0644"]});
+        assert_eq!(compile_binding(&contract, &overlay).unwrap().prepare(&json!({})).unwrap(),
+            json!({"path":"/owned/file","mode":"0644"}));
+        overlay["fixed_args"]["mode"] = json!("0600");
+        assert!(compile_binding(&contract, &overlay).is_err());
+        overlay["fixed_args"].as_object_mut().unwrap().remove("permissions");
+        overlay["fixed_args"].as_object_mut().unwrap().remove("mode");
+        overlay["input_schema"]["properties"]["approved_mode"] =
+            json!({"type":"string","maxLength":4});
+        overlay["input_map"]["permissions"] = json!("approved_mode");
+        let binding = compile_binding(&contract, &overlay).unwrap();
+        assert_eq!(binding.prepare(&json!({"approved_mode":"0600"})).unwrap(),
+            json!({"path":"/owned/file","mode":"0600"}));
+        assert!(binding.prepare(&json!({"approved_mode":"0777"})).is_err());
+        assert!(binding.prepare(&json!({"approved_mode":644})).is_err());
+        overlay["argument_types"]["path"] = json!({"type":"string","maxLength":10});
+        assert!(compile_binding(&contract, &overlay).is_err());
+    }
+
+    #[test]
+    fn required_opaque_members_cannot_disappear_from_nested_contracts() {
+        let contract = import_document(&json!({"doc":{"options":{
+            "entries":{"type":"list","elements":"dict","suboptions":{
+                "value":{"type":"raw","required":true}
+            }}
+        }}})).unwrap();
+        let mut overlay = json!({
+            "input_schema":{"type":"object","properties":{},"additionalProperties":false},
+            "fixed_args":{"entries":[{"value":true}]},"input_map":{}
+        });
+        assert!(compile_binding(&contract, &overlay).is_err());
+        overlay["argument_types"] = json!({"entries[].value":{"type":"boolean"}});
+        assert_eq!(compile_binding(&contract, &overlay).unwrap().prepare(&json!({})).unwrap(),
+            json!({"entries":[{"value":true}]}));
+        overlay["fixed_args"]["entries"] = json!([{}]);
+        assert!(compile_binding(&contract, &overlay).is_err());
+    }
+
+    #[test]
+    fn mapping_choices_constrain_exact_typed_values_without_prose_coercion() {
+        let contract = import_document(&json!({"doc":{"options":{
+            "manager":{"type":"list","elements":"str","choices":{"auto":"Discover","apt":"Debian"}},
+            "strategy":{"type":"str","choices":{"first":"Stop early","all":"Query all"}},
+            "count":{"type":"int","choices":{"1":"One","2":"Two"}}
+        }}})).unwrap();
+        let overlay = json!({
+            "input_schema":{"type":"object","properties":{
+                "selected":{"type":"array","items":{"type":"string"}},
+                "count":{"type":"integer"}
+            },"additionalProperties":false},
+            "fixed_args":{"strategy":"first"},"input_map":{"manager":"selected","count":"count"}
+        });
+        let binding = compile_binding(&contract, &overlay).unwrap();
+        assert_eq!(binding.prepare(&json!({"selected":["auto","apt"],"count":2})).unwrap(),
+            json!({"manager":["auto","apt"],"strategy":"first","count":2}));
+        assert!(binding.prepare(&json!({"selected":["Discover"]})).is_err());
+        assert!(binding.prepare(&json!({"count":"2"})).is_err());
+        assert!(binding.prepare(&json!({"count":3})).is_err());
+        assert!(import_document(&json!({"doc":{"options":{
+            "count":{"type":"int","choices":{"01":"Ambiguous"}}
+        }}})).is_err());
     }
 }

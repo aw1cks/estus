@@ -33,6 +33,11 @@ pub(crate) struct SchemaArgs {
 
 #[derive(Subcommand)]
 enum SchemaCommand {
+    /// Explicitly approve the selected runtime's canonical generic module inventory.
+    ImportInventory {
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Import installed public ansible-doc metadata into a new reviewable snapshot.
     Import {
         module: String,
@@ -282,6 +287,10 @@ pub(crate) fn write_document(path: &Path, document: &impl Serialize) -> Result<(
     if bytes.len() > SNAPSHOT_LIMIT {
         return Err("schema_file_limit");
     }
+    write_document_bytes(path, &bytes)
+}
+
+fn write_document_bytes(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -291,7 +300,7 @@ pub(crate) fn write_document(path: &Path, document: &impl Serialize) -> Result<(
         .permissions(Permissions::from_mode(0o600))
         .tempfile_in(parent)
         .map_err(|_| "schema_output_failed")?;
-    file.write_all(&bytes).map_err(|_| "schema_output_failed")?;
+    file.write_all(bytes).map_err(|_| "schema_output_failed")?;
     file.as_file()
         .sync_all()
         .map_err(|_| "schema_output_failed")?;
@@ -328,6 +337,30 @@ async fn perform(
     phase: &mut &'static str,
 ) -> Result<Report, &'static str> {
     let command = match args.command {
+        SchemaCommand::ImportInventory { output } => {
+            *phase = "runtime_import";
+            let reference = config.automation_runtime().map_err(|_| "runtime_unavailable")?;
+            let duration = config.timeout(args.timeout_secs).map_err(|_| "invalid_timeout")?;
+            let deadline = tokio::time::Instant::now().checked_add(duration).ok_or("invalid_timeout")?;
+            let inventory = automation::import_inventory(reference, RuntimeContext {
+                deadline, ct: &shutdown, shutdown: &shutdown,
+            }).await?;
+            stopped(&shutdown, deadline)?;
+            *phase = "schema_write";
+            tokio::task::spawn_blocking(move || {
+                let mut bytes = serde_json::to_vec(&inventory)
+                    .map_err(|_| "invalid_generic_inventory")?;
+                bytes.push(b'\n');
+                if bytes.len() as u64 > crate::automation::generic::INVENTORY_BYTES {
+                    return Err("schema_file_limit");
+                }
+                write_document_bytes(&output, &bytes)
+            }).await.map_err(|_| "schema_output_failed")??;
+            return Ok(Report {
+                ok: true, error_code: None, phase: None,
+                binding_validated: None, input_validated: None,
+            });
+        }
         SchemaCommand::ImportRole(role) => {
             return Ok(crate::contracts::role_import::perform(
                 config,
@@ -412,7 +445,8 @@ async fn perform(
                     input,
                 ))
             }
-            SchemaCommand::ImportRole(_)
+            SchemaCommand::ImportInventory { .. }
+            | SchemaCommand::ImportRole(_)
             | SchemaCommand::VerifyRole(_)
             | SchemaCommand::ImportPlaybook(_)
             | SchemaCommand::VerifyPlaybook(_) => {
@@ -506,4 +540,25 @@ mod tests {
         assert_eq!(read_json(&path, INPUT_LIMIT), Err("schema_file_limit"));
         assert!(read_json(root.path(), INPUT_LIMIT).is_err());
     }
+}
+
+pub(crate) async fn author_module(
+    runtime: Option<PathBuf>,
+    module: &str,
+    overlay: &Value,
+    output: &Path,
+    context: RuntimeContext<'_>,
+) -> Result<(), &'static str> {
+    let observed = automation::import_module(runtime, module, context).await?;
+    let contract = module_schema::import_document(&observed.document)?;
+    module_schema::compile_binding(&contract, overlay)?;
+    let mut snapshot = Snapshot {
+        schema: 1, module: module.to_owned(), runtime: observed.identity,
+        collection: observed.collection, content_sha256: observed.content_sha256,
+        contract, schema_sha256: String::new(), binding: Some(overlay.clone()),
+    };
+    snapshot.schema_sha256 = digest(&snapshot)?;
+    let output = output.to_path_buf();
+    tokio::task::spawn_blocking(move || write_snapshot(&output, &snapshot))
+        .await.map_err(|_| "schema_output_failed")?
 }

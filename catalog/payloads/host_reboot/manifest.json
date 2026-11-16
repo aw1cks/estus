@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "reboot_scheduled",
+  "source_sha256": "d29e2619747ba8927193dd704d5e7ae4dede263e9eb7c46a7f1f42bbde77818b",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {}
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "description": "Operator-fixed absolute target Python, never caller-selected."
+        }
+      },
+      "required": [
+        "target_python"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {}
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boot_id": [
+          "mcp_result",
+          "boot_id"
+        ],
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "outcome": [
+          "mcp_result",
+          "outcome"
+        ],
+        "command_returncode": [
+          "mcp_result",
+          "command_returncode"
+        ],
+        "reboot_confirmed": [
+          "mcp_result",
+          "reboot_confirmed"
+        ],
+        "reconciliation_required": [
+          "mcp_result",
+          "reconciliation_required"
+        ],
+        "schedule_unit": [
+          "mcp_result",
+          "schedule_unit"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "unavailable": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "outcome": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "command_returncode": {
+            "type": "integer",
+            "minimum": -255,
+            "maximum": 255
+          },
+          "reboot_confirmed": {
+            "type": "boolean"
+          },
+          "reconciliation_required": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "schedule_unit": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "boot_id",
+          "source",
+          "unavailable",
+          "observed_at",
+          "outcome",
+          "command_returncode",
+          "reboot_confirmed",
+          "reconciliation_required",
+          "schedule_unit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

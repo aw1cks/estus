@@ -1,0 +1,290 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "4e16014d774144bed0f9f5a83d4a181a34d0125a82aa25dc086bc17fb70a43b3",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "pid": {
+          "name": "pid"
+        },
+        "boot_id": {
+          "name": "boot_id"
+        },
+        "start_ticks": {
+          "name": "start_ticks"
+        },
+        "limit": {
+          "name": "limit"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "boot_id": {
+          "type": "string"
+        },
+        "start_ticks": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_python",
+        "pid",
+        "boot_id",
+        "start_ticks",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "pid": {
+          "aliases": {},
+          "properties": {}
+        },
+        "boot_id": {
+          "aliases": {},
+          "properties": {}
+        },
+        "start_ticks": {
+          "aliases": {},
+          "properties": {}
+        },
+        "limit": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pid",
+          "boot_id",
+          "start_ticks",
+          "limit"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "pid": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4194304
+          },
+          "boot_id": {
+            "type": "string",
+            "maxLength": 36,
+            "minLength": 36
+          },
+          "start_ticks": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        }
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "pid": "pid",
+        "boot_id": "boot_id",
+        "start_ticks": "start_ticks",
+        "limit": "limit"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "status": [
+          "mcp_result",
+          "status"
+        ],
+        "requested": [
+          "mcp_result",
+          "requested"
+        ],
+        "observed_identity": [
+          "mcp_result",
+          "observed_identity"
+        ],
+        "descriptors": [
+          "mcp_result",
+          "descriptors"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "required": [
+          "observed_at",
+          "status",
+          "requested"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "observed_at": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 24,
+            "enum": [
+              "available",
+              "gone",
+              "denied",
+              "raced",
+              "identity_mismatch"
+            ]
+          },
+          "requested": {
+            "type": "object",
+            "required": [
+              "pid",
+              "start_ticks",
+              "boot_id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4194304
+              },
+              "start_ticks": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "boot_id": {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 36
+              }
+            }
+          },
+          "observed_identity": {
+            "type": "object",
+            "required": [
+              "pid",
+              "start_ticks",
+              "boot_id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4194304
+              },
+              "start_ticks": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "boot_id": {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 36
+              }
+            }
+          },
+          "descriptors": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "required": [
+                "fd",
+                "status"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "fd": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "status": {
+                  "type": "string",
+                  "maxLength": 16,
+                  "enum": [
+                    "available",
+                    "gone",
+                    "denied"
+                  ]
+                },
+                "target": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              }
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

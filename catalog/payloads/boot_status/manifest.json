@@ -1,0 +1,205 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "f580607b0946d9d7c06de10720b5da1999e8812f8a32c1df84d62a01d5c54ae8",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {}
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "description": "Operator-fixed absolute target Python, never caller-selected."
+        }
+      },
+      "required": [
+        "target_python"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {}
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boot_id": [
+          "mcp_result",
+          "boot_id"
+        ],
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "firmware_mode": [
+          "mcp_result",
+          "firmware_mode"
+        ],
+        "loader": [
+          "mcp_result",
+          "loader"
+        ],
+        "selection_source": [
+          "mcp_result",
+          "selection_source"
+        ],
+        "security_source": [
+          "mcp_result",
+          "security_source"
+        ],
+        "current_entry": [
+          "mcp_result",
+          "current_entry"
+        ],
+        "default_entry": [
+          "mcp_result",
+          "default_entry"
+        ],
+        "oneshot_entry": [
+          "mcp_result",
+          "oneshot_entry"
+        ],
+        "secure_boot": [
+          "mcp_result",
+          "secure_boot"
+        ],
+        "setup_mode": [
+          "mcp_result",
+          "setup_mode"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "unavailable": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "firmware_mode": {
+            "type": "string",
+            "maxLength": 16
+          },
+          "loader": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "selection_source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "security_source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "current_entry": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "default_entry": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "oneshot_entry": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "secure_boot": {
+            "type": "string",
+            "maxLength": 16
+          },
+          "setup_mode": {
+            "type": "string",
+            "maxLength": 16
+          }
+        },
+        "required": [
+          "boot_id",
+          "source",
+          "unavailable",
+          "observed_at",
+          "firmware_mode",
+          "loader",
+          "selection_source",
+          "security_source",
+          "secure_boot",
+          "setup_mode"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

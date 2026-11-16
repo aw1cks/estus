@@ -1,34 +1,26 @@
-# Opt-in Linux network_namespaces_list; reviewed role and separately imported snapshot required.
-# Copy roles/network_namespaces_list to /etc/estus/roles/network_namespaces_list; export input_schema/fixed_args/input_map as overlay.json.
-# estus --config network_namespaces_list.toml schema import-role network_namespaces_list --role-path /etc/estus/roles/network_namespaces_list --overlay overlay.json --output /etc/estus/network_namespaces_list.schema.json
-# Offline import never runs tasks; review snapshot before enabling. Provision runner root mode 0700.
-# Requires pinned /usr/bin/python3 and fixed iproute2 utilities; probes additionally ping/traceroute as applicable.
-# Operator policy is fixed_args only: callers cannot replace it. No persistent manager changes or flush/batch.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/network_namespaces_list/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["network_namespaces_list"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.network_namespaces_list]
 description = "network namespaces list. Bounded Linux observations; operator-approved interfaces; no process attribution, flags, namespace execution or mutation."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/network_namespaces_list.schema.json", "role_path" = "/etc/estus/network_namespaces_list.schema.roles/network_namespaces_list", "no_log" = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/network_namespaces_list.payload.json", source = "/etc/estus/payloads/network_namespaces_list/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
 input_map = { "limit" = "limit" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }
 [tools.network_namespaces_list.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "entries" = ["mcp_result", "entries"], "scope" = ["mcp_result", "scope"], "truncated" = ["mcp_result", "truncated"] }
 max_bytes = 4096
 max_items = 256

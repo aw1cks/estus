@@ -1,0 +1,280 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "55116ba7c26c2fae296246afcc26c7247ce6122bc0cbacb4af94d4af7cbfd5ab",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "uid": {
+          "name": "uid"
+        },
+        "name_contains": {
+          "name": "name_contains"
+        },
+        "limit": {
+          "name": "limit"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "integer"
+        },
+        "name_contains": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_python",
+        "uid",
+        "name_contains",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "uid": {
+          "aliases": {},
+          "properties": {}
+        },
+        "name_contains": {
+          "aliases": {},
+          "properties": {}
+        },
+        "limit": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "uid",
+          "name_contains",
+          "limit"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "uid": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "name_contains": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        }
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "uid": "uid",
+        "name_contains": "name_contains",
+        "limit": "limit"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "processes": [
+          "mcp_result",
+          "processes"
+        ],
+        "scanned": [
+          "mcp_result",
+          "scanned"
+        ],
+        "skipped": [
+          "mcp_result",
+          "skipped"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ],
+        "clock_ticks_per_second": [
+          "mcp_result",
+          "clock_ticks_per_second"
+        ],
+        "page_size_bytes": [
+          "mcp_result",
+          "page_size_bytes"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "required": [
+          "observed_at",
+          "processes",
+          "scanned",
+          "skipped",
+          "truncated",
+          "clock_ticks_per_second",
+          "page_size_bytes"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "observed_at": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "processes": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "required": [
+                "pid",
+                "start_ticks",
+                "boot_id",
+                "name",
+                "state",
+                "ppid",
+                "uid",
+                "user_ticks",
+                "system_ticks",
+                "virtual_bytes",
+                "resident_pages"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "pid": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4194304
+                },
+                "start_ticks": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "boot_id": {
+                  "type": "string",
+                  "maxLength": 36,
+                  "minLength": 36
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "state": {
+                  "type": "string",
+                  "maxLength": 1
+                },
+                "ppid": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "user_ticks": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "system_ticks": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "virtual_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "resident_pages": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          },
+          "scanned": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "clock_ticks_per_second": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "page_size_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          }
+        }
+      }
+    },
+    "authority": "automation",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

@@ -33,12 +33,20 @@ pub fn call(role: &str, function: &str, args: Value) -> Result<Value> {
     let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
+    let manifest: Value = serde_json::from_slice(&std::fs::read(assets.join("catalog.json"))?)?;
+    let executor = &manifest["tools"][role]["executor"];
+    let bundle = assets.join(executor["path"].as_str().context("catalog payload assets")?);
+    let source = match executor["kind"].as_str() {
+        Some("native_payload") => bundle.join("collector.py"),
+        Some("ansible_role") => bundle.join("files/collector.py"),
+        _ => anyhow::bail!("executor has no standalone collector"),
+    };
     let request = serde_json::to_vec(&json!({"function": function, "args": args}))?;
     ensure!(request.len() <= 2097152, "payload request bound");
     let mut child =
         Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
             .args(["-I", "-c", BRIDGE])
-            .arg(assets.join("roles").join(role).join("files/collector.py"))
+            .arg(source)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

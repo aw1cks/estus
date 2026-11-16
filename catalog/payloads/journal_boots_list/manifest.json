@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "6f8ec69e27aee8d5d060fcf9fcf6931009cad76400b44831c7d6e58ca8238571",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "argument",
+      "name": "limit",
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_python",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "limit": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        },
+        "required": [
+          "limit"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "limit": "limit"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boots": [
+          "mcp_result",
+          "boots"
+        ],
+        "incomplete": [
+          "mcp_result",
+          "incomplete"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                },
+                "boot_id": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "retained_range_text": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "index",
+                "boot_id",
+                "retained_range_text"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 8
+          },
+          "incomplete": {
+            "type": "boolean",
+            "const": true
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "boots",
+          "incomplete",
+          "truncated"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

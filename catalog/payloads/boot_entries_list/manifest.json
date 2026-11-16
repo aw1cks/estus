@@ -1,0 +1,246 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "ce593b7ff5b3ade5c3a77a6f459dfc0d219eaafeceefbb7fd62746764d4ae0d2",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "offset": {
+          "name": "offset",
+          "default": 0
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "description": "Operator-fixed absolute target Python, never caller-selected."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "ID-sorted live page offset, bounded from zero to 128."
+        }
+      },
+      "required": [
+        "target_python"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "offset": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "offset": "offset"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boot_id": [
+          "mcp_result",
+          "boot_id"
+        ],
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "entries": [
+          "mcp_result",
+          "entries"
+        ],
+        "total_count": [
+          "mcp_result",
+          "total_count"
+        ],
+        "next_offset": [
+          "mcp_result",
+          "next_offset"
+        ],
+        "scope": [
+          "mcp_result",
+          "scope"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "unavailable": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "entries": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "properties": {
+                "entry_id": {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                "source": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "type": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "command_line_sensitive": {
+                  "type": "boolean"
+                },
+                "unknown": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                },
+                "linux": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "efi": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "path": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "initrd": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 2048
+                  }
+                }
+              },
+              "required": [
+                "entry_id",
+                "source",
+                "type",
+                "command_line_sensitive",
+                "unknown"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "next_offset": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 128
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "boot_id",
+          "source",
+          "unavailable",
+          "observed_at",
+          "entries",
+          "total_count",
+          "next_offset",
+          "scope"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

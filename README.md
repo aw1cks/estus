@@ -516,6 +516,11 @@ The extra pins Ansible 14.4.0, Core 2.21.5 and Runner 2.4.3. The Ansible distrib
 supplies the baseline collections; Core and Runner alone are insufficient.
 pip/uv resolves their transitive dependencies at installation time. This is not a
 fully locked or immutable environment, and no installer runs during MCP requests.
+The Nix runtime explicitly exposes `ansible.posix`, `community.general` and its
+declared `community.library_inventory_filtering_v1` dependency. Generic inventory
+approval checks declared collection presence and hashes Core, Runner and every
+searchable collection, including action plugins and module utilities. It is not
+attestation of every possible third-party Python import or target dependency.
 
 The launcher supplies its own interpreter, installed package and script locations
 to Rust without requiring virtualenv activation or searching PATH for Python.
@@ -523,8 +528,9 @@ Explicit roots also support uv-run overlays without importing arbitrary ambient
 Python paths. Explicit `[automation].runtime` configuration wins over
 `ESTUS_ANSIBLE_RUNTIME`; either wins over the launcher's environment.
 A broken explicit selection fails without falling back elsewhere.
-Without an explicit health request or `[automation] required = true`, Rust does not
-consult the optional runtime. Installing the extra never enables tools.
+Without enabled Ansible bindings, an explicit health request or
+`[automation] required = true`, Rust does not consult the optional runtime.
+Installing the extra never enables tools.
 
 `doctor --runtime ansible` and required startup check actual public imports,
 versions and baseline collection manifests. Installer-managed identity reports
@@ -577,9 +583,13 @@ changing the snapshot.
 Snapshots record runtime provenance, imported recursive structure/aliases and
 reviewed schema/content digests. Verification reimports installed metadata and
 rejects drift; it never silently refreshes approval. Documentation defaults remain
-metadata, not supplied arguments. Unsupported types/constraints fail explicitly;
-this is not complete Ansible argument-spec emulation. Effects, target authority and
-execution policy are not inferred from documentation.
+metadata, not supplied arguments. Mapping-shaped documented choices preserve their
+typed keys and descriptive metadata. Documented `raw` options remain unbindable
+unless the reviewed overlay and tool configuration provide matching
+`argument_types`, for example `{"mode":{"type":"string","enum":["0600","0644"]}}`.
+Fixed values need the same bounded representation; omitted raw options stay omitted.
+Other unsupported types/constraints fail explicitly. This is not complete Ansible
+argument-spec emulation; effects, authority and policy are not inferred from docs.
 
 Backend argument names belong to the module's closed argument object, not the
 transport envelope. Documented `argv`/`stdin` are data; public `host`, timeout and
@@ -601,6 +611,70 @@ trees; they are not a sandbox, an immutable-environment attestation, or protecti
 against a same-user attacker replacing trusted files. Mutable content can still
 change after verification. Enabled module execution checks selected source content
 again before dispatch; this is drift detection, not immutable attestation.
+
+## Explicit generic Ansible execution
+
+Generic module execution is separately disabled by default. Neither catalog presets
+nor `enabled_tools` enable it: select each configured policy with
+`enabled_generic_tools`. Global/target profiles still restrict exposure; target
+selection and `disabled_tools` can only narrow access. Reviewed bindings never fall
+back to this surface.
+
+This is broad administrative authority, including **controller-side action plugins**.
+Module allowlists are not sandboxes. The operator fixes runtime, SSH destination,
+credential exposure and privilege; callers supply only logical host, canonical
+module name, module arguments and a bounded timeout. Ansible validates/coerces
+unrestricted module arguments. Caller strings remain literal, not nested templates.
+
+First explicitly approve the already-provisioned selected runtime:
+
+```sh
+estus --config site.toml schema import-inventory --output /etc/estus/admin-inventory.json
+```
+
+Using the same site's ordinary automation authority and private Runner workspace:
+
+```toml
+enabled_generic_tools = ["admin_modules"]
+
+[tools.admin_modules]
+description = "Operator-authorized broad file administration"
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["sensitive_read", "runtime_write", "persistent_write", "availability", "unknown"]
+execution = { kind = "ansible_generic", policy = { snapshot = "/etc/estus/admin-inventory.json", scope = { kind = "exact", modules = ["ansible.builtin.file", "ansible.builtin.stat"] } } }
+result = { kind = "ansible_summary" }
+```
+
+Calls use `{"operation":"call","host":"server","module":"ansible.builtin.file",
+"arguments":{"path":"/owned/path","state":"directory","mode":"0700"}}`.
+`operation="list"` supports bounded `after`/`limit`; `operation="describe"` takes
+`module`. Discovery does not grant additional authority or install anything.
+
+Policy controls:
+- `scope.kind`: `exact` with `modules`, `collections` with collection names, or
+  explicitly `selected_runtime`. Canonical exclusions in `deny` win.
+- `targets.<logical>` may narrow scope, add exclusions and lower `ceilings`.
+  Ceilings bound arguments, publication, time, concurrency and scratch usage.
+- `restrictions.<fqcn>` is a reviewed `input_schema`/`fixed_args`/`input_map`
+  overlay, optionally with bounded `argument_types`. Aliases are canonicalized;
+  unenforceable restrictions reject activation rather than becoming unrestricted.
+- `disclosure.kind` defaults to `summary`; `selected` requires an outer reviewed
+  `ansible_projection`. Explicit `module_result` publishes bounded sanitized JSON
+  text at `data.projection.value.module_result_json`. It may contain secrets.
+  `no_log` and nested censorship always override publication.
+- Optional `retention` sets `max_entries`, `max_bytes`, `lifetime_secs` for in-memory
+  public receipts only. `operation="receipts"` lists or retrieves a scoped receipt.
+  Restart discards them; raw events, argument values and environment are not retained.
+- `runtime_policy` defaults to `locked`: inventory/content drift rejects activation
+  or dispatch. Explicit `follow_selected_runtime` accepts operator-provisioned
+  changes only at a new activation, with a new generation and bounded scope diff.
+  Active requests never acquire new inventory or install dependencies.
+
+Results identify validation mode and policy/runtime generations. `changed` remains
+Ansible's report, not proof of exhaustive effects, idempotence or rollback.
+Cancellation/lost transport can leave remote state unknown; mutations are never replayed.
 
 ## Offline role contracts
 
@@ -803,14 +877,27 @@ reviewed roles must not use them. Visible async metadata is rejected, including
 loop results, but public `no_log` events can hide it. Completion attests reconciled
 Runner workflow evidence, not remote quiescence, rollback or process confinement.
 
-Shipped catalog Python lives in role-owned `files/collector.py` modules. Imports
-perform no target reads, subprocess execution or mutation; a guarded entry point
-owns IO. Roles load the attested file into the existing isolated Python argv
-invocation, rather than introducing a shell or a second executor. Moving or
-editing a payload changes the reviewed role hash and requires explicit re-import.
-Fast Rust-driven tests import the actual modules and cover parsing, bounds,
-identity/reset calculations and import purity; real guest tests retain transport,
-permission, mutation and postcondition coverage.
+The catalog contains 106 controller-owned native Python payloads and 12 retained
+Ansible workflows. Native `payloads/<tool>/collector.py` bytes are approved together
+with a typed contract, fixed policy, argument adapter, requirements and authority.
+Delivery uses interpreter stdin, not a target source installation or cache.
+Positive discovery is process/config/SSH-generation/authority scoped; explicit
+interpreter failure never falls back. Target capability fingerprints are advisory,
+not immutable attestation. Existing `remote_script` still means predeployed remote
+source fetched through SFTP and is not reinterpreted.
+
+Native revisions have the `_native1` suffix. Domain data remains at
+`data.projection.value`; `runner_rc` now carries the actual collector exit code
+and a completed failing collector reports `payload_failed`. Positive mutation
+evidence survives failure; failed operations do not publish success projections.
+`owned_group_cleanup="not_applicable"` means no per-request controller process
+group exists on this backend, not that remote work never started or all descendants
+are gone. Use completion and uncertainty fields for execution evidence.
+
+Retained role collectors remain under role-owned `files/collector.py`. Both forms
+preserve parser and domain semantics; source migration does not promote laboratory
+or site-policy qualifications. Fast tests import the actual collectors; real guest
+tests retain transport, permission, mutation and postcondition coverage.
 
 ```sh
 nix run .#role-acceptance-msrv
@@ -898,7 +985,7 @@ qualify virtual-driver configuration, not physical error correction.
 
 The lab-only `estus_nic_model` driver adds isolated `model0` for
 `nic_eee_get`, `nic_eee_set` and `nic_transceiver_get`. These tools use the normal
-reviewed Ansible path, real kernel ethtool callbacks and the real ethtool binary;
+reviewed native payload path, real kernel ethtool callbacks and the real ethtool binary;
 the driver is not installed on production targets by Estus.
 
 EEE setting accepts an enabled flag and a 0–1000000 microsecond Tx LPI timer,
@@ -911,16 +998,16 @@ published. It never writes EEPROM or runs an active hardware diagnostic.
 
 ### Review and prepare a site configuration
 
-Export creates private **inert** `tools.toml`, role sources, exact JSON
-overlays and `catalog-selection.json` qualification/prerequisite metadata.
-It creates no credentials or approved snapshots. Review the selected
-definitions and every role file first. Unit names, interfaces, paths, module
+Export creates private **inert** `tools.toml`, executor-specific role/payload assets,
+exact JSON overlays and `catalog-selection.json` qualification/prerequisite metadata.
+It creates no credentials or active approvals. Review the selected definitions,
+payload manifests/source or retained role files first. Unit names, interfaces, paths, module
 parameters, package names and repositories outside `linux-health` are generally
 **fixture policies**, not production defaults: adapt the closed input enums,
-fixed policy and role allowlists together.
+fixed policy and allowlists together.
 
-For a Linux health deployment, provide your actual SSH mapping, selected optional
-runtime and preprovisioned mode0700 workspace in `site.toml`:
+For native Linux health tools, provide the actual SSH mapping in `site.toml`;
+no controller Ansible runtime or Runner workspace is needed:
 
 ```toml
 profile = "actions-only"
@@ -928,22 +1015,21 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "6"
+version = "7"
 
 [targets.server]
 ssh_host = "server-ordinary"
 # Omitted selection inherits globally; [] explicitly denies all named tools.
 enabled_tools = ["cpu_stats", "memory_stats", "pressure_get"]
 
-[automation]
-workspace_root = "/var/lib/estus/runner"
-# Optional explicit runtime; otherwise use the launcher's selected runtime.
-# runtime = "/absolute/path/to/installed-runtime"
-
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 ```
+
+For a single-tool export, replace the global `tool_presets` selector with
+`enabled_tools = ["<tool>"]` and narrow the target's `enabled_tools` likewise.
+Do not retain a preset that selects definitions absent from that export.
 
 Then explicitly import the reviewed contracts, inspect the output, and launch:
 
@@ -954,10 +1040,11 @@ estus catalog inspect --site ./reviewed/estus.toml
 estus --config ./reviewed/estus.toml
 ```
 
-Preparation is offline: it imports against the runtime selected for each
-ordinary/named authority, writes snapshots and a new configuration, and never
-starts the server or contacts targets. It does not fabricate missing authority.
-Its overall deadline includes all imports (`--timeout-secs`, default60).
+Preparation is offline: native selections approve immutable source, adapters and
+typed policy without importing Ansible; selected modules/roles import against their
+authority's runtime. It writes a new configuration and never contacts targets.
+Missing authority is not fabricated. The overall deadline includes all preparation
+(`--timeout-secs`, default60).
 Existing output paths and definition collisions fail; output parents must be
 controlled by the account/root, not foreign-owned or non-sticky shared writable
 directories. Relative site paths retain the supplied site's directory even
@@ -1000,7 +1087,7 @@ are supplied; they do not consume the existing32-definition bound.
 
 Presets require an explicit catalog version; use the version reported by
 `estus catalog list --json` after reviewing the installed inventory. Catalog
-inventory changes advance that version (the NIC model additions advance 3 to 6).
+schema3/version7 adds executor-specific assets and the native catalog cutover.
 Review existing pins rather than silently adopting an upgrade. Source/runtime/
 overlay drift still invalidates snapshots; startup never refreshes approval.
 
@@ -1205,37 +1292,25 @@ Docker-compatible backend. No host account, service or sudo policy is changed.
 
 ## Opt-in Linux CPU counters and topology
 
-[`catalog/cpu_stats.toml`](catalog/cpu_stats.toml) enables only the reviewed
-[`cpu_stats` role](catalog/roles/cpu_stats), using the existing ordinary Ansible
-automation authority and actions-only profile. It is not enabled by default.
-Install the wheel's `ansible` extra or provision the Nix automation runtime, and
-install `/usr/bin/python3` on the Linux target. No packages are installed by the
-tool, and no sudo, service, sysctl or CPU hotplug operations are performed.
+[`catalog/cpu_stats.toml`](catalog/cpu_stats.toml) selects the reviewed
+[`cpu_stats` payload](catalog/payloads/cpu_stats), retaining ordinary `automation`
+authority and the actions-only profile. It requires target `/usr/bin/python3`,
+not Ansible or a controller workspace. Nothing installs packages, escalates,
+changes services/sysctls or hotplugs CPUs.
 
-Deploy the reviewed role to `/etc/estus/roles/cpu_stats`, configure the
-`server-ordinary` SSH alias, identity and host-key policy, and provision
-`/var/lib/estus/runner` mode0700 owned by the MCP account. Both automation Python
-and the isolated collector are operator-fixed to `/usr/bin/python3`; change both
-settings together if necessary. For native/Nix commands, set
-`ESTUS_ANSIBLE_RUNTIME` to the provisioned automation runtime directory; the wheel
-launcher can select its already-provisioned `ansible` environment.
-Import the exact overlay offline, then review the generated snapshot before
-enabling the tool (no preapproved snapshot is shipped):
+Use the public catalog workflow with the site mapping above:
 
 ```sh
-cat > cpu_stats.overlay.json <<'JSON'
-{"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{"limit":{"type":"integer","minimum":1,"maximum":16},"sample_ms":{"type":"integer","minimum":0,"maximum":2000}}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{"limit":"limit","sample_ms":"sample_ms"}}
-JSON
-estus schema import-role cpu_stats \
-  --role-path /etc/estus/roles/cpu_stats \
-  --overlay cpu_stats.overlay.json \
-  --output /etc/estus/cpu_stats.schema.json
-estus --config catalog/cpu_stats.toml
+estus catalog export --tool cpu_stats --output ./cpu-review
+# Review source, manifest and fixed policy before approval.
+estus catalog prepare --site ./site.toml --definitions ./cpu-review/tools.toml \
+  --target server --output ./cpu-approved
+estus --config ./cpu-approved/estus.toml
 ```
 
 The example permits only `server`, read effects and a20-second execution budget.
 The closed caller domain accepts optional `limit` (1–16 topology rows) and
-`sample_ms` (0–2000 milliseconds). Omission is resolved by the role to8 and0,
+`sample_ms` (0–2000 milliseconds). The approved argument adapter supplies8 and0,
 not by injecting JSON-schema defaults. Empty input reads counters once; sampling
 is explicit:
 
@@ -1300,36 +1375,22 @@ Accounting and topology semantics follow the kernel's
 
 ## Opt-in Linux memory gauges and VM counters
 
-[`catalog/memory_stats.toml`](catalog/memory_stats.toml) enables only the
-reviewed [`memory_stats` role](catalog/roles/memory_stats), through the existing
-ordinary Ansible automation authority and actions-only profile. It is disabled
-by default. Install the wheel's `ansible` extra or provision the Nix automation
-runtime, and provision `/usr/bin/python3` on the Linux target. The tool installs
-nothing and uses no sudo, service changes or sysctl writes.
-
-Deploy the reviewed role at `/etc/estus/roles/memory_stats`, configure the
-`server-ordinary` SSH alias, identity and host-key policy, and provision
-`/var/lib/estus/runner` mode0700 owned by the MCP account. Automation Python and
-the isolated collector are both operator-fixed to `/usr/bin/python3`; change
-both settings together if necessary. For native/Nix commands, set
-`ESTUS_ANSIBLE_RUNTIME` to the provisioned automation runtime directory; the
-wheel launcher can select its already-provisioned `ansible` environment.
-Import the exact overlay offline and review the generated snapshot before
-enabling the tool; no preapproved snapshot is shipped:
+[`catalog/memory_stats.toml`](catalog/memory_stats.toml) selects the reviewed
+[`memory_stats` payload](catalog/payloads/memory_stats), retaining ordinary
+`automation` authority and actions-only exposure. It requires target
+`/usr/bin/python3`, not Ansible or a controller workspace, and installs nothing.
+No sudo, service changes or sysctl writes occur.
 
 ```sh
-cat > memory_stats.overlay.json <<'JSON'
-{"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}}
-JSON
-estus schema import-role memory_stats \
-  --role-path /etc/estus/roles/memory_stats \
-  --overlay memory_stats.overlay.json \
-  --output /etc/estus/memory_stats.schema.json
-estus --config catalog/memory_stats.toml
+estus catalog export --tool memory_stats --output ./memory-review
+# Review source, manifest and fixed policy before approval.
+estus catalog prepare --site ./site.toml --definitions ./memory-review/tools.toml \
+  --target server --output ./memory-approved
+estus --config ./memory-approved/estus.toml
 ```
 
-Import does not execute tasks. The example permits only `server`, read effects
-and a20-second execution budget. Its closed caller domain is empty:
+Preparation does not execute the payload. The example permits only `server`, read
+effects and a20-second budget. Its closed caller domain is empty:
 
 ```json
 {"host":"server","inputs":{}}

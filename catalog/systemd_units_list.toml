@@ -1,35 +1,26 @@
-# Opt-in Linux systemd binding; review fixed manager scope and unit allowlist.
-# Copy roles/systemd_units_list to /etc/estus/roles/systemd_units_list; export this tool's
-# input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config systemd_units_list.toml schema import-role systemd_units_list --role-path /etc/estus/roles/systemd_units_list --overlay overlay.json --output /etc/estus/systemd_units_list.schema.json
-# Review snapshot before activation; provision workspace 0700, target Python/systemctl.
-# Unit policy changes require reviewing BOTH schema enum and fixed allowed_units.
-# User scope needs the executing account's running user manager and runtime environment.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/systemd_units_list/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["systemd_units_list"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.systemd_units_list]
 description = "Bounded loaded-unit or installed-unit-file/template inventory. Installed file state is distinct from active state; overflow fails explicitly."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_units_list.schema.json", role_path = "/etc/estus/systemd_units_list.schema.roles/systemd_units_list", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/systemd_units_list.payload.json", source = "/etc/estus/payloads/systemd_units_list/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "unit_pattern" = "estus-fixture*" }
 input_map = { "view" = "view", "unit_type" = "unit_type", "state" = "state" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "view" = { "type" = "string", "enum" = ["loaded", "installed"] }, "unit_type" = { "type" = "string", "enum" = ["service", "socket", "timer", "target", "mount", "path", "slice"] }, "state" = { "type" = "string", "enum" = ["all", "active", "inactive", "failed"] } }, "required" = ["view", "unit_type", "state"], "additionalProperties" = false }
 [tools.systemd_units_list.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "scope" = ["mcp_result", "scope"], "view" = ["mcp_result", "view"], "unit_type" = ["mcp_result", "unit_type"], "state" = ["mcp_result", "state"], "units" = ["mcp_result", "units"], "truncated" = ["mcp_result", "truncated"], "source_count" = ["mcp_result", "source_count"], "unit_pattern" = ["mcp_result", "unit_pattern"] }
 max_bytes = 4096
 max_items = 256

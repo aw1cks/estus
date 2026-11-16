@@ -6,6 +6,9 @@
 mod isolated;
 #[allow(dead_code)]
 mod support;
+#[allow(dead_code)]
+#[path = "support/catalog.rs"]
+mod catalog;
 
 use std::{
     collections::BTreeSet,
@@ -2758,10 +2761,6 @@ async fn cpu_stats_session(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Automation Nix fixture artifact, explicit DOCKER_HOST and pinned Runner runtime"]
 async fn real_cpu_stats_acceptance() -> Result<()> {
-    let runtime = fs::canonicalize(
-        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
-            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
-    )?;
     let private = tempfile::Builder::new()
         .prefix("cpu-stats-private-")
         .tempdir()?;
@@ -2771,97 +2770,13 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
     fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
     let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
     let result: Result<()> = async {
-        let mut example: toml::Value = toml::from_str(include_str!("../catalog/cpu_stats.toml"))?;
-        let role = private.path().join("roles/cpu_stats");
-        for (file, source) in [
-            (
-                "meta/argument_specs.yml",
-                include_str!("../catalog/roles/cpu_stats/meta/argument_specs.yml"),
-            ),
-            (
-                "tasks/main.yml",
-                include_str!("../catalog/roles/cpu_stats/tasks/main.yml"),
-            ),
-            (
-                "files/collector.py",
-                include_str!("../catalog/roles/cpu_stats/files/collector.py"),
-            ),
-        ] {
-            let path = role.join(file);
-            fs::create_dir_all(path.parent().context("CPU role asset parent")?)?;
-            fs::write(path, source)?;
-        }
-        let snapshot = private.path().join("cpu_stats.schema.json");
-        let mut overlay = json!({});
-        for key in ["input_schema", "fixed_args", "input_map"] {
-            overlay[key] = serde_json::to_value(&example["tools"]["cpu_stats"][key])?;
-        }
-        let overlay_path = private.path().join("cpu_stats.overlay.json");
-        fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
-        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
-        config.insert(
-            "automation".into(),
-            table(json!({"runtime":text(&runtime)?}))?,
-        );
-        fs::write(&fixture.config, toml::to_string(&config)?)?;
-        let mut import = support::server_command(&fixture.config)?;
-        import
-            .args(["schema", "import-role", "cpu_stats"])
-            .arg("--role-path")
-            .arg(&role)
-            .arg("--output")
-            .arg(&snapshot)
-            .arg("--overlay")
-            .arg(&overlay_path);
-        let imported = support::run(&mut import).await?;
-        ensure!(
-            imported.status.success(),
-            "installed CPU importer failed: {}",
-            String::from_utf8_lossy(&imported.stdout)
-        );
-        let report: Value = serde_json::from_slice(&imported.stdout)?;
-        ensure!(
-            report["binding_validated"] == true,
-            "CPU role overlay was not reviewed"
-        );
-        let tool = example["tools"]["cpu_stats"]
-            .as_table_mut()
-            .context("CPU binding table")?;
-        let execution = tool
-            .get_mut("execution")
-            .and_then(toml::Value::as_table_mut)
-            .context("CPU execution table")?;
-        execution.insert("snapshot".into(), text(&snapshot)?.into());
-        execution.insert(
-            "role_path".into(),
-            text(&approved_role(&snapshot, "cpu_stats")?)?.into(),
-        );
-        tool.insert("targets".into(), table(json!(["plain"]))?);
-        config.insert("tools".into(), example["tools"].clone());
-        let mut automation = example["automation"]
-            .as_table()
-            .context("CPU automation table")?
-            .clone();
-        automation.insert("runtime".into(), text(&runtime)?.into());
-        automation.insert("workspace_root".into(), text(&workspace)?.into());
-        config["ssh"]
-            .as_table_mut()
-            .context("fixture SSH table")?
-            .insert("executable".into(), text(&fixture.ssh)?.into());
-        automation.insert(
-            "targets".into(),
-            table(json!({
-                "plain":{"destination":"plain","python":"/usr/bin/python3"}
-            }))?,
-        );
-        config.insert("automation".into(), toml::Value::Table(automation));
-        config.insert("profile".into(), example["profile"].clone());
+        let binding = catalog::Binding::install(&fixture.config, "cpu_stats", json!({})).await?;
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&binding.config)?)?;
         config.insert("enabled_tools".into(), table(json!([]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         let mut secrets = fixture.credential_markers()?;
         secrets.extend([
             text(private.path())?,
-            text(&runtime)?,
             PRIVATE.into(),
             "/usr/bin/python3".into(),
             "target_python".into(),
@@ -2875,7 +2790,7 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
             "Traceback".into(),
         ]);
         cpu_stats_session(&fixture, &workspace, &secrets, false).await?;
-        config.insert("enabled_tools".into(), example["enabled_tools"].clone());
+        config.insert("enabled_tools".into(), table(json!(["cpu_stats"]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         cpu_stats_session(&fixture, &workspace, &secrets, true).await
     }
@@ -3514,10 +3429,6 @@ async fn memory_stats_session(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Automation Nix fixture artifact, explicit DOCKER_HOST and pinned Runner runtime"]
 async fn real_memory_stats_acceptance() -> Result<()> {
-    let runtime = fs::canonicalize(
-        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
-            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned controller runtime")?,
-    )?;
     let private = tempfile::Builder::new()
         .prefix("memory-stats-private-")
         .tempdir()?;
@@ -3527,93 +3438,13 @@ async fn real_memory_stats_acceptance() -> Result<()> {
     fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
     let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
     let result: Result<()> = async {
-        // Shipped assets stay unchanged; only private operator bindings adapt.
-        let mut example: toml::Value =
-            toml::from_str(include_str!("../catalog/memory_stats.toml"))?;
-        let role = private.path().join("roles/memory_stats");
-        for (file, source) in [
-            (
-                "meta/argument_specs.yml",
-                include_str!("../catalog/roles/memory_stats/meta/argument_specs.yml"),
-            ),
-            (
-                "tasks/main.yml",
-                include_str!("../catalog/roles/memory_stats/tasks/main.yml"),
-            ),
-        ] {
-            let path = role.join(file);
-            fs::create_dir_all(path.parent().context("memory role asset parent")?)?;
-            fs::write(path, source)?;
-        }
-        let snapshot = private.path().join("memory_stats.schema.json");
-        let mut overlay = json!({});
-        for key in ["input_schema", "fixed_args", "input_map"] {
-            overlay[key] = serde_json::to_value(&example["tools"]["memory_stats"][key])?;
-        }
-        let overlay_path = private.path().join("memory_stats.overlay.json");
-        fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
-        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
-        config.insert(
-            "automation".into(),
-            table(json!({"runtime":text(&runtime)?}))?,
-        );
-        fs::write(&fixture.config, toml::to_string(&config)?)?;
-        let mut import = support::server_command(&fixture.config)?;
-        import
-            .args(["schema", "import-role", "memory_stats"])
-            .arg("--role-path")
-            .arg(&role)
-            .arg("--output")
-            .arg(&snapshot)
-            .arg("--overlay")
-            .arg(&overlay_path);
-        let imported = support::run(&mut import).await?;
-        ensure!(
-            imported.status.success(),
-            "installed memory importer failed: {}",
-            String::from_utf8_lossy(&imported.stdout)
-        );
-        let report: Value = serde_json::from_slice(&imported.stdout)?;
-        ensure!(
-            report["binding_validated"] == true,
-            "memory overlay was not reviewed"
-        );
-        let tool = example["tools"]["memory_stats"]
-            .as_table_mut()
-            .context("memory binding table")?;
-        let execution = tool
-            .get_mut("execution")
-            .and_then(toml::Value::as_table_mut)
-            .context("memory execution table")?;
-        execution.insert("snapshot".into(), text(&snapshot)?.into());
-        execution.insert(
-            "role_path".into(),
-            text(&approved_role(&snapshot, "memory_stats")?)?.into(),
-        );
-        tool.insert("targets".into(), table(json!(["plain"]))?);
-        config.insert("tools".into(), example["tools"].clone());
-        let mut automation = example["automation"]
-            .as_table()
-            .context("memory automation table")?
-            .clone();
-        automation.insert("runtime".into(), text(&runtime)?.into());
-        automation.insert("workspace_root".into(), text(&workspace)?.into());
-        config["ssh"]
-            .as_table_mut()
-            .context("fixture SSH table")?
-            .insert("executable".into(), text(&fixture.ssh)?.into());
-        automation.insert(
-            "targets".into(),
-            table(json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}))?,
-        );
-        config.insert("automation".into(), toml::Value::Table(automation));
-        config.insert("profile".into(), example["profile"].clone());
+        let binding = catalog::Binding::install(&fixture.config, "memory_stats", json!({})).await?;
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&binding.config)?)?;
         config.insert("enabled_tools".into(), table(json!([]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         let mut secrets = fixture.credential_markers()?;
         secrets.extend([
             text(private.path())?,
-            text(&runtime)?,
             PRIVATE.into(),
             "/usr/bin/python3".into(),
             "target_python".into(),
@@ -3630,7 +3461,7 @@ async fn real_memory_stats_acceptance() -> Result<()> {
             "Traceback".into(),
         ]);
         memory_stats_session(&fixture, &workspace, &secrets, false).await?;
-        config.insert("enabled_tools".into(), example["enabled_tools"].clone());
+        config.insert("enabled_tools".into(), table(json!(["memory_stats"]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         memory_stats_session(&fixture, &workspace, &secrets, true).await
     }

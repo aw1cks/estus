@@ -1,0 +1,302 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "f6cd7f5f896d05e9c60f0af4f278e074f03de3e2b8c9614ce4c77f3c4e78c0e0",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "target_python": {
+          "name": "target_python"
+        },
+        "manager_scope": {
+          "name": "manager_scope"
+        },
+        "unit_pattern": {
+          "name": "unit_pattern"
+        },
+        "view": {
+          "name": "view"
+        },
+        "unit_type": {
+          "name": "unit_type"
+        },
+        "state": {
+          "name": "state"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "manager_scope": {
+          "type": "string",
+          "enum": [
+            "system",
+            "user"
+          ]
+        },
+        "view": {
+          "type": "string"
+        },
+        "unit_type": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "unit_pattern": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_python",
+        "manager_scope",
+        "view",
+        "unit_type",
+        "state",
+        "unit_pattern"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "manager_scope": {
+          "aliases": {},
+          "properties": {}
+        },
+        "view": {
+          "aliases": {},
+          "properties": {}
+        },
+        "unit_type": {
+          "aliases": {},
+          "properties": {}
+        },
+        "state": {
+          "aliases": {},
+          "properties": {}
+        },
+        "unit_pattern": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "loaded",
+              "installed"
+            ]
+          },
+          "unit_type": {
+            "type": "string",
+            "enum": [
+              "service",
+              "socket",
+              "timer",
+              "target",
+              "mount",
+              "path",
+              "slice"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "all",
+              "active",
+              "inactive",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "view",
+          "unit_type",
+          "state"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "manager_scope": "system",
+        "unit_pattern": "estus-fixture*"
+      },
+      "input_map": {
+        "view": "view",
+        "unit_type": "unit_type",
+        "state": "state"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "scope": [
+          "mcp_result",
+          "scope"
+        ],
+        "view": [
+          "mcp_result",
+          "view"
+        ],
+        "unit_type": [
+          "mcp_result",
+          "unit_type"
+        ],
+        "state": [
+          "mcp_result",
+          "state"
+        ],
+        "units": [
+          "mcp_result",
+          "units"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ],
+        "source_count": [
+          "mcp_result",
+          "source_count"
+        ],
+        "unit_pattern": [
+          "mcp_result",
+          "unit_pattern"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 6,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user"
+            ],
+            "maxLength": 6
+          },
+          "view": {
+            "type": "string",
+            "maxLength": 16
+          },
+          "unit_type": {
+            "type": "string",
+            "maxLength": 16
+          },
+          "state": {
+            "type": "string",
+            "maxLength": 16
+          },
+          "units": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "unit": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "load": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "active": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "sub": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "unit_file": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "state": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "preset": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "maxItems": 8
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "source_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 256
+          },
+          "unit_pattern": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "scope",
+          "view",
+          "unit_type",
+          "state",
+          "units",
+          "truncated",
+          "source_count",
+          "unit_pattern"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

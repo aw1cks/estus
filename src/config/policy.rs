@@ -143,6 +143,26 @@ impl Config {
         &mut self,
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<bool, ConfigError> {
+        let payloads: Vec<_> = self.bindings.entries()
+            .filter(|(id, binding)| binding.is_payload() && self.binding_enabled(*id))
+            .map(|(id, _)| id).collect();
+        let mut inspected_payload_authorities = BTreeSet::new();
+        for id in payloads {
+            if let Some(AutomationAuthority::Named(name)) =
+                self.bindings.get(id).and_then(|binding| binding.automation_authority())
+            {
+                let (name, authority) = self.automation.authorities.get_key_value(name)
+                    .ok_or_else(|| invalid("tools", "automation authority is not configured"))?;
+                if inspected_payload_authorities.insert(name.as_str()) {
+                    let config = authority.ssh_config_file.clone();
+                    let socket = authority.ssh_auth_sock.clone();
+                    tokio::task::spawn_blocking(move || {
+                        inspect_automation_authority(&config, socket.as_deref())
+                    }).await.map_err(|_| invalid("automation.authorities.*", "cannot inspect selected authority"))??;
+                }
+            }
+            self.bindings.activate_payload(id, ct).await?;
+        }
         let active: Vec<_> = self
             .bindings
             .entries()
@@ -173,7 +193,7 @@ impl Config {
             None
         };
         let root = crate::bindings::controller_root(self.automation.workspace_root.as_deref())?;
-        let mut inspected = BTreeSet::new();
+        let mut inspected = inspected_payload_authorities;
         for id in active {
             let (runtime, agent_socket) = match self
                 .bindings
@@ -245,7 +265,7 @@ impl Config {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
         let binding = self.bindings.get(id).ok_or_else(denied)?;
         if !self.binding_enabled(id)
-            || !binding.is_automation()
+            || binding.automation_authority().is_none()
             || !binding.targets.iter().any(|target| target == host)
             || !self
                 .targets
@@ -324,7 +344,7 @@ impl Config {
         self.profile.permits_bindings()
             && self.bindings.get(id).is_some_and(|binding| {
                 binding.enabled()
-                    && (!binding.is_automation()
+                    && (binding.automation_authority().is_none()
                         || binding.targets.iter().any(|name| {
                             self.targets
                                 .as_ref()

@@ -62,7 +62,7 @@ pub(crate) struct AutomationTransport<'a> {
 
 pub(super) struct AutomationPlan {
     reviewed: ReviewedContent,
-    binding: crate::contracts::module_schema::CompiledModuleBinding,
+    binding: crate::contracts::module_schema::CapabilityBinding,
     runtime: Value,
     controller: Arc<ControllerPlan>,
 }
@@ -326,6 +326,9 @@ impl Bindings {
         agent_socket: Option<std::ffi::OsString>,
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<(), ConfigError> {
+        if self.get(id).is_some_and(|binding| binding.is_generic()) {
+            return self.activate_generic(id, runtime, root, agent_socket, ct).await;
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let check_interrupted = || {
             if ct.is_cancelled() {
@@ -553,7 +556,9 @@ impl CompiledBinding {
         let prefix = match &self.execution {
             Execution::NativeArgv { .. }
             | Execution::ControllerScript { .. }
-            | Execution::Ansible { .. } => &[][..],
+            | Execution::Ansible { .. }
+            | Execution::Generic { .. }
+            | Execution::Payload { .. } => &[][..],
             Execution::RemoteScript { prefix, .. } => prefix.as_slice(),
         };
         let mut arguments = Vec::with_capacity(prefix.len() + self.argv.len());
@@ -584,6 +589,8 @@ impl CompiledBinding {
             },
             Execution::ControllerScript { .. }
             | Execution::Ansible { .. }
+            | Execution::Generic { .. }
+            | Execution::Payload { .. }
             | Execution::NativeArgv {
                 authority: Authority::Controller,
                 ..
@@ -641,7 +648,8 @@ impl CompiledBinding {
             script: match &self.execution {
                 Execution::RemoteScript { source, .. } => Some(source),
                 Execution::NativeArgv { .. } => None,
-                Execution::ControllerScript { .. } | Execution::Ansible { .. } => {
+                Execution::ControllerScript { .. } | Execution::Ansible { .. }
+                | Execution::Generic { .. } | Execution::Payload { .. } => {
                     return Err(bound("Controller requires local preparation"));
                 }
             },

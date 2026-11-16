@@ -1,20 +1,10 @@
-# Opt-in Linux systemd binding; review fixed manager scope and unit allowlist.
-# Copy roles/systemd_manager_reload to /etc/estus/roles/systemd_manager_reload; export this tool's
-# input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config systemd_manager_reload.toml schema import-role systemd_manager_reload --role-path /etc/estus/roles/systemd_manager_reload --overlay overlay.json --output /etc/estus/systemd_manager_reload.schema.json
-# Review snapshot before activation; provision workspace 0700, target Python/systemctl.
-# Unit policy changes require reviewing BOTH schema enum and fixed allowed_units.
-# User scope needs the executing account's running user manager and runtime environment.
-# Named catalog authority uses a separate reviewed SSH identity and sudo root.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/systemd_manager_reload/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["systemd_manager_reload"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
@@ -28,17 +18,17 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.systemd_manager_reload]
 description = "Fixed systemd_manager_reload operation in operator manager scope. Explicit completion/readback is separate from application health. Dependencies/activation can affect other units; interrupted work is not replayed."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_manager_reload.schema.json", role_path = "/etc/estus/systemd_manager_reload.schema.roles/systemd_manager_reload", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/systemd_manager_reload.payload.json", source = "/etc/estus/payloads/systemd_manager_reload/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
 input_map = {  }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
 [tools.systemd_manager_reload.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "scope" = ["mcp_result", "scope"], "operation" = ["mcp_result", "operation"], "operation_completed" = ["mcp_result", "operation_completed"], "health" = ["mcp_result", "health"] }
 max_bytes = 4096
 max_items = 256

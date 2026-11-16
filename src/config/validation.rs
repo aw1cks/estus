@@ -123,16 +123,12 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 destination_value,
                 "automation.authorities.*.targets.*.destination",
             )?;
-            let python = mapping
-                .get("python")
-                .and_then(toml::Value::as_str)
-                .ok_or_else(|| {
-                    invalid(
-                        "automation.authorities.*.targets.*.python",
-                        "required string field is missing or invalid",
-                    )
-                })?;
-            authority_path(python, "automation.authorities.*.targets.*.python")?;
+            if let Some(python) = mapping.get("python") {
+                let python = python.as_str().ok_or_else(|| invalid(
+                    "automation.authorities.*.targets.*.python", "must be a string",
+                ))?;
+                authority_path(python, "automation.authorities.*.targets.*.python")?;
+            }
         }
     }
     Ok(())
@@ -155,7 +151,9 @@ fn validate_automation_targets(
             return Err(invalid(field, "must name configured logical targets"));
         }
         destination(&target.destination, field)?;
-        authority_path(&target.python, field)?;
+        if !target.python.is_empty() {
+            authority_path(&target.python, field)?;
+        }
     }
     Ok(())
 }
@@ -322,7 +320,7 @@ fn validate_profile(value: &toml::Value, field: &'static str) -> Result<(), Conf
 }
 
 fn validate_tool_selection(table: &toml::Table, field: &'static str) -> Result<(), ConfigError> {
-    for key in ["enabled_tools", "disabled_tools", "tool_presets"] {
+    for key in ["enabled_tools", "enabled_generic_tools", "disabled_tools", "tool_presets"] {
         if let Some(value) = table.get(key) {
             let entries = value
                 .as_array()
@@ -347,6 +345,7 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "targets",
             "tools",
             "enabled_tools",
+            "enabled_generic_tools",
             "disabled_tools",
             "tool_presets",
             "catalog",
@@ -631,7 +630,9 @@ pub(super) fn validate_automation(
             ));
         }
         destination(&target.destination, "automation.targets.destination")?;
-        validate_runtime_path(&target.python)?;
+        if !target.python.is_empty() {
+            validate_runtime_path(&target.python)?;
+        }
     }
     for authority in automation.authorities.values() {
         validate_automation_targets(
@@ -667,7 +668,7 @@ pub(super) fn validate_bindings(
     }
     for (_, binding) in bindings
         .entries()
-        .filter(|(_, binding)| binding.is_automation())
+        .filter(|(_, binding)| binding.automation_authority().is_some())
     {
         let targets = match binding.automation_authority() {
             Some(AutomationAuthority::Ordinary) => &automation.targets,
@@ -689,6 +690,11 @@ pub(super) fn validate_bindings(
                 "tools",
                 "automation targets require explicit automation authority",
             ));
+        }
+        if binding.is_automation() && binding.targets.iter()
+            .any(|name| targets.get(name).is_none_or(|target| target.python.is_empty()))
+        {
+            return Err(invalid("tools", "Ansible targets require an explicit Python interpreter"));
         }
     }
     Ok(())

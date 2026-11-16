@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "73775ff5e4917f57ae0def5908fe3c10f02802f7667d3260c7974eb01d94a06f",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "target_python": {
+          "name": "target_python"
+        },
+        "manager_scope": {
+          "name": "manager_scope"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "manager_scope": {
+          "type": "string",
+          "enum": [
+            "system",
+            "user"
+          ]
+        }
+      },
+      "required": [
+        "target_python",
+        "manager_scope"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "manager_scope": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "manager_scope": "system"
+      },
+      "input_map": {}
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "scope": [
+          "mcp_result",
+          "scope"
+        ],
+        "timers": [
+          "mcp_result",
+          "timers"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ],
+        "source_count": [
+          "mcp_result",
+          "source_count"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 6,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user"
+            ],
+            "maxLength": 6
+          },
+          "timers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "Id": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "ActiveState": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "Triggers": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "LastTriggerUSec": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "NextElapseUSecRealtime": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "NextElapseUSecMonotonic": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "maxItems": 8
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "source_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 256
+          }
+        },
+        "required": [
+          "scope",
+          "timers",
+          "truncated",
+          "source_count"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

@@ -15,6 +15,8 @@ mod command_execution;
 mod file_execution;
 mod handlers;
 mod local_execution;
+mod generic_execution;
+mod payload_execution;
 mod preparation;
 mod registration;
 mod schemas;
@@ -39,6 +41,7 @@ struct State {
     progress: crate::progress::Registry,
     automation: Arc<Semaphore>,
     automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
+    payload: Arc<crate::native_payload::Engine>,
 }
 
 impl Estus {
@@ -64,6 +67,7 @@ impl Estus {
                     .automation_hosts()
                     .map(|host| (host.clone(), Arc::new(Semaphore::new(1))))
                     .collect(),
+                payload: crate::native_payload::Engine::new(shutdown.clone()),
                 config,
                 tools,
                 sudo_name,
@@ -96,6 +100,7 @@ impl Estus {
             }
             self.state.pool.shutdown().await;
         },);
+        self.state.payload.shutdown().await;
         self.state.outputs.shutdown().await;
     }
 }

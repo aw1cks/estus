@@ -30,6 +30,11 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             "Enabled module bindings require successful startup activation",
         ));
     }
+    if config.bindings().entries().any(|(id, binding)| {
+        binding.is_payload() && config.binding_enabled(id) && binding.payload_plan().is_none()
+    }) {
+        return Err(ConfigError::new("native_payload", "Enabled payloads require successful startup activation"));
+    }
     // This is the explicit publication inventory. Each entry binds native
     // SDK metadata and its callable handler to a target-policy identity.
     let mut routes: [(ToolId, ToolRoute<Estus>); 14] = [
@@ -153,7 +158,7 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
         } else {
             format!("{} Fixed remote execution with declared authority on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description)
         };
-        let meta = JsonObject::from_iter([
+        let mut meta = JsonObject::from_iter([
             ("revision".into(), serde_json::json!(binding.revision)),
             ("result".into(), serde_json::json!(binding.result_kind())),
             ("effects".into(), serde_json::json!(binding.effects())),
@@ -163,7 +168,12 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             ("trusted_controller_code".into(), serde_json::json!(binding.trusted_controller_code())),
             ("restriction_boundary".into(), binding.restriction_boundary()),
         ]);
-        let output_schema = if binding.is_automation() {
+        if let Some(policy) = binding.generic_policy() {
+            meta.insert("generic_policy".into(), policy.inspect());
+        }
+        let output_schema = if binding.is_generic() {
+            schema_for_type::<crate::reply::ToolReply<serde_json::Value>>()
+        } else if binding.is_automation() || binding.is_payload() {
             binding.projection().map_or_else(
                 || Arc::clone(&summary_output_schema),
                 |plan| automation_output_schema(Some(plan)),

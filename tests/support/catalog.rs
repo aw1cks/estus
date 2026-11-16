@@ -1,6 +1,6 @@
 //! Concrete EFI guest and installed-role acceptance; never a fallback SSH backend.
 use crate::support::{self, Client, WireServer};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -365,137 +365,50 @@ impl Binding {
     }
 
     pub async fn install(base: &Path, name: &str, overrides: Value) -> Result<Self> {
-        ensure!(
-            !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
-            "invalid catalog name"
-        );
-        let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog"));
-        let root = tempfile::Builder::new()
-            .prefix("estus-catalog-binding-")
-            .tempdir()?;
+        ensure!(!name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+            "invalid catalog name");
+        let root = tempfile::Builder::new().prefix("estus-catalog-binding-").tempdir()?;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace)?;
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
-        let mut example: toml::Value =
-            toml::from_str(&fs::read_to_string(assets.join(format!("{name}.toml")))?)?;
-        let role = root.path().join("roles").join(name);
-        copy_role(&assets.join("roles").join(name), &role)?;
-        let tool = example["tools"][name]
-            .as_table_mut()
-            .context("shipped catalog binding")?;
-        let fixed = tool
-            .get_mut("fixed_args")
-            .and_then(toml::Value::as_table_mut)
+        let export = root.path().join("export");
+        let mut command = workflow_command()?;
+        command.args(["export", "--tool", name, "--output"]).arg(&export);
+        workflow_output(&mut command).await?;
+        let definitions = export.join("tools.toml");
+        let mut document: toml::Value = toml::from_str(&fs::read_to_string(&definitions)?)?;
+        let tool = document["tools"][name].as_table_mut().context("shipped catalog binding")?;
+        let fixed = tool.get_mut("fixed_args").and_then(toml::Value::as_table_mut)
             .context("catalog fixed args")?;
-        for (key, value) in overrides
-            .as_object()
-            .context("operator fixed-argument overrides must be object")?
-        {
-            ensure!(
-                fixed.contains_key(key),
-                "override must name an existing reviewed fixed argument"
-            );
+        for (key, value) in overrides.as_object().context("operator fixed-argument overrides must be object")? {
+            ensure!(fixed.contains_key(key), "override must name an existing reviewed fixed argument");
             fixed.insert(key.clone(), toml::Value::try_from(value)?);
         }
-        let mut overlay = json!({});
-        for key in ["input_schema", "fixed_args", "input_map"] {
-            overlay[key] = serde_json::to_value(tool.get(key).context("catalog review field")?)?;
+        let native = tool["execution"]["kind"].as_str() == Some("native_payload");
+        let timeout_secs = tool.get("limits").and_then(|value| value.get("timeout_secs"))
+            .and_then(toml::Value::as_integer).and_then(|value| u64::try_from(value).ok()).unwrap_or(20);
+        fs::write(&definitions, toml::to_string(&document)?)?;
+        let mut site: toml::Table = toml::from_str(&fs::read_to_string(base)?)?;
+        site.insert("profile".into(), "actions-only".into());
+        site.insert("enabled_tools".into(), toml::Value::try_from(json!([name]))?);
+        let automation = site.entry("automation").or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut().context("automation base")?;
+        if !native {
+            automation.insert("runtime".into(), std::env::var("ESTUS_TEST_ANSIBLE_RUNTIME")
+                .context("set ESTUS_TEST_ANSIBLE_RUNTIME to pinned installed runtime")?.into());
+            automation.insert("workspace_root".into(), workspace.to_str().context("workspace UTF8")?.into());
         }
-        let overlay_path = root.path().join("overlay.json");
-        fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
-        let snapshot = root.path().join("reviewed.json");
-        let config = root.path().join("server.toml");
-        let mut base_config: toml::Table = toml::from_str(&fs::read_to_string(base)?)?;
-        let runtime = std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
-            .context("set ESTUS_TEST_ANSIBLE_RUNTIME to pinned installed runtime")?;
-        let automation = base_config
-            .entry("automation")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-            .context("automation base")?;
-        automation.insert(
-            "runtime".into(),
-            runtime.to_str().context("runtime UTF8")?.into(),
-        );
-        automation.insert(
-            "workspace_root".into(),
-            workspace.to_str().context("workspace UTF8")?.into(),
-        );
-        automation.insert(
-            "targets".into(),
-            toml::Value::try_from(
-                json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}),
-            )?,
-        );
-        fs::write(&config, toml::to_string(&base_config)?)?;
-        let mut import = support::server_command(&config)?;
-        import
-            .args(["schema", "import-role", name])
-            .arg("--role-path")
-            .arg(&role)
-            .arg("--overlay")
-            .arg(&overlay_path)
-            .arg("--output")
-            .arg(&snapshot);
-        let output = support::run(&mut import).await?;
-        ensure!(
-            output.status.success(),
-            "catalog {name} review failed: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let report: Value = serde_json::from_slice(&output.stdout)?;
-        ensure!(
-            report["binding_validated"] == true,
-            "catalog overlay was not reviewed"
-        );
-        let reviewed: Value = serde_json::from_slice(&fs::read(&snapshot)?)?;
-        ensure!(
-            reviewed["schema"] == 2,
-            "role approval requires explicit reimport"
-        );
-        let role = PathBuf::from(
-            reviewed["bundle_root"]
-                .as_str()
-                .context("reviewed bundle root")?,
-        )
-        .join(name);
-        let execution = tool
-            .get_mut("execution")
-            .and_then(toml::Value::as_table_mut)
-            .context("catalog executor")?;
-        execution.insert(
-            "snapshot".into(),
-            snapshot.to_str().context("snapshot UTF8")?.into(),
-        );
-        execution.insert(
-            "role_path".into(),
-            role.to_str().context("role UTF8")?.into(),
-        );
-        tool.insert("targets".into(), toml::Value::try_from(json!(["plain"]))?);
-        let timeout_secs = tool
-            .get("limits")
-            .and_then(|v| v.get("timeout_secs"))
-            .and_then(toml::Value::as_integer)
-            .and_then(|n| u64::try_from(n).ok())
-            .unwrap_or(20);
-        base_config.insert("tools".into(), example["tools"].clone());
-        base_config.insert("profile".into(), "actions-only".into());
-        base_config.insert(
-            "enabled_tools".into(),
-            toml::Value::try_from(json!([name]))?,
-        );
-        fs::write(&config, toml::to_string(&base_config)?)?;
-        Ok(Self {
-            root,
-            config,
-            workspace,
-            name: name.into(),
-            timeout_secs,
-        })
+        automation.insert("targets".into(), toml::Value::try_from(
+            json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}))?);
+        let site_path = root.path().join("site.toml");
+        fs::write(&site_path, toml::to_string(&site)?)?;
+        let prepared = root.path().join("prepared");
+        let mut command = workflow_command()?;
+        command.arg("prepare").arg("--site").arg(site_path).arg("--definitions").arg(definitions)
+            .args(["--target", "plain"]).arg("--output").arg(&prepared);
+        workflow_output(&mut command).await?;
+        Ok(Self { root, config: prepared.join("estus.toml"), workspace, name: name.into(), timeout_secs })
     }
 
     pub async fn call(&self, inputs: Value) -> Result<Value> {
@@ -569,35 +482,20 @@ fn workflow_command() -> Result<Command> {
 }
 
 async fn workflow_output(command: &mut Command) -> Result<Value> {
-    let output = support::run(command).await?;
+    let output = support::run_authoring(command).await?;
     ensure!(output.status.success(), "workflow public CLI failed: {} {}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     serde_json::from_slice(&output.stdout).context("workflow CLI JSON")
 }
 
-fn copy_role(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let destination = destination.join(entry.file_name());
-        if kind.is_dir() {
-            copy_role(&entry.path(), &destination)?;
-        } else if kind.is_file() {
-            fs::copy(entry.path(), destination)?;
-        } else {
-            bail!("catalog role asset must be regular");
-        }
-    }
-    Ok(())
-}
 
 pub fn projection(envelope: &Value) -> Result<&Value> {
     ensure!(
         envelope["error"].is_null()
             && envelope["data"]["status"] == "successful"
             && envelope["data"]["complete"] == true
-            && envelope["data"]["owned_group_cleanup"] == "signalled_and_reaped",
+            && matches!(envelope["data"]["owned_group_cleanup"].as_str(),
+                Some("signalled_and_reaped" | "not_applicable")),
         "catalog execution is not confirmed complete: {envelope}"
     );
     ensure!(

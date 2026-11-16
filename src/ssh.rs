@@ -22,6 +22,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_MASTERS: usize = 16;
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 const CHANNELS: usize = 4;
 const IDLE: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(2);
@@ -38,6 +39,7 @@ enum Policy {
 pub(crate) struct Pool {
     entries: Mutex<HashMap<Key, Arc<Entry>>>,
     executable: PathBuf,
+    agent: Option<Option<std::ffi::OsString>>,
     ssh_config: Option<PathBuf>,
     policy: Policy,
     connect_timeout: Duration,
@@ -46,6 +48,7 @@ pub(crate) struct Pool {
 }
 
 struct Entry {
+    generation: u64,
     state: Mutex<State>,
     channels: Arc<Semaphore>,
     ready: CancellationToken,
@@ -119,6 +122,11 @@ pub(crate) struct Lease {
 }
 
 impl Lease {
+    /// Process-local identity of the exact owned master generation.
+    pub(crate) fn generation(&self) -> u64 {
+        self.interest.0.generation
+    }
+
     pub(crate) fn session(&self) -> &Session {
         &self.session
     }
@@ -144,6 +152,18 @@ impl Lease {
 }
 
 impl Pool {
+    pub(crate) fn automation(
+        executable: PathBuf,
+        ssh_config: Option<PathBuf>,
+        connect_timeout: Duration,
+        shutdown: CancellationToken,
+        agent: Option<std::ffi::OsString>,
+    ) -> Arc<Self> {
+        let mut pool = Self::with_policy(executable, ssh_config, connect_timeout, shutdown, Policy::Diagnostic);
+        Arc::get_mut(&mut pool).expect("new pool is uniquely owned").agent = Some(agent);
+        pool
+    }
+
     pub(crate) fn new(
         executable: PathBuf,
         ssh_config: Option<PathBuf>,
@@ -185,6 +205,7 @@ impl Pool {
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             executable,
+            agent: None,
             ssh_config,
             policy,
             connect_timeout,
@@ -235,6 +256,7 @@ impl Pool {
                     ));
                 }
                 let entry = Arc::new(Entry {
+                    generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     state: Mutex::new(State {
                         session: None,
                         interests: 1,
@@ -261,6 +283,7 @@ impl Pool {
         if launch {
             let owner = Arc::downgrade(self);
             let executable = self.executable.clone();
+            let agent = self.agent.clone();
             let config = self.ssh_config.clone();
             let policy = self.policy;
             let destination = destination.to_owned();
@@ -276,6 +299,7 @@ impl Pool {
                 let control = EntryControl {
                     executable,
                     policy,
+                    agent,
                     deadline: connection_deadline,
                     shutdown,
                     stopping,
@@ -343,6 +367,7 @@ impl Master {
         config: Option<&PathBuf>,
         destination: &str,
         policy: Policy,
+        agent: &Option<Option<std::ffi::OsString>>,
     ) -> Result<(Self, Session), Failure> {
         let directory = tempfile::Builder::new()
             .prefix("sm-")
@@ -356,6 +381,12 @@ impl Master {
             return Err(Failure::Connect);
         }
         let mut command = Command::new(executable);
+        if let Some(agent) = agent {
+            command.env_remove("SSH_AUTH_SOCK");
+            if let Some(socket) = agent {
+                command.env("SSH_AUTH_SOCK", socket);
+            }
+        }
         command.args(["-M", "-N", "-T", "-S"]).arg(&socket);
         for option in [
             "ControlMaster=yes",
@@ -529,6 +560,7 @@ impl Drop for Master {
 
 struct EntryControl {
     executable: PathBuf,
+    agent: Option<Option<std::ffi::OsString>>,
     policy: Policy,
     deadline: Option<Instant>,
     shutdown: CancellationToken,
@@ -689,6 +721,7 @@ async fn run_entry(
             config.as_ref(),
             &destination,
             control.policy,
+            &control.agent,
         ) {
             Ok(resources) => resources,
             Err(failure) => {
@@ -779,6 +812,7 @@ mod tests {
         );
         let key = ("unwind-owned".to_owned(), IdentityRole::Ordinary);
         let entry = Arc::new(Entry {
+            generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             state: Mutex::new(State {
                 session: None,
                 interests: 0,

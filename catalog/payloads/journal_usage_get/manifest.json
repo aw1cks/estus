@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "454dad207e9c34dd5cf59aa3009c52077e1f54e616bb228527074188e6e7de59",
+  "max_source_bytes": 1048576,
+  "argv": [],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_python"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {}
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "disk_usage_text": [
+          "mcp_result",
+          "disk_usage_text"
+        ],
+        "retention_assignments": [
+          "mcp_result",
+          "retention_assignments"
+        ],
+        "runtime_retention_known": [
+          "mcp_result",
+          "runtime_retention_known"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "disk_usage_text": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "retention_assignments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "key": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "path",
+                "key",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 256
+          },
+          "runtime_retention_known": {
+            "type": "boolean",
+            "const": false
+          }
+        },
+        "required": [
+          "disk_usage_text",
+          "retention_assignments",
+          "runtime_retention_known"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

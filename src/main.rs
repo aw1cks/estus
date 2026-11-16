@@ -10,6 +10,7 @@ mod controller;
 mod doctor;
 mod exec;
 mod filesystem;
+mod native_payload;
 mod output;
 mod process;
 mod progress;

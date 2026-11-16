@@ -1,28 +1,20 @@
-# Linux-only opt-in reviewed processes_list; no implicit installs or escalation.
-# Copy roles/processes_list to /etc/estus/roles/processes_list; review all tasks and fixed allowlists.
-# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config processes_list.toml schema import-role processes_list --role-path /etc/estus/roles/processes_list --overlay overlay.json --output /etc/estus/processes_list.schema.json
-# Review snapshot before activation. Provision /var/lib/estus/runner mode 0700.
-# Requires installed optional automation runtime and /usr/bin/python3 on target.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/processes_list/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["processes_list"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.processes_list]
 description = "Bounded procfs process inventory filtered by exact real UID and literal name substring. No argv, environment, memory contents or FD targets. PID identity includes boot ID and start ticks; churn is skipped and counted, truncated means incomplete scan or result. Counters are cumulative ticks/pages, not rates."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/processes_list.schema.json", role_path = "/etc/estus/processes_list.schema.roles/processes_list", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/processes_list.payload.json", source = "/etc/estus/payloads/processes_list/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "uid" = "uid", "name_contains" = "name_contains", "limit" = "limit" }
 limits = { timeout_secs = 20 }
@@ -32,7 +24,7 @@ required = ["uid", "name_contains", "limit"]
 additionalProperties = false
 properties = { "uid" = { "type" = "integer", "minimum" = 0, "maximum" = 4294967295 }, "name_contains" = { "type" = "string", "maxLength" = 64 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 8 } }
 [tools.processes_list.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "observed_at" = ["mcp_result", "observed_at"], "processes" = ["mcp_result", "processes"], "scanned" = ["mcp_result", "scanned"], "skipped" = ["mcp_result", "skipped"], "truncated" = ["mcp_result", "truncated"], "clock_ticks_per_second" = ["mcp_result", "clock_ticks_per_second"], "page_size_bytes" = ["mcp_result", "page_size_bytes"] }
 max_bytes = 4096
 max_items = 256

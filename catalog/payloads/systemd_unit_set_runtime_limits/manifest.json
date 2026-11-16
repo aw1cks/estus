@@ -1,0 +1,367 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "mutation_success",
+  "source_sha256": "1ac67a55ffcc9673b446a8053efb1df595d3222bbf7fd4854dbe54c38a3cd040",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "target_python": {
+          "name": "target_python"
+        },
+        "manager_scope": {
+          "name": "manager_scope"
+        },
+        "allowed_units": {
+          "name": "allowed_units"
+        },
+        "unit": {
+          "name": "unit"
+        },
+        "limits": {
+          "name": "limits"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "manager_scope": {
+          "type": "string",
+          "enum": [
+            "system",
+            "user"
+          ]
+        },
+        "allowed_units": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unit": {
+          "type": "string"
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "memory_max_bytes": {
+              "type": "integer"
+            },
+            "tasks_max": {
+              "type": "integer"
+            },
+            "cpu_quota_percent": {
+              "type": "integer"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "target_python",
+        "manager_scope",
+        "allowed_units",
+        "unit",
+        "limits"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "manager_scope": {
+          "aliases": {},
+          "properties": {}
+        },
+        "allowed_units": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
+        },
+        "unit": {
+          "aliases": {},
+          "properties": {}
+        },
+        "limits": {
+          "aliases": {},
+          "properties": {
+            "memory_max_bytes": {
+              "aliases": {},
+              "properties": {}
+            },
+            "tasks_max": {
+              "aliases": {},
+              "properties": {}
+            },
+            "cpu_quota_percent": {
+              "aliases": {},
+              "properties": {}
+            }
+          }
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string",
+            "enum": [
+              "estus-fixture.service",
+              "estus-fixture-idle.service",
+              "estus-fixture-fail.service",
+              "estus-fixture.timer",
+              "estus-fixture.socket",
+              "estus-fixture-signal.service",
+              "estus-fixture-block.service",
+              "estus-fixture-manager.service",
+              "estus-fixture@.service"
+            ],
+            "maxLength": 128
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "memory_max_bytes": {
+                "type": "integer",
+                "minimum": 16777216,
+                "maximum": 1099511627776
+              },
+              "tasks_max": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 65536
+              },
+              "cpu_quota_percent": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 800
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "minProperties": 1
+          }
+        },
+        "required": [
+          "unit",
+          "limits"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "manager_scope": "system",
+        "allowed_units": [
+          "estus-fixture.service",
+          "estus-fixture-idle.service",
+          "estus-fixture-fail.service",
+          "estus-fixture.timer",
+          "estus-fixture.socket",
+          "estus-fixture-signal.service",
+          "estus-fixture-block.service",
+          "estus-fixture-manager.service",
+          "estus-fixture@.service"
+        ]
+      },
+      "input_map": {
+        "unit": "unit",
+        "limits": "limits"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "scope": [
+          "mcp_result",
+          "scope"
+        ],
+        "operation": [
+          "mcp_result",
+          "operation"
+        ],
+        "operation_completed": [
+          "mcp_result",
+          "operation_completed"
+        ],
+        "health": [
+          "mcp_result",
+          "health"
+        ],
+        "unit": [
+          "mcp_result",
+          "unit"
+        ],
+        "properties": [
+          "mcp_result",
+          "properties"
+        ],
+        "requested_limits": [
+          "mcp_result",
+          "requested_limits"
+        ],
+        "persistent": [
+          "mcp_result",
+          "persistent"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 6,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user"
+            ],
+            "maxLength": 6
+          },
+          "operation": {
+            "type": "string",
+            "const": "set_runtime_limits",
+            "maxLength": 18
+          },
+          "operation_completed": {
+            "type": "boolean",
+            "const": true
+          },
+          "health": {
+            "type": "string",
+            "const": "not_checked",
+            "maxLength": 11
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "Id": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "LoadState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "ActiveState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "SubState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "UnitFileState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "MainPID": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "Result": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "MemoryMax": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "TasksMax": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "CPUQuotaPerSecUSec": {
+                "type": "string",
+                "maxLength": 4096
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "requested_limits": {
+            "type": "object",
+            "properties": {
+              "memory_max_bytes": {
+                "type": "integer",
+                "minimum": 16777216,
+                "maximum": 1099511627776
+              },
+              "tasks_max": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 65536
+              },
+              "cpu_quota_percent": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 800
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "minProperties": 1
+          },
+          "persistent": {
+            "type": "boolean",
+            "const": false
+          }
+        },
+        "required": [
+          "scope",
+          "operation",
+          "operation_completed",
+          "health",
+          "unit",
+          "properties",
+          "requested_limits",
+          "persistent"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

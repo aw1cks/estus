@@ -1,34 +1,26 @@
-# Opt-in Linux tcp_connect_probe; reviewed role and separately imported snapshot required.
-# Copy roles/tcp_connect_probe to /etc/estus/roles/tcp_connect_probe; export input_schema/fixed_args/input_map as overlay.json.
-# estus --config tcp_connect_probe.toml schema import-role tcp_connect_probe --role-path /etc/estus/roles/tcp_connect_probe --overlay overlay.json --output /etc/estus/tcp_connect_probe.schema.json
-# Offline import never runs tasks; review snapshot before enabling. Provision runner root mode 0700.
-# Requires pinned /usr/bin/python3 and fixed iproute2 utilities; probes additionally ping/traceroute as applicable.
-# Operator policy is fixed_args only: callers cannot replace it. No persistent manager changes or flush/batch.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/tcp_connect_probe/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["tcp_connect_probe"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.tcp_connect_probe]
 description = "tcp connect probe. Active bounded diagnostics; only operator-approved fixture destinations; no application payload."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["probe"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/tcp_connect_probe.schema.json", "role_path" = "/etc/estus/tcp_connect_probe.schema.roles/tcp_connect_probe", "no_log" = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/tcp_connect_probe.payload.json", source = "/etc/estus/payloads/tcp_connect_probe/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
 input_map = { "destination" = "destination", "destination_port" = "destination_port", "probe_timeout" = "timeout" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "destination" = { "type" = "string", "enum" = ["127.0.0.1"], "maxLength" = 256 }, "destination_port" = { "type" = "integer", "minimum" = 1024, "maximum" = 65535 }, "timeout" = { "type" = "integer", "minimum" = 1, "maximum" = 3 } }, "required" = ["destination", "destination_port", "timeout"], "additionalProperties" = false }
 [tools.tcp_connect_probe.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "destination" = ["mcp_result", "destination"], "destination_port" = ["mcp_result", "destination_port"], "connected" = ["mcp_result", "connected"], "elapsed_ms" = ["mcp_result", "elapsed_ms"], "bytes_sent" = ["mcp_result", "bytes_sent"] }
 max_bytes = 4096
 max_items = 256

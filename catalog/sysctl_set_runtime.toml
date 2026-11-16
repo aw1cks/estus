@@ -1,18 +1,10 @@
-# Reviewed Linux-only sysctl_set_runtime; logs can contain secrets; no arbitrary paths/code/flags.
-# Copy roles/sysctl_set_runtime to /etc/estus/roles/sysctl_set_runtime, review all tasks, export
-# input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config sysctl_set_runtime.toml schema import-role sysctl_set_runtime --role-path /etc/estus/roles/sysctl_set_runtime --overlay overlay.json --output /etc/estus/sysctl_set_runtime.schema.json
-# Review snapshot before activation; provision /var/lib/estus/runner mode 0700.
-# Install pinned Python3 and the fixed utilities used below; no auto-install.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/sysctl_set_runtime/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["sysctl_set_runtime"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
@@ -25,17 +17,17 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.sysctl_set_runtime]
 description = "Set only approved integer kernel.printk_ratelimit seconds (0 disables rate limiting; 1..60 bounds interval). Runtime only, no persistence or all-settings reload. Verified readback is not CAS, rollback, or application-health assurance; interruption may leave effects."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/sysctl_set_runtime.schema.json", role_path = "/etc/estus/sysctl_set_runtime.schema.roles/sysctl_set_runtime", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/sysctl_set_runtime.payload.json", source = "/etc/estus/payloads/sysctl_set_runtime/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "key" = "key", "value" = "value" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "key" = { "type" = "string", "maxLength" = 64, "enum" = ["kernel.printk_ratelimit"] }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 60 } }, "required" = ["key", "value"], "additionalProperties" = false }
 [tools.sysctl_set_runtime.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "key" = ["mcp_result", "key"], "before" = ["mcp_result", "before"], "value" = ["mcp_result", "value"], "verified" = ["mcp_result", "verified"], "persistent" = ["mcp_result", "persistent"], "application" = ["mcp_result", "application"], "config_path" = ["mcp_result", "config_path"], "atomic_compare_exchange" = ["mcp_result", "atomic_compare_exchange"], "rollback_guaranteed" = ["mcp_result", "rollback_guaranteed"] }
 max_bytes = 4096
 max_items = 256

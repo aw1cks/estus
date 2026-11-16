@@ -45,10 +45,18 @@ pub(crate) enum Qualification {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Template {
     pub(crate) definition: String,
-    pub(crate) role: String,
+    pub(crate) executor: Executor,
     pub(crate) policy_required: bool,
     pub(crate) requires: Vec<String>,
     pub(crate) qualification: Qualification,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Executor {
+    AnsibleRole { path: String },
+    NativePayload { path: String },
+    AnsibleModule { module: String },
 }
 
 fn unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
@@ -153,7 +161,7 @@ impl Catalog {
             MANIFEST_LIMIT,
         )?;
         let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
-        if manifest.schema != 2
+        if manifest.schema != 3
             || !name_valid(&manifest.version)
             || manifest.tools.is_empty()
             || manifest.tools.len() > 1024
@@ -164,7 +172,15 @@ impl Catalog {
         for (name, template) in &manifest.tools {
             if !name_valid(name)
                 || template.definition != format!("{name}.toml")
-                || template.role != format!("roles/{name}")
+                || match &template.executor {
+                    Executor::AnsibleRole { path } => path != &format!("roles/{name}"),
+                    Executor::NativePayload { path } => path != &format!("payloads/{name}"),
+                    Executor::AnsibleModule { module } => module.len() > 256
+                        || module.split('.').count() != 3
+                        || module.split('.').any(|part| part.is_empty()
+                            || !part.bytes().enumerate().all(|(index, byte)| byte.is_ascii_lowercase()
+                                || byte == b'_' || (index > 0 && byte.is_ascii_digit()))),
+                }
                 || template.requires.len() > 32
                 || template
                     .requires
@@ -224,11 +240,16 @@ impl Catalog {
         Ok(table)
     }
 
-    pub(crate) fn copy_role(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
-        self.manifest
+    pub(crate) fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
+        let template = self.manifest
             .tools
             .get(name)
             .ok_or("unknown catalog tool")?;
+        let (directory_name, required) = match &template.executor {
+            Executor::AnsibleRole { .. } => ("roles", &["tasks/main.yml"][..]),
+            Executor::NativePayload { .. } => ("payloads", &["collector.py", "manifest.json"][..]),
+            Executor::AnsibleModule { .. } => return Err(ERROR),
+        };
         if destination.components().any(|component| {
             matches!(
                 component,
@@ -237,24 +258,21 @@ impl Catalog {
         }) {
             return Err(ERROR);
         }
-        let roles = open_child(&self.directory, Path::new("roles"), true)?;
+        let roles = open_child(&self.directory, Path::new(directory_name), true)?;
         let directory = open_child(&roles, Path::new(name), true)?;
         let mut files = Vec::new();
         let mut remaining = ROLE_LIMIT;
         let mut entries = 0;
         collect_role(
             &directory,
-            &self.root.join("roles").join(name),
+            &self.root.join(directory_name).join(name),
             Path::new(""),
             &mut files,
             &mut remaining,
             &mut entries,
             0,
         )?;
-        if !files
-            .iter()
-            .any(|(path, _)| path == Path::new("tasks/main.yml"))
-        {
+        if required.iter().any(|required| !files.iter().any(|(path, _)| path == Path::new(required))) {
             return Err(ERROR);
         }
         let parent = destination

@@ -147,6 +147,8 @@ pub(crate) enum ControllerTermination {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GroupCleanup {
+    /// This executor creates no per-request controller process group.
+    NotApplicable,
     NotStarted,
     SignalledAndReaped,
     Incomplete,

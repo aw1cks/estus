@@ -106,6 +106,12 @@ impl Estus {
             Ok(BindingCall::Automation(request)) => {
                 self.automation_binding(id, request, context).await
             }
+            Ok(BindingCall::Generic(request)) => {
+                self.generic_binding(id, request, context).await
+            }
+            Ok(BindingCall::Payload(request)) => {
+                self.payload_binding(id, request, context).await
+            }
             Err(error) => {
                 if binding.is_controller() {
                     self.state
@@ -130,7 +136,7 @@ impl Estus {
                     } else {
                         IdentityRole::Ordinary
                     },
-                    sudo_mode: if binding.is_automation() { None } else { mode },
+                    sudo_mode: if binding.automation_authority().is_some() { None } else { mode },
                     user: binding.sudo().map(|(user, _)| user),
                     program: None,
                     binding_revision: Some(&binding.revision),

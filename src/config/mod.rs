@@ -226,6 +226,7 @@ impl Default for Automation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct AutomationTarget {
     pub(crate) destination: String,
+    #[serde(default)]
     pub(crate) python: String,
 }
 

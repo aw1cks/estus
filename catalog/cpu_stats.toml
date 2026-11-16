@@ -1,22 +1,11 @@
-# Linux-only ordinary CPU observation; no caller code, paths or escalation.
-# Copy roles/cpu_stats to /etc/estus/roles/cpu_stats and review every task.
-# Export input_schema/fixed_args/input_map as overlay.json, then run:
-# estus --config cpu_stats.toml schema import-role cpu_stats --role-path /etc/estus/roles/cpu_stats --overlay overlay.json --output /etc/estus/cpu_stats.schema.json
-# Import is offline and never runs tasks. Review the snapshot before enabling.
-# Provision /var/lib/estus/runner mode 0700 owned by the MCP account.
-# Select an installed optional automation runtime; target needs /usr/bin/python3.
-# MCP: {"host":"server","inputs":{}} or {"host":"server","inputs":{"limit":2,"sample_ms":100}}
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/cpu_stats/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["cpu_stats"]
 
 [targets.server]
 ssh_host = "server-ordinary"
-
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 
 [automation.targets.server]
 destination = "server-ordinary"
@@ -24,11 +13,11 @@ python = "/usr/bin/python3"
 
 [tools.cpu_stats]
 description = "Observe raw Linux aggregate CPU clock-tick counters and bounded raw topology IDs, optionally sampling twice. The procfs/sysfs view may be host/global, not affinity, quota, utilization or isolation evidence; collection is not atomic."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/cpu_stats.schema.json", role_path = "/etc/estus/cpu_stats.schema.roles/cpu_stats", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/cpu_stats.payload.json", source = "/etc/estus/payloads/cpu_stats/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { limit = "limit", sample_ms = "sample_ms" }
 limits = { timeout_secs = 20 }
@@ -40,7 +29,7 @@ additionalProperties = false
 properties = { limit = { type = "integer", minimum = 1, maximum = 16 }, sample_ms = { type = "integer", minimum = 0, maximum = 2000 } }
 
 [tools.cpu_stats.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { system = ["mcp_result", "system"], scope = ["mcp_result", "scope"], observed_at = ["mcp_result", "observed_at"], clock_ticks_per_second = ["mcp_result", "clock_ticks_per_second"], online_cpu_count = ["mcp_result", "online_cpu_count"], counters = ["mcp_result", "counters"], topology = ["mcp_result", "topology"], topology_truncated = ["mcp_result", "topology_truncated"], unavailable = ["mcp_result", "unavailable"], boot_id = ["mcp_result", "boot_id"], sample_elapsed_ns = ["mcp_result", "sample_elapsed_ns"], counters_end = ["mcp_result", "counters_end"], delta = ["mcp_result", "delta"], counter_decrease = ["mcp_result", "counter_decrease"], identity_changed = ["mcp_result", "identity_changed"] }
 max_bytes = 4096
 max_items = 256

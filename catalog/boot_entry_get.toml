@@ -1,30 +1,12 @@
-# Explicit standalone opt-in. Read one exact approved installed boot entry, including explicitly sensitive command line with source and unknown fields. No editing, wildcard or special entry selectors.
-# Copy roles/boot_entry_get to /etc/estus/roles/boot_entry_get; review every file.
-# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
-# estus --config boot_entry_get.toml schema import-role boot_entry_get --role-path /etc/estus/roles/boot_entry_get --overlay overlay.json --output /etc/estus/boot_entry_get.schema.json
-# Import is offline; review snapshot before startup activation. No implicit install/escalation.
-# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
-# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
-# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
-# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
-# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/boot_entry_get/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["boot_entry_get"]
 
 [targets.server]
 ssh_host = "server-ordinary"
 
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
-# Separate reviewed SSH identity and sudo policy; ordinary observation grants no mutation authority.
 [automation.authorities.catalog]
 ssh_config_file = "/etc/estus/catalog-ssh.conf"
 become = { method = "sudo", user = "root" }
@@ -35,15 +17,15 @@ python = "/usr/bin/python3"
 
 [tools.boot_entry_get]
 description = "Read one exact approved installed boot entry, including explicitly sensitive command line with source and unknown fields. No editing, wildcard or special entry selectors."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/boot_entry_get.schema.json", role_path = "/etc/estus/boot_entry_get.schema.roles/boot_entry_get", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/boot_entry_get.payload.json", source = "/etc/estus/payloads/boot_entry_get/collector.py", no_log = false }
 # Sensitive values are intentionally returned to this separately approved capability.
 # no_log=true would censor the typed projection; review MCP result-retention policy.
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "entry_id" = "entry_id" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "entry_id" = { "type" = "string", "enum" = ["estus-current.conf", "estus-alternate.conf"], "minLength" = 1, "maxLength" = 255 } }, "required" = ["entry_id"], "additionalProperties" = false }
-result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "entry" = ["mcp_result", "entry"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "entry" = { "type" = "object", "properties" = { "entry_id" = { "type" = "string", "maxLength" = 255 }, "source" = { "type" = "string", "maxLength" = 128 }, "type" = { "type" = "string", "maxLength" = 128 }, "command_line_sensitive" = { "type" = "boolean" }, "unknown" = { "type" = "array", "maxItems" = 8, "items" = { "type" = "string", "maxLength" = 64 } }, "linux" = { "type" = "string", "maxLength" = 2048 }, "efi" = { "type" = "string", "maxLength" = 2048 }, "title" = { "type" = "string", "maxLength" = 2048 }, "path" = { "type" = "string", "maxLength" = 2048 }, "initrd" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "string", "maxLength" = 2048 } }, "command_line" = { "type" = "string", "maxLength" = 4096 }, "command_line_source" = { "type" = "string", "maxLength" = 128 } }, "required" = ["entry_id", "source", "type", "command_line_sensitive", "unknown", "command_line_source"], "additionalProperties" = false } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "entry"], "additionalProperties" = false } }
+result = { kind = "capability_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "entry" = ["mcp_result", "entry"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "entry" = { "type" = "object", "properties" = { "entry_id" = { "type" = "string", "maxLength" = 255 }, "source" = { "type" = "string", "maxLength" = 128 }, "type" = { "type" = "string", "maxLength" = 128 }, "command_line_sensitive" = { "type" = "boolean" }, "unknown" = { "type" = "array", "maxItems" = 8, "items" = { "type" = "string", "maxLength" = 64 } }, "linux" = { "type" = "string", "maxLength" = 2048 }, "efi" = { "type" = "string", "maxLength" = 2048 }, "title" = { "type" = "string", "maxLength" = 2048 }, "path" = { "type" = "string", "maxLength" = 2048 }, "initrd" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "string", "maxLength" = 2048 } }, "command_line" = { "type" = "string", "maxLength" = 4096 }, "command_line_source" = { "type" = "string", "maxLength" = 128 } }, "required" = ["entry_id", "source", "type", "command_line_sensitive", "unknown", "command_line_source"], "additionalProperties" = false } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "entry"], "additionalProperties" = false } }

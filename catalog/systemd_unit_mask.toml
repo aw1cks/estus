@@ -1,20 +1,10 @@
-# Opt-in Linux systemd binding; review fixed manager scope and unit allowlist.
-# Copy roles/systemd_unit_mask to /etc/estus/roles/systemd_unit_mask; export this tool's
-# input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config systemd_unit_mask.toml schema import-role systemd_unit_mask --role-path /etc/estus/roles/systemd_unit_mask --overlay overlay.json --output /etc/estus/systemd_unit_mask.schema.json
-# Review snapshot before activation; provision workspace 0700, target Python/systemctl.
-# Unit policy changes require reviewing BOTH schema enum and fixed allowed_units.
-# User scope needs the executing account's running user manager and runtime environment.
-# Named catalog authority uses a separate reviewed SSH identity and sudo root.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/systemd_unit_mask/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["systemd_unit_mask"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
@@ -28,17 +18,17 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.systemd_unit_mask]
 description = "Fixed persistent unit-file mask with --no-reload and actual on-disk enablement readback. Never starts/stops a unit or reloads manager configuration. Install relationships such as Also/Alias may change related links; the target allowlist is not a complete blast-radius bound. Manager state may remain stale until separately approved systemd_manager_reload; manager_reload_required means reload is required before relying on refreshed manager configuration, including mask enforcement. Completion is not application health; interrupted work is never replayed."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["persistent_write", "read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_unit_mask.schema.json", role_path = "/etc/estus/systemd_unit_mask.schema.roles/systemd_unit_mask", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/systemd_unit_mask.payload.json", source = "/etc/estus/payloads/systemd_unit_mask/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
 input_map = { "unit" = "unit" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "enum" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"], "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
 [tools.systemd_unit_mask.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "scope" = ["mcp_result", "scope"], "operation" = ["mcp_result", "operation"], "operation_completed" = ["mcp_result", "operation_completed"], "health" = ["mcp_result", "health"], "unit" = ["mcp_result", "unit"], "properties" = ["mcp_result", "properties"], "manager_reload_performed" = ["mcp_result", "manager_reload_performed"], "manager_reload_required" = ["mcp_result", "manager_reload_required"] }
 max_bytes = 4096
 max_items = 256

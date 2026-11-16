@@ -22,6 +22,8 @@ pub(crate) use plans::{
 };
 
 mod plans;
+mod generic;
+mod payload;
 
 pub(crate) const EXECUTOR_KIND: &str = "native_argv";
 pub(crate) const RESULT_KIND: &str = "command";
@@ -263,6 +265,19 @@ enum Execution {
     ControllerScript {
         plan: Option<Arc<ControllerPlan>>,
     },
+    Generic {
+        policy: Box<crate::automation::generic::Policy>,
+        authority: AutomationAuthority,
+    },
+    Payload {
+        plan: Option<Box<crate::native_payload::PayloadPlan>>,
+        authority: AutomationAuthority,
+        overlay: Value,
+        projection: Arc<crate::contracts::projection::Plan>,
+        snapshot: PathBuf,
+        source: PathBuf,
+        no_log: bool,
+    },
     Ansible {
         snapshot: PathBuf,
         source: AnsibleSource,
@@ -354,6 +369,8 @@ pub(crate) enum BindingCall {
     Remote(BindingRequest),
     Controller(ControllerRequest),
     Automation(AutomationRequest),
+    Generic(crate::automation::generic::Request),
+    Payload(AutomationRequest),
 }
 
 pub(crate) struct AutomationRequest {
@@ -528,8 +545,9 @@ impl CompiledBinding {
             }
             _ => unreachable!("module result checked"),
         };
-        let schema =
-            serde_json::to_value(raw.input_schema).map_err(|_| invalid("Invalid module schema"))?;
+        let schema = serde_json::to_value(
+            raw.input_schema.ok_or_else(|| invalid("Input schema is required"))?
+        ).map_err(|_| invalid("Invalid module schema"))?;
         let fixed = raw
             .fixed_args
             .map(serde_json::to_value)
@@ -539,7 +557,14 @@ impl CompiledBinding {
         if !fixed.is_object() {
             return Err(invalid("Fixed module arguments must be an object"));
         }
-        let overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
+        let mut overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
+        if let Some(argument_types) = raw.argument_types {
+            if !matches!(source, AnsibleSource::Module) {
+                return Err(invalid("Opaque argument representations require a module binding"));
+            }
+            overlay["argument_types"] = serde_json::to_value(argument_types)
+                .map_err(|_| invalid("Invalid opaque argument representations"))?;
+        }
         crate::contracts::module_schema::validate_overlay(&overlay).map_err(invalid)?;
         match &source {
             AnsibleSource::Module => {}
@@ -604,6 +629,12 @@ impl CompiledBinding {
         target_exists: &impl Fn(&str) -> bool,
         activation: &mut ControllerActivation<'_>,
     ) -> Result<Self, ConfigError> {
+        if matches!(&raw.execution, RawExecution::AnsibleGeneric { .. }) {
+            return Self::compile_generic(name, raw, enabled, limits, target_exists);
+        }
+        if matches!(&raw.execution, RawExecution::NativePayload { .. }) {
+            return Self::compile_payload(name, raw, enabled, limits, target_exists);
+        }
         if matches!(
             &raw.execution,
             RawExecution::AnsibleModule { .. }
@@ -612,7 +643,7 @@ impl CompiledBinding {
         ) {
             return Self::compile_automation(name, raw, enabled, limits, target_exists);
         }
-        if raw.fixed_args.is_some() || raw.input_map.is_some() {
+        if raw.fixed_args.is_some() || raw.input_map.is_some() || raw.argument_types.is_some() {
             return Err(invalid(
                 "Module overlay fields require ansible_module execution",
             ));
@@ -778,7 +809,9 @@ impl CompiledBinding {
                 )?;
                 (Execution::ControllerScript { plan }, Vec::new(), false)
             }
-            RawExecution::AnsibleModule { .. }
+            RawExecution::NativePayload { .. }
+            | RawExecution::AnsibleGeneric { .. }
+            | RawExecution::AnsibleModule { .. }
             | RawExecution::AnsibleRole { .. }
             | RawExecution::AnsiblePlaybook { .. } => {
                 unreachable!("compiled separately")
@@ -798,6 +831,7 @@ impl CompiledBinding {
         }
         let schema: RawSchema = raw
             .input_schema
+            .ok_or_else(|| invalid("Input schema is required"))?
             .try_into()
             .map_err(|_| invalid("Unsupported input schema"))?;
         if schema.kind != "object"
@@ -1005,6 +1039,8 @@ impl CompiledBinding {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::RemoteScript { .. } => "remote_script",
             Execution::ControllerScript { .. } => "controller_script",
+            Execution::Generic { .. } => "ansible_generic",
+            Execution::Payload { .. } => "native_payload",
             Execution::Ansible {
                 source: AnsibleSource::Role { .. },
                 ..
@@ -1025,29 +1061,47 @@ impl CompiledBinding {
     }
 
     pub(crate) fn is_automation(&self) -> bool {
-        matches!(self.execution, Execution::Ansible { .. })
+        matches!(self.execution, Execution::Ansible { .. } | Execution::Generic { .. })
+    }
+
+    pub(crate) fn is_generic(&self) -> bool {
+        matches!(self.execution, Execution::Generic { .. })
+    }
+
+    pub(crate) fn is_payload(&self) -> bool {
+        matches!(self.execution, Execution::Payload { .. })
     }
 
     pub(crate) fn automation_authority(&self) -> Option<&AutomationAuthority> {
         match &self.execution {
-            Execution::Ansible { authority, .. } => Some(authority),
+            Execution::Ansible { authority, .. }
+            | Execution::Generic { authority, .. }
+            | Execution::Payload { authority, .. } => Some(authority),
             _ => None,
         }
     }
 
     pub(crate) fn automation_activated(&self) -> bool {
-        matches!(self.execution, Execution::Ansible { plan: Some(_), .. })
+        match &self.execution {
+            Execution::Ansible { plan, .. } => plan.is_some(),
+            Execution::Generic { policy, .. } => policy.is_activated(),
+            _ => false,
+        }
     }
 
     pub(crate) fn projection(&self) -> Option<&Arc<crate::contracts::projection::Plan>> {
         match &self.execution {
             Execution::Ansible { projection, .. } => projection.as_ref(),
+            Execution::Generic { policy, .. } => policy.projection(),
+            Execution::Payload { projection, .. } => Some(projection),
             _ => None,
         }
     }
 
     pub(crate) fn result_kind(&self) -> &'static str {
-        if self.projection().is_some() {
+        if self.is_payload() {
+            "capability_projection"
+        } else if self.projection().is_some() {
             "ansible_projection"
         } else if self.is_automation() {
             "ansible_summary"
@@ -1073,7 +1127,7 @@ impl CompiledBinding {
         self.enabled
     }
     pub(crate) fn read_only(&self) -> bool {
-        self.effects
+        !self.is_generic() && self.effects
             .iter()
             .all(|v| matches!(v, Effect::Read | Effect::SensitiveRead))
     }
@@ -1084,6 +1138,12 @@ impl CompiledBinding {
         &self,
         mut arguments: JsonObject,
     ) -> Result<BindingCall, ErrorData> {
+        if self.is_generic() {
+            return self.parse_generic(arguments).map(BindingCall::Generic);
+        }
+        if self.is_payload() {
+            return self.parse_payload(arguments);
+        }
         let host = if self.is_controller() {
             None
         } else {

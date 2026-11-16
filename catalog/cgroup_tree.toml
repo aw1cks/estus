@@ -1,34 +1,26 @@
-# Reviewed Linux-only cgroup_tree; logs can contain secrets; no arbitrary paths/code/flags.
-# Copy roles/cgroup_tree to /etc/estus/roles/cgroup_tree, review all tasks, export
-# input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config cgroup_tree.toml schema import-role cgroup_tree --role-path /etc/estus/roles/cgroup_tree --overlay overlay.json --output /etc/estus/cgroup_tree.schema.json
-# Review snapshot before activation; provision /var/lib/estus/runner mode 0700.
-# Install pinned Python3 and the fixed utilities used below; no auto-install.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/cgroup_tree/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["cgroup_tree"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.cgroup_tree]
 description = "Walk only the approved cgroup v2 subtree, bounded depth and nodes; exact hierarchy names retain systemd unit/slice relationships. Ancestor limits are context, not a computed effective capacity."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/cgroup_tree.schema.json", role_path = "/etc/estus/cgroup_tree.schema.roles/cgroup_tree", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/cgroup_tree.payload.json", source = "/etc/estus/payloads/cgroup_tree/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
 input_map = { "depth" = "depth", "limit" = "limit" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "depth" = { "type" = "integer", "minimum" = 0, "maximum" = 4 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 8 } }, "required" = ["depth", "limit"], "additionalProperties" = false }
 [tools.cgroup_tree.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "root" = ["mcp_result", "root"], "boot_id" = ["mcp_result", "boot_id"], "identity" = ["mcp_result", "identity"], "controllers" = ["mcp_result", "controllers"], "subtree_control" = ["mcp_result", "subtree_control"], "ancestors" = ["mcp_result", "ancestors"], "scope" = ["mcp_result", "scope"], "nodes" = ["mcp_result", "nodes"], "truncated" = ["mcp_result", "truncated"] }
 max_bytes = 4096
 max_items = 256

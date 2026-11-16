@@ -1,19 +1,10 @@
-# Opt-in Linux network_address_add; reviewed role and separately imported snapshot required.
-# Copy roles/network_address_add to /etc/estus/roles/network_address_add; export input_schema/fixed_args/input_map as overlay.json.
-# estus --config network_address_add.toml schema import-role network_address_add --role-path /etc/estus/roles/network_address_add --overlay overlay.json --output /etc/estus/network_address_add.schema.json
-# Offline import never runs tasks; review snapshot before enabling. Provision runner root mode 0700.
-# Requires pinned /usr/bin/python3 and fixed iproute2 utilities; probes additionally ping/traceroute as applicable.
-# Operator policy is fixed_args only: callers cannot replace it. No persistent manager changes or flush/batch.
-# Independent root-control recovery must survive catalog0 changes; NEVER target management interfaces.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/network_address_add/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["network_address_add"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
@@ -25,17 +16,17 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.network_address_add]
 description = "network address add. One runtime-only mutation with readback; independent surviving root-control recovery REQUIRED, no persistence or automatic replay."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
-execution = { "kind" = "ansible_role", "snapshot" = "/etc/estus/network_address_add.schema.json", "role_path" = "/etc/estus/network_address_add.schema.roles/network_address_add", "no_log" = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/network_address_add.payload.json", source = "/etc/estus/payloads/network_address_add/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
 input_map = { "interface" = "interface", "address" = "address" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "enum" = ["catalog0"], "maxLength" = 256 }, "address" = { "type" = "string", "enum" = ["192.0.2.9/24"], "maxLength" = 256 } }, "required" = ["interface", "address"], "additionalProperties" = false }
 [tools.network_address_add.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "interface" = ["mcp_result", "interface"], "operation" = ["mcp_result", "operation"], "verified" = ["mcp_result", "verified"], "persistence" = ["mcp_result", "persistence"] }
 max_bytes = 4096
 max_items = 256

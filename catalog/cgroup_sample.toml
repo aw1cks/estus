@@ -1,34 +1,26 @@
-# Reviewed Linux-only cgroup_sample; logs can contain secrets; no arbitrary paths/code/flags.
-# Copy roles/cgroup_sample to /etc/estus/roles/cgroup_sample, review all tasks, export
-# input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config cgroup_sample.toml schema import-role cgroup_sample --role-path /etc/estus/roles/cgroup_sample --overlay overlay.json --output /etc/estus/cgroup_sample.schema.json
-# Review snapshot before activation; provision /var/lib/estus/runner mode 0700.
-# Install pinned Python3 and the fixed utilities used below; no auto-install.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/cgroup_sample/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["cgroup_sample"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.cgroup_sample]
 description = "Finite approved cgroup CPU cumulative-use samples, actual monotonic elapsed interval, identity and counter-reset evidence; rates withheld on resets. Includes controller/ancestor context and first/last full resource observations."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/cgroup_sample.schema.json", role_path = "/etc/estus/cgroup_sample.schema.roles/cgroup_sample", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/cgroup_sample.payload.json", source = "/etc/estus/payloads/cgroup_sample/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
 input_map = { "duration_ms" = "duration_ms", "samples" = "samples" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "duration_ms" = { "type" = "integer", "minimum" = 100, "maximum" = 5000 }, "samples" = { "type" = "integer", "minimum" = 2, "maximum" = 4 } }, "required" = ["duration_ms", "samples"], "additionalProperties" = false }
 [tools.cgroup_sample.result]
-kind = "ansible_projection"
+kind = "capability_projection"
 fields = { "root" = ["mcp_result", "root"], "boot_id" = ["mcp_result", "boot_id"], "identity" = ["mcp_result", "identity"], "controllers" = ["mcp_result", "controllers"], "subtree_control" = ["mcp_result", "subtree_control"], "ancestors" = ["mcp_result", "ancestors"], "scope" = ["mcp_result", "scope"], "observations" = ["mcp_result", "observations"], "first" = ["mcp_result", "first"], "last" = ["mcp_result", "last"] }
 max_bytes = 4096
 max_items = 256

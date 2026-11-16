@@ -18,7 +18,7 @@ fn canonical_catalog() -> Catalog {
 }
 
 #[test]
-fn canonical_catalog_exports_every_operational_definition_and_role() {
+fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
     let catalog = canonical_catalog();
     assert_eq!(
         catalog.manifest().presets["linux-health"],
@@ -34,8 +34,13 @@ fn canonical_catalog_exports_every_operational_definition_and_role() {
                 .is_some()
         );
         let destination = output.join(name);
-        catalog.copy_role(name, &destination).unwrap();
-        assert!(destination.join("tasks/main.yml").is_file(), "{name}");
+        catalog.copy_assets(name, &destination).unwrap();
+        let source = match &catalog.manifest().tools[name].executor {
+            assets::Executor::AnsibleRole { .. } => "tasks/main.yml",
+            assets::Executor::NativePayload { .. } => "collector.py",
+            assets::Executor::AnsibleModule { .. } => unreachable!(),
+        };
+        assert!(destination.join(source).is_file(), "{name}");
         assert_eq!(
             fs::metadata(destination).unwrap().permissions().mode() & 0o777,
             0o700
@@ -45,7 +50,7 @@ fn canonical_catalog_exports_every_operational_definition_and_role() {
     assert!(catalog.definition("not_a_tool").is_err());
     assert!(
         catalog
-            .copy_role("not_a_tool", &output.join("unknown"))
+            .copy_assets("not_a_tool", &output.join("unknown"))
             .is_err()
     );
     assert!(!output.join("unknown").exists());
@@ -53,7 +58,7 @@ fn canonical_catalog_exports_every_operational_definition_and_role() {
 
 fn small_catalog(root: &Path) {
     fs::create_dir_all(root.join("roles/cpu_stats/tasks")).unwrap();
-    fs::write(root.join("catalog.json"), r#"{"schema":2,"version":"1","presets":{"linux-health":["cpu_stats"]},"tools":{"cpu_stats":{"definition":"cpu_stats.toml","role":"roles/cpu_stats","qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
+    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["cpu_stats"]},"tools":{"cpu_stats":{"definition":"cpu_stats.toml","executor":{"kind":"ansible_role","path":"roles/cpu_stats"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
     fs::write(
         root.join("cpu_stats.toml"),
         "[tools.cpu_stats]\ndescription = 'fixture'\n",
@@ -127,7 +132,7 @@ fn role_export_excludes_installer_generated_python_bytecode() {
     let output = root.join("export");
     Catalog::load(Some(&root))
         .unwrap()
-        .copy_role("cpu_stats", &output)
+        .copy_assets("cpu_stats", &output)
         .unwrap();
     assert_eq!(
         fs::read(output.join("files/collector.py")).unwrap(),
@@ -148,7 +153,7 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
     let destination = root.join("existing");
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("sentinel"), "keep").unwrap();
-    assert!(catalog.copy_role("cpu_stats", &destination).is_err());
+    assert!(catalog.copy_assets("cpu_stats", &destination).is_err());
     assert_eq!(
         fs::read_to_string(destination.join("sentinel")).unwrap(),
         "keep"
@@ -158,13 +163,13 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
     symlink(root.join("cpu_stats.toml"), &task).unwrap();
     assert!(
         catalog
-            .copy_role("cpu_stats", &root.join("existing/../traversal"))
+            .copy_assets("cpu_stats", &root.join("existing/../traversal"))
             .is_err()
     );
     assert!(!root.join("traversal").exists());
     assert!(
         catalog
-            .copy_role("cpu_stats", &root.join("symlink-copy"))
+            .copy_assets("cpu_stats", &root.join("symlink-copy"))
             .is_err()
     );
     assert!(!root.join("symlink-copy").exists());
@@ -179,9 +184,9 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
     let original = fs::read_to_string(&manifest).unwrap();
     for replacement in [
         original.replace("cpu_stats.toml", "../cpu_stats.toml"),
-        original.replace("\"schema\":2", "\"schema\":1"),
-        original.replace("\"schema\":2", "\"schema\":2,\"schema\":2"),
-        original.replace("\"schema\":2", "\"schema\":2,\"unexpected\":true"),
+        original.replace("\"schema\":3", "\"schema\":1"),
+        original.replace("\"schema\":3", "\"schema\":3,\"schema\":3"),
+        original.replace("\"schema\":3", "\"schema\":3,\"unexpected\":true"),
     ] {
         fs::write(&manifest, replacement).unwrap();
         assert!(Catalog::load(Some(&root)).is_err());
@@ -219,8 +224,8 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listing["schema"], 2);
-    assert_eq!(listing["version"], "6");
+    assert_eq!(listing["schema"], 3);
+    assert_eq!(listing["version"], "7");
     let canonical: Value = serde_json::from_slice(
         &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json")).unwrap(),
     )
@@ -307,12 +312,12 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     for name in ["cpu_stats", "memory_stats", "pressure_get"] {
         assert!(
             output
-                .join(format!("roles/{name}/tasks/main.yml"))
+                .join(format!("payloads/{name}/manifest.json"))
                 .is_file()
         );
         assert!(
             output
-                .join(format!("roles/{name}/files/collector.py"))
+                .join(format!("payloads/{name}/collector.py"))
                 .is_file()
         );
         let overlay: Value = serde_json::from_slice(
@@ -322,10 +327,10 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         assert_eq!(overlay.as_object().unwrap().len(), 3);
         assert!(overlay["input_schema"].is_object());
         assert_eq!(
-            definitions["tools"][name]["execution"]["role_path"]
+            definitions["tools"][name]["execution"]["source"]
                 .as_str()
                 .unwrap(),
-            output.join(format!("roles/{name}")).to_str().unwrap()
+            output.join(format!("payloads/{name}/collector.py")).to_str().unwrap()
         );
     }
     assert!(output.join("snapshots").is_dir());
@@ -439,8 +444,8 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
 fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) {
     let path = output.join("catalog-selection.json");
     let selection: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(selection["schema"], 2);
-    assert_eq!(selection["version"], "6");
+    assert_eq!(selection["schema"], 3);
+    assert_eq!(selection["version"], "7");
     assert_eq!(selection["scope"], "catalog_templates");
     assert_eq!(selection.as_object().unwrap().len(), 4);
     assert_eq!(

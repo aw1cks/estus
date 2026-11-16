@@ -1,0 +1,264 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "reported_changed",
+  "source_sha256": "408aab715f579b84bbf328ad8a1d52abacfb829cc3c8395bdea9180721b103f1",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "interface": {
+          "name": "interface"
+        },
+        "rx": {
+          "name": "rx"
+        }
+      }
+    },
+    {
+      "kind": "argument",
+      "name": "operator_policy",
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "operator_policy": {
+          "type": "object",
+          "properties": {
+            "interface": {
+              "type": "string"
+            },
+            "mac": {
+              "type": "string"
+            },
+            "driver": {
+              "type": "string"
+            },
+            "allow_runtime_tuning": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "interface",
+            "mac",
+            "driver",
+            "allow_runtime_tuning"
+          ],
+          "additionalProperties": false
+        },
+        "interface": {
+          "type": "string"
+        },
+        "rx": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_python",
+        "operator_policy",
+        "interface",
+        "rx"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "operator_policy": {
+          "aliases": {},
+          "properties": {
+            "interface": {
+              "aliases": {},
+              "properties": {}
+            },
+            "mac": {
+              "aliases": {},
+              "properties": {}
+            },
+            "driver": {
+              "aliases": {},
+              "properties": {}
+            },
+            "allow_runtime_tuning": {
+              "aliases": {},
+              "properties": {}
+            }
+          }
+        },
+        "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "rx": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "enum": [
+              "tune0"
+            ],
+            "maxLength": 15
+          },
+          "rx": {
+            "type": "integer",
+            "enum": [
+              64,
+              128,
+              256,
+              512,
+              1024
+            ]
+          }
+        },
+        "required": [
+          "interface",
+          "rx"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "operator_policy": {
+          "interface": "tune0",
+          "mac": "52:54:00:12:34:57",
+          "driver": "virtio_net",
+          "allow_runtime_tuning": true
+        }
+      },
+      "input_map": {
+        "interface": "interface",
+        "rx": "rx"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "interface": [
+          "mcp_result",
+          "interface"
+        ],
+        "before": [
+          "mcp_result",
+          "before"
+        ],
+        "after": [
+          "mcp_result",
+          "after"
+        ],
+        "changed": [
+          "mcp_result",
+          "changed"
+        ],
+        "verified": [
+          "mcp_result",
+          "verified"
+        ],
+        "persistence": [
+          "mcp_result",
+          "persistence"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "maxLength": 15
+          },
+          "before": {
+            "type": "object",
+            "properties": {
+              "rx": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              }
+            },
+            "required": [
+              "rx"
+            ],
+            "additionalProperties": false
+          },
+          "after": {
+            "type": "object",
+            "properties": {
+              "rx": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              }
+            },
+            "required": [
+              "rx"
+            ],
+            "additionalProperties": false
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "verified": {
+            "type": "boolean",
+            "const": true
+          },
+          "persistence": {
+            "type": "string",
+            "const": "runtime_only",
+            "maxLength": 32
+          }
+        },
+        "required": [
+          "interface",
+          "before",
+          "after",
+          "changed",
+          "verified",
+          "persistence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

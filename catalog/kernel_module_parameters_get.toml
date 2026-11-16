@@ -1,24 +1,11 @@
-# Explicit standalone opt-in. Read only reviewed current module parameters, preserving absent/unreadable values as unsupported and actual sysfs writable mode. No arbitrary parameter paths.
-# Copy roles/kernel_module_parameters_get to /etc/estus/roles/kernel_module_parameters_get; review every file.
-# Export this tool's input_schema/fixed_args/input_map to overlay.json, then:
-# estus --config kernel_module_parameters_get.toml schema import-role kernel_module_parameters_get --role-path /etc/estus/roles/kernel_module_parameters_get --overlay overlay.json --output /etc/estus/kernel_module_parameters_get.schema.json
-# Import is offline; review snapshot before startup activation. No implicit install/escalation.
-# Provision /var/lib/estus/runner mode0700 for MCP; install optional pinned Runner runtime.
-# Target prerequisites: Linux /usr/bin/python3; boot tools require actual EFI/systemd-boot + bootctl;
-# module tools require installed kmod modinfo/modprobe and reviewed dummy/estus_catalog modules.
-# estus_catalog is a harmless operator-installed fixture module, value:int mode0644; not auto-installed.
-# Exact approved entries are estus-current.conf and estus-alternate.conf; change reviewed schema AND role to deploy elsewhere.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/kernel_module_parameters_get/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["kernel_module_parameters_get"]
 
 [targets.server]
 ssh_host = "server-ordinary"
-
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 
 [automation.targets.server]
 destination = "server-ordinary"
@@ -26,13 +13,13 @@ python = "/usr/bin/python3"
 
 [tools.kernel_module_parameters_get]
 description = "Read only reviewed current module parameters, preserving absent/unreadable values as unsupported and actual sysfs writable mode. No arbitrary parameter paths."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/kernel_module_parameters_get.schema.json", role_path = "/etc/estus/kernel_module_parameters_get.schema.roles/kernel_module_parameters_get", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/kernel_module_parameters_get.payload.json", source = "/etc/estus/payloads/kernel_module_parameters_get/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "name" = "name" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "enum" = ["dummy", "estus_catalog"], "minLength" = 1, "maxLength" = 64 } }, "required" = ["name"], "additionalProperties" = false }
-result = { kind = "ansible_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "name" = ["mcp_result", "name"], "parameters" = ["mcp_result", "parameters"], "approval_scope" = ["mcp_result", "approval_scope"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "name" = { "type" = "string", "maxLength" = 64 }, "parameters" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "object", "properties" = { "parameter" = { "type" = "string", "maxLength" = 64 }, "supported" = { "type" = "boolean" }, "writable" = { "type" = "boolean" }, "source" = { "type" = "string", "maxLength" = 32 }, "value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["parameter", "supported", "writable", "source"], "additionalProperties" = false } }, "approval_scope" = { "type" = "string", "maxLength" = 256 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "name", "parameters", "approval_scope"], "additionalProperties" = false } }
+result = { kind = "capability_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "name" = ["mcp_result", "name"], "parameters" = ["mcp_result", "parameters"], "approval_scope" = ["mcp_result", "approval_scope"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "name" = { "type" = "string", "maxLength" = 64 }, "parameters" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "object", "properties" = { "parameter" = { "type" = "string", "maxLength" = 64 }, "supported" = { "type" = "boolean" }, "writable" = { "type" = "boolean" }, "source" = { "type" = "string", "maxLength" = 32 }, "value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["parameter", "supported", "writable", "source"], "additionalProperties" = false } }, "approval_scope" = { "type" = "string", "maxLength" = 256 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "name", "parameters", "approval_scope"], "additionalProperties" = false } }

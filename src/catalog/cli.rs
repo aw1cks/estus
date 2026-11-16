@@ -276,7 +276,7 @@ fn overlay(definition: &toml::Value) -> Result<Value, &'static str> {
         );
     }
     let value = Value::Object(value);
-    crate::contracts::role_import::validate_overlay(&value)?;
+    crate::contracts::module_schema::validate_overlay(&value)?;
     Ok(value)
 }
 
@@ -316,6 +316,7 @@ fn template_metadata(template: &super::assets::Template) -> Value {
         "qualification":template.qualification,
         "policy_required":template.policy_required,
         "requires":template.requires,
+        "executor":template.executor,
     })
 }
 
@@ -384,7 +385,7 @@ fn export(
 ) -> Result<Value, &'static str> {
     let names = selected(catalog, tools, presets)?;
     let output = PrivateOutput::create(path)?;
-    for directory in ["roles", "overlays", "snapshots"] {
+    for directory in ["roles", "payloads", "overlays", "snapshots"] {
         DirBuilder::new()
             .mode(0o700)
             .create(output.path.join(directory))
@@ -405,16 +406,23 @@ fn export(
             .and_then(toml::Value::as_table_mut)
             .and_then(|tools| tools.remove(name))
             .ok_or("catalog_definition_invalid")?;
-        let role = output.path.join("roles").join(name);
-        catalog.copy_role(name, &role)?;
         let execution = definition
             .get_mut("execution")
             .and_then(toml::Value::as_table_mut)
             .ok_or("catalog_definition_invalid")?;
-        execution.insert(
-            "role_path".into(),
-            role.to_str().ok_or("catalog_output_unavailable")?.into(),
-        );
+        match &template.executor {
+            super::assets::Executor::AnsibleRole { .. } => {
+                let role = output.path.join("roles").join(name);
+                catalog.copy_assets(name, &role)?;
+                execution.insert("role_path".into(), role.to_str().ok_or("catalog_output_unavailable")?.into());
+            }
+            super::assets::Executor::NativePayload { .. } => {
+                let bundle = output.path.join("payloads").join(name);
+                catalog.copy_assets(name, &bundle)?;
+                execution.insert("source".into(), bundle.join("collector.py").to_str().ok_or("catalog_output_unavailable")?.into());
+            }
+            super::assets::Executor::AnsibleModule { .. } => {}
+        }
         execution.insert(
             "snapshot".into(),
             output
@@ -435,7 +443,7 @@ fn export(
     let mut document = toml::Table::new();
     document.insert("tools".into(), toml::Value::Table(definitions));
     let text = format!(
-        "# INERT export. Review targets, fixed policies and role contents before prepare.\n{}",
+        "# INERT export. Review targets, fixed policies and executor assets before prepare.\n{}",
         toml::to_string_pretty(&document).map_err(|_| "catalog_output_invalid")?
     );
     write_private(&output.path.join("tools.toml"), text.as_bytes())?;
@@ -499,6 +507,56 @@ fn preserve_site_paths(document: &mut toml::Table, base: &Path) -> Result<(), &'
     Ok(())
 }
 
+fn prepare_payload(
+    definition: &mut toml::Value,
+    name: &str,
+    output: &Path,
+) -> Result<(), Failure> {
+    let execution = definition.get("execution").ok_or("catalog_definition_invalid")?;
+    let source = PathBuf::from(execution.get("source").and_then(toml::Value::as_str).ok_or("catalog_definition_invalid")?);
+    if !source.is_absolute() {
+        return Err("catalog_definition_invalid".into());
+    }
+    let draft = source.parent().ok_or("catalog_definition_invalid")?.join("manifest.json");
+    let mut manifest: crate::native_payload::Manifest = serde_json::from_value(
+        crate::contracts::schema_import::read_json(&draft, 262_144)?
+    ).map_err(|_| "catalog_definition_invalid")?;
+    let input = overlay(definition)?;
+    manifest.approval = crate::native_payload::Approval {
+        overlay: input,
+        result: serde_json::to_value(definition.get("result").ok_or("catalog_definition_invalid")?)
+            .map_err(|_| "catalog_definition_invalid")?,
+        authority: definition.get("authority").and_then(toml::Value::as_str)
+            .ok_or("catalog_definition_invalid")?.to_owned(),
+        revision: definition.get("revision").and_then(toml::Value::as_str)
+            .ok_or("catalog_definition_invalid")?.to_owned(),
+        no_log: execution.get("no_log").and_then(toml::Value::as_bool).unwrap_or(false),
+    };
+    let source_file = OpenOptions::new().read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(&source).map_err(|_| "catalog_definition_unavailable")?;
+    if !source_file.metadata().map_err(|_| "catalog_definition_unavailable")?.is_file() {
+        return Err("catalog_definition_invalid".into());
+    }
+    let mut bytes = Vec::new();
+    source_file.take(1_048_577).read_to_end(&mut bytes).map_err(|_| "catalog_definition_unavailable")?;
+    if bytes.is_empty() || bytes.len() > 1_048_576 {
+        return Err("catalog_definition_invalid".into());
+    }
+    let bundle = output.join("payloads").join(name);
+    DirBuilder::new().recursive(true).mode(0o700).create(&bundle)
+        .map_err(|_| "catalog_output_unavailable")?;
+    let source = bundle.join("collector.py");
+    write_private(&source, &bytes)?;
+    let snapshot = output.join("snapshots").join(format!("{name}.json"));
+    crate::native_payload::prepare_manifest(&source, &snapshot, manifest)?;
+    let execution = definition.get_mut("execution").and_then(toml::Value::as_table_mut)
+        .ok_or("catalog_definition_invalid")?;
+    execution.insert("source".into(), source.to_str().ok_or("catalog_output_invalid")?.into());
+    execution.insert("snapshot".into(), snapshot.to_str().ok_or("catalog_output_invalid")?.into());
+    Ok(())
+}
+
 async fn prepare(
     catalog: Catalog,
     pin_root: bool,
@@ -547,6 +605,7 @@ async fn prepare(
             .as_table_mut()
             .ok_or("catalog_definition_invalid")?;
         let mut imports = Vec::with_capacity(tools.len());
+        let mut prepared_names = Vec::with_capacity(tools.len());
         let mut reviewed_bundle: Option<PathBuf> = None;
         let mut authoring_parent: Option<PathBuf> = None;
         for (name, mut definition) in tools {
@@ -561,6 +620,30 @@ async fn prepare(
                         "targets".into(),
                         toml::Value::Array(targets.iter().map(|s| s.as_str().into()).collect()),
                     );
+            }
+            prepared_names.push(name.clone());
+            let kind = definition.get("execution").and_then(|execution| execution.get("kind"))
+                .and_then(toml::Value::as_str).ok_or("catalog_definition_invalid")?;
+            if kind == "native_payload" {
+                prepare_payload(&mut definition, &name, &output.path)?;
+                configured.insert(name, definition);
+                continue;
+            }
+            if kind == "ansible_module" {
+                let super::assets::Executor::AnsibleModule { module } =
+                    &catalog.manifest().tools[&name].executor else {
+                        return Err("catalog_definition_invalid".into());
+                    };
+                let snapshot = output.path.join("snapshots").join(format!("{name}.json"));
+                definition["execution"]["snapshot"] = snapshot.to_str().ok_or("catalog_output_invalid")?.into();
+                let input = overlay(&definition)?;
+                let authority = definition.get("authority").and_then(toml::Value::as_str)
+                    .ok_or("catalog_definition_invalid")?.to_owned();
+                let overlay_path = output.path.join("overlays").join(format!("{name}.json"));
+                write_private(&overlay_path, &serde_json::to_vec(&input).map_err(|_| "catalog_output_invalid")?)?;
+                imports.push((name.clone(), None, overlay_path, snapshot, authority, Some(module.clone())));
+                configured.insert(name, definition);
+                continue;
             }
             let execution = definition
                 .get_mut("execution")
@@ -623,7 +706,7 @@ async fn prepare(
                 .ok_or("catalog_definition_invalid")?
                 .to_owned();
             configured.insert(name.clone(), definition);
-            imports.push((name, role_path, overlay_path, snapshot, authority));
+            imports.push((name, Some(role_path), overlay_path, snapshot, authority, None));
         }
         document
             .entry("profile")
@@ -632,9 +715,9 @@ async fn prepare(
             document.insert(
                 "enabled_tools".into(),
                 toml::Value::Array(
-                    imports
+                    prepared_names
                         .iter()
-                        .map(|(name, ..)| name.as_str().into())
+                        .map(|name| name.as_str().into())
                         .collect(),
                 ),
             );
@@ -700,21 +783,32 @@ async fn prepare(
         config_file
             .write_all(text.as_bytes())
             .map_err(|_| "catalog_output_unavailable")?;
-        Ok::<_, Failure>((output, config, imports))
+        Ok::<_, Failure>((output, config, imports, prepared_names.len()))
     })
     .await
     .map_err(|_| "catalog_output_unavailable")??;
-    let (output, config, imports) = work;
-    for (name, role_path, overlay, snapshot, authority) in &imports {
+    let (output, config, imports, prepared_count) = work;
+    for (name, role_path, overlay, snapshot, authority, module) in &imports {
         if shutdown.is_cancelled() {
             return Err("cancelled".into());
         }
         let reference = config.catalog_runtime(authority)?;
+        if let Some(module) = module {
+            let overlay = crate::contracts::schema_import::read_json(overlay, 65_536)?;
+            crate::contracts::schema_import::author_module(
+                reference, module, &overlay, snapshot,
+                crate::automation::RuntimeContext {
+                    deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+                    ct: &shutdown, shutdown: &shutdown,
+                },
+            ).await?;
+            continue;
+        }
         let report = crate::contracts::role_import::perform_with_reference(
             &config,
             crate::contracts::role_import::Command::Import(crate::contracts::role_import::ImportArgs::reviewed(
                 name.clone(),
-                role_path.clone(),
+                role_path.as_ref().ok_or("catalog_definition_invalid")?.clone(),
                 snapshot.clone(),
                 overlay.clone(),
             )),
@@ -733,7 +827,7 @@ async fn prepare(
     if shutdown.is_cancelled() {
         return Err("cancelled".into());
     }
-    let report = json!({"ok":true,"prepared":imports.len(),"activated":false});
+    let report = json!({"ok":true,"prepared":prepared_count,"activated":false});
     output.finish();
     Ok(report)
 }
@@ -889,7 +983,7 @@ fn inspect(
                 .targets
                 .iter()
                 .map(|host| {
-                    let permitted = if binding.is_automation() {
+                    let permitted = if binding.automation_authority().is_some() {
                         config.automation_target(id, host).is_ok()
                     } else {
                         config.resolve_binding(host, id).is_ok()
@@ -910,6 +1004,7 @@ fn inspect(
                 "execution_location":binding.execution_location(),
                 "trusted_controller_code":binding.trusted_controller_code(),
                 "restriction_boundary":binding.restriction_boundary(),
+                "generic_policy":binding.generic_policy().map(|policy| policy.inspect()),
             })
         })
         .collect();

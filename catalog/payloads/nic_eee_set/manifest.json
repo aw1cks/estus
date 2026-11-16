@@ -1,0 +1,397 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "reported_changed",
+  "source_sha256": "22061749d1a37215348fd6c64b5454a983b2a90327d4d1b2eb2fd83cc0430f63",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "interface": {
+          "name": "interface"
+        },
+        "enabled": {
+          "name": "enabled"
+        },
+        "tx_lpi_timer_us": {
+          "name": "tx_lpi_timer_us"
+        }
+      }
+    },
+    {
+      "kind": "argument",
+      "name": "operator_policy",
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "enum": [
+            "/usr/bin/python3"
+          ]
+        },
+        "operator_policy": {
+          "type": "object",
+          "properties": {
+            "interface": {
+              "type": "string",
+              "enum": [
+                "model0"
+              ]
+            },
+            "mac": {
+              "type": "string",
+              "enum": [
+                "52:54:00:12:34:5a"
+              ]
+            },
+            "driver": {
+              "type": "string",
+              "enum": [
+                "estus_nic_model"
+              ]
+            },
+            "allow_runtime_tuning": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "interface",
+            "mac",
+            "driver",
+            "allow_runtime_tuning"
+          ],
+          "additionalProperties": false
+        },
+        "interface": {
+          "type": "string",
+          "enum": [
+            "model0"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "tx_lpi_timer_us": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_python",
+        "operator_policy",
+        "interface",
+        "enabled",
+        "tx_lpi_timer_us"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "operator_policy": {
+          "aliases": {},
+          "properties": {
+            "interface": {
+              "aliases": {},
+              "properties": {}
+            },
+            "mac": {
+              "aliases": {},
+              "properties": {}
+            },
+            "driver": {
+              "aliases": {},
+              "properties": {}
+            },
+            "allow_runtime_tuning": {
+              "aliases": {},
+              "properties": {}
+            }
+          }
+        },
+        "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "enabled": {
+          "aliases": {},
+          "properties": {}
+        },
+        "tx_lpi_timer_us": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "maxLength": 15,
+            "enum": [
+              "model0"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "tx_lpi_timer_us": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          }
+        },
+        "required": [
+          "interface",
+          "enabled",
+          "tx_lpi_timer_us"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "operator_policy": {
+          "interface": "model0",
+          "mac": "52:54:00:12:34:5a",
+          "driver": "estus_nic_model",
+          "allow_runtime_tuning": true
+        }
+      },
+      "input_map": {
+        "interface": "interface",
+        "enabled": "enabled",
+        "tx_lpi_timer_us": "tx_lpi_timer_us"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "interface": [
+          "mcp_result",
+          "interface"
+        ],
+        "driver": [
+          "mcp_result",
+          "driver"
+        ],
+        "scope": [
+          "mcp_result",
+          "scope"
+        ],
+        "before": [
+          "mcp_result",
+          "before"
+        ],
+        "after": [
+          "mcp_result",
+          "after"
+        ],
+        "changed": [
+          "mcp_result",
+          "changed"
+        ],
+        "verified": [
+          "mcp_result",
+          "verified"
+        ],
+        "persistence": [
+          "mcp_result",
+          "persistence"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "maxLength": 15,
+            "enum": [
+              "model0"
+            ]
+          },
+          "driver": {
+            "type": "string",
+            "maxLength": 32,
+            "enum": [
+              "estus_nic_model"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 14,
+            "enum": [
+              "software_model"
+            ]
+          },
+          "before": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "active": {
+                "type": "boolean"
+              },
+              "tx_lpi_enabled": {
+                "type": "boolean"
+              },
+              "tx_lpi_timer_us": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "supported_modes": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "advertised_modes": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "peer_modes": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              }
+            },
+            "required": [
+              "enabled",
+              "active",
+              "tx_lpi_enabled",
+              "supported_modes",
+              "advertised_modes",
+              "peer_modes"
+            ],
+            "additionalProperties": false
+          },
+          "after": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "active": {
+                "type": "boolean"
+              },
+              "tx_lpi_enabled": {
+                "type": "boolean",
+                "const": true
+              },
+              "tx_lpi_timer_us": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "supported_modes": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "advertised_modes": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "peer_modes": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              }
+            },
+            "required": [
+              "enabled",
+              "active",
+              "tx_lpi_enabled",
+              "tx_lpi_timer_us",
+              "supported_modes",
+              "advertised_modes",
+              "peer_modes"
+            ],
+            "additionalProperties": false
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "verified": {
+            "type": "boolean",
+            "const": true
+          },
+          "persistence": {
+            "type": "string",
+            "maxLength": 12,
+            "enum": [
+              "runtime_only"
+            ]
+          }
+        },
+        "required": [
+          "interface",
+          "driver",
+          "scope",
+          "before",
+          "after",
+          "changed",
+          "verified",
+          "persistence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

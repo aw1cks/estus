@@ -14,10 +14,17 @@ def catalog_sources():
     data = json.loads(manifest.read_text(encoding="utf-8"))
     yield manifest, Path("catalog.json")
     for name, tool in data["tools"].items():
-        if tool["definition"] != name + ".toml" or tool["role"] != "roles/" + name:
+        executor = tool["executor"]
+        kind = executor["kind"]
+        group = {"ansible_role": "roles", "native_payload": "payloads"}.get(kind)
+        if tool["definition"] != name + ".toml" or (group and executor["path"] != group + "/" + name):
             raise ValueError("invalid catalog source path")
         yield root / tool["definition"], Path(tool["definition"])
-        role = root / tool["role"]
+        if kind == "ansible_module":
+            continue
+        if group is None:
+            raise ValueError("unsupported catalog executor")
+        role = root / executor["path"]
         for source in sorted(role.rglob("*")):
             if source.is_symlink():
                 raise ValueError("symlink in catalog source")
@@ -25,7 +32,7 @@ def catalog_sources():
                 relative = source.relative_to(role)
                 if "__pycache__" in relative.parts or source.suffix in {".pyc", ".pyo"}:
                     continue
-                if relative.parts[0] not in {"tasks", "meta", "files", "defaults", "vars", "handlers"} or source.suffix not in {".yml", ".yaml", ".py", ".json", ".toml"}:
+                if (kind == "ansible_role" and relative.parts[0] not in {"tasks", "meta", "files", "defaults", "vars", "handlers"}) or source.suffix not in {".yml", ".yaml", ".py", ".json", ".toml"}:
                     raise ValueError("unexpected catalog source asset")
                 yield source, source.relative_to(root)
 

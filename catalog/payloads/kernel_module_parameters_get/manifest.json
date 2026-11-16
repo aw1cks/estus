@@ -1,0 +1,214 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "33b674626fdb776ba35d9fa21177c1cde9c4aa9296cbee7eeddabe2d60284292",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "name": {
+          "name": "name"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "description": "Operator-fixed absolute target Python, never caller-selected."
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "dummy",
+            "estus_catalog"
+          ]
+        }
+      },
+      "required": [
+        "target_python",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "name": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "dummy",
+              "estus_catalog"
+            ],
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "name": "name"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boot_id": [
+          "mcp_result",
+          "boot_id"
+        ],
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "name": [
+          "mcp_result",
+          "name"
+        ],
+        "parameters": [
+          "mcp_result",
+          "parameters"
+        ],
+        "approval_scope": [
+          "mcp_result",
+          "approval_scope"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "unavailable": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "parameters": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "parameter": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "supported": {
+                  "type": "boolean"
+                },
+                "writable": {
+                  "type": "boolean"
+                },
+                "source": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "parameter",
+                "supported",
+                "writable",
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "approval_scope": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "boot_id",
+          "source",
+          "unavailable",
+          "observed_at",
+          "name",
+          "parameters",
+          "approval_scope"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

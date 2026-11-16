@@ -1,0 +1,358 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "mutation_success",
+  "source_sha256": "ca90ec92ae3a1555e911ccfed690d0d155d8ca889e376e9d8216b61cfaab8fe3",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "interface": {
+          "name": "interface",
+          "default": null
+        },
+        "destination": {
+          "name": "destination",
+          "default": null
+        }
+      }
+    },
+    {
+      "kind": "argument",
+      "name": "operator_policy",
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string",
+          "description": "Operator-fixed Python interpreter"
+        },
+        "operator_policy": {
+          "type": "object",
+          "properties": {
+            "interface": {
+              "type": "string"
+            },
+            "interfaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "destinations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "addresses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "routes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "neighbors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "namespaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dns_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "resolver": {
+              "type": "string"
+            },
+            "dns_port": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "interface",
+            "interfaces",
+            "destinations",
+            "neighbors"
+          ],
+          "additionalProperties": false,
+          "description": "Fixed reviewed destination and interface policy, never caller supplied"
+        },
+        "interface": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_python",
+        "operator_policy",
+        "interface",
+        "destination"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "operator_policy": {
+          "aliases": {},
+          "properties": {
+            "interface": {
+              "aliases": {},
+              "properties": {}
+            },
+            "interfaces": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "destinations": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "ports": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "addresses": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "routes": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "neighbors": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "namespaces": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "dns_names": {
+              "aliases": {},
+              "properties": {},
+              "items": {
+                "aliases": {},
+                "properties": {}
+              }
+            },
+            "resolver": {
+              "aliases": {},
+              "properties": {}
+            },
+            "dns_port": {
+              "aliases": {},
+              "properties": {}
+            }
+          }
+        },
+        "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "destination": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "enum": [
+              "catalog0"
+            ],
+            "maxLength": 256
+          },
+          "destination": {
+            "type": "string",
+            "enum": [
+              "192.0.2.2"
+            ],
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "interface",
+          "destination"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "operator_policy": {
+          "interface": "catalog0",
+          "interfaces": [
+            "lo",
+            "catalog0"
+          ],
+          "destinations": [
+            "127.0.0.1",
+            "192.0.2.2"
+          ],
+          "ports": [
+            18080
+          ],
+          "addresses": [
+            "192.0.2.9/24"
+          ],
+          "routes": [
+            "198.51.100.0/24"
+          ],
+          "neighbors": [
+            "192.0.2.2"
+          ],
+          "namespaces": [
+            "catalogns"
+          ],
+          "dns_names": [
+            "catalog.test"
+          ],
+          "resolver": "127.0.0.1",
+          "dns_port": 15353
+        }
+      },
+      "input_map": {
+        "interface": "interface",
+        "destination": "destination"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "interface": [
+          "mcp_result",
+          "interface"
+        ],
+        "operation": [
+          "mcp_result",
+          "operation"
+        ],
+        "verified": [
+          "mcp_result",
+          "verified"
+        ],
+        "persistence": [
+          "mcp_result",
+          "persistence"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "maxLength": 15
+          },
+          "operation": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "verified": {
+            "type": "boolean",
+            "const": true
+          },
+          "persistence": {
+            "type": "string",
+            "const": "runtime_only",
+            "maxLength": 32
+          }
+        },
+        "required": [
+          "interface",
+          "operation",
+          "verified",
+          "persistence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

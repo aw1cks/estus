@@ -5,13 +5,18 @@ let
   runner = python.pkgs.ansible-runner;
   bundle = python.pkgs.ansible;
   environment = python.withPackages (_: [ core runner ]);
+  selectedCollections = [
+    "ansible.posix"
+    "community.general"
+    "community.library_inventory_filtering_v1"
+  ];
   healthSha256 = builtins.hashFile "sha256" (sourceRoot + "/src/automation/python/health.py");
   platform = pkgs.stdenv.hostPlatform.system;
   # Output and source identities pin the complete upstream provisioning choice.
   # Only the digest, never these store paths, is exposed in the public identity.
   runtimeId = builtins.hashString "sha256" (builtins.toJSON {
     schema = 1;
-    inherit platform healthSha256;
+    inherit platform healthSha256 selectedCollections;
     python = { output = toString python; source = toString python.src; };
     ansible_core = { output = toString core; source = toString core.src; };
     ansible_runner = { output = toString runner; source = toString runner.src; };
@@ -23,12 +28,16 @@ in
 pkgs.runCommand "estus-automation-runtime" {
   nativeBuildInputs = [ pkgs.jq pkgs.coreutils ];
 } ''
-  mkdir -p "$out/bin" "$out/collections/ansible_collections/ansible" \
-    "$out/collections/ansible_collections/community"
+  mkdir -p "$out/bin" "$out/collections/ansible_collections"
   ln -s ${environment} "$out/python"
   ln -s ${environment}/bin/python3 "$out/bin/python3"
-  ln -s ${collectionSource}/ansible/posix "$out/collections/ansible_collections/ansible/posix"
-  ln -s ${collectionSource}/community/general "$out/collections/ansible_collections/community/general"
+  for name in ${pkgs.lib.concatStringsSep " " selectedCollections}; do
+    namespace="''${name%%.*}"
+    collection="''${name#*.}"
+    mkdir -p "$out/collections/ansible_collections/$namespace"
+    ln -s "${collectionSource}/$namespace/$collection" \
+      "$out/collections/ansible_collections/$namespace/$collection"
+  done
 
   # No home/cwd config discovery or ambient collection registration is needed.
   cat > "$out/ansible.cfg" <<EOF
@@ -38,7 +47,7 @@ pkgs.runCommand "estus-automation-runtime" {
   EOF
 
   collections='[]'
-  for name in ansible.posix community.general; do
+  for name in ${pkgs.lib.concatStringsSep " " selectedCollections}; do
     namespace="''${name%%.*}"
     collection="''${name#*.}"
     manifest="$out/collections/ansible_collections/$namespace/$collection/MANIFEST.json"

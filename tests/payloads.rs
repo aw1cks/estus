@@ -532,8 +532,14 @@ print(json.dumps({'violations': violations, 'error': error}))
         .context("catalog templates")?
         .values()
     {
-        let role = assets.join(template["role"].as_str().context("role path")?);
-        let files = role.join("files");
+        let executor = &template["executor"];
+        let Some(path) = executor["path"].as_str() else { continue };
+        let bundle = assets.join(path);
+        let files = if executor["kind"] == "native_payload" {
+            bundle
+        } else {
+            bundle.join("files")
+        };
         if !files.exists() {
             continue;
         }

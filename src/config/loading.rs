@@ -70,6 +70,7 @@ struct Document {
     targets: Option<BTreeMap<String, Target>>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
+    enabled_generic_tools: Vec<String>,
     tool_presets: Vec<String>,
     disabled_tools: Vec<String>,
     catalog: CatalogSettings,
@@ -91,6 +92,7 @@ impl Default for Document {
             targets: None,
             tools: BTreeMap::new(),
             enabled_tools: Vec::new(),
+            enabled_generic_tools: Vec::new(),
             tool_presets: Vec::new(),
             disabled_tools: Vec::new(),
             catalog: CatalogSettings::default(),
@@ -164,7 +166,7 @@ fn resolve_catalog_selection(
         ));
     }
     let manifest = catalog.as_ref().map(|c| c.manifest());
-    let selected = crate::catalog::selection::expand(
+    let mut selected = crate::catalog::selection::expand(
         &definitions,
         manifest,
         &document.enabled_tools,
@@ -180,6 +182,22 @@ fn resolve_catalog_selection(
             "tools",
             "selected catalog tools require prepared reviewed definitions",
         ));
+    }
+    let generic = |name: &str| document.tools.get(name)
+        .and_then(|definition| definition.get("execution"))
+        .and_then(|execution| execution.get("kind"))
+        .and_then(toml::Value::as_str) == Some("ansible_generic");
+    if selected.iter().any(|name| generic(name)) {
+        return Err(invalid("enabled_generic_tools", "Generic tools require independent explicit selection"));
+    }
+    let mut seen = BTreeSet::new();
+    for name in &document.enabled_generic_tools {
+        if !generic(name) || !seen.insert(name) {
+            return Err(invalid("enabled_generic_tools", "Must name unique configured generic tools"));
+        }
+        if !document.disabled_tools.contains(name) {
+            selected.insert(name.clone());
+        }
     }
     if let Some(targets) = &mut document.targets {
         for target in targets.values_mut() {

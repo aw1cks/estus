@@ -1,30 +1,22 @@
-# Standalone opt-in; review role and snapshot before activation.
-# Copy roles/storage_raid_status to /etc/estus/roles/storage_raid_status.
-# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
-# estus --config storage_raid_status.toml schema import-role storage_raid_status --role-path /etc/estus/roles/storage_raid_status --overlay overlay.json --output /etc/estus/storage_raid_status.schema.json
-# Provision runner workspace mode0700; requires installed pinned Runner and target Python.
-# Only the reviewed fixed device and backend are supported. No install or storage mutation.
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/storage_raid_status/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 profile = "actions-only"
 enabled_tools = ["storage_raid_status"]
 [targets.server]
 ssh_host = "server-ordinary"
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.storage_raid_status]
 description = "Observe a pre-existing two-member Linux MD RAID1 md0 on reviewed vdb/vdc through ordinary-readable kernel sysfs only; no raw block-device access. Report array state, degraded count, sync action and member states/errors. Non-atomic reported software redundancy, not hardware RAID or physical-media health. Never creates, assembles, tests or repairs an array."
-revision = "1"
+revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_role", snapshot = "/etc/estus/storage_raid_status.schema.json", role_path = "/etc/estus/storage_raid_status.schema.roles/storage_raid_status", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/storage_raid_status.payload.json", source = "/etc/estus/payloads/storage_raid_status/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { device = "device" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "required" = ["device"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "enum" = ["/dev/md0"] } } }
-result = { "kind" = "ansible_projection", "fields" = { "device" = ["mcp_result", "device"], "scope" = ["mcp_result", "scope"], "source" = ["mcp_result", "source"], "level" = ["mcp_result", "level"], "array_state" = ["mcp_result", "array_state"], "raid_disks" = ["mcp_result", "raid_disks"], "degraded_members" = ["mcp_result", "degraded_members"], "sync_action" = ["mcp_result", "sync_action"], "members" = ["mcp_result", "members"], "observed_at" = ["mcp_result", "observed_at"] }, "max_bytes" = 4096, "max_items" = 256, "max_depth" = 8, "schema" = { "type" = "object", "required" = ["device", "scope", "source", "level", "array_state", "raid_disks", "degraded_members", "sync_action", "members", "observed_at"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "const" = "/dev/md0" }, "scope" = { "type" = "string", "maxLength" = 64, "const" = "linux_md_raid1_reported" }, "source" = { "type" = "string", "maxLength" = 32, "const" = "linux_sysfs_md" }, "level" = { "type" = "string", "maxLength" = 16, "const" = "raid1" }, "array_state" = { "type" = "string", "maxLength" = 128 }, "raid_disks" = { "type" = "integer", "minimum" = 0, "maximum" = 2 }, "degraded_members" = { "type" = "integer", "minimum" = 0, "maximum" = 2 }, "sync_action" = { "type" = "string", "maxLength" = 128 }, "members" = { "type" = "array", "maxItems" = 2, "items" = { "type" = "object", "required" = ["device", "states", "slot", "read_errors"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "enum" = ["/dev/vdb", "/dev/vdc"] }, "states" = { "type" = "array", "maxItems" = 12, "items" = { "type" = "string", "maxLength" = 128 } }, "slot" = { "type" = "string", "maxLength" = 4, "enum" = ["none", "0", "1"] }, "read_errors" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } } } }, "observed_at" = { "type" = "string", "maxLength" = 64 } } } }
+result = { "kind" = "capability_projection", "fields" = { "device" = ["mcp_result", "device"], "scope" = ["mcp_result", "scope"], "source" = ["mcp_result", "source"], "level" = ["mcp_result", "level"], "array_state" = ["mcp_result", "array_state"], "raid_disks" = ["mcp_result", "raid_disks"], "degraded_members" = ["mcp_result", "degraded_members"], "sync_action" = ["mcp_result", "sync_action"], "members" = ["mcp_result", "members"], "observed_at" = ["mcp_result", "observed_at"] }, "max_bytes" = 4096, "max_items" = 256, "max_depth" = 8, "schema" = { "type" = "object", "required" = ["device", "scope", "source", "level", "array_state", "raid_disks", "degraded_members", "sync_action", "members", "observed_at"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "const" = "/dev/md0" }, "scope" = { "type" = "string", "maxLength" = 64, "const" = "linux_md_raid1_reported" }, "source" = { "type" = "string", "maxLength" = 32, "const" = "linux_sysfs_md" }, "level" = { "type" = "string", "maxLength" = 16, "const" = "raid1" }, "array_state" = { "type" = "string", "maxLength" = 128 }, "raid_disks" = { "type" = "integer", "minimum" = 0, "maximum" = 2 }, "degraded_members" = { "type" = "integer", "minimum" = 0, "maximum" = 2 }, "sync_action" = { "type" = "string", "maxLength" = 128 }, "members" = { "type" = "array", "maxItems" = 2, "items" = { "type" = "object", "required" = ["device", "states", "slot", "read_errors"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "enum" = ["/dev/vdb", "/dev/vdc"] }, "states" = { "type" = "array", "maxItems" = 12, "items" = { "type" = "string", "maxLength" = 128 } }, "slot" = { "type" = "string", "maxLength" = 4, "enum" = ["none", "0", "1"] }, "read_errors" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } } } }, "observed_at" = { "type" = "string", "maxLength" = 64 } } } }

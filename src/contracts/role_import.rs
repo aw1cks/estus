@@ -360,7 +360,7 @@ pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
 pub(crate) fn compile_binding(
     contract: &Value,
     overlay: &Value,
-) -> Result<module_schema::CompiledModuleBinding, &'static str> {
+) -> Result<module_schema::CapabilityBinding, &'static str> {
     validate_overlay(overlay)?;
     // Aliases must not turn a harmless-looking configured name into a control.
     for field in ["fixed_args", "input_map"] {

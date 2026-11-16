@@ -49,18 +49,23 @@ def identifier(value):
     return type(value) is str and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,127}", value) is not None
 
 
-def arguments(value, depth=0, nodes=None):
+def arguments(value, depth=0, nodes=None, generic=False):
     if nodes is None:
         nodes = [0]
     nodes[0] += 1
     require(depth <= 32 and nodes[0] <= 16384)
     if type(value) is dict:
         for key, child in value.items():
-            require(identifier(key) and not key.startswith("ansible_"))
-            arguments(child, depth + 1, nodes)
+            if generic:
+                require(type(key) is str and "\x00" not in key and len(key.encode("utf-8")) <= 4096)
+                if depth == 0:
+                    require(identifier(key) and not key.startswith("ansible_") and not key.startswith("_"))
+            else:
+                require(identifier(key) and not key.startswith("ansible_"))
+            arguments(child, depth + 1, nodes, generic)
     elif type(value) is list:
         for child in value:
-            arguments(child, depth + 1, nodes)
+            arguments(child, depth + 1, nodes, generic)
     elif type(value) in (int, float):
         require(math.isfinite(value) and abs(value) <= 9007199254740991)
     else:
@@ -310,8 +315,43 @@ class Projection:
             return dict(status="invalid")
 
 
+def module_result(result, censored, policy):
+    """Explicit secret-bearing JSON disclosure, without invocation/internal data."""
+    if censored:
+        return dict(status="censored")
+    nodes = [0]
+
+    def copy(value, depth=0):
+        nodes[0] += 1
+        if depth > policy["max_depth"] or nodes[0] > policy["max_items"]:
+            raise ProjectionLimit()
+        projection_censorship(value)
+        if type(value) is dict:
+            return {key: copy(child, depth + 1) for key, child in value.items()
+                    if projection_key(key)}
+        if type(value) is list:
+            return [copy(child, depth + 1) for child in value]
+        require(value is None or type(value) in (str, int, float, bool))
+        if type(value) in (int, float):
+            require(math.isfinite(value) and abs(value) <= 9007199254740991)
+        return value
+
+    try:
+        value = copy(result)
+        text = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        if len(text.encode("ascii")) > policy["max_bytes"]:
+            raise ProjectionLimit()
+        return dict(status="complete", value={"module_result_json": text})
+    except ProjectionCensored:
+        return dict(status="censored")
+    except ProjectionLimit:
+        return dict(status="truncated", value={"module_result_json": "{}"})
+    except Exception:
+        return dict(status="invalid")
+
+
 class Evidence:
-    def __init__(self, frames, module, no_log, projection=None):
+    def __init__(self, frames, module, no_log, projection=None, disclosure=None):
         self.frames = frames
         self.module = module
         self.censored = no_log
@@ -324,6 +364,7 @@ class Evidence:
         self.statuses = []
         self.tasks = dict(ok=0, failed=0, unreachable=0, skipped=0)
         self.projection = projection
+        self.disclosure = disclosure
 
     def status(self, data, runner_config):
         # Starting data contains argv/env: never retain it or serialize it.
@@ -371,7 +412,9 @@ class Evidence:
             self.tasks[self.outcome] = 1
             self.frames.emit("task", outcome=self.outcome, changed=self.changed, censored=self.censored)
             if self.projection is not None:
-                selected = Projection(self.projection).reduce(result, self.censored)
+                selected = (module_result(result, self.censored, self.disclosure)
+                            if self.disclosure is not None and self.disclosure.get("kind") == "module_result"
+                            else Projection(self.projection).reduce(result, self.censored))
                 self.frames.emit("projection", projection=selected)
         elif kind == "playbook_on_stats":
             require(self.stats is None and self.outcome is not None)
@@ -702,7 +745,14 @@ def validate(spec):
     require(type(spec["schema"]) is int and spec["schema"] == 2)
     require(type(spec["invocation_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", spec["invocation_id"]))
     expected = spec["expected"]
-    if "playbook" in expected:
+    if expected.get("generic") is True:
+        keys(expected, ("generic", "module", "identity", "content_sha256", "generation",
+                        "policy_generation", "disclosure"))
+        require(type(expected["module"]) is str and len(expected["module"]) <= 256 and re.fullmatch(
+            r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){2,}", expected["module"]))
+        require(all(type(expected[key]) is str and re.fullmatch(r"[0-9a-f]{64}", expected[key])
+                    for key in ("generation", "policy_generation")))
+    elif "playbook" in expected:
         keys(expected, ("identity", "content_sha256", "playbook", "project_root"))
         # The content verifier owns canonical entry syntax before any dispatch.
         require(type(expected["playbook"]) is str
@@ -750,7 +800,7 @@ def validate(spec):
         keys(agent, ("mode",))
         require(agent["mode"] in ("inherit", "disabled"))
     require(type(spec["no_log"]) is bool and type(spec["arguments"]) is dict)
-    arguments(spec["arguments"])
+    arguments(spec["arguments"], generic=expected.get("generic") is True)
     require(type(spec["timeout_secs"]) in (int, float) and math.isfinite(spec["timeout_secs"])
             and 0 < spec["timeout_secs"])
     require(type(spec["scratch_bytes"]) is int and 0 < spec["scratch_bytes"] <= 64 * 1024 * 1024)
@@ -766,6 +816,11 @@ def selected_runtime(spec, workspace):
         spec["runtime"], role_request=any(key in spec["expected"] for key in ("role", "playbook")))
     expected = spec["expected"]
     require(observed == expected["identity"])
+    if expected.get("generic") is True:
+        inventory = namespace["generic_inventory"](roots)
+        require(inventory["content_sha256"] == expected["content_sha256"]
+                and expected["module"] in inventory["modules"])
+        return roots
     if "playbook" in expected:
         directory, content = namespace["playbook_content"](
             expected["playbook"], expected["project_root"], roots)
@@ -1008,7 +1063,8 @@ def main():
         evidence = (RoleEvidence(frames, spec["no_log"], spec["projection"],
                                  workspace / "project" / "playbook.yml")
                     if any(key in spec["expected"] for key in ("role", "playbook")) else
-                    Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"]))
+                    Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"],
+                             spec["expected"].get("disclosure")))
         if cancellation.requested():
             status = cancellation.reason
         else:

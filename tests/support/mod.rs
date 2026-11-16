@@ -259,7 +259,17 @@ pub fn quote(text: &str) -> String {
 }
 
 pub async fn run(command: &mut Command) -> Result<std::process::Output> {
-    // Only short credential/readiness helpers use output(), never the server command path.
+    run_bounded(command, Duration::from_secs(10)).await
+}
+
+pub async fn run_authoring(command: &mut Command) -> Result<std::process::Output> {
+    // The application enforces its 60-second authoring deadline; allow cleanup
+    // without applying the short credential/readiness helper deadline.
+    run_bounded(command, Duration::from_secs(90)).await
+}
+
+async fn run_bounded(command: &mut Command, limit: Duration) -> Result<std::process::Output> {
+    // Own and reap finite credential/readiness or offline-authoring helpers.
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -276,7 +286,7 @@ pub async fn run(command: &mut Command) -> Result<std::process::Output> {
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).await.map(|_| bytes)
     });
-    let status = match timeout(Duration::from_secs(10), child.wait()).await {
+    let status = match timeout(limit, child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
             child.kill().await?;

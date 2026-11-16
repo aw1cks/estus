@@ -1,0 +1,280 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "77bc80dcb117f2bfeee9c0b1a34d08f69d878063712768222f5985767aa1e1b5",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "interface": {
+          "name": "interface"
+        }
+      }
+    },
+    {
+      "kind": "argument",
+      "name": "operator_policy",
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "operator_policy": {
+          "type": "object",
+          "properties": {
+            "interface": {
+              "type": "string"
+            },
+            "mac": {
+              "type": "string"
+            },
+            "driver": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "interface",
+            "mac",
+            "driver"
+          ],
+          "additionalProperties": false
+        },
+        "interface": {
+          "type": "string",
+          "enum": [
+            "model0"
+          ]
+        }
+      },
+      "required": [
+        "target_python",
+        "operator_policy",
+        "interface"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "operator_policy": {
+          "aliases": {},
+          "properties": {
+            "interface": {
+              "aliases": {},
+              "properties": {}
+            },
+            "mac": {
+              "aliases": {},
+              "properties": {}
+            },
+            "driver": {
+              "aliases": {},
+              "properties": {}
+            }
+          }
+        },
+        "interface": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "enum": [
+              "model0"
+            ],
+            "maxLength": 15
+          }
+        },
+        "required": [
+          "interface"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "operator_policy": {
+          "interface": "model0",
+          "mac": "52:54:00:12:34:5a",
+          "driver": "estus_nic_model"
+        }
+      },
+      "input_map": {
+        "interface": "interface"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "interface": [
+          "mcp_result",
+          "interface"
+        ],
+        "driver": [
+          "mcp_result",
+          "driver"
+        ],
+        "scope": [
+          "mcp_result",
+          "scope"
+        ],
+        "vendor": [
+          "mcp_result",
+          "vendor"
+        ],
+        "part": [
+          "mcp_result",
+          "part"
+        ],
+        "temperature_c": [
+          "mcp_result",
+          "temperature_c"
+        ],
+        "voltage_v": [
+          "mcp_result",
+          "voltage_v"
+        ],
+        "tx_bias_ma": [
+          "mcp_result",
+          "tx_bias_ma"
+        ],
+        "tx_power_mw": [
+          "mcp_result",
+          "tx_power_mw"
+        ],
+        "rx_power_mw": [
+          "mcp_result",
+          "rx_power_mw"
+        ],
+        "source": [
+          "mcp_result",
+          "source"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "enum": [
+              "model0"
+            ],
+            "maxLength": 15
+          },
+          "driver": {
+            "type": "string",
+            "enum": [
+              "estus_nic_model"
+            ],
+            "maxLength": 32
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "software_model"
+            ],
+            "maxLength": 14
+          },
+          "vendor": {
+            "type": "string",
+            "enum": [
+              "ESTUS TEST"
+            ],
+            "maxLength": 16
+          },
+          "part": {
+            "type": "string",
+            "enum": [
+              "SIM-SFP-1"
+            ],
+            "maxLength": 16
+          },
+          "temperature_c": {
+            "type": "number",
+            "minimum": -128,
+            "maximum": 127.996
+          },
+          "voltage_v": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 6.5535
+          },
+          "tx_bias_ma": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 131.07
+          },
+          "tx_power_mw": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 6.5535
+          },
+          "rx_power_mw": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 6.5535
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 160
+          }
+        },
+        "required": [
+          "interface",
+          "driver",
+          "scope",
+          "vendor",
+          "part",
+          "temperature_c",
+          "voltage_v",
+          "tx_bias_ma",
+          "tx_power_mw",
+          "rx_power_mw",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

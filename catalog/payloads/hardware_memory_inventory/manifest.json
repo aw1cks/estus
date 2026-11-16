@@ -1,0 +1,208 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "588b49e85ee262c421b8c4059b96d666c033990a1454d9d5a20fc31a83430d8d",
+  "max_source_bytes": 1048576,
+  "argv": [],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_python"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {}
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "records": [
+          "mcp_result",
+          "records"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ],
+        "omitted_records": [
+          "mcp_result",
+          "omitted_records"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "truncated": {
+            "type": "boolean"
+          },
+          "omitted_records": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "maxItems": 256
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "handle": {
+                  "type": "string",
+                  "maxLength": 6
+                },
+                "array_handle": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "total_width": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "data_width": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "size": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "form_factor": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "set": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "locator": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "bank_locator": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "type": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "type_detail": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "speed": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "manufacturer": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "configured_speed": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "configured_voltage": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "populated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "handle"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 256
+          }
+        },
+        "required": [
+          "source",
+          "observed_at",
+          "unavailable",
+          "records"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}
