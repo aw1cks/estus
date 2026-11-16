@@ -265,7 +265,7 @@ impl Binding {
         );
         let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples"));
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog"));
         let root = tempfile::Builder::new()
             .prefix("estus-catalog-binding-")
             .tempdir()?;

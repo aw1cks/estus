@@ -32,7 +32,7 @@ pub fn bytes(value: &[u8]) -> Value {
 pub fn call(role: &str, function: &str, args: Value) -> Result<Value> {
     let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"));
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
     let request = serde_json::to_vec(&json!({"function": function, "args": args}))?;
     ensure!(request.len() <= 2097152, "payload request bound");
     let mut child =

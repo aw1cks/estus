@@ -15,7 +15,7 @@ use std::{
 
 fn canonical_catalog() -> Catalog {
     Catalog::load(Some(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"),
     ))
     .unwrap()
 }
@@ -225,7 +225,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     assert_eq!(listing["schema"], 2);
     assert_eq!(listing["version"], "6");
     let canonical: Value = serde_json::from_slice(
-        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/catalog.json")).unwrap(),
+        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json")).unwrap(),
     )
     .unwrap();
     let tools = listing["tools"].as_array().unwrap();

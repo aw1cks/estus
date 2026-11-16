@@ -4752,7 +4752,7 @@ tool_presets = []
 
     #[test]
     fn presets_are_pinned_inert_templates_not_authority_or_definition_grants() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
         let catalog = crate::catalog_assets::Catalog::load(Some(&root)).unwrap();
         let pin = format!("version={:?}", catalog.manifest().version);
         let inert = load(&format!("[catalog]\nroot={root:?}\n{pin}\n")).unwrap();

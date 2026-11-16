@@ -381,7 +381,7 @@ async fn installed_wheel_channels() -> Result<()> {
         "missing immutable Ansible bundle"
     );
     let canonical: Value = serde_json::from_slice(&fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/catalog.json"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json"),
     )?)?;
     let installed = Installed::new()?;
     let python = installed.python().await?;

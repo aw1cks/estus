@@ -11,14 +11,14 @@ let
     postInstall = ''
       catalog="$out/share/estus/catalog"
       mkdir -p "$catalog/roles"
-      install -m644 examples/catalog.json "$catalog/catalog.json"
-      for name in $(jq -r '.tools | keys[]' examples/catalog.json); do
-        install -m644 "examples/$name.toml" "$catalog/$name.toml"
+      install -m644 catalog/catalog.json "$catalog/catalog.json"
+      for name in $(jq -r '.tools | keys[]' catalog/catalog.json); do
+        install -m644 "catalog/$name.toml" "$catalog/$name.toml"
         while IFS= read -r source; do
-          relative="''${source#examples/}"
+          relative="''${source#catalog/}"
           mkdir -p "$catalog/$(dirname "$relative")"
           install -m644 "$source" "$catalog/$relative"
-        done < <(find "examples/roles/$name" -type f \
+        done < <(find "catalog/roles/$name" -type f \
           \( -name '*.yml' -o -name '*.yaml' -o -name '*.py' \
              -o -name '*.json' -o -name '*.toml' \))
       done

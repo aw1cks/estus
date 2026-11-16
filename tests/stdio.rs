@@ -4870,7 +4870,7 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
             }));
             let inspected = command(&[
                 "catalog", "--root",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/examples"),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/catalog"),
                 "inspect", "--site",
                 fixture.config_path.to_str().context("controller config path")?,
             ]).output().await?;

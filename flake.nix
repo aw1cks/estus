@@ -42,6 +42,7 @@
                 || (pkgs.lib.hasPrefix "${toString ./.}/src/" path
                   && pkgs.lib.hasSuffix ".py" path)
                 || pkgs.lib.hasPrefix "${toString ./.}/examples/" path
+                || pkgs.lib.hasPrefix "${toString ./.}/catalog/" path
                 || pkgs.lib.hasPrefix "${toString ./.}/vendor/openssh-sftp-client/" path
                 || pkgs.lib.hasPrefix "${toString ./.}/tests/catalog/fixtures/" path);
           };
@@ -138,7 +139,7 @@
           makeWrapper ${harness}/libexec/catalog "$out/bin/catalog-acceptance" \
             --set ESTUS_TEST_BINARY ${native}/bin/estus \
             --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
-            --set ESTUS_TEST_CATALOG_ASSETS ${commonArgs.src}/examples \
+            --set ESTUS_TEST_CATALOG_ASSETS ${commonArgs.src}/catalog \
             --set ESTUS_TEST_CATALOG_VM ${catalogVm}/bin/catalog-guest \
             --set ESTUS_TEST_CATALOG_LAB_VM ${catalogLabVm}/bin/catalog-lab-guest \
             --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \

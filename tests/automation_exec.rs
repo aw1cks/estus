@@ -449,7 +449,7 @@ async fn execution_boundary_inspection(
     }
     let output = command
         .args(["catalog", "--root"])
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"))
         .args(["inspect", "--site"])
         .arg(config)
         .kill_on_drop(true)
@@ -2027,11 +2027,11 @@ async fn real_host_summary_acceptance() -> Result<()> {
     let result: Result<()> = async {
         // Deploy the shipped role unchanged; only operator-private config paths,
         // selected controller runtime and target alias mapping are adapted.
-        let mut example: toml::Value = toml::from_str(include_str!("../examples/host_summary.toml"))?;
+        let mut example: toml::Value = toml::from_str(include_str!("../catalog/host_summary.toml"))?;
         let role = private.path().join("roles/host_summary");
         for (file, source) in [
-            ("meta/argument_specs.yml", include_str!("../examples/roles/host_summary/meta/argument_specs.yml")),
-            ("tasks/main.yml", include_str!("../examples/roles/host_summary/tasks/main.yml")),
+            ("meta/argument_specs.yml", include_str!("../catalog/roles/host_summary/meta/argument_specs.yml")),
+            ("tasks/main.yml", include_str!("../catalog/roles/host_summary/tasks/main.yml")),
         ] {
             let path = role.join(file);
             fs::create_dir_all(path.parent().context("role asset parent")?)?;
@@ -2771,20 +2771,20 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
     fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
     let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
     let result: Result<()> = async {
-        let mut example: toml::Value = toml::from_str(include_str!("../examples/cpu_stats.toml"))?;
+        let mut example: toml::Value = toml::from_str(include_str!("../catalog/cpu_stats.toml"))?;
         let role = private.path().join("roles/cpu_stats");
         for (file, source) in [
             (
                 "meta/argument_specs.yml",
-                include_str!("../examples/roles/cpu_stats/meta/argument_specs.yml"),
+                include_str!("../catalog/roles/cpu_stats/meta/argument_specs.yml"),
             ),
             (
                 "tasks/main.yml",
-                include_str!("../examples/roles/cpu_stats/tasks/main.yml"),
+                include_str!("../catalog/roles/cpu_stats/tasks/main.yml"),
             ),
             (
                 "files/collector.py",
-                include_str!("../examples/roles/cpu_stats/files/collector.py"),
+                include_str!("../catalog/roles/cpu_stats/files/collector.py"),
             ),
         ] {
             let path = role.join(file);
@@ -3529,16 +3529,16 @@ async fn real_memory_stats_acceptance() -> Result<()> {
     let result: Result<()> = async {
         // Shipped assets stay unchanged; only private operator bindings adapt.
         let mut example: toml::Value =
-            toml::from_str(include_str!("../examples/memory_stats.toml"))?;
+            toml::from_str(include_str!("../catalog/memory_stats.toml"))?;
         let role = private.path().join("roles/memory_stats");
         for (file, source) in [
             (
                 "meta/argument_specs.yml",
-                include_str!("../examples/roles/memory_stats/meta/argument_specs.yml"),
+                include_str!("../catalog/roles/memory_stats/meta/argument_specs.yml"),
             ),
             (
                 "tasks/main.yml",
-                include_str!("../examples/roles/memory_stats/tasks/main.yml"),
+                include_str!("../catalog/roles/memory_stats/tasks/main.yml"),
             ),
         ] {
             let path = role.join(file);

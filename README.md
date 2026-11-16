@@ -792,7 +792,17 @@ explicitly reports `operator_managed_not_observed`.
 Normal wheels and Nix packages include the versioned catalog: definitions,
 reviewed role sources and Python payloads. Ansible remains optional. Installing
 the package does **not** enable catalog tools or grant credentials or sudo.
-The repository's `examples/` tree is the canonical asset source.
+The repository's `catalog/` tree is the canonical shipped asset source;
+`examples/` contains demonstrations and deployment examples.
+
+Source-checkout migration: use `catalog/` for catalog roots and selected
+definitions/roles. Installed `_catalog` and `share/estus/catalog` layouts,
+inventory version6 and reviewed payload bytes are unchanged. Existing exports
+and persisted approval bundles remain valid when their recorded paths and content
+remain unchanged. Update configurations/authoring commands that explicitly name
+the old source root; if an approval's recorded source path changes, explicitly
+export, review and import again. Estus never rewrites or silently refreshes an
+approval. No obsolete source copy or compatibility symlink remains.
 
 ```sh
 estus catalog list
@@ -802,7 +812,7 @@ estus catalog export --preset linux-health --output ./health
 
 Listing and export need no SSH connection or Ansible runtime and work without a
 checkout. Normal launchers select their installed assets; development commands
-can use `estus catalog --root "$PWD/examples" list`. An explicit invalid root
+can use `estus catalog --root "$PWD/catalog" list`. An explicit invalid root
 fails rather than silently selecting another catalog.
 
 Catalog manifest/list format2 requires explicit qualification alongside
@@ -1031,8 +1041,8 @@ and their API demonstrations are different capabilities, not fact collectors.
 
 ## Opt-in Linux host summary
 
-[`examples/host_summary.toml`](examples/host_summary.toml) binds the reviewed
-[`host_summary` role](examples/roles/host_summary) to one ordinary SSH target.
+[`catalog/host_summary.toml`](catalog/host_summary.toml) binds the reviewed
+[`host_summary` role](catalog/roles/host_summary) to one ordinary SSH target.
 It is not enabled by default. This is an optional Ansible automation tool, not a
 native-only observer: install the wheel's `ansible` extra or select the Nix
 automation runtime, and provision `/usr/bin/python3` on the Linux target.
@@ -1056,7 +1066,7 @@ estus schema import-role host_summary \
   --role-path /etc/estus/roles/host_summary \
   --overlay host_summary.overlay.json \
   --output /etc/estus/host_summary.schema.json
-estus --config examples/host_summary.toml
+estus --config catalog/host_summary.toml
 ```
 
 Import does not execute the role. Review the generated snapshot; no preapproved
@@ -1096,8 +1106,8 @@ Docker-compatible backend. No host account, service or sudo policy is changed.
 
 ## Opt-in Linux CPU counters and topology
 
-[`examples/cpu_stats.toml`](examples/cpu_stats.toml) enables only the reviewed
-[`cpu_stats` role](examples/roles/cpu_stats), using the existing ordinary Ansible
+[`catalog/cpu_stats.toml`](catalog/cpu_stats.toml) enables only the reviewed
+[`cpu_stats` role](catalog/roles/cpu_stats), using the existing ordinary Ansible
 automation authority and actions-only profile. It is not enabled by default.
 Install the wheel's `ansible` extra or provision the Nix automation runtime, and
 install `/usr/bin/python3` on the Linux target. No packages are installed by the
@@ -1121,7 +1131,7 @@ estus schema import-role cpu_stats \
   --role-path /etc/estus/roles/cpu_stats \
   --overlay cpu_stats.overlay.json \
   --output /etc/estus/cpu_stats.schema.json
-estus --config examples/cpu_stats.toml
+estus --config catalog/cpu_stats.toml
 ```
 
 The example permits only `server`, read effects and a20-second execution budget.
@@ -1191,8 +1201,8 @@ Accounting and topology semantics follow the kernel's
 
 ## Opt-in Linux memory gauges and VM counters
 
-[`examples/memory_stats.toml`](examples/memory_stats.toml) enables only the
-reviewed [`memory_stats` role](examples/roles/memory_stats), through the existing
+[`catalog/memory_stats.toml`](catalog/memory_stats.toml) enables only the
+reviewed [`memory_stats` role](catalog/roles/memory_stats), through the existing
 ordinary Ansible automation authority and actions-only profile. It is disabled
 by default. Install the wheel's `ansible` extra or provision the Nix automation
 runtime, and provision `/usr/bin/python3` on the Linux target. The tool installs
@@ -1216,7 +1226,7 @@ estus schema import-role memory_stats \
   --role-path /etc/estus/roles/memory_stats \
   --overlay memory_stats.overlay.json \
   --output /etc/estus/memory_stats.schema.json
-estus --config examples/memory_stats.toml
+estus --config catalog/memory_stats.toml
 ```
 
 Import does not execute tasks. The example permits only `server`, read effects

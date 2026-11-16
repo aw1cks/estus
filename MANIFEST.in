@@ -1,230 +1,230 @@
 include Cargo.toml Cargo.lock setup.py
 recursive-include src *.rs *.py
 graft vendor/openssh-sftp-client
-include examples/catalog.json
-include examples/boot_clear_oneshot.toml
-recursive-include examples/roles/boot_clear_oneshot *.yml *.yaml *.py *.json *.toml
-include examples/boot_entries_list.toml
-recursive-include examples/roles/boot_entries_list *.yml *.yaml *.py *.json *.toml
-include examples/boot_entry_get.toml
-recursive-include examples/roles/boot_entry_get *.yml *.yaml *.py *.json *.toml
-include examples/boot_set_default.toml
-recursive-include examples/roles/boot_set_default *.yml *.yaml *.py *.json *.toml
-include examples/boot_set_oneshot.toml
-recursive-include examples/roles/boot_set_oneshot *.yml *.yaml *.py *.json *.toml
-include examples/boot_status.toml
-recursive-include examples/roles/boot_status *.yml *.yaml *.py *.json *.toml
-include examples/cgroup_processes.toml
-recursive-include examples/roles/cgroup_processes *.yml *.yaml *.py *.json *.toml
-include examples/cgroup_sample.toml
-recursive-include examples/roles/cgroup_sample *.yml *.yaml *.py *.json *.toml
-include examples/cgroup_stats.toml
-recursive-include examples/roles/cgroup_stats *.yml *.yaml *.py *.json *.toml
-include examples/cgroup_tree.toml
-recursive-include examples/roles/cgroup_tree *.yml *.yaml *.py *.json *.toml
-include examples/cpu_stats.toml
-recursive-include examples/roles/cpu_stats *.yml *.yaml *.py *.json *.toml
-include examples/device_attributes_get.toml
-recursive-include examples/roles/device_attributes_get *.yml *.yaml *.py *.json *.toml
-include examples/dns_lookup.toml
-recursive-include examples/roles/dns_lookup *.yml *.yaml *.py *.json *.toml
-include examples/filesystem_usage_get.toml
-recursive-include examples/roles/filesystem_usage_get *.yml *.yaml *.py *.json *.toml
-include examples/hardware_identifiers_get.toml
-recursive-include examples/roles/hardware_identifiers_get *.yml *.yaml *.py *.json *.toml
-include examples/hardware_memory_inventory.toml
-recursive-include examples/roles/hardware_memory_inventory *.yml *.yaml *.py *.json *.toml
-include examples/hardware_slots_list.toml
-recursive-include examples/roles/hardware_slots_list *.yml *.yaml *.py *.json *.toml
-include examples/hardware_system_get.toml
-recursive-include examples/roles/hardware_system_get *.yml *.yaml *.py *.json *.toml
-include examples/host_reboot.toml
-recursive-include examples/roles/host_reboot *.yml *.yaml *.py *.json *.toml
-include examples/host_summary.toml
-recursive-include examples/roles/host_summary *.yml *.yaml *.py *.json *.toml
-include examples/icmp_probe.toml
-recursive-include examples/roles/icmp_probe *.yml *.yaml *.py *.json *.toml
-include examples/journal_boots_list.toml
-recursive-include examples/roles/journal_boots_list *.yml *.yaml *.py *.json *.toml
-include examples/journal_read.toml
-recursive-include examples/roles/journal_read *.yml *.yaml *.py *.json *.toml
-include examples/journal_usage_get.toml
-recursive-include examples/roles/journal_usage_get *.yml *.yaml *.py *.json *.toml
-include examples/kernel_log_read.toml
-recursive-include examples/roles/kernel_log_read *.yml *.yaml *.py *.json *.toml
-include examples/kernel_module_get.toml
-recursive-include examples/roles/kernel_module_get *.yml *.yaml *.py *.json *.toml
-include examples/kernel_module_load.toml
-recursive-include examples/roles/kernel_module_load *.yml *.yaml *.py *.json *.toml
-include examples/kernel_module_load_plan.toml
-recursive-include examples/roles/kernel_module_load_plan *.yml *.yaml *.py *.json *.toml
-include examples/kernel_module_parameter_set.toml
-recursive-include examples/roles/kernel_module_parameter_set *.yml *.yaml *.py *.json *.toml
-include examples/kernel_module_parameters_get.toml
-recursive-include examples/roles/kernel_module_parameters_get *.yml *.yaml *.py *.json *.toml
-include examples/kernel_module_unload.toml
-recursive-include examples/roles/kernel_module_unload *.yml *.yaml *.py *.json *.toml
-include examples/kernel_modules_list.toml
-recursive-include examples/roles/kernel_modules_list *.yml *.yaml *.py *.json *.toml
-include examples/kernel_state_get.toml
-recursive-include examples/roles/kernel_state_get *.yml *.yaml *.py *.json *.toml
-include examples/memory_stats.toml
-recursive-include examples/roles/memory_stats *.yml *.yaml *.py *.json *.toml
-include examples/network_address_add.toml
-recursive-include examples/roles/network_address_add *.yml *.yaml *.py *.json *.toml
-include examples/network_address_remove.toml
-recursive-include examples/roles/network_address_remove *.yml *.yaml *.py *.json *.toml
-include examples/network_addresses_list.toml
-recursive-include examples/roles/network_addresses_list *.yml *.yaml *.py *.json *.toml
-include examples/network_device_get.toml
-recursive-include examples/roles/network_device_get *.yml *.yaml *.py *.json *.toml
-include examples/network_interface_stats.toml
-recursive-include examples/roles/network_interface_stats *.yml *.yaml *.py *.json *.toml
-include examples/network_link_down.toml
-recursive-include examples/roles/network_link_down *.yml *.yaml *.py *.json *.toml
-include examples/network_link_up.toml
-recursive-include examples/roles/network_link_up *.yml *.yaml *.py *.json *.toml
-include examples/network_links_list.toml
-recursive-include examples/roles/network_links_list *.yml *.yaml *.py *.json *.toml
-include examples/network_namespaces_list.toml
-recursive-include examples/roles/network_namespaces_list *.yml *.yaml *.py *.json *.toml
-include examples/network_neighbor_remove.toml
-recursive-include examples/roles/network_neighbor_remove *.yml *.yaml *.py *.json *.toml
-include examples/network_neighbors_list.toml
-recursive-include examples/roles/network_neighbors_list *.yml *.yaml *.py *.json *.toml
-include examples/network_path_probe.toml
-recursive-include examples/roles/network_path_probe *.yml *.yaml *.py *.json *.toml
-include examples/network_route_add.toml
-recursive-include examples/roles/network_route_add *.yml *.yaml *.py *.json *.toml
-include examples/network_route_lookup.toml
-recursive-include examples/roles/network_route_lookup *.yml *.yaml *.py *.json *.toml
-include examples/network_route_remove.toml
-recursive-include examples/roles/network_route_remove *.yml *.yaml *.py *.json *.toml
-include examples/network_routes_list.toml
-recursive-include examples/roles/network_routes_list *.yml *.yaml *.py *.json *.toml
-include examples/network_rules_list.toml
-recursive-include examples/roles/network_rules_list *.yml *.yaml *.py *.json *.toml
-include examples/network_sockets_list.toml
-recursive-include examples/roles/network_sockets_list *.yml *.yaml *.py *.json *.toml
-include examples/nic_channels_get.toml
-recursive-include examples/roles/nic_channels_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_channels_set.toml
-recursive-include examples/roles/nic_channels_set *.yml *.yaml *.py *.json *.toml
-include examples/nic_coalesce_get.toml
-recursive-include examples/roles/nic_coalesce_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_coalesce_set.toml
-recursive-include examples/roles/nic_coalesce_set *.yml *.yaml *.py *.json *.toml
-include examples/nic_features_get.toml
-recursive-include examples/roles/nic_features_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_features_set.toml
-recursive-include examples/roles/nic_features_set *.yml *.yaml *.py *.json *.toml
-include examples/nic_link_get.toml
-recursive-include examples/roles/nic_link_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_pause_get.toml
-recursive-include examples/roles/nic_pause_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_pause_set.toml
-recursive-include examples/roles/nic_pause_set *.yml *.yaml *.py *.json *.toml
-include examples/nic_rings_get.toml
-recursive-include examples/roles/nic_rings_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_rings_set.toml
-recursive-include examples/roles/nic_rings_set *.yml *.yaml *.py *.json *.toml
-include examples/nic_rss_get.toml
-recursive-include examples/roles/nic_rss_get *.yml *.yaml *.py *.json *.toml
-include examples/nic_rss_set.toml
-recursive-include examples/roles/nic_rss_set *.yml *.yaml *.py *.json *.toml
-include examples/nic_stats_get.toml
-recursive-include examples/roles/nic_stats_get *.yml *.yaml *.py *.json *.toml
-include examples/package_get.toml
-recursive-include examples/roles/package_get *.yml *.yaml *.py *.json *.toml
-include examples/package_repository_change.toml
-recursive-include examples/roles/package_repository_change *.yml *.yaml *.py *.json *.toml
-include examples/package_repository_refresh.toml
-recursive-include examples/roles/package_repository_refresh *.yml *.yaml *.py *.json *.toml
-include examples/packages_install.toml
-recursive-include examples/roles/packages_install *.yml *.yaml *.py *.json *.toml
-include examples/packages_list.toml
-recursive-include examples/roles/packages_list *.yml *.yaml *.py *.json *.toml
-include examples/packages_remove.toml
-recursive-include examples/roles/packages_remove *.yml *.yaml *.py *.json *.toml
-include examples/packages_updates_list.toml
-recursive-include examples/roles/packages_updates_list *.yml *.yaml *.py *.json *.toml
-include examples/packages_upgrade.toml
-recursive-include examples/roles/packages_upgrade *.yml *.yaml *.py *.json *.toml
-include examples/pci_device_get.toml
-recursive-include examples/roles/pci_device_get *.yml *.yaml *.py *.json *.toml
-include examples/pci_devices_list.toml
-recursive-include examples/roles/pci_devices_list *.yml *.yaml *.py *.json *.toml
-include examples/pci_driver_binding_get.toml
-recursive-include examples/roles/pci_driver_binding_get *.yml *.yaml *.py *.json *.toml
-include examples/pci_iommu_group_get.toml
-recursive-include examples/roles/pci_iommu_group_get *.yml *.yaml *.py *.json *.toml
-include examples/pci_topology_get.toml
-recursive-include examples/roles/pci_topology_get *.yml *.yaml *.py *.json *.toml
-include examples/pressure_get.toml
-recursive-include examples/roles/pressure_get *.yml *.yaml *.py *.json *.toml
-include examples/process_fds_list.toml
-recursive-include examples/roles/process_fds_list *.yml *.yaml *.py *.json *.toml
-include examples/process_get.toml
-recursive-include examples/roles/process_get *.yml *.yaml *.py *.json *.toml
-include examples/processes_list.toml
-recursive-include examples/roles/processes_list *.yml *.yaml *.py *.json *.toml
-include examples/storage_device_get.toml
-recursive-include examples/roles/storage_device_get *.yml *.yaml *.py *.json *.toml
-include examples/storage_device_health_get.toml
-recursive-include examples/roles/storage_device_health_get *.yml *.yaml *.py *.json *.toml
-include examples/storage_devices_list.toml
-recursive-include examples/roles/storage_devices_list *.yml *.yaml *.py *.json *.toml
-include examples/storage_mounts_list.toml
-recursive-include examples/roles/storage_mounts_list *.yml *.yaml *.py *.json *.toml
-include examples/storage_raid_status.toml
-recursive-include examples/roles/storage_raid_status *.yml *.yaml *.py *.json *.toml
-include examples/sysctl_config_set.toml
-recursive-include examples/roles/sysctl_config_set *.yml *.yaml *.py *.json *.toml
-include examples/sysctl_get.toml
-recursive-include examples/roles/sysctl_get *.yml *.yaml *.py *.json *.toml
-include examples/sysctl_set_runtime.toml
-recursive-include examples/roles/sysctl_set_runtime *.yml *.yaml *.py *.json *.toml
-include examples/systemd_jobs_list.toml
-recursive-include examples/roles/systemd_jobs_list *.yml *.yaml *.py *.json *.toml
-include examples/systemd_manager_reload.toml
-recursive-include examples/roles/systemd_manager_reload *.yml *.yaml *.py *.json *.toml
-include examples/systemd_sockets_list.toml
-recursive-include examples/roles/systemd_sockets_list *.yml *.yaml *.py *.json *.toml
-include examples/systemd_timers_list.toml
-recursive-include examples/roles/systemd_timers_list *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_config_read.toml
-recursive-include examples/roles/systemd_unit_config_read *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_dependencies.toml
-recursive-include examples/roles/systemd_unit_dependencies *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_disable.toml
-recursive-include examples/roles/systemd_unit_disable *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_enable.toml
-recursive-include examples/roles/systemd_unit_enable *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_get.toml
-recursive-include examples/roles/systemd_unit_get *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_mask.toml
-recursive-include examples/roles/systemd_unit_mask *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_reload.toml
-recursive-include examples/roles/systemd_unit_reload *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_reset_failed.toml
-recursive-include examples/roles/systemd_unit_reset_failed *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_restart.toml
-recursive-include examples/roles/systemd_unit_restart *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_set_runtime_limits.toml
-recursive-include examples/roles/systemd_unit_set_runtime_limits *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_signal.toml
-recursive-include examples/roles/systemd_unit_signal *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_start.toml
-recursive-include examples/roles/systemd_unit_start *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_stop.toml
-recursive-include examples/roles/systemd_unit_stop *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_try_restart.toml
-recursive-include examples/roles/systemd_unit_try_restart *.yml *.yaml *.py *.json *.toml
-include examples/systemd_unit_unmask.toml
-recursive-include examples/roles/systemd_unit_unmask *.yml *.yaml *.py *.json *.toml
-include examples/systemd_units_list.toml
-recursive-include examples/roles/systemd_units_list *.yml *.yaml *.py *.json *.toml
-include examples/tcp_connect_probe.toml
-recursive-include examples/roles/tcp_connect_probe *.yml *.yaml *.py *.json *.toml
-include examples/time_sync_status.toml
-recursive-include examples/roles/time_sync_status *.yml *.yaml *.py *.json *.toml
+include catalog/catalog.json
+include catalog/boot_clear_oneshot.toml
+recursive-include catalog/roles/boot_clear_oneshot *.yml *.yaml *.py *.json *.toml
+include catalog/boot_entries_list.toml
+recursive-include catalog/roles/boot_entries_list *.yml *.yaml *.py *.json *.toml
+include catalog/boot_entry_get.toml
+recursive-include catalog/roles/boot_entry_get *.yml *.yaml *.py *.json *.toml
+include catalog/boot_set_default.toml
+recursive-include catalog/roles/boot_set_default *.yml *.yaml *.py *.json *.toml
+include catalog/boot_set_oneshot.toml
+recursive-include catalog/roles/boot_set_oneshot *.yml *.yaml *.py *.json *.toml
+include catalog/boot_status.toml
+recursive-include catalog/roles/boot_status *.yml *.yaml *.py *.json *.toml
+include catalog/cgroup_processes.toml
+recursive-include catalog/roles/cgroup_processes *.yml *.yaml *.py *.json *.toml
+include catalog/cgroup_sample.toml
+recursive-include catalog/roles/cgroup_sample *.yml *.yaml *.py *.json *.toml
+include catalog/cgroup_stats.toml
+recursive-include catalog/roles/cgroup_stats *.yml *.yaml *.py *.json *.toml
+include catalog/cgroup_tree.toml
+recursive-include catalog/roles/cgroup_tree *.yml *.yaml *.py *.json *.toml
+include catalog/cpu_stats.toml
+recursive-include catalog/roles/cpu_stats *.yml *.yaml *.py *.json *.toml
+include catalog/device_attributes_get.toml
+recursive-include catalog/roles/device_attributes_get *.yml *.yaml *.py *.json *.toml
+include catalog/dns_lookup.toml
+recursive-include catalog/roles/dns_lookup *.yml *.yaml *.py *.json *.toml
+include catalog/filesystem_usage_get.toml
+recursive-include catalog/roles/filesystem_usage_get *.yml *.yaml *.py *.json *.toml
+include catalog/hardware_identifiers_get.toml
+recursive-include catalog/roles/hardware_identifiers_get *.yml *.yaml *.py *.json *.toml
+include catalog/hardware_memory_inventory.toml
+recursive-include catalog/roles/hardware_memory_inventory *.yml *.yaml *.py *.json *.toml
+include catalog/hardware_slots_list.toml
+recursive-include catalog/roles/hardware_slots_list *.yml *.yaml *.py *.json *.toml
+include catalog/hardware_system_get.toml
+recursive-include catalog/roles/hardware_system_get *.yml *.yaml *.py *.json *.toml
+include catalog/host_reboot.toml
+recursive-include catalog/roles/host_reboot *.yml *.yaml *.py *.json *.toml
+include catalog/host_summary.toml
+recursive-include catalog/roles/host_summary *.yml *.yaml *.py *.json *.toml
+include catalog/icmp_probe.toml
+recursive-include catalog/roles/icmp_probe *.yml *.yaml *.py *.json *.toml
+include catalog/journal_boots_list.toml
+recursive-include catalog/roles/journal_boots_list *.yml *.yaml *.py *.json *.toml
+include catalog/journal_read.toml
+recursive-include catalog/roles/journal_read *.yml *.yaml *.py *.json *.toml
+include catalog/journal_usage_get.toml
+recursive-include catalog/roles/journal_usage_get *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_log_read.toml
+recursive-include catalog/roles/kernel_log_read *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_module_get.toml
+recursive-include catalog/roles/kernel_module_get *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_module_load.toml
+recursive-include catalog/roles/kernel_module_load *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_module_load_plan.toml
+recursive-include catalog/roles/kernel_module_load_plan *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_module_parameter_set.toml
+recursive-include catalog/roles/kernel_module_parameter_set *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_module_parameters_get.toml
+recursive-include catalog/roles/kernel_module_parameters_get *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_module_unload.toml
+recursive-include catalog/roles/kernel_module_unload *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_modules_list.toml
+recursive-include catalog/roles/kernel_modules_list *.yml *.yaml *.py *.json *.toml
+include catalog/kernel_state_get.toml
+recursive-include catalog/roles/kernel_state_get *.yml *.yaml *.py *.json *.toml
+include catalog/memory_stats.toml
+recursive-include catalog/roles/memory_stats *.yml *.yaml *.py *.json *.toml
+include catalog/network_address_add.toml
+recursive-include catalog/roles/network_address_add *.yml *.yaml *.py *.json *.toml
+include catalog/network_address_remove.toml
+recursive-include catalog/roles/network_address_remove *.yml *.yaml *.py *.json *.toml
+include catalog/network_addresses_list.toml
+recursive-include catalog/roles/network_addresses_list *.yml *.yaml *.py *.json *.toml
+include catalog/network_device_get.toml
+recursive-include catalog/roles/network_device_get *.yml *.yaml *.py *.json *.toml
+include catalog/network_interface_stats.toml
+recursive-include catalog/roles/network_interface_stats *.yml *.yaml *.py *.json *.toml
+include catalog/network_link_down.toml
+recursive-include catalog/roles/network_link_down *.yml *.yaml *.py *.json *.toml
+include catalog/network_link_up.toml
+recursive-include catalog/roles/network_link_up *.yml *.yaml *.py *.json *.toml
+include catalog/network_links_list.toml
+recursive-include catalog/roles/network_links_list *.yml *.yaml *.py *.json *.toml
+include catalog/network_namespaces_list.toml
+recursive-include catalog/roles/network_namespaces_list *.yml *.yaml *.py *.json *.toml
+include catalog/network_neighbor_remove.toml
+recursive-include catalog/roles/network_neighbor_remove *.yml *.yaml *.py *.json *.toml
+include catalog/network_neighbors_list.toml
+recursive-include catalog/roles/network_neighbors_list *.yml *.yaml *.py *.json *.toml
+include catalog/network_path_probe.toml
+recursive-include catalog/roles/network_path_probe *.yml *.yaml *.py *.json *.toml
+include catalog/network_route_add.toml
+recursive-include catalog/roles/network_route_add *.yml *.yaml *.py *.json *.toml
+include catalog/network_route_lookup.toml
+recursive-include catalog/roles/network_route_lookup *.yml *.yaml *.py *.json *.toml
+include catalog/network_route_remove.toml
+recursive-include catalog/roles/network_route_remove *.yml *.yaml *.py *.json *.toml
+include catalog/network_routes_list.toml
+recursive-include catalog/roles/network_routes_list *.yml *.yaml *.py *.json *.toml
+include catalog/network_rules_list.toml
+recursive-include catalog/roles/network_rules_list *.yml *.yaml *.py *.json *.toml
+include catalog/network_sockets_list.toml
+recursive-include catalog/roles/network_sockets_list *.yml *.yaml *.py *.json *.toml
+include catalog/nic_channels_get.toml
+recursive-include catalog/roles/nic_channels_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_channels_set.toml
+recursive-include catalog/roles/nic_channels_set *.yml *.yaml *.py *.json *.toml
+include catalog/nic_coalesce_get.toml
+recursive-include catalog/roles/nic_coalesce_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_coalesce_set.toml
+recursive-include catalog/roles/nic_coalesce_set *.yml *.yaml *.py *.json *.toml
+include catalog/nic_features_get.toml
+recursive-include catalog/roles/nic_features_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_features_set.toml
+recursive-include catalog/roles/nic_features_set *.yml *.yaml *.py *.json *.toml
+include catalog/nic_link_get.toml
+recursive-include catalog/roles/nic_link_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_pause_get.toml
+recursive-include catalog/roles/nic_pause_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_pause_set.toml
+recursive-include catalog/roles/nic_pause_set *.yml *.yaml *.py *.json *.toml
+include catalog/nic_rings_get.toml
+recursive-include catalog/roles/nic_rings_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_rings_set.toml
+recursive-include catalog/roles/nic_rings_set *.yml *.yaml *.py *.json *.toml
+include catalog/nic_rss_get.toml
+recursive-include catalog/roles/nic_rss_get *.yml *.yaml *.py *.json *.toml
+include catalog/nic_rss_set.toml
+recursive-include catalog/roles/nic_rss_set *.yml *.yaml *.py *.json *.toml
+include catalog/nic_stats_get.toml
+recursive-include catalog/roles/nic_stats_get *.yml *.yaml *.py *.json *.toml
+include catalog/package_get.toml
+recursive-include catalog/roles/package_get *.yml *.yaml *.py *.json *.toml
+include catalog/package_repository_change.toml
+recursive-include catalog/roles/package_repository_change *.yml *.yaml *.py *.json *.toml
+include catalog/package_repository_refresh.toml
+recursive-include catalog/roles/package_repository_refresh *.yml *.yaml *.py *.json *.toml
+include catalog/packages_install.toml
+recursive-include catalog/roles/packages_install *.yml *.yaml *.py *.json *.toml
+include catalog/packages_list.toml
+recursive-include catalog/roles/packages_list *.yml *.yaml *.py *.json *.toml
+include catalog/packages_remove.toml
+recursive-include catalog/roles/packages_remove *.yml *.yaml *.py *.json *.toml
+include catalog/packages_updates_list.toml
+recursive-include catalog/roles/packages_updates_list *.yml *.yaml *.py *.json *.toml
+include catalog/packages_upgrade.toml
+recursive-include catalog/roles/packages_upgrade *.yml *.yaml *.py *.json *.toml
+include catalog/pci_device_get.toml
+recursive-include catalog/roles/pci_device_get *.yml *.yaml *.py *.json *.toml
+include catalog/pci_devices_list.toml
+recursive-include catalog/roles/pci_devices_list *.yml *.yaml *.py *.json *.toml
+include catalog/pci_driver_binding_get.toml
+recursive-include catalog/roles/pci_driver_binding_get *.yml *.yaml *.py *.json *.toml
+include catalog/pci_iommu_group_get.toml
+recursive-include catalog/roles/pci_iommu_group_get *.yml *.yaml *.py *.json *.toml
+include catalog/pci_topology_get.toml
+recursive-include catalog/roles/pci_topology_get *.yml *.yaml *.py *.json *.toml
+include catalog/pressure_get.toml
+recursive-include catalog/roles/pressure_get *.yml *.yaml *.py *.json *.toml
+include catalog/process_fds_list.toml
+recursive-include catalog/roles/process_fds_list *.yml *.yaml *.py *.json *.toml
+include catalog/process_get.toml
+recursive-include catalog/roles/process_get *.yml *.yaml *.py *.json *.toml
+include catalog/processes_list.toml
+recursive-include catalog/roles/processes_list *.yml *.yaml *.py *.json *.toml
+include catalog/storage_device_get.toml
+recursive-include catalog/roles/storage_device_get *.yml *.yaml *.py *.json *.toml
+include catalog/storage_device_health_get.toml
+recursive-include catalog/roles/storage_device_health_get *.yml *.yaml *.py *.json *.toml
+include catalog/storage_devices_list.toml
+recursive-include catalog/roles/storage_devices_list *.yml *.yaml *.py *.json *.toml
+include catalog/storage_mounts_list.toml
+recursive-include catalog/roles/storage_mounts_list *.yml *.yaml *.py *.json *.toml
+include catalog/storage_raid_status.toml
+recursive-include catalog/roles/storage_raid_status *.yml *.yaml *.py *.json *.toml
+include catalog/sysctl_config_set.toml
+recursive-include catalog/roles/sysctl_config_set *.yml *.yaml *.py *.json *.toml
+include catalog/sysctl_get.toml
+recursive-include catalog/roles/sysctl_get *.yml *.yaml *.py *.json *.toml
+include catalog/sysctl_set_runtime.toml
+recursive-include catalog/roles/sysctl_set_runtime *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_jobs_list.toml
+recursive-include catalog/roles/systemd_jobs_list *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_manager_reload.toml
+recursive-include catalog/roles/systemd_manager_reload *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_sockets_list.toml
+recursive-include catalog/roles/systemd_sockets_list *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_timers_list.toml
+recursive-include catalog/roles/systemd_timers_list *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_config_read.toml
+recursive-include catalog/roles/systemd_unit_config_read *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_dependencies.toml
+recursive-include catalog/roles/systemd_unit_dependencies *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_disable.toml
+recursive-include catalog/roles/systemd_unit_disable *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_enable.toml
+recursive-include catalog/roles/systemd_unit_enable *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_get.toml
+recursive-include catalog/roles/systemd_unit_get *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_mask.toml
+recursive-include catalog/roles/systemd_unit_mask *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_reload.toml
+recursive-include catalog/roles/systemd_unit_reload *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_reset_failed.toml
+recursive-include catalog/roles/systemd_unit_reset_failed *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_restart.toml
+recursive-include catalog/roles/systemd_unit_restart *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_set_runtime_limits.toml
+recursive-include catalog/roles/systemd_unit_set_runtime_limits *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_signal.toml
+recursive-include catalog/roles/systemd_unit_signal *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_start.toml
+recursive-include catalog/roles/systemd_unit_start *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_stop.toml
+recursive-include catalog/roles/systemd_unit_stop *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_try_restart.toml
+recursive-include catalog/roles/systemd_unit_try_restart *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_unit_unmask.toml
+recursive-include catalog/roles/systemd_unit_unmask *.yml *.yaml *.py *.json *.toml
+include catalog/systemd_units_list.toml
+recursive-include catalog/roles/systemd_units_list *.yml *.yaml *.py *.json *.toml
+include catalog/tcp_connect_probe.toml
+recursive-include catalog/roles/tcp_connect_probe *.yml *.yaml *.py *.json *.toml
+include catalog/time_sync_status.toml
+recursive-include catalog/roles/time_sync_status *.yml *.yaml *.py *.json *.toml

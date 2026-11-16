@@ -493,7 +493,7 @@ fn cpu_integer_arguments_reject_signs_whitespace_and_overflow() -> Result<()> {
 
 #[test]
 fn importing_bundled_payloads_cannot_observe_or_modify_the_target() -> Result<()> {
-    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
     let manifest: Value = serde_json::from_slice(&std::fs::read(assets.join("catalog.json"))?)?;
     let bridge = r#"import importlib.util, json, os, resource, signal, sys
 sys.dont_write_bytecode = True

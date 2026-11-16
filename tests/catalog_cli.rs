@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn assets() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog")
 }
 fn invoke(arguments: &[&std::ffi::OsStr]) -> Result<Output> {
     Ok(Command::new(env!("CARGO_BIN_EXE_estus"))

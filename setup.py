@@ -9,7 +9,7 @@ from setuptools.command.build_py import build_py
 
 
 def catalog_sources():
-    root = Path(__file__).resolve().parent / "examples"
+    root = Path(__file__).resolve().parent / "catalog"
     manifest = root / "catalog.json"
     data = json.loads(manifest.read_text(encoding="utf-8"))
     yield manifest, Path("catalog.json")

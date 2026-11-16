@@ -13,7 +13,7 @@ async fn command(base: &Path, arguments: &[&std::ffi::OsStr]) -> Result<()> {
     child
         .arg("catalog")
         .arg("--root")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"))
         .args(arguments);
     let output = support::run(&mut child).await?;
     ensure!(
