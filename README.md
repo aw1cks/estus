@@ -1531,6 +1531,9 @@ templates, captured observations and provenance live under `tests/fixtures/catal
 Their derivations live under `nix/tests/catalog/`; generated packages, indexes,
 rootfs and disks remain build outputs. Never trust the published fixture signing
 identity outside the disposable guest.
+`catalog-vm.nix` composes the explicit x86_64 Linux `guest.nix`, focused disk
+derivation and `launcher.nix` using host-selected QEMU/tools. Default and lab
+launchers retain per-run private disks, EFI state and keys.
 
 ### Explicit development preparation
 
