@@ -1022,7 +1022,51 @@ the separate `systemd_manager_reload` capability. Runtime changes do not imply
 persistence. Reboot scheduling is not confirmed reboot completion. Interrupted
 mutations are never automatically replayed and do not imply rollback.
 
-### Qualification
+### Four reviewed operational workflows
+
+These recipes are the narrow operational qualification set, not blanket approval
+of every catalog entry or site. The first three select canonical definitions and
+produce concrete runtime/content approvals through `catalog prepare`; their
+recipe TOML is not a runnable server configuration. Follow the public
+export/review/prepare/inspect/start commands in each recipe. Never copy an
+approval from another runtime or silently refresh one.
+
+| Workflow | Reviewed input | Independent confirmation |
+| --- | --- | --- |
+| Host inspection | `examples/workflows/health.toml` / `host_summary` | Actual boot identity, kernel, architecture and bounded uptime; no application-health or isolation assertion |
+| Service diagnosis | `examples/workflows/service-diagnosis.toml` / `systemd_unit_get` | Active/inactive/failed manager state and selected properties; state is not application health |
+| Controlled restart | `examples/workflows/service-restart.toml` / `systemd_unit_restart` | Selected unit PID/invocation changes; completion reports health not checked; cancellation is not rollback/replay |
+| Configuration replacement | `examples/workflows/config-replacement.toml` | Restricted SFTP, expected-digest read, complete old/new visibility, independent SHA-256 and new mode0600 inode |
+
+Catalog workflows expose only their reviewed named tool and non-executing
+discovery/output tools. Replacement deliberately uses `files-only`, not
+`actions-only`, with a dedicated root-owned chroot/forced-internal-SFTP boundary;
+only `/config` is writable in the disposable qualification target. The file
+profile is not itself a pathname sandbox. Replacement does not promise crash
+durability or compare-and-swap against concurrent writers.
+
+```sh
+nix run .#workflow-catalog-acceptance
+# Select an explicit DOCKER_HOST and matching deployment-fixture-image first:
+ESTUS_TEST_FIXTURE="$PWD/nix/result/fixtures/deployment-x86_64-linux" \
+  nix run .#workflow-files-acceptance
+```
+
+`workflow-acceptance` runs both components; matching `-msrv` entrypoints remain
+separate. Each scenario owns clean disposable state and verifies policy denial,
+setup diagnostics and/or interrupted/uncertain outcomes without a generic-shell
+escape hatch. A manager job may complete after cancellation; independently
+inspect it before deciding anything. A conservative failed replacement may leave
+a private stage: never automatically replay it or delete an unproven pathname.
+
+Recorded catalog scope: x86_64 Linux controller with CPython 3.14.8, Ansible Core
+2.21.5 and Runner 2.4.3; pinned disposable NixOS 26.11 x86_64 guest with Linux
+6.18.60. Replacement uses the Nix-built x86_64 Linux deployment image through an
+explicit Docker-compatible backend on Darwin 25 arm64. These fixture results do
+not qualify another site's identities, service health signals, storage durability
+or physical hardware.
+
+### Extended catalog qualification
 
 ```sh
 nix run .#catalog-acceptance-msrv

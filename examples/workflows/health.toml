@@ -1,0 +1,13 @@
+# Reviewed Linux SSH-process-view observation; NOT an application health assertion.
+# Export only this canonical tool, review its role, then prepare with a provisioned
+# site (plain destination, private 0700 workspace, installed Runner runtime).
+# Approval snapshots are produced by catalog prepare, never shipped here.
+# MCP: host_summary {"host":"plain","inputs":{}}
+tool = "host_summary"
+authority = "automation"
+#
+# estus catalog export --tool host_summary --output health-export
+# Review health-export/roles and tools.toml; no input/fixed policy changes needed.
+# estus catalog prepare --site provisioned-site.toml --definitions health-export/tools.toml --target plain --output health-reviewed
+# estus catalog inspect --site health-reviewed/estus.toml
+# estus --config health-reviewed/estus.toml

@@ -1,0 +1,20 @@
+# Reviewed configuration-replacement workflow: ordinary SFTP only, no exec routes.
+# Inert until an operator provisions this private SSH config and pinned host key.
+# The replacement alias MUST authenticate a dedicated chrooted internal-sftp
+# identity: root-owned chroot/sshd/authorized keys, no forwarding or user rc,
+# and only /config writable. Never use an unrestricted shell account here.
+# Paths are literal SFTP paths inside that OS boundary, not an Estus path sandbox.
+# Read /config/service.conf with expected_content_sha256, then explicitly call
+# ssh_replace_file with overwrite=true. Replacement publishes a NEW mode0600
+# inode; it does not preserve destination metadata or promise crash durability.
+# On remote_state_unknown, inspect independently; never automatically replay or
+# delete .estus-replace-* paths whose ownership/outcome is uncertain.
+profile = "files-only"
+destination_policy = "configured"
+
+[ssh]
+config_file = "/etc/estus/replacement_ssh_config"
+
+[targets.configuration]
+ssh_host = "replacement"
+profile = "files-only"

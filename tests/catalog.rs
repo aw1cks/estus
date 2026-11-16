@@ -164,4 +164,5 @@ mod tools {
     mod systemd_units_list;
     mod tcp_connect_probe;
     mod time_sync_status;
+    mod workflows;
 }

@@ -205,3 +205,246 @@ async fn separated_accounts_force_real_service_mcp_and_reap_owned_resources() ->
     removed?;
     Ok(())
 }
+
+/// File-profile qualification is scoped to this explicit OS-restricted identity.
+/// Catalog export/prepare are not applicable: these are native file routes, not
+/// catalog definitions or imported automation contracts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires real Linux deployment-fixture-image and explicit Docker-compatible daemon"]
+async fn configuration_replacement_workflow() -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let fixture = isolated::Fixture::start(isolated::ImageKind::Deployment).await?;
+    let scenario = async {
+        fixture.prepare_restricted_files(include_str!(
+            "../examples/workflows/config-replacement.toml"
+        )).await?;
+        let old_digest = hex::encode(Sha256::digest(b"version=old\n"));
+        let new_content = "version=reviewed\n";
+        let new_digest = hex::encode(Sha256::digest(new_content.as_bytes()));
+
+        // Independent direct SSH/SFTP operations use the SAME service credential,
+        // bypassing MCP policy. A poisoned writable directory cannot become a
+        // login home, authorized_keys, user rc, or service credential directory.
+        let boundary = fixture.primary_exec(indoc::indoc! {r#"
+            test "$(stat -c %u:%a /srv/estus-files)" = 0:755
+            test "$(stat -c %u:%a /srv/estus-files/config)" = 1202:700
+            test "$(stat -c %u /fixture/authorized_keys/estus-target)" = 0
+            test "$(stat -c %u /fixture/sshd_config)" = 0
+            if chroot --userspec=1201:1201 / /usr/bin/ssh \
+                -F /etc/estus/replacement_ssh_config -T replacement \
+                'touch /tmp/replacement-shell-escape' </dev/null \
+                > /tmp/replacement-exec-result 2>&1; then
+                echo 'forced SFTP unexpectedly executed a command' >&2
+                exit 1
+            fi
+            cat /tmp/replacement-exec-result
+            test ! -e /tmp/replacement-shell-escape
+            sftp=$(dirname "$(readlink -f /usr/bin/ssh)")/sftp
+            for path in /etc/estus/server.toml /../../etc/shadow /.ssh/authorized_keys; do
+                printf 'get %s /var/lib/estus-service/escaped\n' "$path" \
+                    > /var/lib/estus-service/boundary.batch
+                chown 1201:1201 /var/lib/estus-service/boundary.batch
+                if chroot --userspec=1201:1201 / "$sftp" \
+                    -F /etc/estus/replacement_ssh_config \
+                    -b /var/lib/estus-service/boundary.batch replacement \
+                    > /tmp/replacement-sftp-result 2>&1; then
+                    echo "SFTP escaped jail: $path" >&2
+                    exit 1
+                fi
+                test ! -e /var/lib/estus-service/escaped
+                cat /tmp/replacement-sftp-result
+            done
+        "#}).await?;
+        let boundary = String::from_utf8(boundary)?;
+        ensure!(boundary.contains("This service allows sftp connections only."),
+            "arbitrary command was not refused by forced internal-sftp: {boundary}");
+        ensure!(boundary.lines().filter(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("no such file") || line.contains("not found")
+        }).count() >= 3,
+            "outside-boundary SFTP probes did not reach the real server: {boundary}");
+
+        // Actual operator-visible offline inspection of the consumed recipe.
+        let inspected = fixture.primary_exec(
+            "chroot --userspec=1201:1201 / /opt/estus/bin/estus catalog inspect \
+             --site /etc/estus/server.toml",
+        ).await?;
+        let inspection: serde_json::Value = serde_json::from_slice(&inspected)?;
+        ensure!(inspection["global_native_execution"] == false
+            && inspection["global_native_file_read"] == true
+            && inspection["global_native_file_write"] == true
+            && inspection["tools"] == json!([]),
+            "offline inspection did not preserve the reviewed file-only authority: {inspection}");
+
+        // Actionable setup failure: an explicitly missing site file is diagnosed,
+        // not silently replaced by defaults or an ambient configuration.
+        let diagnostic = fixture.primary_exec(indoc::indoc! {r#"
+            if chroot --userspec=1201:1201 / /opt/estus/bin/estus \
+                --config /etc/estus/not-provisioned.toml </dev/null \
+                > /tmp/replacement-bad-stdout 2> /tmp/replacement-bad-stderr; then
+                echo 'missing configuration unexpectedly started' >&2
+                exit 1
+            fi
+            test ! -s /tmp/replacement-bad-stdout
+            cat /tmp/replacement-bad-stderr
+        "#}).await?;
+        let diagnostic = String::from_utf8(diagnostic)?;
+        ensure!(diagnostic.contains("config") && diagnostic.contains("cannot read explicitly selected TOML file"),
+            "missing private site lacks actionable diagnostic: {diagnostic}");
+        denied_os(&fixture, "cat /var/lib/estus-service/outbound_key").await?;
+        denied_os(&fixture, "printf bypass >> /etc/estus/server.toml").await?;
+
+        let client = support::Client::start_command(fixture.deployment_client_command(&[
+            "ssh", "-F", "/home/estus-client/ssh_config", "-T", "ingress",
+        ])?).await?;
+        let work = async {
+            let listed = timeout(Duration::from_secs(10), client.service.list_tools(None)).await??;
+            let names: std::collections::BTreeSet<_> =
+                listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
+            ensure!(names.contains("ssh_replace_file") && names.contains("ssh_read_file")
+                && names.contains("ssh_targets") && !names.contains("ssh_exec")
+                && !names.contains("ssh_run") && !names.contains("ssh_sudo"),
+                "file profile exposed unexpected command authority: {names:?}");
+            let targets = client.call("ssh_targets", json!({})).await?;
+            ensure!(targets["error"].is_null()
+                && targets["data"]["mode"] == "configured"
+                && targets["data"]["targets"].as_array().is_some_and(|rows|
+                    rows.len() == 1 && rows[0]["name"] == "configuration"),
+                "discovery did not restrict authority to the reviewed target: {targets}");
+            for (name, arguments) in [
+                ("ssh_exec", json!({"host":"configuration","command":"touch /tmp/replacement-generic"})),
+                ("ssh_run", json!({"host":"configuration","argv":["/usr/bin/touch","/tmp/replacement-generic"]})),
+            ] {
+                ensure!(timeout(Duration::from_secs(10),
+                    client.service.call_tool(support::params(name, arguments))).await?.is_err(),
+                    "generic shell escape published: {name}");
+            }
+            let foreign = client.call("ssh_replace_file", json!({
+                "host":"foreign","path":"/config/service.conf","content":"NEVER","overwrite":true,
+            })).await?;
+            ensure!(foreign["error"]["code"] == "policy_denied", "foreign target accepted: {foreign}");
+            for path in ["/.ssh/rc", "/.ssh/authorized_keys", "/etc/estus/server.toml"] {
+                let denied = client.call("ssh_replace_file", json!({
+                    "host":"configuration","path":path,"content":"NEVER","overwrite":true,
+                })).await?;
+                ensure!(denied["error"].is_object(), "writable authority escaped /config: {denied}");
+            }
+            let read = client.call("ssh_read_file", json!({
+                "host":"configuration","path":"/config/service.conf",
+                "expected_content_sha256":old_digest,
+            })).await?;
+            ensure!(read["error"].is_null() && read["data"]["content"] == "version=old\n"
+                && read["data"]["content_sha256"] == old_digest, "reviewed read failed: {read}");
+            let mismatch = client.call("ssh_read_file", json!({
+                "host":"configuration","path":"/config/service.conf",
+                "expected_content_sha256":"00".repeat(32),
+            })).await?;
+            ensure!(mismatch["error"]["code"] == "checksum_mismatch" && mismatch["data"].is_null(),
+                "expected-digest mismatch disclosed content: {mismatch}");
+
+            // An ordinary root-side reader observes only complete old/new files.
+            // Readiness is explicit; cleanup always signals and joins the reader.
+            let observer = fixture.primary_exec(indoc::indoc! {r#"
+                test "$(cat /srv/estus-files/config/service.conf)" = version=old
+                touch /tmp/replacement-reader-ready
+                while test ! -e /tmp/replacement-reader-done; do
+                    value=$(cat /srv/estus-files/config/service.conf)
+                    case "$value" in version=old|version=reviewed) ;; *) exit 1 ;; esac
+                done
+                test "$(cat /srv/estus-files/config/service.conf)" = version=reviewed
+            "#});
+            let operation = async {
+                let replaced = async {
+                    fixture.primary_exec(
+                        "while test ! -e /tmp/replacement-reader-ready; do sleep 0.01; done",
+                    ).await?;
+                    let replaced = client.call("ssh_replace_file", json!({
+                        "host":"configuration","path":"/config/service.conf",
+                        "content":new_content,"overwrite":true,
+                    })).await?;
+                    ensure!(replaced["error"].is_null()
+                        && replaced["data"]["bytes_written"] == new_content.len(),
+                        "atomic replacement failed: {replaced}");
+                    Ok::<_, anyhow::Error>(())
+                }.await;
+                let signalled = fixture.primary_exec("touch /tmp/replacement-reader-done").await;
+                replaced?;
+                signalled?;
+                Ok::<_, anyhow::Error>(())
+            };
+            let (observed, replaced) = tokio::join!(observer, operation);
+            observed?;
+            replaced?;
+            let oracle = fixture.primary_exec(indoc::indoc! {r#"
+                path=/srv/estus-files/config/service.conf
+                old=/srv/estus-files/config/old-config
+                test "$(cat "$path")" = version=reviewed
+                test "$(cat "$old")" = version=old
+                test "$(stat -c %i "$path")" != "$(stat -c %i "$old")"
+                test "$(stat -c %u:%g:%a "$path")" = 1202:1202:600
+                test "$(stat -c %a "$old")" = 644
+                set -- /srv/estus-files/config/.estus-replace-*
+                test ! -e "$1"
+                test ! -e /tmp/replacement-shell-escape
+                test ! -e /tmp/replacement-generic
+                sha256sum "$path"
+            "#}).await?;
+            ensure!(String::from_utf8(oracle)?.starts_with(&new_digest), "independent SHA256 differs");
+            let readback = client.call("ssh_read_file", json!({
+                "host":"configuration","path":"/config/service.conf",
+                "expected_content_sha256":new_digest,
+            })).await?;
+            ensure!(readback["error"].is_null() && readback["data"]["content"] == new_content,
+                "agent-visible replacement readback failed: {readback}");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let stopped = client.stop().await;
+        work?;
+        stopped?;
+
+        // Acknowledged real server rejection, NOT interruption or a lost ACK.
+        // Conservative uncertainty must survive; post-rename pathname cleanup
+        // is forbidden, so independently retain the one private orphan as evidence.
+        fixture.primary_exec(indoc::indoc! {r#"
+            mkdir /srv/estus-files/config/blocked.conf
+            printf 'preserved\n' > /srv/estus-files/config/blocked.conf/evidence
+            chown -R 1202:1202 /srv/estus-files/config/blocked.conf
+        "#}).await?;
+        let client = support::Client::start_command(fixture.deployment_client_command(&[
+            "ssh", "-F", "/home/estus-client/ssh_config", "-T", "ingress",
+        ])?).await?;
+        let rejected = async {
+            let reply = client.call("ssh_replace_file", json!({
+                "host":"configuration","path":"/config/blocked.conf",
+                "content":"version=rejected\n","overwrite":true,
+            })).await?;
+            ensure!(reply["data"].is_null() && reply["error"].is_object()
+                && reply["error"]["remote_state_unknown"] == true,
+                "failed mutation suppressed conservative uncertainty: {reply}");
+            let oracle = fixture.primary_exec(indoc::indoc! {r#"
+                test "$(cat /srv/estus-files/config/service.conf)" = version=reviewed
+                test "$(stat -c %u:%g:%a /srv/estus-files/config/service.conf)" = 1202:1202:600
+                test -d /srv/estus-files/config/blocked.conf
+                test "$(cat /srv/estus-files/config/blocked.conf/evidence)" = preserved
+                set -- /srv/estus-files/config/.estus-replace-*
+                test "$#" = 1
+                test -f "$1"
+                test "$(stat -c %u:%g:%a "$1")" = 1202:1202:600
+                test "$(cat "$1")" = version=rejected
+                sha256sum /srv/estus-files/config/service.conf
+            "#}).await?;
+            ensure!(String::from_utf8(oracle)?.starts_with(&new_digest),
+                "rejected rename changed destination or replayed publication");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        let stopped = client.stop().await;
+        rejected?;
+        stopped?;
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let removed = fixture.stop().await;
+    scenario?;
+    removed?;
+    Ok(())
+}

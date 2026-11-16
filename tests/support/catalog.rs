@@ -258,6 +258,112 @@ pub struct Binding {
 }
 
 impl Binding {
+    /// A broken explicitly selected runtime must fail authoring, not fall back.
+    pub async fn reject_workflow_runtime(&self) -> Result<()> {
+        let mut site: toml::Value = toml::from_str(&fs::read_to_string(self.root.path().join("site.toml"))?)?;
+        site["automation"]["runtime"] = self.root.path().join("missing-runtime").to_str().context("runtime path")?.into();
+        let site_path = self.root.path().join("invalid-site.toml");
+        fs::write(&site_path, toml::to_string(&site)?)?;
+        let output_path = self.root.path().join("invalid-prepared");
+        let mut command = workflow_command()?;
+        command.arg("prepare").arg("--site").arg(site_path)
+            .arg("--definitions").arg(self.root.path().join("export/tools.toml"))
+            .args(["--target", "plain"]).arg("--output").arg(&output_path);
+        let output = support::run(&mut command).await?;
+        ensure!(output.status.code() == Some(2) && output.stdout.is_empty() && !output_path.exists(),
+            "invalid selected site runtime fell back or retained partial preparation");
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(diagnostic["code"] == "runtime_unavailable" && diagnostic["phase"] == "runtime_import",
+            "setup failure must identify runtime provisioning/import repair: {diagnostic}");
+        Ok(())
+    }
+
+    /// Exercise offline export, explicit site-policy review, prepare, and inspect.
+    /// Recipes select canonical definitions; they never carry approval snapshots.
+    pub async fn prepare_workflow(base: &Path, recipe: &str) -> Result<Self> {
+        let recipe: toml::Value = toml::from_str(recipe)?;
+        let name = recipe["tool"].as_str().context("workflow tool")?;
+        let root = tempfile::Builder::new().prefix("estus-workflow-").tempdir()?;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
+        let export = root.path().join("export");
+        let mut command = workflow_command()?;
+        command.args(["export", "--tool", name, "--output"]).arg(&export);
+        workflow_output(&mut command).await?;
+        let definitions = export.join("tools.toml");
+        let mut document: toml::Value = toml::from_str(&fs::read_to_string(&definitions)?)?;
+        let tool = &mut document["tools"][name];
+        if let Some(units) = recipe.get("allowed_units") {
+            ensure!(!units.as_array().context("reviewed units")?.is_empty(), "empty unit policy");
+            tool["fixed_args"]["allowed_units"] = units.clone();
+            tool["input_schema"]["properties"]["unit"]["enum"] = units.clone();
+        }
+        let timeout_secs = tool["limits"]["timeout_secs"].as_integer().context("workflow timeout")? as u64;
+        let authority = recipe["authority"].as_str().context("reviewed workflow authority")?.to_owned();
+        ensure!(tool["authority"].as_str() == Some(authority.as_str()),
+            "canonical authority changed; workflow requires explicit review");
+        fs::write(&definitions, toml::to_string(&document)?)?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+        let mut site: toml::Value = toml::from_str(&fs::read_to_string(base)?)?;
+        site["profile"] = "actions-only".into();
+        site.as_table_mut().context("site")?.insert("enabled_tools".into(), toml::Value::try_from(json!([name]))?);
+        site["automation"].as_table_mut().context("automation")?.insert(
+            "runtime".into(), std::env::var("ESTUS_TEST_ANSIBLE_RUNTIME")
+                .context("set ESTUS_TEST_ANSIBLE_RUNTIME to pinned installed runtime")?.into());
+        site["automation"].as_table_mut().context("automation")?.insert(
+            "workspace_root".into(), workspace.to_str().context("workspace UTF8")?.into());
+        site["automation"].as_table_mut().context("automation")?.insert(
+            "targets".into(), toml::Value::try_from(json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}))?);
+        let site_path = root.path().join("site.toml");
+        fs::write(&site_path, toml::to_string(&site)?)?;
+        let prepared = root.path().join("prepared");
+        let mut command = workflow_command()?;
+        command.arg("prepare").arg("--site").arg(&site_path)
+            .arg("--definitions").arg(&definitions).args(["--target", "plain"])
+            .arg("--output").arg(&prepared);
+        let report = workflow_output(&mut command).await?;
+        ensure!(report["prepared"] == 1 && report["activated"] == false, "prepare did not explicitly approve one tool: {report}");
+        let config = prepared.join("estus.toml");
+        let mut command = workflow_command()?;
+        command.arg("inspect").arg("--site").arg(&config);
+        let inspected = workflow_output(&mut command).await?;
+        ensure!(inspected["global_native_execution"] == false
+            && inspected["global_native_file_read"] == false
+            && inspected["global_native_file_write"] == false, "workflow exposed native escape: {inspected}");
+        let tools = inspected["tools"].as_array().context("inspected tools")?;
+        ensure!(tools.len() == 1 && tools[0]["name"] == name && tools[0]["enabled"] == true
+            && tools[0]["authority"] == authority
+            && tools[0]["execution_location"] == "controller_and_remote"
+            && tools[0]["targets"] == json!([{"name":"plain","permitted":true}]),
+            "unexpected workflow authority/exposure: {inspected}");
+        let snapshot: Value = serde_json::from_slice(&fs::read(prepared.join("snapshots").join(format!("{name}.json")))?)?;
+        ensure!(snapshot["schema"] == 2, "prepare omitted real reviewed approval");
+        Ok(Self { root, config, workspace, name: name.into(), timeout_secs })
+    }
+
+    pub async fn inspect_workflow_list(&self) -> Result<()> {
+        let mut server = WireServer::start(&self.config)?;
+        let result: Result<()> = async {
+            server.initialize().await?;
+            let reply = server.request(2, "tools/list", json!({})).await?;
+            let tools = reply["result"]["tools"].as_array().context("workflow tools/list")?;
+            // These two non-executing protocol tools are always present in
+            // actions-only; neither grants generic shell or file access.
+            ensure!(tools.len() == 3 && tools.iter().all(|tool|
+                tool["name"] == self.name || tool["name"] == "ssh_targets" || tool["name"] == "ssh_read_output"),
+                "workflow tools/list escape: {reply}");
+            let published = tools.iter().find(|tool| tool["name"] == self.name).context("selected workflow publication")?;
+            let config: toml::Value = toml::from_str(&fs::read_to_string(&self.config)?)?;
+            ensure!(published["_meta"]["authority"].as_str() == config["tools"][self.name.as_str()]["authority"].as_str()
+                && published["_meta"]["execution_location"] == "controller_and_remote",
+                "workflow discovery authority/location differs from review: {published}");
+            Ok(())
+        }.await;
+        server.stop(None).await?;
+        result
+    }
+
     pub async fn install(base: &Path, name: &str, overrides: Value) -> Result<Self> {
         ensure!(
             !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
@@ -443,6 +549,30 @@ impl Binding {
         );
         result
     }
+}
+
+/// Deliberately no global --config: catalog export is an offline operation.
+fn workflow_command() -> Result<Command> {
+    let binary = std::env::var_os("ESTUS_TEST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(option_env!("ESTUS_TEST_BINARY").unwrap_or(env!("CARGO_BIN_EXE_estus"))));
+    let mut command = Command::new(support::executable(&binary)?);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("ESTUS_") {
+            command.env_remove(name);
+        }
+    }
+    let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog"));
+    command.arg("catalog").arg("--root").arg(assets).kill_on_drop(true);
+    Ok(command)
+}
+
+async fn workflow_output(command: &mut Command) -> Result<Value> {
+    let output = support::run(command).await?;
+    ensure!(output.status.success(), "workflow public CLI failed: {} {}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    serde_json::from_slice(&output.stdout).context("workflow CLI JSON")
 }
 
 fn copy_role(source: &Path, destination: &Path) -> Result<()> {

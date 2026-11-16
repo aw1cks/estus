@@ -987,6 +987,78 @@ impl Fixture {
         Ok(())
     }
 
+    /// Provision only the disposable target's config directory as file authority.
+    /// The supplied reviewed recipe is consumed verbatim; no fabricated approvals.
+    pub async fn prepare_restricted_files(&self, recipe: &str) -> Result<()> {
+        self.prepare_deployment().await?;
+        self.primary_exec(indoc! {r#"
+            install -d -o 0 -g 0 -m 0755 /srv /srv/estus-files
+            install -d -o 1202 -g 1202 -m 0700 /srv/estus-files/config
+            printf 'version=old\n' > /srv/estus-files/config/service.conf
+            chown 1202:1202 /srv/estus-files/config/service.conf
+            chmod 0644 /srv/estus-files/config/service.conf
+            ln /srv/estus-files/config/service.conf /srv/estus-files/config/old-config
+            # Home is the root-owned jail root, not the writable config directory.
+            sed -i 's|:/home/estus-target:|:/:|' /etc/passwd
+            printf 'restrict ' > /fixture/authorized_keys/estus-target
+            cat /var/lib/estus-service/outbound_key.pub >> /fixture/authorized_keys/estus-target
+            chown 0:0 /fixture/authorized_keys/estus-target
+            chmod 0644 /fixture/authorized_keys/estus-target
+            cat > /etc/estus/replacement_ssh_config <<'EOF'
+            Host replacement
+                HostName 127.0.0.1
+                Port 2222
+                User estus-target
+                IdentityFile /var/lib/estus-service/outbound_key
+                IdentityAgent none
+                IdentitiesOnly yes
+                BatchMode yes
+                StrictHostKeyChecking yes
+                UserKnownHostsFile /var/lib/estus-service/known_hosts
+                GlobalKnownHostsFile /dev/null
+                PasswordAuthentication no
+                KbdInteractiveAuthentication no
+                ControlMaster no
+                ControlPath none
+                ConnectTimeout 5
+                ConnectionAttempts 1
+            EOF
+            chown 0:1201 /etc/estus/replacement_ssh_config
+            chmod 0640 /etc/estus/replacement_ssh_config
+            cp /fixture/sshd_config /fixture/replacement-sshd-base
+            chmod 0600 /fixture/replacement-sshd-base
+        "#}).await?;
+        self.primary_exec(&format!(
+            "printf %s {} > /etc/estus/server.toml; \
+             chown 0:1201 /etc/estus/server.toml; chmod 0640 /etc/estus/server.toml",
+            quote(recipe),
+        )).await?;
+        self.restricted_files_policy().await
+    }
+
+    /// Change only the owned sshd policy, never a host user or daemon config.
+    /// Every new session remains forced internal-sftp, including failure cases.
+    pub async fn restricted_files_policy(&self) -> Result<()> {
+        self.primary_exec(indoc! {r#"
+            cp /fixture/replacement-sshd-base /fixture/sshd_config
+            cat >> /fixture/sshd_config <<'EOF'
+            Match User estus-target
+                ChrootDirectory /srv/estus-files
+                ForceCommand internal-sftp -d /config -u 0077
+                DisableForwarding yes
+                PermitTTY no
+                PermitUserRC no
+                PermitTunnel no
+            EOF
+            chown 0:0 /fixture/sshd_config
+            chmod 0600 /fixture/sshd_config
+            sshd=$(dirname "$(readlink -f /usr/bin/ssh)")/sshd
+            "$sshd" -t -f /fixture/sshd_config
+            kill -HUP "$(cat /run/sshd/sshd.pid)"
+        "#}).await?;
+        Ok(())
+    }
+
     /// All caller work, including SSH transport, runs under the disposable client UID.
     pub fn deployment_client_command(&self, args: &[&str]) -> Result<Command> {
         ensure!(

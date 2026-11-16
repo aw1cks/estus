@@ -73,9 +73,30 @@
           --set ESTUS_TEST_CATALOG_ASSETS ${commonArgs.src}/catalog \
           --set ESTUS_TEST_CATALOG_VM ${catalogVm}/bin/catalog-guest \
           --set ESTUS_TEST_CATALOG_LAB_VM ${catalogLabVm}/bin/catalog-lab-guest \
-          --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
+          --prefix PATH : ${pkgs.lib.makeBinPath ([ pkgs.openssh pkgs.coreutils ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ])} \
           --add-flags '--ignored --nocapture --test-threads=2'
       '';
+      workflowAcceptance = native: harness:
+        let
+          catalog = pkgs.writeShellScriptBin "workflow-catalog-acceptance" ''
+            exec ${catalogAcceptance native harness}/bin/catalog-acceptance workflows:: "$@"
+          '';
+          files = pkgs.runCommand "estus-workflow-files-acceptance" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p "$out/bin"
+            makeWrapper ${harness}/libexec/deployment_boundary "$out/bin/workflow-files-acceptance" \
+              --set ESTUS_TEST_BINARY ${native}/bin/estus \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils pkgs.bash pkgs.docker-client pkgs.gnutar ]} \
+              --add-flags '--ignored --exact configuration_replacement_workflow --nocapture'
+          '';
+          all = pkgs.writeShellScriptBin "workflow-acceptance" ''
+            set -eu
+            ${catalog}/bin/workflow-catalog-acceptance
+            exec ${files}/bin/workflow-files-acceptance "$@"
+          '';
+        in { inherit catalog files all; };
     in
     {
       packages = {
@@ -85,6 +106,8 @@
         automation-acceptance-msrv = automationAcceptance msrvBuild.package msrvBuild.acceptance automationMsrv;
         runner-acceptance = runnerAcceptance package acceptance;
         runner-acceptance-msrv = runnerAcceptance msrvBuild.package msrvBuild.acceptance;
+        workflow-acceptance = (workflowAcceptance package acceptance).all;
+        workflow-acceptance-msrv = (workflowAcceptance msrvBuild.package msrvBuild.acceptance).all;
       };
       apps.catalog-acceptance = {
         type = "app";
@@ -93,6 +116,30 @@
       apps.catalog-acceptance-msrv = {
         type = "app";
         program = "${catalogAcceptance msrvBuild.package msrvBuild.acceptance}/bin/catalog-acceptance";
+      };
+      apps.workflow-acceptance = {
+        type = "app";
+        program = "${(workflowAcceptance package acceptance).all}/bin/workflow-acceptance";
+      };
+      apps.workflow-acceptance-msrv = {
+        type = "app";
+        program = "${(workflowAcceptance msrvBuild.package msrvBuild.acceptance).all}/bin/workflow-acceptance";
+      };
+      apps.workflow-catalog-acceptance = {
+        type = "app";
+        program = "${(workflowAcceptance package acceptance).catalog}/bin/workflow-catalog-acceptance";
+      };
+      apps.workflow-catalog-acceptance-msrv = {
+        type = "app";
+        program = "${(workflowAcceptance msrvBuild.package msrvBuild.acceptance).catalog}/bin/workflow-catalog-acceptance";
+      };
+      apps.workflow-files-acceptance = {
+        type = "app";
+        program = "${(workflowAcceptance package acceptance).files}/bin/workflow-files-acceptance";
+      };
+      apps.workflow-files-acceptance-msrv = {
+        type = "app";
+        program = "${(workflowAcceptance msrvBuild.package msrvBuild.acceptance).files}/bin/workflow-files-acceptance";
       };
       apps.automation-acceptance = {
         type = "app";

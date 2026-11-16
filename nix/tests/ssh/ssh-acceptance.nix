@@ -9,12 +9,12 @@ craneLib.mkCargoDerivation (commonArgs // {
   # not a build-directory Cargo executable that disappears after installation.
   ESTUS_TEST_BINARY = "${package}/bin/estus";
   buildPhaseCargoCommand = ''
-    cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local --test controller --test doctor --test automation --test automation_exec --test wheel --test progress --test catalog --test catalog_distribution --test catalog_authoring \
+    cargo test --release --locked --no-run --test stdio --test ssh_e2e --test ssh_local --test controller --test doctor --test automation --test automation_exec --test wheel --test progress --test catalog --test catalog_distribution --test catalog_authoring --test deployment_boundary \
       --message-format=json-render-diagnostics > test-artifacts.json
   '';
   installPhaseCommand = ''
     mkdir -p "$out/bin" "$out/libexec"
-    for name in stdio ssh_e2e ssh_local controller doctor automation automation_exec wheel progress catalog catalog_distribution catalog_authoring; do
+    for name in stdio ssh_e2e ssh_local controller doctor automation automation_exec wheel progress catalog catalog_distribution catalog_authoring deployment_boundary; do
       executable=$(jq -ers --arg name "$name" '
         [.[] | select(.reason == "compiler-artifact" and .profile.test
           and .target.name == $name and .executable != null)]
