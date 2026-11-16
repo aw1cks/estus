@@ -11,4 +11,6 @@ prune target
 prune build
 prune dist
 prune nix
-exclude ESTUS_REVIEW.md
+# Markdown is opt-in, including files added by the vendor graft above.
+global-exclude *.[mM][dD]
+include README.md vendor/openssh-sftp-client/README.md
