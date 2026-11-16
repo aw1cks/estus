@@ -901,6 +901,12 @@ the two kmod utilities. These declarations are bound into the reviewed manifest.
 Existing snapshots do not acquire them automatically: export, review and prepare
 a fresh approval to adopt them.
 
+The eight native NIC setters (channels, rings, coalescing, pause, RSS, features,
+FEC and EEE) similarly bind `/usr/bin/ethtool` as a required executable. Missing
+utility discovery is distinct from an unsupported driver control or a failed
+readback: those remain explicit payload failures, never successful no-ops.
+Interface/MAC/driver checks and the original collector bytes remain unchanged.
+
 A missing utility fails before payload dispatch. A changed executable fingerprint
 rejects that invocation and invalidates its discovery entry; only a later explicit
 request may rediscover. This does not attest modprobe hooks, configuration or all
@@ -1212,6 +1218,30 @@ root-only fault controls for unsupported/read-error replies, rejected writes,
 accepted-but-unapplied writes, partial effects, delayed reads and malformed
 module data. Tests use real ethtool calls and Rust assertions, including
 independent readback and management-path survival.
+
+Native NIC mutation acceptance checks both the typed domain receipt and outer
+change evidence, plus ordinary UID1000 management-path survival. EEE fault cases
+observe the model's independent kernel setter counter: unsupported/read-error
+observations perform no write; rejected, unapplied and partially applied writes
+remain failed receipts without replay or rollback. Completed failure with
+`changed=null` does not establish unchanged device state.
+
+The persistent EEE session also removes and replaces `ethtool`, requiring cold
+prerequisite rejection and warm fingerprint rejection before any setter callback.
+A later explicit request can rediscover; an already-current request must not
+invoke the setter. This uses the actual utility and kernel callbacks, not a
+simulated command result:
+
+```sh
+nix run .#catalog-acceptance-msrv -- \
+  tools::nic_eee_set::nic_eee_set_requires_stable_ethtool --exact
+```
+
+Recorded native NIC wave: ten real guest scenarios and two FEC parser checks
+passed on a Darwin arm64 controller with disposable x86_64 Linux EFI targets and
+no selected Ansible runtime. This used the same documented `intremap=off` launch
+workaround. All eight setters retained their source and qualification labels;
+EEE remains a software model, and FEC readback is not physical-link validation.
 
 This is software configuration/API and decoding qualification—not physical
 power savings, peer negotiation, optical accuracy, arbitrary-driver support,

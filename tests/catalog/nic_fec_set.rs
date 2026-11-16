@@ -23,7 +23,7 @@ async fn assert_native_fec(guest: &catalog::Guest, mode: &str) -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM and pinned Runner runtime"]
+#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM"]
 async fn nic_fec_set() -> Result<()> {
     let guest = catalog::Guest::start_lab().await?;
     let result: Result<()> = async {
@@ -42,6 +42,7 @@ async fn nic_fec_set() -> Result<()> {
             "after": {"configured": ["rs"], "active": "rs"},
             "changed": true, "verified": true, "persistence": "runtime_only"
         }), "complete verified FEC mutation projection: {value}");
+        ensure!(reply["data"]["changed"] == true, "FEC change evidence lost");
         assert_native_fec(&guest, "RS").await?;
         let ordinary = guest.ordinary("/usr/bin/id -u; cat /sys/class/net/management0/operstate").await?;
         ensure!(ordinary.status.success() && ordinary.stdout == b"1000\nup\n", "ordinary management SSH must survive FEC tuning: {ordinary:?}");
@@ -53,6 +54,7 @@ async fn nic_fec_set() -> Result<()> {
             "after": {"configured": ["rs"], "active": "rs"},
             "changed": false, "verified": true, "persistence": "runtime_only"
         }), "already-current FEC request must be unchanged: {value}");
+        ensure!(noop["data"]["changed"] == false, "FEC no-op reported a change");
         assert_native_fec(&guest, "RS").await?;
         let reverse = binding.call(json!({"interface": "fec0", "mode": "off"})).await?;
         let value = catalog::projection(&reverse)?;
@@ -62,6 +64,7 @@ async fn nic_fec_set() -> Result<()> {
             "after": {"configured": ["off"], "active": "off"},
             "changed": true, "verified": true, "persistence": "runtime_only"
         }), "explicit reverse operation must really restore off: {value}");
+        ensure!(reverse["data"]["changed"] == true, "FEC reverse change evidence lost");
         assert_native_fec(&guest, "Off").await?;
         Ok(())
     }.await;

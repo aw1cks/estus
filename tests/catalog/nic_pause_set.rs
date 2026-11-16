@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM and pinned Runner runtime"]
+#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM"]
 async fn nic_pause_set() -> Result<()> {
     let guest = catalog::Guest::start_lab().await?;
     let result: Result<()> = async {
@@ -17,14 +17,17 @@ async fn nic_pause_set() -> Result<()> {
         binding.reject(json!({"interface": "management0", "rx": false, "tx": false})).await?;
         let reply = binding.call(json!({"interface": "pause0", "rx": false, "tx": false})).await?;
         let value = catalog::projection(&reply)?;
-        ensure!(value["changed"] == true && value["verified"] == true, "setter must perform a meaningful verified mutation: {value}");
+        ensure!(value["changed"] == true && value["verified"] == true && reply["data"]["changed"] == true, "setter must perform a meaningful verified mutation: {reply}");
         ensure!(value["before"] != value["after"], "setter only reported a no-op");
         let after = guest.shell(r#"set -e; /usr/bin/ethtool -a pause0"#).await?;
         ensure!(after.status.success(), "independent postcondition query failed");
         ensure!(["Autonegotiate:", "RX:", "TX:"].iter().all(|label| String::from_utf8_lossy(&after.stdout).lines().any(|line| line.split_whitespace().collect::<Vec<_>>() == [*label, "off"])), "independent postcondition mismatch: {:?}", after);
         ensure!(before.stdout != after.stdout, "independent driver setting did not change");
         let noop = binding.call(json!({"interface": "pause0", "rx": false, "tx": false})).await?;
-        ensure!(catalog::projection(&noop)?["changed"] == false, "already-current request must be unchanged");
+        ensure!(catalog::projection(&noop)?["changed"] == false && noop["data"]["changed"] == false, "already-current request must be unchanged: {noop}");
+        let alive = guest.ordinary("/usr/bin/id -u; cat /sys/class/net/management0/operstate").await?;
+        ensure!(alive.status.success() && alive.stdout == b"1000\nup\n",
+            "ordinary management path lost after pause change: {alive:?}");
         Ok(())
     }.await;
     let cleanup = guest.stop().await;
