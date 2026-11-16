@@ -27,18 +27,18 @@
         strictDeps = true;
         doCheck = true;
       };
-      defaultBuild = import ../rust-build.nix {
+      defaultBuild = import ../packages/rust-build.nix {
         inherit pkgs craneLib commonArgs;
       };
-      msrvBuild = import ../rust-build.nix {
+      msrvBuild = import ../packages/rust-build.nix {
         inherit pkgs;
         craneLib = msrvLib;
         commonArgs = commonArgs // { preBuild = "rustc --version"; };
         cargoTestExtraArgs = "--all-targets";
       };
       inherit (defaultBuild) package acceptance;
-      automationRuntime = import ../automation-runtime.nix { inherit pkgs; };
-      wheel = import ../wheel.nix { inherit pkgs; craneLib = msrvLib; };
+      automationRuntime = import ../packages/automation-runtime.nix { inherit pkgs sourceRoot; };
+      wheel = import ../packages/wheel.nix { inherit pkgs sourceRoot; craneLib = msrvLib; };
       withAutomation = native: pkgs.runCommand "estus-automation-${native.version}" {
         nativeBuildInputs = [ pkgs.makeWrapper ];
         meta.mainProgram = "estus";
@@ -49,8 +49,8 @@
       '';
       automation = withAutomation package;
       automationMsrv = withAutomation msrvBuild.package;
-      catalogVm = import ../catalog-vm.nix { inherit inputs; hostPkgs = pkgs; };
-      catalogLabVm = import ../catalog-vm.nix { inherit inputs; hostPkgs = pkgs; lab = true; };
+      catalogVm = import ../tests/catalog/catalog-vm.nix { inherit inputs sourceRoot; hostPkgs = pkgs; };
+      catalogLabVm = import ../tests/catalog/catalog-vm.nix { inherit inputs sourceRoot; hostPkgs = pkgs; lab = true; };
     in
     {
       _module.args.estusBuild = {
@@ -68,13 +68,13 @@
         catalog-vm = catalogVm;
         catalog-lab-vm = catalogLabVm;
       } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        ssh-fixture-image = import ../ssh-fixture.nix { inherit pkgs; };
-        ssh-automation-fixture-image = import ../ssh-fixture.nix {
-          inherit pkgs;
+        ssh-fixture-image = import ../tests/ssh/ssh-fixture.nix { inherit pkgs sourceRoot; };
+        ssh-automation-fixture-image = import ../tests/ssh/ssh-fixture.nix {
+          inherit pkgs sourceRoot;
           automation = true;
         };
-        deployment-fixture-image = import ../ssh-fixture.nix {
-          inherit pkgs;
+        deployment-fixture-image = import ../tests/ssh/ssh-fixture.nix {
+          inherit pkgs sourceRoot;
           servicePackage = package;
         };
       };

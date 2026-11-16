@@ -1,4 +1,4 @@
-{ pkgs, automation ? false, servicePackage ? null }:
+{ pkgs, sourceRoot, automation ? false, servicePackage ? null }:
 let
   inherit (pkgs) lib;
   commandPath = "/usr/bin:/bin:${pkgs.coreutils}/bin:${pkgs.dash}/bin";
@@ -79,12 +79,12 @@ let
       ln -s ${openssh}/bin/ssh-keygen "$out/usr/bin/ssh-keygen"
       ln -s ${pkgs.coreutils}/bin/env "$out/usr/bin/env"
       ln -s ${pkgs.gnused}/bin/sed "$out/usr/bin/sed"
-      cp ${../examples/separated-accounts/estus-ingress} "$out/usr/local/libexec/estus-ingress"
-      cp ${../examples/separated-accounts/estus-record-identity} "$out/usr/local/libexec/estus-record-identity"
+      cp ${sourceRoot + "/examples/separated-accounts/estus-ingress"} "$out/usr/local/libexec/estus-ingress"
+      cp ${sourceRoot + "/examples/separated-accounts/estus-record-identity"} "$out/usr/local/libexec/estus-record-identity"
       chmod 0755 "$out/usr/local/libexec/"*
-      cp ${../examples/separated-accounts/server.toml} "$out/fixture/deployment/server.toml"
-      cp ${../examples/separated-accounts/outbound_ssh_config} "$out/fixture/deployment/outbound_ssh_config"
-      cp ${../examples/separated-accounts/sshd_config} "$out/fixture/deployment/sshd_config"
+      cp ${sourceRoot + "/examples/separated-accounts/server.toml"} "$out/fixture/deployment/server.toml"
+      cp ${sourceRoot + "/examples/separated-accounts/outbound_ssh_config"} "$out/fixture/deployment/outbound_ssh_config"
+      cp ${sourceRoot + "/examples/separated-accounts/sshd_config"} "$out/fixture/deployment/sshd_config"
     ''}
     ${lib.optionalString automation "ln -s ${pkgs.python314}/bin/python3 \"$out/usr/bin/python3\"\n    "}cp ${sudo}/bin/sudo "$out/usr/bin/sudo"
     cat > "$out/etc/passwd" <<'EOF'

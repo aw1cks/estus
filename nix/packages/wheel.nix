@@ -1,7 +1,7 @@
-{ pkgs, craneLib }:
+{ pkgs, craneLib, sourceRoot }:
 let
   lib = pkgs.lib;
-  metadata = (lib.importTOML ../pyproject.toml).project;
+  metadata = (lib.importTOML (sourceRoot + "/pyproject.toml")).project;
   # Use the upstream backend wheel, not nixpkgs' older setuptools or a
   # second implementation of our project's packaging metadata.
   python = pkgs.python3.override {
@@ -31,9 +31,9 @@ craneLib.mkCargoDerivation {
   pname = "${metadata.name}-wheel";
   inherit (metadata) version;
   src = lib.cleanSourceWith {
-    src = ../.;
+    src = sourceRoot;
     filter = path: type:
-      let relative = lib.removePrefix "${toString ../.}/" path;
+      let relative = lib.removePrefix "${toString sourceRoot}/" path;
       in !builtins.elem relative [ "fuzz" "tests" ]
       && !lib.hasPrefix "tests/" relative && (
         craneLib.filterCargoSources path type

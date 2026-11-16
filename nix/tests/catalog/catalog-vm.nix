@@ -1,6 +1,7 @@
-{ inputs, hostPkgs, lab ? false }:
+{ inputs, hostPkgs, sourceRoot, lab ? false }:
 let
   packageFixture = import ./catalog-package-fixture.nix {
+    inherit sourceRoot;
     pkgs = import inputs.nixpkgs { system = "x86_64-linux"; };
   };
   guest = inputs.nixpkgs.lib.nixosSystem {
@@ -39,7 +40,7 @@ let
         nicModelModule = pkgs.stdenv.mkDerivation {
           pname = "estus-nic-model";
           version = "1";
-          src = pkgs.writeTextDir "estus_nic_model.c" (builtins.readFile ./catalog-nic-model.c);
+          src = pkgs.writeTextDir "estus_nic_model.c" (builtins.readFile (sourceRoot + "/nix/catalog-nic-model.c"));
           nativeBuildInputs = kernel.moduleBuildDependencies;
           buildPhase = ''
             printf 'obj-m := estus_nic_model.o\n' > Makefile

@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, sourceRoot }:
 let
   apt = pkgs.apt.overrideAttrs (old: {
     cmakeFlags = (old.cmakeFlags or [ ]) ++ [
@@ -23,7 +23,7 @@ let
     export GNUPGHOME="$TMPDIR/test-signing-key"
     mkdir -m 700 "$GNUPGHOME"
     # Checked-in unencrypted PUBLIC TEST KEY. Never trust this identity outside this disposable VM.
-    gpg --batch --import ${./catalog-package-fixture/test-only-signing-key.asc}
+    gpg --batch --import ${sourceRoot + "/nix/catalog-package-fixture/test-only-signing-key.asc"}
     mkdir -p "$out"/{etc/apt/sources.list.d,etc/apt/apt.conf.d,usr/share/keyrings,opt/estus-catalog,var/lib/dpkg/{info,updates,triggers},var/lib/apt/{lists/partial,periodic},var/cache/apt/archives/partial,var/log/apt}
     touch "$out/var/lib/dpkg/status" "$out/var/lib/dpkg/available" "$out/var/lib/dpkg/diversions" "$out/var/lib/dpkg/statoverride"
     gpg --batch --export > "$out/usr/share/keyrings/estus-catalog.gpg"

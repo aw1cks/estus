@@ -29,7 +29,7 @@ let
         --set ESTUS_CATALOG_ROOT "$out/share/estus/catalog"
     '';
   });
-  acceptance = import ./ssh-acceptance.nix {
+  acceptance = import ../tests/ssh/ssh-acceptance.nix {
     inherit pkgs craneLib commonArgs cargoArtifacts package;
     inherit controllerTestPrograms;
   };
