@@ -21,7 +21,9 @@
     "modules": [
       "json"
     ],
-    "executables": [],
+    "executables": [
+      "/usr/bin/nvme"
+    ],
     "paths": []
   },
   "contract": {

@@ -907,6 +907,15 @@ utility discovery is distinct from an unsupported driver control or a failed
 readback: those remain explicit payload failures, never successful no-ops.
 Interface/MAC/driver checks and the original collector bytes remain unchanged.
 
+Native NVMe health observation binds `/usr/bin/nvme` as a prerequisite. It reads
+the fixed controller's [raw SMART log](https://manpages.debian.org/testing/nvme-cli/nvme-smart-log.1.en.html),
+preserves wide counters as exact decimal strings, and omits the identity-guard
+serial from published telemetry. The MD RAID observer instead reads existing
+[kernel sysfs attributes](https://docs.kernel.org/admin-guide/md.html) under
+ordinary authority: it requires neither `mdadm` nor raw block-device access.
+Do not add changing array attributes or controller counters to discovery
+fingerprints; observations must remain fresh within an active MCP session.
+
 A missing utility fails before payload dispatch. A changed executable fingerprint
 rejects that invocation and invalidates its discovery entry; only a later explicit
 request may rediscover. This does not attest modprobe hooks, configuration or all
@@ -1242,6 +1251,19 @@ passed on a Darwin arm64 controller with disposable x86_64 Linux EFI targets and
 no selected Ansible runtime. This used the same documented `intremap=off` launch
 workaround. All eight setters retained their source and qualification labels;
 EEE remains a software model, and FEC readback is not physical-link validation.
+
+Recorded native storage wave: two real guest scenarios and five captured/boundary
+parser checks passed without an Ansible runtime. One MD session observed healthy,
+degraded and subsequently absent state; missing state failed rather than replaying
+cached telemetry or assembling an array. The NVMe session rejected missing
+`nvme-cli` before dispatch, recovered only on a later request, and matched changed
+I/O counters against independent controller queries. Both observations retained
+read-only change evidence and ordinary-access boundaries.
+
+This used disposable Linux MD/NVMe devices with the same documented launcher
+workaround. MD values remain non-atomic kernel-reported redundancy observations;
+NVMe values remain virtual-controller reports, not physical-media health verdicts.
+Collector bytes and existing qualification labels are unchanged.
 
 This is software configuration/API and decoding qualification—not physical
 power savings, peer negotiation, optical accuracy, arbitrary-driver support,

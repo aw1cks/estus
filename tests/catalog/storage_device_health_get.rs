@@ -13,6 +13,17 @@ fn counter(value: &Value) -> Result<u128> {
     ))
 }
 
+async fn health(client: &crate::support::Client) -> Result<Value> {
+    client
+        .call(
+            "storage_device_health_get",
+            json!({
+                "host":"plain", "inputs":{"device":"/dev/nvme0"}, "timeout_secs":30
+            }),
+        )
+        .await
+}
+
 async fn capture_smart(guest: &catalog::Guest, phase: &str) -> Result<()> {
     let raw = guest.shell("/usr/bin/nvme smart-log /dev/nvme0 --raw-binary | /usr/bin/python3 -c 'import sys; data=sys.stdin.buffer.read(513); print(data.hex()) if len(data)==512 else sys.exit(1)'").await?;
     ensure!(
@@ -27,7 +38,7 @@ async fn capture_smart(guest: &catalog::Guest, phase: &str) -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM and pinned Runner runtime"]
+#[ignore = "requires ESTUS_TEST_CATALOG_LAB_VM"]
 async fn storage_device_health_get() -> Result<()> {
     let guest = catalog::Guest::start_lab().await?;
     let result: Result<()> = async {
@@ -37,14 +48,36 @@ async fn storage_device_health_get() -> Result<()> {
         binding.reject(json!({"device":"/dev/vda"})).await?;
         binding.reject(json!({"device":"/dev/nvme0n1"})).await?;
         binding.reject(json!({"device":"/dev/nvme0", "self_test":true})).await?;
-        let before = binding.call(json!({"device":"/dev/nvme0"})).await?;
+        let hidden = guest.shell(r#"set -eu
+mkdir -m700 /run/estus-storage-nvme
+mv /usr/bin/nvme /run/estus-storage-nvme/original
+test ! -e /usr/bin/nvme
+"#).await?;
+        ensure!(hidden.status.success(), "NVMe prerequisite fixture failed");
+        let client = crate::support::Client::start(&binding.config).await?;
+        let observations: Result<()> = async {
+        let missing = health(&client).await?;
+        ensure!(missing["error"]["code"] == "discovery_failed"
+            && missing["error"]["remote_state_unknown"] == false
+            && missing["data"]["status"] == "not_started"
+            && missing["data"]["complete"] == false,
+            "missing nvme-cli reached payload execution: {missing}");
+        let restored = guest.shell(
+            "ln -s /run/estus-storage-nvme/original /usr/bin/nvme",
+        ).await?;
+        ensure!(restored.status.success(), "NVMe prerequisite restoration failed");
+        let before = health(&client).await?;
+        ensure!(before["data"]["changed"] == false, "read-only SMART observation claimed change");
         let before = catalog::projection(&before).context("initial virtual controller projection")?;
         ensure!(before["scope"] == "virtual_reported_controller" && before["model"] == "QEMU NVMe Ctrl", "incorrect health scope");
+        ensure!(before.get("serial").is_none() && !serde_json::to_string(before)?.contains("ESTUS-LAB-NVME"),
+            "fixed identity constraint leaked into published device telemetry");
         capture_smart(&guest, "BEFORE").await?;
         eprintln!("NVME_BEFORE_PROJECTION={before}");
         let io = guest.shell("dd if=/dev/zero of=/dev/nvme0n1 bs=4096 count=256 oflag=direct conv=fsync && dd if=/dev/nvme0n1 of=/dev/null bs=4096 count=256 iflag=direct").await?;
         ensure!(io.status.success(), "approved guest-only NVMe preparation IO failed: {}", String::from_utf8_lossy(&io.stderr));
-        let after = binding.call(json!({"device":"/dev/nvme0"})).await?;
+        let after = health(&client).await?;
+        ensure!(after["data"]["changed"] == false, "fresh read-only SMART observation claimed change");
         let after = catalog::projection(&after).context("post-IO virtual controller projection")?;
         let oracle = guest.shell("/usr/bin/nvme smart-log /dev/nvme0 --output-format=json").await?;
         ensure!(oracle.status.success(), "independent nvme-cli SMART query failed");
@@ -67,7 +100,20 @@ async fn storage_device_health_get() -> Result<()> {
         let state = guest.shell("cat /sys/class/nvme/nvme0/state").await?;
         ensure!(state.status.success(), "controller state oracle failed");
         ensure!(after["controller_state"].as_str() == Some(String::from_utf8_lossy(&state.stdout).trim()), "reported controller state mismatch");
+        let alive = guest.ordinary("/usr/bin/id -u; cat /sys/class/net/management0/operstate").await?;
+        ensure!(alive.status.success() && alive.stdout == b"1000\nup\n",
+            "ordinary management path or identity changed during SMART observation");
         Ok(())
+        }.await;
+        let stopped = client.stop().await;
+        let recovery = guest.shell(r#"set -eu
+rm -f /usr/bin/nvme
+mv /run/estus-storage-nvme/original /usr/bin/nvme
+rmdir /run/estus-storage-nvme
+"#).await?;
+        ensure!(recovery.status.success(), "NVMe utility recovery failed");
+        stopped?;
+        observations
     }.await;
     let cleanup = guest.stop().await;
     result?;
