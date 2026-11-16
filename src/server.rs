@@ -695,7 +695,7 @@ impl Estus {
                 }
             };
             let audit = Audit::start(metadata, started);
-            let run = crate::automation_exec::run(
+            let run = crate::automation::execution::run(
                 prepared,
                 crate::controller::ControllerContext {
                     deadline,

@@ -36,7 +36,7 @@ pub(crate) enum ControllerSupervision {
     Script,
     Automation {
         invocation_id: String,
-        mode: crate::automation_protocol::ExecutionMode,
+        mode: crate::automation::protocol::ExecutionMode,
         scratch_bytes: u64,
         scratch_files: usize,
     },
@@ -55,7 +55,7 @@ pub(crate) struct ControllerContext<'a> {
 pub(crate) struct ControllerRun {
     pub reply: ControllerReply,
     pub pending: Option<PendingCleanup>,
-    pub automation: Option<crate::automation_protocol::Evidence>,
+    pub automation: Option<crate::automation::protocol::Evidence>,
 }
 
 struct Setup {
@@ -361,7 +361,7 @@ async fn read_pipe<R: AsyncRead + Unpin>(
 }
 
 struct Monitoring {
-    automation: Option<crate::automation_protocol::Evidence>,
+    automation: Option<crate::automation::protocol::Evidence>,
     scratch: Option<(u64, usize)>,
 }
 
@@ -514,7 +514,7 @@ async fn finish_drain<R: AsyncRead + Unpin>(pipe: Option<R>, capture: &mut Captu
 async fn finish_protocol(
     mut pipe: Option<ChildStdout>,
     capture: &mut Capture,
-    evidence: &mut Option<crate::automation_protocol::Evidence>,
+    evidence: &mut Option<crate::automation::protocol::Evidence>,
 ) -> bool {
     if evidence.is_none() {
         return finish_drain(pipe, capture).await;
@@ -543,7 +543,7 @@ async fn cooperative_finish(
     owner: &mut PendingCleanup,
     stdout: &mut Option<ChildStdout>,
     stderr: &mut Option<ChildStderr>,
-    evidence: &mut crate::automation_protocol::Evidence,
+    evidence: &mut crate::automation::protocol::Evidence,
 ) {
     owner.control.take();
     if owner.children.script.is_none() {
@@ -595,7 +595,7 @@ pub(crate) async fn run(
             scratch_bytes,
             scratch_files,
         } => Monitoring {
-            automation: Some(crate::automation_protocol::Evidence::new(
+            automation: Some(crate::automation::protocol::Evidence::new(
                 invocation_id,
                 mode,
             )),

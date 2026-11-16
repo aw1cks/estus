@@ -1,8 +1,8 @@
 #![no_main]
 #![allow(dead_code)]
 
-#[path = "../../src/automation_protocol.rs"]
-mod automation_protocol;
+#[path = "../../src/automation/protocol.rs"]
+mod protocol;
 #[path = "../../src/module_schema.rs"]
 mod module_schema;
 #[path = "../../src/projection.rs"]
@@ -12,7 +12,7 @@ mod reply;
 #[path = "../../src/strict_json.rs"]
 mod strict_json;
 
-use automation_protocol::{Completion, Evidence, ExecutionMode, Observations};
+use protocol::{Completion, Evidence, ExecutionMode, Observations};
 use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -107,7 +107,7 @@ fn decode(
     }
     evidence.finish();
     let result =
-        automation_protocol::reduce(Some(evidence), "logical".into(), plan, completion(input));
+        protocol::reduce(Some(evidence), "logical".into(), plan, completion(input));
     (
         serde_json::to_value(result).unwrap(),
         (

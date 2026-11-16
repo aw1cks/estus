@@ -596,11 +596,11 @@ impl ReviewedContent {
         }
     }
 
-    fn mode(&self) -> crate::automation_protocol::ExecutionMode {
+    fn mode(&self) -> crate::automation::protocol::ExecutionMode {
         match self {
-            Self::Module { .. } => crate::automation_protocol::ExecutionMode::Module,
-            Self::Role { .. } => crate::automation_protocol::ExecutionMode::Role,
-            Self::Playbook { .. } => crate::automation_protocol::ExecutionMode::Playbook,
+            Self::Module { .. } => crate::automation::protocol::ExecutionMode::Module,
+            Self::Role { .. } => crate::automation::protocol::ExecutionMode::Role,
+            Self::Playbook { .. } => crate::automation::protocol::ExecutionMode::Playbook,
         }
     }
 }
@@ -1096,7 +1096,7 @@ impl CompiledBinding {
         request: &AutomationRequest,
         limits: &Limits,
         transport: AutomationTransport<'_>,
-    ) -> Result<crate::automation_exec::PreparedAutomation, ToolError> {
+    ) -> Result<crate::automation::execution::PreparedAutomation, ToolError> {
         let AutomationTransport {
             authority,
             scratch_bytes,
@@ -1129,7 +1129,7 @@ impl CompiledBinding {
             .binding
             .prepare(&request.inputs)
             .map_err(|_| bound("Automation inputs violate the reviewed binding"))?;
-        let invocation_id = crate::automation_exec::invocation_id();
+        let invocation_id = crate::automation::execution::invocation_id();
         let spec = AutomationSpec {
             schema: 2,
             invocation_id: &invocation_id,
@@ -1161,7 +1161,7 @@ impl CompiledBinding {
         serde_json::to_writer(&mut writer, &spec)
             .map_err(|_| bound("Automation invocation exceeds byte bound"))?;
         let input_json = writer.bytes;
-        Ok(crate::automation_exec::PreparedAutomation {
+        Ok(crate::automation::execution::PreparedAutomation {
             controller: PreparedController {
                 plan: Arc::clone(&plan.controller),
                 input_json,

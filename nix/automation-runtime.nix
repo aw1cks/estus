@@ -5,7 +5,7 @@ let
   runner = python.pkgs.ansible-runner;
   bundle = python.pkgs.ansible;
   environment = python.withPackages (_: [ core runner ]);
-  healthSha256 = builtins.hashFile "sha256" ../src/automation_health.py;
+  healthSha256 = builtins.hashFile "sha256" ../src/automation/python/health.py;
   platform = pkgs.stdenv.hostPlatform.system;
   # Output and source identities pin the complete upstream provisioning choice.
   # Only the digest, never these store paths, is exposed in the public identity.

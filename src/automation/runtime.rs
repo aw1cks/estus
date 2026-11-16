@@ -19,7 +19,7 @@ use crate::config::RuntimeKind;
 use crate::controller::{self, ControllerContext};
 use crate::reply::{ControllerReply, ControllerTermination, GroupCleanup};
 
-const HEALTH: &str = include_str!("automation_health.py");
+const HEALTH: &str = include_str!("python/health.py");
 const MANIFEST_LIMIT: usize = 16 * 1024;
 const REPORT_LIMIT: u64 = 16 * 1024;
 const MODULE_REPORT_LIMIT: u64 = 2 * 1024 * 1024 + REPORT_LIMIT;
@@ -480,11 +480,11 @@ pub(crate) fn runner_runtime(
     let payload =
         serde_json::from_slice(&request(&loaded)?).map_err(|_| "invalid_runtime_manifest")?;
     let literal = serde_json::to_string(HEALTH).map_err(|_| "invalid_runtime_manifest")?;
-    let cli_literal = serde_json::to_string(include_str!("automation_cli.py"))
+    let cli_literal = serde_json::to_string(include_str!("python/cli.py"))
         .map_err(|_| "invalid_runtime_manifest")?;
     let source = format!(
         "_ESTUS_HEALTH_SOURCE = {literal}\n_ESTUS_CLI_SOURCE = {cli_literal}\n{}",
-        include_str!("automation_runner.py")
+        include_str!("python/runner.py")
     );
     let mut environment = BTreeMap::new();
     if let Some(socket) = agent_socket {

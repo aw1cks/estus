@@ -1,7 +1,7 @@
 //! Runtime ownership for the private Runner adapter.
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::automation_protocol::{self, Completion};
+use super::protocol::{self, Completion};
 use crate::bindings::PreparedController;
 use crate::controller::{self, ControllerContext, PendingCleanup};
 use crate::reply::{AutomationData, GroupCleanup, ToolReply};
@@ -49,7 +49,7 @@ pub(crate) async fn run(
         group_cleanup,
     };
     AutomationRun {
-        reply: automation_protocol::reduce(
+        reply: protocol::reduce(
             run.automation,
             prepared.host,
             prepared.projection.as_deref(),
@@ -91,7 +91,7 @@ mod spawn_failures {
                 max_output_bytes: 1024,
                 supervision: controller::ControllerSupervision::Automation {
                     invocation_id: invocation_id(),
-                    mode: crate::automation_protocol::ExecutionMode::Module,
+                    mode: super::protocol::ExecutionMode::Module,
                     scratch_bytes: 65536,
                     scratch_files: 32,
                 },

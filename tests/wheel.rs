@@ -901,7 +901,7 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             "pyproject.toml",
             "setup.py",
             "src/main.rs",
-            "src/automation_runner.py",
+            "src/automation/python/runner.py",
             "vendor/openssh-sftp-client/Cargo.toml",
             "vendor/openssh-sftp-client/src/lib.rs",
         ] {
