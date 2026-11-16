@@ -894,6 +894,20 @@ evidence survives failure; failed operations do not publish success projections.
 group exists on this backend, not that remote work never started or all descendants
 are gone. Use completion and uncertainty fields for execution evidence.
 
+Native network link/address/route mutations declare `/usr/bin/ip` as a mandatory
+prerequisite. Module load declares `/usr/bin/modinfo`, `/usr/bin/modprobe` and
+`/usr/bin/ip` (needed for the approved load-parameter readback); unload requires
+the two kmod utilities. These declarations are bound into the reviewed manifest.
+Existing snapshots do not acquire them automatically: export, review and prepare
+a fresh approval to adopt them.
+
+A missing utility fails before payload dispatch. A changed executable fingerprint
+rejects that invocation and invalidates its discovery entry; only a later explicit
+request may rediscover. This does not attest modprobe hooks, configuration or all
+target dependencies. Parameter-setting keeps its explicit unsupported/no-write
+receipt when the approved sysfs parameter is absent; it does not require that
+optional parameter path during discovery.
+
 Retained role collectors remain under role-owned `files/collector.py`. Both forms
 preserve parser and domain semantics; source migration does not promote laboratory
 or site-policy qualifications. Fast tests import the actual collectors; real guest
@@ -957,8 +971,8 @@ checkout. Normal launchers select their installed assets; development commands
 can use `estus catalog --root "$PWD/catalog" list`. An explicit invalid root
 fails rather than silently selecting another catalog.
 
-Catalog manifest/list format2 requires explicit qualification alongside
-`policy_required` and `requires`; inventory version6 is unchanged.
+Catalog manifest/list format3 includes executor-specific assets and explicit
+qualification alongside `policy_required` and `requires`; inventory version7 applies.
 `site_policy_template` requires site review, while `laboratory_only` identifies
 hard-coded synthetic-device or fixture contracts, not production defaults.
 `unqualified` makes no readiness claim. `deployment_qualified` is reserved for
@@ -1166,6 +1180,30 @@ key, not production trust. No workstation services, interfaces, modules,
 bootloader or physical devices are changed. Injected SSH keys have one writer;
 OS key generation is disabled and installation errors go to the private console.
 Fast parser tests use stdlib Python from Nix check inputs, not Ansible.
+
+The native mutation wave covers module load/unload/parameter setting and network
+link/address/route add/remove on the disposable fixture, without a controller
+Ansible runtime. Its oracles check kernel/sysfs and `ip -j` state independently.
+Strict network add/remove operations remain strict operations, not implicit
+replace/ensure-state calls. A same-value parameter write remains a write attempt,
+not an inferred no-op.
+
+The persistent-session prerequisite scenario removes and replaces the real `ip`
+executable, checks cold discovery failure and warm fingerprint rejection before
+mutation, and observes exactly one mutation/readback after a later explicit
+request. The wrapper delegates to the actual utility; it does not simulate network
+state. Select it with:
+
+```sh
+nix run .#catalog-acceptance-msrv -- \
+  tools::network_link_down::network_link_down_requires_stable_executable --exact
+```
+
+Recorded native-wave verification: ten scenarios on a Darwin arm64 controller
+against disposable x86_64 Linux EFI guests, with no selected Ansible runtime.
+The control-plane launcher disabled emulated interrupt remapping after a QEMU
+boot panic; mutation and policy oracles were unchanged. Existing laboratory and
+site-policy labels remain in force; this is not physical-device qualification.
 
 The isolated lab qualifies selected Virtio/veth/e1000e controls, Linux
 `netdevsim` FEC configuration, modeled EEE state and synthetic module decoding,

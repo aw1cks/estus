@@ -23,7 +23,10 @@
     "modules": [
       "json"
     ],
-    "executables": [],
+    "executables": [
+      "/usr/bin/modinfo",
+      "/usr/bin/modprobe"
+    ],
     "paths": []
   },
   "contract": {

@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_VM and pinned Runner runtime"]
+#[ignore = "requires ESTUS_TEST_CATALOG_VM"]
 async fn network_link_up() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
