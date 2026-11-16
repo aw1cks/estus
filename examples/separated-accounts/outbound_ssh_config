@@ -1,0 +1,19 @@
+Host estus-target
+    HostName target.example.invalid
+    Port 22
+    User estus-target
+    IdentityFile /var/lib/estus-service/outbound_key
+Host *
+    IdentityAgent none
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /var/lib/estus-service/known_hosts
+    GlobalKnownHostsFile /dev/null
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    ForwardAgent no
+    ClearAllForwardings yes
+    RequestTTY no
+    ConnectTimeout 5
+    ConnectionAttempts 1

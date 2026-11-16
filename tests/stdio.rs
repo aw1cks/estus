@@ -3447,6 +3447,13 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
                 "effects": effects,
                 "result": "command",
                 "executor": "native_argv",
+                "execution_location": "remote",
+                "trusted_controller_code": false,
+                "restriction_boundary": {
+                    "mcp": "request_policy", "os": "service_account_and_remote_identity",
+                    "service_account_separation": "operator_managed_not_observed",
+                    "sandbox": "not_provided_by_estus"
+                },
             }));
             ensure!(tool["annotations"]["readOnlyHint"] == read_only);
             ensure!(tool["annotations"]["destructiveHint"] == destructive);
@@ -3878,6 +3885,13 @@ async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Re
                 "effects": effects,
                 "executor": "native_argv",
                 "result": "command",
+                "execution_location": "remote",
+                "trusted_controller_code": false,
+                "restriction_boundary": {
+                    "mcp": "request_policy", "os": "service_account_and_remote_identity",
+                    "service_account_separation": "operator_managed_not_observed",
+                    "sandbox": "not_provided_by_estus"
+                },
             }));
             ensure!(tool["annotations"]["readOnlyHint"] == read_only);
             ensure!(tool["annotations"]["destructiveHint"] == destructive);
@@ -4242,6 +4256,12 @@ async fn remote_scripts_publish_private_ordinary_command_contracts() -> Result<(
             ensure!(tool["_meta"] == json!({
                 "revision":"script-1", "authority":"ordinary", "effects":["read"],
                 "result":"command", "executor":"remote_script",
+                "execution_location": "remote", "trusted_controller_code": false,
+                "restriction_boundary": {
+                    "mcp": "request_policy", "os": "service_account_and_remote_identity",
+                    "service_account_separation": "operator_managed_not_observed",
+                    "sandbox": "not_provided_by_estus"
+                },
             }));
             ensure!(tool["annotations"]["readOnlyHint"] == true);
             ensure!(tool["annotations"]["destructiveHint"] == false);
@@ -4840,8 +4860,38 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
             let tool = tools.iter().find(|tool| tool["name"] == "observe_controller").context("controller route")?;
             ensure!(tool["_meta"] == json!({
                 "revision":"review-controller-1", "authority":"controller", "effects":["read"],
-                "executor":"controller_script", "result":"controller_command", "execution_location":"controller"
+                "executor":"controller_script", "result":"controller_command", "execution_location":"controller",
+                "trusted_controller_code": true,
+                "restriction_boundary": {
+                    "mcp": "request_policy", "os": "service_account",
+                    "service_account_separation": "operator_managed_not_observed",
+                    "sandbox": "not_provided_by_estus"
+                }
             }));
+            let inspected = command(&[
+                "catalog", "--root",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/examples"),
+                "inspect", "--site",
+                fixture.config_path.to_str().context("controller config path")?,
+            ]).output().await?;
+            ensure!(inspected.status.success(), "controller inspection failed");
+            fixture.public_only(&inspected.stdout)?;
+            fixture.public_only(&inspected.stderr)?;
+            let report: Value = serde_json::from_slice(&inspected.stdout)?;
+            ensure!(report["deployment_boundary"] == json!({
+                "mcp": "request_policy",
+                "same_identity_arbitrary_execution": "outside_restriction",
+                "service_account_separation": "operator_managed_not_observed",
+                "sandbox": "not_provided_by_estus"
+            }));
+            let inspected_tool = report["tools"].as_array().context("inspected controller tools")?
+                .iter().find(|tool| tool["name"] == "observe_controller")
+                .context("inspected controller binding")?;
+            for field in ["executor", "authority", "execution_location", "trusted_controller_code", "restriction_boundary"] {
+                ensure!(inspected_tool[field] == tool["_meta"][field], "controller inspection changed {field}");
+            }
+            ensure!(inspected_tool["enabled"] == true);
+            ensure!(inspected_tool["catalog_template"] == json!({"qualification":"unqualified"}));
             ensure!(tool["annotations"]["readOnlyHint"] == true);
             ensure!(tool["annotations"]["destructiveHint"] == false);
             let input = &tool["inputSchema"];

@@ -4,7 +4,7 @@ use futures_util::FutureExt;
 use openssh::Session;
 use std::{
     collections::HashMap,
-    os::unix::ffi::OsStrExt,
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     process::Stdio,
@@ -346,9 +346,10 @@ impl Master {
     ) -> Result<(Self, Session), Failure> {
         let directory = tempfile::Builder::new()
             .prefix("sm-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
             .map_err(|_| Failure::Connect)?;
-        // tempfile creates mode 0700 directories; never inherit TMPDIR or a
+        // Request owner-only permissions at creation; never inherit TMPDIR or a
         // destination-derived pathname for the control socket.
         let socket = directory.path().join("c");
         if socket.as_os_str().as_bytes().len() > 100 {

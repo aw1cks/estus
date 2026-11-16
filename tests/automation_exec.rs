@@ -429,6 +429,99 @@ impl Acceptance {
     }
 }
 
+// Run only from real, activated Runner sessions. Template qualification is not
+// evidence of an execution sandbox or observed service-account separation.
+async fn execution_boundary_inspection(
+    config: &Path,
+    listed: &Value,
+    expected: &[(&str, &str, &str)],
+) -> Result<Value> {
+    let binary = std::env::var_os("ESTUS_TEST_BINARY").unwrap_or_else(|| {
+        option_env!("ESTUS_TEST_BINARY")
+            .unwrap_or(env!("CARGO_BIN_EXE_estus"))
+            .into()
+    });
+    let mut command = Command::new(binary);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("ESTUS_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .args(["catalog", "--root"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples"))
+        .args(["inspect", "--site"])
+        .arg(config)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    ensure!(
+        output.status.success(),
+        "real Runner catalog inspection failed"
+    );
+    ensure!(
+        output.stderr.is_empty(),
+        "successful inspection emitted diagnostics"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(
+        report["deployment_boundary"]
+            == json!({
+                "mcp": "request_policy",
+                "same_identity_arbitrary_execution": "outside_restriction",
+                "service_account_separation": "operator_managed_not_observed",
+                "sandbox": "not_provided_by_estus"
+            })
+    );
+    ensure!(report["qualification_scope"] == "catalog_template");
+    let published = listed["result"]["tools"]
+        .as_array()
+        .context("Runner tools")?;
+    let inspected = report["tools"]
+        .as_array()
+        .context("inspected Runner tools")?;
+    for &(name, executor, authority) in expected {
+        let tool = published
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .context("published Runner boundary")?;
+        let meta = &tool["_meta"];
+        ensure!(
+            meta["executor"] == executor && meta["authority"] == authority,
+            "Runner executor/authority changed for {name}"
+        );
+        ensure!(meta["execution_location"] == "controller_and_remote");
+        ensure!(meta["trusted_controller_code"] == true);
+        ensure!(
+            meta["restriction_boundary"]
+                == json!({
+                    "mcp": "request_policy", "os": "service_account_and_remote_identity",
+                    "service_account_separation": "operator_managed_not_observed",
+                    "sandbox": "not_provided_by_estus"
+                })
+        );
+        let inspection = inspected
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .context("inspected Runner boundary")?;
+        for field in [
+            "executor",
+            "authority",
+            "execution_location",
+            "trusted_controller_code",
+            "restriction_boundary",
+        ] {
+            ensure!(
+                inspection[field] == meta[field],
+                "Runner inspection changed {field} for {name}"
+            );
+        }
+        ensure!(inspection["enabled"] == true);
+        ensure!(inspection["catalog_template"] == json!({"qualification":"unqualified"}));
+    }
+    Ok(report)
+}
+
 #[derive(Clone)]
 struct OwnedProcess {
     pid: i32,
@@ -1183,6 +1276,13 @@ async fn scenarios(a: &mut Acceptance) -> Result<()> {
     let mut server = a.server().await?;
     let normal: Result<()> = async {
     let listed = server.request(2, "tools/list", json!({})).await?;
+    a.private(&listed.to_string())?;
+    let inspection = execution_boundary_inspection(&a.fixture.config, &listed, &[
+        ("probe", "ansible_module", "automation"),
+        ("command", "ansible_module", "automation"),
+        ("secret", "ansible_module", "automation"),
+    ]).await?;
+    a.private(&inspection.to_string())?;
     for name in ["probe", "command", "secret", "ssh_exec"] {
         ensure!(
             listed["result"]["tools"]
@@ -3907,6 +4007,12 @@ async fn authority_scenarios(
         let tool = published.iter().find(|tool| tool["name"] == "authority_write")
             .context("named authority tool not published")?;
         ensure!(tool["_meta"]["authority"] == "automation:ops", "logical authority metadata missing");
+        let inspection = execution_boundary_inspection(&fixture.config, &listed, &[
+            ("authority_write", "ansible_module", "automation:ops"),
+            ("ordinary_write", "ansible_module", "automation"),
+            ("password_write", "ansible_module", "automation:password"),
+        ]).await?;
+        assert_private(&inspection.to_string())?;
         ensure!(!published.iter().any(|tool| tool["name"] == "hidden_authority"),
             "disabled authority binding was published");
         authority_absent(fixture, &[AUTHORITY_MARKER, AUTHORITY_PASSWORD_MARKER, AUTHORITY_CANCEL_MARKER]).await?;
@@ -4506,6 +4612,12 @@ async fn real_runner_role_acceptance() -> Result<()> {
 async fn role_scenarios(a: &Acceptance, roles: &Path) -> Result<()> {
     let mut server = a.server().await?;
     let result: Result<()> = async {
+        let listed = server.request(2, "tools/list", json!({})).await?;
+        a.private(&listed.to_string())?;
+        let inspection = execution_boundary_inspection(&a.fixture.config, &listed, &[
+            ("app_config", "ansible_role", "automation"),
+        ]).await?;
+        a.private(&inspection.to_string())?;
         let literal = format!("{{{{ lookup('pipe', 'touch {}') }}}}", text(&a.forbidden)?);
         let banner = format!("雪😀 \"quoted\"\n{literal} {{{{ 6 * 7 }}}}");
         let inputs = json!({"instance":literal,"config":{"banner":banner,"enabled":true,"port":8080}});
@@ -5147,6 +5259,12 @@ async fn playbook_scenarios(a: &Acceptance, project: &Path) -> Result<()> {
     playbook_markers_absent(a, &untouched).await?;
     let mut server = a.server().await?;
     let result: Result<()> = async {
+        let listed = server.request(2, "tools/list", json!({})).await?;
+        a.private(&listed.to_string())?;
+        let inspection = execution_boundary_inspection(&a.fixture.config, &listed, &[
+            ("document", "ansible_playbook", "automation"),
+        ]).await?;
+        a.private(&inspection.to_string())?;
         let literal = format!("{{{{ lookup('pipe', 'touch {}') }}}}", text(&a.forbidden)?);
         let inputs = json!({"instance":literal,"config":{
             "banner":format!("雪😀 \"quoted\"\nnext\\line\t{literal} {{{{ 6 * 7 }}}}"),

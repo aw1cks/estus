@@ -1,4 +1,4 @@
-{ pkgs, automation ? false }:
+{ pkgs, automation ? false, servicePackage ? null }:
 let
   inherit (pkgs) lib;
   commandPath = "/usr/bin:/bin:${pkgs.coreutils}/bin:${pkgs.dash}/bin";
@@ -11,6 +11,11 @@ let
       "--with-privsep-user=sshd"
       "--with-privsep-path=/var/empty"
       "--with-default-path=${commandPath}"
+    ] ++ lib.optionals (servicePackage != null) [
+      # This fixture proves Unix account authorization, not pre-auth hardening.
+      # Guest seccomp cannot run under CPU emulation, and Linux poll rejects
+      # the rlimit fallback. Privilege separation and UID drops remain enabled.
+      "--with-sandbox=no"
     ];
   });
   # sudo's installation notes define these configure switches. Keep the plugins
@@ -31,6 +36,10 @@ let
   ] ++ lib.optionals automation [
     { name = "mcp-automation"; id = 1005; }
     { name = "mcp-automation-password"; id = 1006; }
+  ] ++ lib.optionals (servicePackage != null) [
+    { name = "estus-client"; id = 1200; }
+    { name = "estus-service"; id = 1201; }
+    { name = "estus-target"; id = 1202; }
   ];
   accountLines = f: lib.concatMapStringsSep "\n" f accounts;
   # Fixture-only secret, used privately to prime a real sudo timestamp. It is
@@ -63,6 +72,20 @@ let
     done
     ln -s ${pkgs.coreutils}/bin/id "$out/usr/bin/id"
     ln -s ${pkgs.coreutils}/bin/printf "$out/usr/bin/printf"
+    ${lib.optionalString (servicePackage != null) ''
+      mkdir -p "$out/opt" "$out/usr/local/libexec" "$out/fixture/deployment"
+      ln -s ${servicePackage} "$out/opt/estus"
+      ln -s ${openssh}/bin/ssh "$out/usr/bin/ssh"
+      ln -s ${openssh}/bin/ssh-keygen "$out/usr/bin/ssh-keygen"
+      ln -s ${pkgs.coreutils}/bin/env "$out/usr/bin/env"
+      ln -s ${pkgs.gnused}/bin/sed "$out/usr/bin/sed"
+      cp ${../examples/separated-accounts/estus-ingress} "$out/usr/local/libexec/estus-ingress"
+      cp ${../examples/separated-accounts/estus-record-identity} "$out/usr/local/libexec/estus-record-identity"
+      chmod 0755 "$out/usr/local/libexec/"*
+      cp ${../examples/separated-accounts/server.toml} "$out/fixture/deployment/server.toml"
+      cp ${../examples/separated-accounts/outbound_ssh_config} "$out/fixture/deployment/outbound_ssh_config"
+      cp ${../examples/separated-accounts/sshd_config} "$out/fixture/deployment/sshd_config"
+    ''}
     ${lib.optionalString automation "ln -s ${pkgs.python314}/bin/python3 \"$out/usr/bin/python3\"\n    "}cp ${sudo}/bin/sudo "$out/usr/bin/sudo"
     cat > "$out/etc/passwd" <<'EOF'
     root:x:0:0:root:/root:/bin/sh
@@ -117,7 +140,8 @@ let
     ${sudo}/sbin/visudo -cf "$out/etc/sudoers"
   '';
   image = pkgs.dockerTools.buildLayeredImage {
-    name = if automation then "estus-automation-fixture" else "estus-fixture";
+    name = if servicePackage != null then "estus-deployment-fixture"
+      else if automation then "estus-automation-fixture" else "estus-fixture";
     # Omitting tag selects dockerTools' derivation-derived tag, never latest.
     created = "1970-01-01T00:00:01Z";
     mtime = "1970-01-01T00:00:01Z";

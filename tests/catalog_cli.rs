@@ -288,17 +288,28 @@ fn inspect_honors_explicit_catalog_root_without_ambient_configuration() -> Resul
         serde_json::from_slice(&std::fs::read(assets().join("catalog.json"))?)?;
     let pin = serde_json::to_string(&manifest["version"])?;
     let mut text = format!(
-        "tool_presets=['linux-health']\nenabled_tools=['custom_action']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n",
+        "tool_presets=['linux-health']\nenabled_tools=['custom_action','custom_sudo']\n[catalog]\nversion={}\n[targets.one]\nssh_host='private-alias'\n[targets.one.sudo]\nmode='same-account'\nusers=['root']\nprograms=['/usr/bin/id']\n",
         pin
     );
-    for name in ["cpu_stats", "memory_stats", "pressure_get", "custom_action"] {
+    for name in [
+        "cpu_stats",
+        "memory_stats",
+        "pressure_get",
+        "custom_action",
+        "custom_sudo",
+    ] {
+        let authority = if name == "custom_sudo" {
+            "{sudo='root'}"
+        } else {
+            "'ordinary'"
+        };
         text.push_str(&format!(
             r#"
 [tools.{name}]
 description="Explicit operator binding"
 revision="1"
 targets=["one"]
-authority="ordinary"
+authority={authority}
 effects=["read"]
 execution={{kind="native_argv",program="/usr/bin/id",argv=["--","root"]}}
 input_schema={{type="object",properties={{}},required=[],additionalProperties=false}}
@@ -332,6 +343,26 @@ result={{kind="command"}}
             String::from_utf8_lossy(&output.stderr)
         );
         let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let public = String::from_utf8(output.stdout.clone())?;
+        for private in [
+            "private-alias",
+            "/usr/bin/id",
+            site.to_str().context("site path")?,
+        ] {
+            ensure!(
+                !public.contains(private),
+                "inspection disclosed private binding data"
+            );
+        }
+        ensure!(
+            report["deployment_boundary"]
+                == serde_json::json!({
+                    "mcp": "request_policy",
+                    "same_identity_arbitrary_execution": "outside_restriction",
+                    "service_account_separation": "operator_managed_not_observed",
+                    "sandbox": "not_provided_by_estus"
+                })
+        );
         ensure!(
             report["global_native_execution"] == execution
                 && report["global_native_file_read"] == file_read
@@ -348,7 +379,27 @@ result={{kind="command"}}
         );
         ensure!(report["qualification_scope"] == "catalog_template");
         for tool in report["tools"].as_array().context("inspected tools")? {
-            if tool["name"] == "custom_action" {
+            ensure!(tool["executor"] == "native_argv");
+            ensure!(tool["execution_location"] == "remote");
+            ensure!(tool["trusted_controller_code"] == false);
+            ensure!(
+                tool["restriction_boundary"]
+                    == serde_json::json!({
+                        "mcp": "request_policy", "os": "service_account_and_remote_identity",
+                        "service_account_separation": "operator_managed_not_observed",
+                        "sandbox": "not_provided_by_estus"
+                    })
+            );
+            let authority = if tool["name"] == "custom_sudo" {
+                serde_json::json!({"sudo":"root"})
+            } else {
+                serde_json::json!("ordinary")
+            };
+            ensure!(
+                tool["authority"] == authority,
+                "inspection changed fixed authority"
+            );
+            if tool["name"] == "custom_action" || tool["name"] == "custom_sudo" {
                 ensure!(
                     tool["catalog_template"] == serde_json::json!({"qualification":"unqualified"})
                 );

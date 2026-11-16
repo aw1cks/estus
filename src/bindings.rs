@@ -1576,6 +1576,42 @@ impl CompiledBinding {
         }
         Ok(binding)
     }
+    pub(crate) fn public_authority(&self) -> Value {
+        if let Some(authority) = self.automation_authority() {
+            serde_json::json!(authority)
+        } else if self.is_controller() {
+            serde_json::json!("controller")
+        } else {
+            self.sudo().map_or_else(
+                || serde_json::json!("ordinary"),
+                |(user, _)| serde_json::json!({"sudo": user}),
+            )
+        }
+    }
+
+    pub(crate) fn execution_location(&self) -> &'static str {
+        if self.is_controller() {
+            "controller"
+        } else if self.is_automation() {
+            "controller_and_remote"
+        } else {
+            "remote"
+        }
+    }
+
+    pub(crate) fn trusted_controller_code(&self) -> bool {
+        self.is_controller() || self.is_automation()
+    }
+
+    pub(crate) fn restriction_boundary(&self) -> Value {
+        serde_json::json!({
+            "mcp":"request_policy",
+            "os":if self.is_controller() { "service_account" } else { "service_account_and_remote_identity" },
+            "service_account_separation":"operator_managed_not_observed",
+            "sandbox":"not_provided_by_estus",
+        })
+    }
+
     pub(crate) fn executor_kind(&self) -> &'static str {
         match self.execution {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,

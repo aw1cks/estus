@@ -30,6 +30,7 @@ const AUTOMATION_ACCOUNTS: [&str; 2] = ["mcp-automation", "mcp-automation-passwo
 pub enum ImageKind {
     Native,
     Automation,
+    Deployment,
 }
 
 impl ImageKind {
@@ -37,6 +38,7 @@ impl ImageKind {
         match self {
             Self::Native => "estus-fixture:",
             Self::Automation => "estus-automation-fixture:",
+            Self::Deployment => "estus-deployment-fixture:",
         }
     }
 }
@@ -480,6 +482,11 @@ impl Fixture {
                 AllowTcpForwarding yes
             "}
             .to_owned();
+            if matches!(self.kind, ImageKind::Deployment) {
+                // A dedicated ingress never accepts a caller-controlled environment:
+                // ForceCommand is entered through the service account's login shell.
+                config = config.replace("AcceptEnv ESTUS V03_HOST V03_MATCH V03_INCLUDE\n", "");
+            }
             config.push_str(extra);
             if matches!(self.kind, ImageKind::Automation) {
                 // Intentional rejected-key matrices must not trigger sshd's source penalty gate.
@@ -487,6 +494,10 @@ impl Fixture {
             }
             if index == 0 {
                 config.push_str("Subsystem sftp internal-sftp\n");
+            }
+            if matches!(self.kind, ImageKind::Deployment) {
+                // Subsystem is global-only; Include ends in a Match all block.
+                config.push_str("Include /fixture/deployment/sshd_config\n");
             }
             config.push_str("Match User mcp\n    Banner /fixture/backend-banner\n");
             // The SDK joins these with ':', selecting the local sha256 image ID,
@@ -524,11 +535,14 @@ impl Fixture {
         self.write_configuration().await?;
         for alias in ["plain", "nosftp", "viajump"] {
             let output = self.direct(alias, "/usr/bin/id -u").await?;
-            ensure!(
-                output.status.success() && output.stdout == b"1000\n",
-                "real fixture SSH readiness failed for {alias}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            if !output.status.success() || output.stdout != b"1000\n" {
+                let logs = self.primary_logs().await?;
+                anyhow::bail!(
+                    "real fixture SSH readiness failed for {alias}: {}; sshd: {}",
+                    String::from_utf8_lossy(&output.stderr),
+                    String::from_utf8_lossy(&logs),
+                );
+            }
         }
         // A real transition distinguishes a usable fixture from a runtime whose
         // nosuid/no-new-privileges policy makes all later sudo acceptance fake.
@@ -903,6 +917,95 @@ impl Fixture {
             "}
         )?;
         Ok(())
+    }
+
+    /// Set up real OS identities only inside this fixture's owned container.
+    pub async fn prepare_deployment(&self) -> Result<()> {
+        ensure!(
+            matches!(self.kind, ImageKind::Deployment),
+            "deployment image required"
+        );
+        self.primary_exec(indoc! {r#"
+            # Minimal images need the ordinary traversable system ancestor;
+            # only the service-owned leaf is private.
+            install -d -m 0755 /var/lib
+            umask 077
+            mkdir -p /etc/estus /var/lib/estus-service /run/estus-service
+            chown 0:1201 /etc/estus
+            chmod 0750 /etc/estus
+            chown 1201:1201 /var/lib/estus-service /run/estus-service
+            chmod 0700 /var/lib/estus-service /run/estus-service
+            sed -i 's|:/home/estus-service:|:/var/lib/estus-service:|' /etc/passwd
+            cp /fixture/deployment/server.toml /etc/estus/server.toml
+            sed 's/target.example.invalid/127.0.0.1/; s/Port 22$/Port 2222/' \
+                /fixture/deployment/outbound_ssh_config > /etc/estus/outbound_ssh_config
+            chown 0:1201 /etc/estus/server.toml /etc/estus/outbound_ssh_config
+            chmod 0640 /etc/estus/server.toml /etc/estus/outbound_ssh_config
+            ssh-keygen -q -t ed25519 -N '' -f /var/lib/estus-service/outbound_key
+            cp /var/lib/estus-service/outbound_key.pub /fixture/authorized_keys/estus-target
+            chown 0:0 /fixture/authorized_keys/estus-target
+            chmod 0644 /fixture/authorized_keys/estus-target
+            ssh-keygen -q -t ed25519 -N '' -f /home/estus-client/ingress_key
+            printf 'restrict ' > /etc/estus/ingress_authorized_keys
+            cat /home/estus-client/ingress_key.pub >> /etc/estus/ingress_authorized_keys
+            chown 0:0 /etc/estus/ingress_authorized_keys
+            chmod 0644 /etc/estus/ingress_authorized_keys
+            printf '[127.0.0.1]:2222 ' > /var/lib/estus-service/known_hosts
+            ssh-keygen -y -f /fixture/host_key >> /var/lib/estus-service/known_hosts
+            cp /var/lib/estus-service/known_hosts /home/estus-client/known_hosts
+            cat > /home/estus-client/ssh_config <<'EOF'
+            Host ingress
+                HostName 127.0.0.1
+                Port 2222
+                User estus-service
+                IdentityFile /home/estus-client/ingress_key
+            Host *
+                IdentityAgent none
+                IdentitiesOnly yes
+                BatchMode yes
+                StrictHostKeyChecking yes
+                UserKnownHostsFile /home/estus-client/known_hosts
+                GlobalKnownHostsFile /dev/null
+                PasswordAuthentication no
+                KbdInteractiveAuthentication no
+                ControlMaster no
+                ControlPath none
+                ConnectTimeout 5
+                ConnectionAttempts 1
+            EOF
+            chown -R 1200:1200 /home/estus-client
+            chown -R 1201:1201 /var/lib/estus-service
+            chmod 0600 /home/estus-client/ingress_key /home/estus-client/ssh_config \
+                /home/estus-client/known_hosts /var/lib/estus-service/outbound_key \
+                /var/lib/estus-service/known_hosts
+            test "$(id -u estus-client)" = 1200
+            test "$(id -u estus-service)" = 1201
+            test "$(id -u estus-target)" = 1202
+            test -x /opt/estus/bin/estus
+        "#})
+            .await?;
+        Ok(())
+    }
+
+    /// All caller work, including SSH transport, runs under the disposable client UID.
+    pub fn deployment_client_command(&self, args: &[&str]) -> Result<Command> {
+        ensure!(
+            matches!(self.kind, ImageKind::Deployment),
+            "deployment image required"
+        );
+        let primary = self.containers.first().context("fixture primary")?;
+        let mut command = self.docker.command();
+        command.args(["exec", "-i", "--user", "1200:1200", primary.id()]);
+        command.args(args).kill_on_drop(true);
+        Ok(command)
+    }
+
+    pub async fn deployment_client_exec(&self, script: &str) -> Result<Output> {
+        bounded(
+            &mut self.deployment_client_command(&["/bin/sh", "-c", script])?,
+            CLEANUP,
+        )
+        .await
     }
 
     /// Root container exec is fixture setup/observation, never the production writer.

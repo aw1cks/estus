@@ -1,0 +1,6 @@
+#!/bin/sh
+# Install root-owned mode 0755 on the target; output directory is target-private.
+set -eu
+umask 077
+/usr/bin/id -u > /home/estus-target/identity-evidence
+/usr/bin/id -u

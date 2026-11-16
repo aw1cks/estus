@@ -764,6 +764,29 @@ nix run .#role-acceptance-msrv
 This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
 the same private-directory/non-root prerequisites as native acceptance.
 
+## Deployment trust boundary
+
+Estus enforces MCP request validation and dispatch policy, not a sandbox.
+Remote SSH identities and target OS authorization remain authoritative.
+**A client with arbitrary execution under the server's OS identity is outside
+the claimed restriction:** it can use that identity's credentials, SSH control
+sockets and runtimes without going through MCP.
+
+Named tool metadata and catalog inspection expose the executor, configured
+authority, execution location, trusted-controller-code requirement and restriction
+boundary. Ansible and controller code are trusted operator code running with the
+service account's access, including access to its credentials. `no_log`,
+projections and process cleanup do not make that code safe or sandbox it.
+
+When the client also has local execution, use distinct client and service
+accounts with private service credentials/runtime directories and a root-owned,
+forced-command stdio ingress. The client must not have service-account shell,
+sudo/root, shared privileged groups, or host/container-administration access.
+The [separated-account example](examples/separated-accounts/) makes this concrete
+without introducing another production daemon or container requirement.
+Estus does not provision or verify production account isolation; inspection
+explicitly reports `operator_managed_not_observed`.
+
 ## Bundled operational catalog
 
 Normal wheels and Nix packages include the versioned catalog: definitions,

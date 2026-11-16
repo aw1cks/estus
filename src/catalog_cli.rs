@@ -897,17 +897,33 @@ fn inspect(
                     json!({"name":host,"permitted":permitted})
                 })
                 .collect();
-            let template = catalog.manifest().tools.get(&binding.name)
+            let template = catalog
+                .manifest()
+                .tools
+                .get(&binding.name)
                 .map(template_metadata)
                 .unwrap_or_else(|| json!({"qualification":"unqualified"}));
-            json!({"name":binding.name,"enabled":config.binding_enabled(id),"targets":targets,"catalog_template":template})
+            json!({
+                "name":binding.name,"enabled":config.binding_enabled(id),
+                "targets":targets,"catalog_template":template,
+                "executor":binding.executor_kind(),"authority":binding.public_authority(),
+                "execution_location":binding.execution_location(),
+                "trusted_controller_code":binding.trusted_controller_code(),
+                "restriction_boundary":binding.restriction_boundary(),
+            })
         })
         .collect();
     Ok(
         json!({"scope":"named_tools","global_native_execution":config.tool_enabled(crate::config::ToolId::Exec),
         "global_native_file_read":config.tool_enabled(crate::config::ToolId::ReadFile),
         "global_native_file_write":config.tool_enabled(crate::config::ToolId::WriteFile),
-        "runtime_verification":"not_performed","qualification_scope":"catalog_template","tools":tools}),
+        "runtime_verification":"not_performed","qualification_scope":"catalog_template","tools":tools,
+        "deployment_boundary":{
+            "mcp":"request_policy",
+            "same_identity_arbitrary_execution":"outside_restriction",
+            "service_account_separation":"operator_managed_not_observed",
+            "sandbox":"not_provided_by_estus",
+        }}),
     )
 }
 

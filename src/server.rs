@@ -331,25 +331,21 @@ impl Estus {
                 .idempotent(false);
             let local = binding.is_controller();
             let description = if local {
-                format!("{} Explicit controller execution under the server's OS account, not SSH authority or a sandbox. Typed inputs use a private JSON file, never caller argv/source. Cleanup reports anchored-group signalling and direct-child reaping, not rollback or escaped-descendant containment. Operations are never replayed.", binding.description)
+                format!("{} Trusted operator controller code executes under the server's OS account and can access that account's credentials; this is not SSH authority or a sandbox. Typed inputs use a private JSON file, never caller argv/source. Cleanup reports anchored-group signalling and direct-child reaping, not rollback or escaped-descendant containment. Operations are never replayed.", binding.description)
+            } else if binding.is_automation() {
+                format!("{} Trusted Ansible/controller code executes under the server's OS account and may access its credentials; remote work uses the configured automation authority. no_log and projections restrict disclosure, not code authority. Process cleanup is not a sandbox or authorization boundary. Operations are never replayed.", binding.description)
             } else {
                 format!("{} Fixed remote execution with declared authority on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description)
             };
-            let mut meta = JsonObject::from_iter([
+            let meta = JsonObject::from_iter([
                 ("revision".into(), serde_json::json!(binding.revision)),
                 ("result".into(), serde_json::json!(binding.result_kind())),
                 ("effects".into(), serde_json::json!(binding.effects())),
                 ("executor".into(), serde_json::json!(binding.executor_kind())),
-                ("authority".into(), if let Some(authority) = binding.automation_authority() {
-                    serde_json::json!(authority)
-                } else if local {
-                    serde_json::json!("controller")
-                } else {
-                    binding.sudo().map_or_else(
-                        || serde_json::json!("ordinary"),
-                        |(user, _)| serde_json::json!({"sudo": user}),
-                    )
-                }),
+                ("authority".into(), binding.public_authority()),
+                ("execution_location".into(), serde_json::json!(binding.execution_location())),
+                ("trusted_controller_code".into(), serde_json::json!(binding.trusted_controller_code())),
+                ("restriction_boundary".into(), binding.restriction_boundary()),
             ]);
             let output_schema = if binding.is_automation() {
                 binding.projection().map_or_else(
@@ -357,7 +353,6 @@ impl Estus {
                     |plan| automation_output_schema(Some(plan)),
                 )
             } else if local {
-                meta.insert("execution_location".into(), serde_json::json!("controller"));
                 Arc::clone(controller_output_schema.as_ref().expect("controller registration has its result schema"))
             } else {
                 Arc::clone(&command_output_schema)

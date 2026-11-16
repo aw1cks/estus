@@ -1,0 +1,8 @@
+#!/bin/sh
+# Root-owned, not writable by either the client or service account.
+# ForceCommand invokes the account's login shell with -c; do not use nologin.
+# Never evaluate SSH_ORIGINAL_COMMAND or accept caller-selected config/arguments.
+exec /usr/bin/env -i \
+    HOME=/var/lib/estus-service USER=estus-service LOGNAME=estus-service \
+    PATH=/usr/bin:/bin LANG=C TMPDIR=/run/estus-service \
+    /opt/estus/bin/estus --config /etc/estus/server.toml

@@ -169,6 +169,10 @@
             inherit pkgs;
             automation = true;
           };
+          deployment-fixture-image = import ./nix/ssh-fixture.nix {
+            inherit pkgs;
+            servicePackage = package;
+          };
         };
         apps.catalog-acceptance = {
           type = "app";

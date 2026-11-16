@@ -1,0 +1,18 @@
+profile = "actions-only"
+enabled_tools = ["record_identity"]
+
+[ssh]
+config_file = "/etc/estus/outbound_ssh_config"
+
+[targets.target]
+ssh_host = "estus-target"
+
+[tools.record_identity]
+description = "Record the configured target account identity."
+revision = "separated-accounts-1"
+targets = ["target"]
+authority = "ordinary"
+effects = ["persistent_write"]
+execution = { kind = "native_argv", program = "/usr/local/libexec/estus-record-identity", argv = [] }
+input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+result = { kind = "command" }

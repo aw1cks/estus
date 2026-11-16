@@ -170,7 +170,11 @@ pub struct Client {
 
 impl Client {
     pub async fn start(config: &Path) -> Result<Self> {
-        let command = server_command(config)?;
+        Self::start_command(server_command(config)?).await
+    }
+
+    /// Connect through an owned stdio ingress instead of launching a local server.
+    pub async fn start_command(command: Command) -> Result<Self> {
         let (transport, stderr) = TokioChildProcess::builder(command)
             .stderr(Stdio::piped())
             .spawn()?;

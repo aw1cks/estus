@@ -1,0 +1,18 @@
+# Use on a dedicated sshd with NO global AcceptEnv. Validate with sshd -t.
+# The key file and wrapper are root-owned; no service-writable key lookup.
+PermitUserEnvironment no
+Match User estus-service
+    AuthorizedKeysFile /etc/estus/ingress_authorized_keys
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    ForceCommand /usr/local/libexec/estus-ingress
+    DisableForwarding yes
+    AllowTcpForwarding no
+    AllowStreamLocalForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTunnel no
+    PermitTTY no
+    PermitUserRC no
+Match all
