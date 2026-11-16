@@ -773,7 +773,7 @@ pub(crate) async fn import_module(
     module: &str,
     ctx: RuntimeContext<'_>,
 ) -> Result<ModuleImport, &'static str> {
-    if !crate::module_schema::valid_fqcn(module) {
+    if !crate::contracts::module_schema::valid_fqcn(module) {
         return Err("invalid_module_identifier");
     }
     let (reply, source) = run_selected(runtime, &ctx, Some(DocumentationRequest::Module(module)))
@@ -860,13 +860,13 @@ pub(crate) async fn import_role(
     output: Option<&Path>,
     ctx: RuntimeContext<'_>,
 ) -> Result<RoleImport, &'static str> {
-    if !crate::role_schema::valid_role(role) {
+    if !crate::contracts::role_schema::valid_role(role) {
         return Err("invalid_role_name");
     }
-    if !crate::role_schema::valid_entry_point(entry_point) {
+    if !crate::contracts::role_schema::valid_entry_point(entry_point) {
         return Err("invalid_role_entry_point");
     }
-    match (crate::role_schema::is_collection_role(role), role_path) {
+    match (crate::contracts::role_schema::is_collection_role(role), role_path) {
         (true, Some(_)) => return Err("invalid_role_source"),
         (false, None) => return Err("role_source_required"),
         (_, Some(path))
@@ -969,7 +969,7 @@ pub(crate) async fn import_playbook(
     output: Option<&Path>,
     ctx: RuntimeContext<'_>,
 ) -> Result<PlaybookImport, &'static str> {
-    if !crate::playbook_import::valid_playbook(playbook) {
+    if !crate::contracts::playbook_import::valid_playbook(playbook) {
         return Err("invalid_playbook");
     }
     if project_root

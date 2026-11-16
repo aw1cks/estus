@@ -7,11 +7,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use super::{
+    module_schema, role_import,
+    schema_import::{Report, bounded_json, read_json, stopped, write_document},
+};
 use crate::{
     automation::{self, RuntimeContext, RuntimeIdentity},
     config::Config,
-    module_schema, role_import,
-    schema_import::{Report, bounded_json, read_json, stopped, write_document},
 };
 
 const SNAPSHOT_LIMIT: usize = 1_048_576;

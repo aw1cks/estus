@@ -150,7 +150,7 @@ pub(crate) enum CliCommand {
     /// Check runtime health or configured targets without executing automation or commands.
     Doctor(DoctorArgs),
     /// Import and verify reviewed offline Ansible module contracts; never execute them.
-    Schema(crate::schema_import::SchemaArgs),
+    Schema(crate::contracts::schema_import::SchemaArgs),
     /// Discover, export and prepare bundled catalog definitions offline.
     Catalog(crate::catalog::cli::CatalogArgs),
 }

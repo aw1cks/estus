@@ -120,14 +120,14 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, Estus>> for Argume
 
 // Keep the envelope and execution evidence generated from the actual reply types.
 // Only the operator-reviewed payload schema is binding-specific.
-fn automation_output_schema(plan: Option<&crate::projection::Plan>) -> Arc<JsonObject> {
+fn automation_output_schema(plan: Option<&crate::contracts::projection::Plan>) -> Arc<JsonObject> {
     let schema = schemars::generate::SchemaSettings::draft2020_12()
         .for_serialize()
         .with(|settings| settings.inline_subschemas = true)
         .into_generator()
         .into_root_schema_for::<ToolReply<crate::reply::AutomationData>>();
     let mut schema = serde_json::to_value(schema).expect("generated reply schema serializes");
-    fn specialize(node: &mut serde_json::Value, plan: Option<&crate::projection::Plan>) {
+    fn specialize(node: &mut serde_json::Value, plan: Option<&crate::contracts::projection::Plan>) {
         match node {
             serde_json::Value::Object(object) => {
                 if let Some(properties) = object
@@ -2324,7 +2324,7 @@ mod projection_metadata_tests {
     fn output_contract_specializes_both_values_without_changing_evidence() {
         let selected = json!({"type":"object","additionalProperties":false,
             "required":["platform"],"properties":{"platform":{"type":"string","maxLength":64}}});
-        let plan = crate::projection::compile(json!({
+        let plan = crate::contracts::projection::compile(json!({
             "fields":{"platform":["ansible_facts","ansible_system"]},"schema":selected,
             "max_bytes":1024,"max_items":32,"max_depth":4
         }))

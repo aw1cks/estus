@@ -586,7 +586,7 @@ impl Evidence {
 }
 
 fn finish_projection(
-    plan: &crate::projection::Plan,
+    plan: &crate::contracts::projection::Plan,
     received: Option<ModuleProjection>,
     bad: bool,
     censored: bool,
@@ -621,7 +621,7 @@ pub(crate) struct Completion {
 pub(crate) fn reduce(
     mut evidence: Option<Evidence>,
     host: String,
-    projection: Option<&crate::projection::Plan>,
+    projection: Option<&crate::contracts::projection::Plan>,
     local: Completion,
 ) -> ToolReply<AutomationData> {
     let projected = evidence.as_mut().and_then(|e| e.projection.take());
@@ -1011,8 +1011,8 @@ mod projection_evidence {
     use super::*;
     use serde_json::{Value, json};
 
-    fn plan() -> crate::projection::Plan {
-        crate::projection::compile(json!({
+    fn plan() -> crate::contracts::projection::Plan {
+        crate::contracts::projection::compile(json!({
             "fields":{"text":["stdout"]},
             "schema":{"type":"object","properties":{"text":{"type":"string","maxLength":16}},
                 "required":["text"],"additionalProperties":false},

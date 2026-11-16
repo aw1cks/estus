@@ -5,8 +5,11 @@ use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[path = "../../src/module_schema.rs"]
-mod module_schema;
+#[path = "../../src/contracts"]
+mod contracts {
+    pub(crate) mod module_schema;
+}
+use contracts::module_schema;
 #[path = "../../src/strict_json.rs"]
 mod strict_json;
 

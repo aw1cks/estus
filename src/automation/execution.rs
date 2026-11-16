@@ -20,7 +20,7 @@ pub(crate) fn invocation_id() -> String {
 pub(crate) struct PreparedAutomation {
     pub controller: PreparedController,
     pub host: String,
-    pub projection: Option<std::sync::Arc<crate::projection::Plan>>,
+    pub projection: Option<std::sync::Arc<crate::contracts::projection::Plan>>,
 }
 
 pub(crate) struct AutomationRun {

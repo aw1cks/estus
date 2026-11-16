@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::automation::{self, RuntimeCollection, RuntimeContext, RuntimeIdentity};
 use crate::config::Config;
-use crate::module_schema;
+use crate::contracts::module_schema;
 
 const SNAPSHOT_LIMIT: usize = 1_048_576;
 const INPUT_LIMIT: usize = 65_536;
@@ -53,13 +53,13 @@ enum SchemaCommand {
         input: Option<PathBuf>,
     },
     /// Import one reviewed role entry point; never execute its tasks or dependencies.
-    ImportRole(crate::role_import::ImportArgs),
+    ImportRole(crate::contracts::role_import::ImportArgs),
     /// Detect role/runtime/content drift and validate reviewed inputs offline.
-    VerifyRole(crate::role_import::VerifyArgs),
+    VerifyRole(crate::contracts::role_import::VerifyArgs),
     /// Review one fixed project/playbook with an explicit input contract, without executing it.
-    ImportPlaybook(crate::playbook_import::ImportArgs),
+    ImportPlaybook(crate::contracts::playbook_import::ImportArgs),
     /// Detect reviewed project/runtime drift and validate inputs without execution.
-    VerifyPlaybook(crate::playbook_import::VerifyArgs),
+    VerifyPlaybook(crate::contracts::playbook_import::VerifyArgs),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -329,36 +329,36 @@ async fn perform(
 ) -> Result<Report, &'static str> {
     let command = match args.command {
         SchemaCommand::ImportRole(role) => {
-            return Ok(crate::role_import::perform(
+            return Ok(crate::contracts::role_import::perform(
                 config,
-                crate::role_import::Command::Import(role),
+                crate::contracts::role_import::Command::Import(role),
                 args.timeout_secs,
                 shutdown,
             )
             .await);
         }
         SchemaCommand::VerifyRole(role) => {
-            return Ok(crate::role_import::perform(
+            return Ok(crate::contracts::role_import::perform(
                 config,
-                crate::role_import::Command::Verify(role),
+                crate::contracts::role_import::Command::Verify(role),
                 args.timeout_secs,
                 shutdown,
             )
             .await);
         }
         SchemaCommand::ImportPlaybook(playbook) => {
-            return Ok(crate::playbook_import::perform(
+            return Ok(crate::contracts::playbook_import::perform(
                 config,
-                crate::playbook_import::Command::Import(playbook),
+                crate::contracts::playbook_import::Command::Import(playbook),
                 args.timeout_secs,
                 shutdown,
             )
             .await);
         }
         SchemaCommand::VerifyPlaybook(playbook) => {
-            return Ok(crate::playbook_import::perform(
+            return Ok(crate::contracts::playbook_import::perform(
                 config,
-                crate::playbook_import::Command::Verify(playbook),
+                crate::contracts::playbook_import::Command::Verify(playbook),
                 args.timeout_secs,
                 shutdown,
             )

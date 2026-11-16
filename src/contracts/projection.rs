@@ -66,7 +66,7 @@ pub(crate) fn compile(config: Value) -> Result<Plan, &'static str> {
         &plan,
     )
     .map_err(|_| INVALID)?;
-    crate::module_schema::check_projection_schema(&plan.schema).map_err(|_| INVALID)?;
+    crate::contracts::module_schema::check_projection_schema(&plan.schema).map_err(|_| INVALID)?;
     let properties = plan.schema["properties"].as_object().ok_or(INVALID)?;
     if properties.len() != plan.fields.len()
         || plan.fields.keys().any(|key| !properties.contains_key(key))
@@ -193,7 +193,7 @@ impl Plan {
             value,
         )
         .map_err(|_| INVALID)?;
-        crate::module_schema::validate(&self.schema, value).map_err(|_| INVALID)
+        crate::contracts::module_schema::validate(&self.schema, value).map_err(|_| INVALID)
     }
 }
 

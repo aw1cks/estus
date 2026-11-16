@@ -411,7 +411,7 @@ enum Execution {
         authority: AutomationAuthority,
         overlay: Value,
         no_log: bool,
-        projection: Option<Arc<crate::projection::Plan>>,
+        projection: Option<Arc<crate::contracts::projection::Plan>>,
         // One startup allocation keeps native bindings from reserving the large plan.
         plan: Option<Box<AutomationPlan>>,
     },
@@ -520,7 +520,7 @@ pub(crate) struct AutomationTransport<'a> {
 
 pub(crate) struct AutomationPlan {
     reviewed: ReviewedContent,
-    binding: crate::module_schema::CompiledModuleBinding,
+    binding: crate::contracts::module_schema::CompiledModuleBinding,
     runtime: Value,
     controller: Arc<ControllerPlan>,
 }
@@ -533,15 +533,15 @@ impl std::fmt::Debug for AutomationPlan {
 
 enum ReviewedContent {
     Module {
-        reviewed: crate::schema_import::ReviewedModule,
+        reviewed: crate::contracts::schema_import::ReviewedModule,
         source: String,
     },
     Role {
-        reviewed: crate::role_import::ReviewedRole,
+        reviewed: crate::contracts::role_import::ReviewedRole,
         role_path: Option<PathBuf>,
     },
     Playbook {
-        reviewed: crate::playbook_import::ReviewedPlaybook,
+        reviewed: crate::contracts::playbook_import::ReviewedPlaybook,
         project_root: PathBuf,
     },
 }
@@ -681,7 +681,7 @@ struct AutomationSpec<'a> {
     agent: AgentReference<'a>,
     arguments: &'a Value,
     no_log: bool,
-    projection: Option<&'a crate::projection::Plan>,
+    projection: Option<&'a crate::contracts::projection::Plan>,
     timeout_secs: f64,
     scratch_bytes: u64,
     scratch_files: usize,
@@ -826,17 +826,17 @@ impl Bindings {
         let prepared = tokio::task::spawn_blocking(move || {
             let reviewed = match source {
                 AnsibleSource::Role { path } => ReviewedContent::Role {
-                    reviewed: crate::role_import::load_reviewed(&snapshot)
+                    reviewed: crate::contracts::role_import::load_reviewed(&snapshot)
                         .map_err(|code| invalid(code).with_cause(code, "role_snapshot"))?,
                     role_path: path,
                 },
                 AnsibleSource::Module => ReviewedContent::Module {
-                    reviewed: crate::schema_import::load_reviewed(&snapshot)
+                    reviewed: crate::contracts::schema_import::load_reviewed(&snapshot)
                         .map_err(|code| invalid(code).with_cause(code, "module_snapshot"))?,
                     source: String::new(),
                 },
                 AnsibleSource::Playbook { project_root } => ReviewedContent::Playbook {
-                    reviewed: crate::playbook_import::load_reviewed(&snapshot)
+                    reviewed: crate::contracts::playbook_import::load_reviewed(&snapshot)
                         .map_err(|code| invalid(code).with_cause(code, "playbook_snapshot"))?,
                     project_root,
                 },
@@ -851,13 +851,13 @@ impl Bindings {
             }
             let compiled = match &reviewed {
                 ReviewedContent::Module { .. } => {
-                    crate::module_schema::compile_binding(reviewed.contract(), &overlay)
+                    crate::contracts::module_schema::compile_binding(reviewed.contract(), &overlay)
                 }
                 ReviewedContent::Role { .. } => {
-                    crate::role_import::compile_binding(reviewed.contract(), &overlay)
+                    crate::contracts::role_import::compile_binding(reviewed.contract(), &overlay)
                 }
                 ReviewedContent::Playbook { .. } => {
-                    crate::playbook_import::compile_binding(reviewed.contract(), &overlay)
+                    crate::contracts::playbook_import::compile_binding(reviewed.contract(), &overlay)
                 }
             }
             .map_err(|code| invalid(code).with_cause(code, "binding_compilation"))?;
@@ -876,7 +876,7 @@ impl Bindings {
         };
         match &mut reviewed {
             ReviewedContent::Module { reviewed, source } => {
-                *source = crate::schema_import::verify_reviewed(reviewed, runtime.clone(), context)
+                *source = crate::contracts::schema_import::verify_reviewed(reviewed, runtime.clone(), context)
                     .await
                     .map_err(|code| invalid(code).with_cause(code, "module_verification"))?;
             }
@@ -884,7 +884,7 @@ impl Bindings {
                 reviewed,
                 role_path,
             } => {
-                crate::role_import::verify_reviewed(
+                crate::contracts::role_import::verify_reviewed(
                     reviewed,
                     role_path.as_deref(),
                     runtime.clone(),
@@ -897,7 +897,7 @@ impl Bindings {
                 reviewed,
                 project_root,
             } => {
-                crate::playbook_import::verify_reviewed(
+                crate::contracts::playbook_import::verify_reviewed(
                     reviewed,
                     project_root,
                     runtime.clone(),
@@ -1014,7 +1014,7 @@ impl CompiledBinding {
                 let schema = serde_json::to_value(schema)
                     .map_err(|_| invalid("Invalid projection schema"))?;
                 Some(Arc::new(
-                    crate::projection::compile(json!({
+                    crate::contracts::projection::compile(json!({
                         "fields": fields, "schema": schema, "max_bytes": max_bytes,
                         "max_items": max_items, "max_depth": max_depth
                     }))
@@ -1035,14 +1035,14 @@ impl CompiledBinding {
             return Err(invalid("Fixed module arguments must be an object"));
         }
         let overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
-        crate::module_schema::validate_overlay(&overlay).map_err(invalid)?;
+        crate::contracts::module_schema::validate_overlay(&overlay).map_err(invalid)?;
         match &source {
             AnsibleSource::Module => {}
             AnsibleSource::Role { .. } => {
-                crate::role_import::validate_overlay(&overlay).map_err(invalid)?;
+                crate::contracts::role_import::validate_overlay(&overlay).map_err(invalid)?;
             }
             AnsibleSource::Playbook { .. } => {
-                crate::playbook_import::validate_overlay(&overlay).map_err(invalid)?;
+                crate::contracts::playbook_import::validate_overlay(&overlay).map_err(invalid)?;
             }
         }
         let timeout_secs = raw.limits.as_ref().and_then(|limits| limits.timeout_secs);
@@ -1651,7 +1651,7 @@ impl CompiledBinding {
         matches!(self.execution, Execution::Ansible { plan: Some(_), .. })
     }
 
-    pub(crate) fn projection(&self) -> Option<&Arc<crate::projection::Plan>> {
+    pub(crate) fn projection(&self) -> Option<&Arc<crate::contracts::projection::Plan>> {
         match &self.execution {
             Execution::Ansible { projection, .. } => projection.as_ref(),
             _ => None,
@@ -1758,7 +1758,7 @@ impl CompiledBinding {
             let Execution::Ansible { overlay, .. } = &self.execution else {
                 unreachable!("module request selected");
             };
-            crate::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
+            crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
                 .map_err(|_| shape())?;
             return Ok(BindingCall::Automation(AutomationRequest {
                 host: host.ok_or_else(shape)?,

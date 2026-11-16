@@ -276,7 +276,7 @@ fn overlay(definition: &toml::Value) -> Result<Value, &'static str> {
         );
     }
     let value = Value::Object(value);
-    crate::role_import::validate_overlay(&value)?;
+    crate::contracts::role_import::validate_overlay(&value)?;
     Ok(value)
 }
 
@@ -591,7 +591,7 @@ async fn prepare(
             let root = match &reviewed_bundle {
                 Some(root) => root,
                 None => {
-                    let root = crate::role_import::author_bundle(&name, &role_path, &snapshot)?;
+                    let root = crate::contracts::role_import::author_bundle(&name, &role_path, &snapshot)?;
                     authoring_parent = Some(parent);
                     reviewed_bundle.insert(root)
                 }
@@ -710,9 +710,9 @@ async fn prepare(
             return Err("cancelled".into());
         }
         let reference = config.catalog_runtime(authority)?;
-        let report = crate::role_import::perform_with_reference(
+        let report = crate::contracts::role_import::perform_with_reference(
             &config,
-            crate::role_import::Command::Import(crate::role_import::ImportArgs::reviewed(
+            crate::contracts::role_import::Command::Import(crate::contracts::role_import::ImportArgs::reviewed(
                 name.clone(),
                 role_path.clone(),
                 snapshot.clone(),

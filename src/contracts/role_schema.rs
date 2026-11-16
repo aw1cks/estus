@@ -2,7 +2,7 @@
 //! Role defaults are never input values, and importing metadata never runs a role.
 use serde_json::{Map, Value, json};
 
-use crate::module_schema;
+use crate::contracts::module_schema;
 
 const INVALID: &str = "unsupported_role_contract";
 const DEPENDENCIES: &str = "Role dependencies can execute before upstream role argument-spec validation. Rust prevalidation is the approval boundary, not upstream execution order. The v2 content approval covers the complete reviewed role search root and every searchable selected-runtime collection; declared role paths outside those roots are rejected. Importing never executes tasks or certifies their behavior, and reviewed controller code is not sandboxed.";
@@ -162,7 +162,7 @@ pub(crate) fn import_document(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module_schema::compile_binding;
+    use crate::contracts::module_schema::compile_binding;
 
     fn document(options: Value) -> Value {
         json!({"entry_points":{"main":{"options":options}}})
