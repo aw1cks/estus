@@ -1,5 +1,5 @@
 //! Presets select names; they never supply definitions, targets or authority.
-use crate::catalog_assets::Manifest;
+use super::assets::Manifest;
 use std::collections::BTreeSet;
 
 pub(crate) fn expand(

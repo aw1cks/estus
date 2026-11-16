@@ -5,8 +5,8 @@
 mod support;
 
 #[allow(dead_code)]
-#[path = "../src/catalog_assets.rs"]
-mod catalog_assets;
+#[path = "../src/catalog/assets.rs"]
+mod assets;
 
 use anyhow::{Context, Result, ensure};
 use nix::sys::signal::Signal;
@@ -831,7 +831,7 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             "pressure_get"
         };
         let reviewed =
-            catalog_assets::Catalog::load(Some(&catalog)).map_err(|code| anyhow::anyhow!(code))?;
+            assets::Catalog::load(Some(&catalog)).map_err(|code| anyhow::anyhow!(code))?;
         reviewed
             .definition(selected)
             .map_err(|code| anyhow::anyhow!(code))
@@ -1059,7 +1059,7 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     )
     .await?;
     let assets = workspace.join("estus/_catalog");
-    let catalog = catalog_assets::Catalog::load(Some(&assets)).map_err(anyhow::Error::msg)?;
+    let catalog = assets::Catalog::load(Some(&assets)).map_err(anyhow::Error::msg)?;
     for name in catalog.manifest().tools.keys() {
         catalog.definition(name).map_err(anyhow::Error::msg)?;
         catalog

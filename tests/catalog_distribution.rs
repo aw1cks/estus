@@ -1,10 +1,10 @@
 #![cfg(unix)]
 
 #[allow(dead_code)]
-#[path = "../src/catalog_assets.rs"]
-mod catalog_assets;
+#[path = "../src/catalog/assets.rs"]
+mod assets;
 
-use catalog_assets::Catalog;
+use assets::Catalog;
 use serde_json::Value;
 use std::{
     fs,
@@ -14,10 +14,7 @@ use std::{
 };
 
 fn canonical_catalog() -> Catalog {
-    Catalog::load(Some(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"),
-    ))
-    .unwrap()
+    Catalog::load(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"))).unwrap()
 }
 
 #[test]

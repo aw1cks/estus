@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::{catalog_assets::Catalog, config::Config};
+use crate::{catalog::assets::Catalog, config::Config};
 
 #[derive(Debug)]
 enum Failure {
@@ -311,7 +311,7 @@ fn selected(
     Ok(names)
 }
 
-fn template_metadata(template: &crate::catalog_assets::Template) -> Value {
+fn template_metadata(template: &super::assets::Template) -> Value {
     json!({
         "qualification":template.qualification,
         "policy_required":template.policy_required,

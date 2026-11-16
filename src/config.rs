@@ -152,7 +152,7 @@ pub(crate) enum CliCommand {
     /// Import and verify reviewed offline Ansible module contracts; never execute them.
     Schema(crate::schema_import::SchemaArgs),
     /// Discover, export and prepare bundled catalog definitions offline.
-    Catalog(crate::catalog_cli::CatalogArgs),
+    Catalog(crate::catalog::cli::CatalogArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
@@ -341,7 +341,7 @@ fn resolve_catalog_selection(
             .map(|p| resolve_path(p, base, "catalog.root"))
             .transpose()?;
         Some(
-            crate::catalog_assets::Catalog::load(path.as_deref())
+            crate::catalog::assets::Catalog::load(path.as_deref())
                 .map_err(|reason| invalid("catalog", reason))?,
         )
     } else {
@@ -370,7 +370,7 @@ fn resolve_catalog_selection(
         ));
     }
     let manifest = catalog.as_ref().map(|c| c.manifest());
-    let selected = crate::catalog_selection::expand(
+    let selected = crate::catalog::selection::expand(
         &definitions,
         manifest,
         &document.enabled_tools,
@@ -395,7 +395,7 @@ fn resolve_catalog_selection(
             {
                 let mut allowed = if target.enabled_tools.is_some() || target.tool_presets.is_some()
                 {
-                    crate::catalog_selection::expand(
+                    crate::catalog::selection::expand(
                         &definitions,
                         manifest,
                         target.enabled_tools.as_deref().unwrap_or(&[]),
@@ -405,7 +405,7 @@ fn resolve_catalog_selection(
                     .map_err(|reason| invalid("targets.*.enabled_tools", reason))?
                 } else {
                     // Validate disable names even when none is globally selected.
-                    crate::catalog_selection::expand(
+                    crate::catalog::selection::expand(
                         &definitions,
                         manifest,
                         &[],
@@ -4753,7 +4753,7 @@ tool_presets = []
     #[test]
     fn presets_are_pinned_inert_templates_not_authority_or_definition_grants() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
-        let catalog = crate::catalog_assets::Catalog::load(Some(&root)).unwrap();
+        let catalog = crate::catalog::assets::Catalog::load(Some(&root)).unwrap();
         let pin = format!("version={:?}", catalog.manifest().version);
         let inert = load(&format!("[catalog]\nroot={root:?}\n{pin}\n")).unwrap();
         assert_eq!(inert.bindings.entries().count(), 0);

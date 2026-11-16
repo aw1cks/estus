@@ -4,9 +4,7 @@ mod automation_exec;
 mod automation_protocol;
 mod bindings;
 mod capture;
-mod catalog_assets;
-mod catalog_cli;
-mod catalog_selection;
+mod catalog;
 mod command;
 mod config;
 mod controller;
@@ -112,7 +110,7 @@ fn main() -> ExitCode {
 }
 
 fn standalone_catalog(
-    args: catalog_cli::CatalogArgs,
+    args: catalog::cli::CatalogArgs,
     cli: config::Cli,
     explicit_config: bool,
     explicit_ssh: bool,
@@ -136,7 +134,7 @@ fn standalone_catalog(
             return fail("signal_setup_failed");
         };
         let shutdown = CancellationToken::new();
-        let operation = catalog_cli::run(args, cli, shutdown.clone());
+        let operation = catalog::cli::run(args, cli, shutdown.clone());
         tokio::pin!(operation);
         let status = tokio::select! {
             status = &mut operation => status,
