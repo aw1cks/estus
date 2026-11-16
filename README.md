@@ -66,6 +66,21 @@ The base wheel does not depend on Ansible, install packages at startup, or enabl
 additional tools. An explicitly selected existing runtime bundle remains usable
 through the native application's configuration.
 
+## Packaging support contract
+
+Installed wheels and native builds are supported workflows. PEP660/editable
+installation is not supported: an isolated `uv pip install --editable` builds the
+private executable but does not map the generated catalog assets into the source
+package. Offline catalog discovery then fails. Use a wheel or an explicitly
+prepared native build rather than relying on `--editable`.
+
+Recorded installed qualification uses CPython3.14.6 on Darwin25 arm64, for both
+base and `ansible`-extra channels, including interpreter selection, asset discovery,
+stdio purity and process lifecycle. Metadata retains the conservative
+`cp314-cp314` tags and Python3.14-only requirement. A standalone executable's lack
+of CPython linkage does not qualify another Python version, platform or OS release;
+the declared native payload baselines are audited separately below.
+
 Source archives select catalog definitions/roles through the manifest-driven build
 hook, not a second tool-name list in `MANIFEST.in`. They include required Rust
 sources, embedded helpers and the vendored SFTP client, while excluding generated
