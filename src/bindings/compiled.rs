@@ -1,0 +1,1155 @@
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use rmcp::{ErrorData, model::JsonObject};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::{
+    config::{ConfigError, Limits, account_name},
+    reply::ToolError,
+};
+
+use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot};
+use plans::AutomationPlan;
+pub(crate) use plans::{
+    AutomationTransport, ControllerPlan, PreparedController, controller_root,
+};
+
+mod plans;
+
+pub(crate) const EXECUTOR_KIND: &str = "native_argv";
+pub(crate) const RESULT_KIND: &str = "command";
+
+const MAX_SCHEMA_BYTES: usize = 16 * 1024;
+const RESERVED: &[&str] = &[
+    "host",
+    "timeout_secs",
+    "retain_output",
+    "argv",
+    "program",
+    "cwd",
+    "stdin",
+    "user",
+    "role",
+    "authority",
+    "execution",
+    "profile",
+    "env",
+    "shell",
+    "sudo",
+    "command",
+    "revision",
+    "effects",
+    "result",
+    "input_schema",
+    "enabled_tools",
+];
+
+struct SchemaCounter(usize);
+impl io::Write for SchemaCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .filter(|size| *size <= MAX_SCHEMA_BYTES)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "schema exceeds limit"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+fn schema_fits(value: &impl Serialize) -> bool {
+    serde_json::to_writer(SchemaCounter(0), value).is_ok()
+}
+
+fn integral_number(value: &Value) -> bool {
+    value.as_number().is_some_and(|number| {
+        number.as_i64().is_some()
+            || number.as_u64().is_some()
+            || number
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value.fract() == 0.0)
+    })
+}
+fn canonical_integer(value: Value) -> Value {
+    let integer = value.as_i64().or_else(|| {
+        let number = value.as_f64()?;
+        // Strict upper bound avoids saturating i64::MAX after float rounding.
+        (number.is_finite()
+            && number.fract() == 0.0
+            && number >= i64::MIN as f64
+            && number < -(i64::MIN as f64))
+            .then_some(number as i64)
+    });
+    integer.map(Value::from).unwrap_or(value)
+}
+fn unsigned_integer(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        let number = value.as_f64()?;
+        (number.is_finite() && number.fract() == 0.0 && number >= 0.0 && number < u64::MAX as f64)
+            .then_some(number as u64)
+    })
+}
+
+fn invalid(reason: &'static str) -> ConfigError {
+    ConfigError::new("tools", reason)
+}
+fn bound(reason: &'static str) -> ToolError {
+    ToolError::new("invalid_argument", reason, false)
+}
+fn shape() -> ErrorData {
+    ErrorData::invalid_params("Invalid named tool argument shape", None)
+}
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+fn parameter(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_alphabetic()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !RESERVED.contains(&value)
+}
+fn absolute(value: &str) -> bool {
+    value.starts_with('/') && value.len() <= 4096 && !value.contains('\0')
+}
+
+fn controller_environment(
+    configured: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    let mut bytes = 0usize;
+    if configured.len() > 32 {
+        return Err(invalid("Controller environment exceeds entry bound"));
+    }
+    for (name, value) in &configured {
+        let application = name.strip_prefix("MCP_").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        });
+        bytes += name.len() + value.len();
+        if name.len() > 64
+            || (!application && !matches!(name.as_str(), "PATH" | "LANG" | "LC_ALL" | "TZ"))
+            || value.len() > 4096
+            || value.contains('\0')
+            || bytes > 8192
+        {
+            return Err(invalid("Invalid controller environment"));
+        }
+    }
+    let mut environment = BTreeMap::from([
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("LANG".into(), "C".into()),
+        ("LC_ALL".into(), "C".into()),
+        ("TZ".into(), "UTC".into()),
+    ]);
+    environment.extend(configured);
+    Ok(environment)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BindingId(pub(crate) usize);
+
+#[derive(Debug)]
+pub(crate) struct Bindings {
+    entries: Vec<CompiledBinding>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Effect {
+    Read,
+    SensitiveRead,
+    Probe,
+    RuntimeWrite,
+    PersistentWrite,
+    Availability,
+    Unknown,
+}
+#[derive(Debug)]
+enum Domain {
+    String { minimum: u64, maximum: u64 },
+    Integer { minimum: i64, maximum: i64 },
+    Boolean,
+}
+#[derive(Debug)]
+struct Input {
+    name: String,
+    domain: Domain,
+    choices: Option<Vec<Value>>,
+}
+impl Input {
+    fn matches_type(&self, value: &Value) -> bool {
+        match self.domain {
+            Domain::String { .. } => value.is_string(),
+            Domain::Integer { .. } => integral_number(value),
+            Domain::Boolean => value.is_boolean(),
+        }
+    }
+    fn validate(&self, value: &Value) -> Result<(), ToolError> {
+        let valid = match self.domain {
+            Domain::String { minimum, maximum } => value.as_str().is_some_and(|v| {
+                !v.contains('\0') && (minimum..=maximum).contains(&(v.chars().count() as u64))
+            }),
+            Domain::Integer { minimum, maximum } => value
+                .as_i64()
+                .is_some_and(|v| (minimum..=maximum).contains(&v)),
+            Domain::Boolean => value.is_boolean(),
+        };
+        if !valid
+            || self
+                .choices
+                .as_ref()
+                .is_some_and(|choices| !choices.contains(value))
+        {
+            return Err(bound("Named tool input violates its declared bounds"));
+        }
+        Ok(())
+    }
+    fn option_safe(&self) -> bool {
+        self.choices.is_some()
+            || matches!(
+                self.domain,
+                Domain::Boolean | Domain::Integer { minimum: 0.., .. }
+            )
+    }
+}
+#[derive(Debug)]
+enum Slot {
+    Fixed(String),
+    Input(usize),
+}
+#[derive(Debug)]
+enum Authority {
+    Ordinary,
+    Sudo(String),
+    Controller,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScriptSource {
+    pub(crate) path: String,
+    pub(crate) content_sha256: [u8; 32],
+    pub(crate) max_bytes: usize,
+}
+
+#[derive(Debug)]
+enum Execution {
+    NativeArgv {
+        program: String,
+        cwd: Option<String>,
+        authority: Authority,
+    },
+    RemoteScript {
+        source: ScriptSource,
+        program: String,
+        prefix: Vec<String>,
+        cwd: Option<String>,
+    },
+    ControllerScript {
+        plan: Option<Arc<ControllerPlan>>,
+    },
+    Ansible {
+        snapshot: PathBuf,
+        source: AnsibleSource,
+        authority: AutomationAuthority,
+        overlay: Value,
+        no_log: bool,
+        projection: Option<Arc<crate::contracts::projection::Plan>>,
+        // One startup allocation keeps native bindings from reserving the large plan.
+        plan: Option<Box<AutomationPlan>>,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum AnsibleSource {
+    Module,
+    Role { path: Option<PathBuf> },
+    Playbook { project_root: PathBuf },
+}
+
+#[derive(Debug)]
+pub(crate) enum AutomationAuthority {
+    Ordinary,
+    Named(String),
+}
+
+impl AutomationAuthority {
+    fn parse(value: &toml::Value) -> Result<Self, ConfigError> {
+        match value.as_str() {
+            Some("automation") => Ok(Self::Ordinary),
+            Some(value) => {
+                let name = value
+                    .strip_prefix("automation:")
+                    .ok_or_else(|| invalid("Invalid automation authority"))?;
+                if name.is_empty()
+                    || name.len() > 64
+                    || !name.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_alphabetic()
+                            || byte == b'_'
+                            || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
+                    })
+                {
+                    return Err(invalid("Invalid automation authority"));
+                }
+                Ok(Self::Named(name.to_owned()))
+            }
+            None => Err(invalid("Invalid automation authority")),
+        }
+    }
+
+    pub(crate) fn identity_role(&self) -> crate::config::IdentityRole {
+        match self {
+            Self::Ordinary => crate::config::IdentityRole::Ordinary,
+            Self::Named(_) => crate::config::IdentityRole::Automation,
+        }
+    }
+}
+
+impl Serialize for AutomationAuthority {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Ordinary => serializer.serialize_str("automation"),
+            Self::Named(name) => serializer.collect_str(&format_args!("automation:{name}")),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompiledBinding {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) revision: String,
+    pub(crate) targets: Vec<String>,
+    pub(crate) input_schema: Arc<JsonObject>,
+    enabled: bool,
+    effects: Vec<Effect>,
+    inputs: Vec<Input>,
+    execution: Execution,
+    argv: Vec<Slot>,
+    timeout_secs: Option<u64>,
+    max_output_bytes: Option<u64>,
+}
+pub(crate) struct BindingRequest {
+    pub(crate) host: String,
+    pub(crate) timeout_secs: Option<u64>,
+    pub retain_output: bool,
+    values: Vec<Value>,
+}
+pub(crate) enum BindingCall {
+    Remote(BindingRequest),
+    Controller(ControllerRequest),
+    Automation(AutomationRequest),
+}
+
+pub(crate) struct AutomationRequest {
+    pub(crate) host: String,
+    timeout_secs: Option<u64>,
+    inputs: Value,
+}
+
+pub(crate) struct ControllerRequest {
+    timeout_secs: Option<u64>,
+    pub retain_output: bool,
+    values: Vec<Value>,
+}
+struct ControllerActivation<'a> {
+    workspace_root: Option<&'a str>,
+    permitted: bool,
+    canonical_root: Option<Arc<Path>>,
+}
+
+
+impl Bindings {
+    pub(crate) fn compile(
+        raw: BTreeMap<String, toml::Value>,
+        enabled: &[String],
+        limits: &Limits,
+        target_exists: impl Fn(&str) -> bool,
+        workspace_root: Option<&str>,
+        active_profile: bool,
+    ) -> Result<Self, ConfigError> {
+        if raw.len() > 32 {
+            return Err(invalid("At most 32 named tools are allowed"));
+        }
+        let selected: BTreeSet<_> = enabled.iter().map(String::as_str).collect();
+        if selected.len() != enabled.len() || enabled.iter().any(|name| !raw.contains_key(name)) {
+            return Err(ConfigError::new(
+                "enabled_tools",
+                "Enabled tool names must exist and be unique",
+            ));
+        }
+        let mut activation = ControllerActivation {
+            workspace_root,
+            permitted: active_profile,
+            canonical_root: None,
+        };
+        let entries = raw
+            .into_iter()
+            .map(|(name, value)| {
+                if !identifier(&name) {
+                    return Err(invalid("Invalid named tool identifier"));
+                }
+                let raw: RawBinding = value
+                    .try_into()
+                    .map_err(|_| invalid("Invalid named tool definition"))?;
+                let enabled = selected.contains(name.as_str());
+                CompiledBinding::compile(
+                    name,
+                    raw,
+                    enabled,
+                    limits,
+                    &target_exists,
+                    &mut activation,
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self { entries })
+    }
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (BindingId, &CompiledBinding)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (BindingId(i), entry))
+    }
+    pub(crate) fn get(&self, id: BindingId) -> Option<&CompiledBinding> {
+        self.entries.get(id.0)
+    }
+
+}
+
+impl CompiledBinding {
+    fn compile_automation(
+        name: String,
+        raw: RawBinding,
+        enabled: bool,
+        limits: &Limits,
+        target_exists: &impl Fn(&str) -> bool,
+    ) -> Result<Self, ConfigError> {
+        let (snapshot, no_log, source) = match raw.execution {
+            RawExecution::AnsibleModule { snapshot, no_log } => {
+                (snapshot, no_log, AnsibleSource::Module)
+            }
+            RawExecution::AnsibleRole {
+                snapshot,
+                role_path,
+                no_log,
+            } => {
+                if role_path.as_deref().is_some_and(|path| !absolute(path)) {
+                    return Err(invalid("Invalid fixed role source"));
+                }
+                (
+                    snapshot,
+                    no_log,
+                    AnsibleSource::Role {
+                        path: role_path.map(PathBuf::from),
+                    },
+                )
+            }
+            RawExecution::AnsiblePlaybook {
+                snapshot,
+                project_root,
+                no_log,
+            } => {
+                if !absolute(&project_root) {
+                    return Err(invalid("Invalid fixed playbook project"));
+                }
+                (
+                    snapshot,
+                    no_log,
+                    AnsibleSource::Playbook {
+                        project_root: PathBuf::from(project_root),
+                    },
+                )
+            }
+            _ => unreachable!("automation execution selected"),
+        };
+        let targets = raw.targets.unwrap_or_default();
+        let authority = AutomationAuthority::parse(&raw.authority)?;
+        if !matches!(
+            &raw.result,
+            RawResult::AnsibleSummary {} | RawResult::AnsibleProjection { .. }
+        ) || raw.description.is_empty()
+            || raw.description.len() > 1024
+            || !identifier(&raw.revision)
+            || !absolute(&snapshot)
+            || targets.is_empty()
+            || targets.len() > 32
+            || targets.iter().collect::<BTreeSet<_>>().len() != targets.len()
+            || targets.iter().any(|target| !target_exists(target))
+            || raw.effects.is_empty()
+            || raw.effects.iter().collect::<BTreeSet<_>>().len() != raw.effects.len()
+        {
+            return Err(invalid(
+                "Invalid automation binding authority or definition",
+            ));
+        }
+        let projection = match raw.result {
+            RawResult::AnsibleSummary {} => None,
+            RawResult::AnsibleProjection {
+                fields,
+                schema,
+                max_bytes,
+                max_items,
+                max_depth,
+            } => {
+                if !matches!(source, AnsibleSource::Module)
+                    && fields.values().any(|path| {
+                        path.len() < 2 || path.first().map(String::as_str) != Some("mcp_result")
+                    })
+                {
+                    return Err(invalid(
+                        "Workflow projections require mcp_result member paths",
+                    ));
+                }
+                let schema = serde_json::to_value(schema)
+                    .map_err(|_| invalid("Invalid projection schema"))?;
+                Some(Arc::new(
+                    crate::contracts::projection::compile(json!({
+                        "fields": fields, "schema": schema, "max_bytes": max_bytes,
+                        "max_items": max_items, "max_depth": max_depth
+                    }))
+                    .map_err(invalid)?,
+                ))
+            }
+            _ => unreachable!("module result checked"),
+        };
+        let schema =
+            serde_json::to_value(raw.input_schema).map_err(|_| invalid("Invalid module schema"))?;
+        let fixed = raw
+            .fixed_args
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| invalid("Invalid fixed module arguments"))?
+            .unwrap_or_else(|| json!({}));
+        if !fixed.is_object() {
+            return Err(invalid("Fixed module arguments must be an object"));
+        }
+        let overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
+        crate::contracts::module_schema::validate_overlay(&overlay).map_err(invalid)?;
+        match &source {
+            AnsibleSource::Module => {}
+            AnsibleSource::Role { .. } => {
+                crate::contracts::role_import::validate_overlay(&overlay).map_err(invalid)?;
+            }
+            AnsibleSource::Playbook { .. } => {
+                crate::contracts::playbook_import::validate_overlay(&overlay).map_err(invalid)?;
+            }
+        }
+        let timeout_secs = raw.limits.as_ref().and_then(|limits| limits.timeout_secs);
+        if timeout_secs.is_some_and(|value| value == 0 || value > limits.max_timeout_secs)
+            || raw
+                .limits
+                .as_ref()
+                .and_then(|limits| limits.max_output_bytes)
+                .is_some()
+        {
+            return Err(invalid("Module limits only support a bounded timeout"));
+        }
+        let published = json!({
+            "type":"object","additionalProperties":false,
+            "required":["host","inputs"],
+            "properties":{
+                "host":{"type":"string","enum":targets},
+                "inputs":overlay["input_schema"],
+                "timeout_secs":{"type":"integer","minimum":1,"maximum":timeout_secs.unwrap_or(limits.max_timeout_secs)}
+            }
+        }).as_object().cloned().ok_or_else(||invalid("Invalid module metadata"))?;
+        if !schema_fits(&published) || !schema_fits(&overlay) {
+            return Err(invalid("Module metadata exceeds bound"));
+        }
+        Ok(Self {
+            name,
+            description: raw.description,
+            revision: raw.revision,
+            targets,
+            input_schema: Arc::new(published),
+            enabled,
+            effects: raw.effects,
+            inputs: Vec::new(),
+            execution: Execution::Ansible {
+                snapshot: PathBuf::from(snapshot),
+                source,
+                authority,
+                overlay,
+                no_log,
+                projection,
+                plan: None,
+            },
+            argv: Vec::new(),
+            timeout_secs,
+            max_output_bytes: None,
+        })
+    }
+
+    fn compile(
+        name: String,
+        raw: RawBinding,
+        enabled: bool,
+        limits: &Limits,
+        target_exists: &impl Fn(&str) -> bool,
+        activation: &mut ControllerActivation<'_>,
+    ) -> Result<Self, ConfigError> {
+        if matches!(
+            &raw.execution,
+            RawExecution::AnsibleModule { .. }
+                | RawExecution::AnsibleRole { .. }
+                | RawExecution::AnsiblePlaybook { .. }
+        ) {
+            return Self::compile_automation(name, raw, enabled, limits, target_exists);
+        }
+        if raw.fixed_args.is_some() || raw.input_map.is_some() {
+            return Err(invalid(
+                "Module overlay fields require ansible_module execution",
+            ));
+        }
+        if raw.description.is_empty() || raw.description.len() > 1024 || !identifier(&raw.revision)
+        {
+            return Err(invalid("Invalid description or revision"));
+        }
+        let authority = match raw.authority {
+            toml::Value::String(value) if value == "ordinary" => Authority::Ordinary,
+            toml::Value::String(value) if value == "controller" => Authority::Controller,
+            toml::Value::Table(mut value) if value.len() == 1 => match value.remove("sudo") {
+                Some(toml::Value::String(user)) if user.len() <= 64 && account_name(&user) => {
+                    Authority::Sudo(user)
+                }
+                _ => return Err(invalid("Invalid fixed sudo account")),
+            },
+            _ => return Err(invalid("Invalid fixed tool authority")),
+        };
+        let controller = matches!(&raw.execution, RawExecution::ControllerScript { .. });
+        if controller != matches!(authority, Authority::Controller)
+            || !matches!(
+                (&raw.result, controller),
+                (RawResult::ControllerCommand {}, true) | (RawResult::Command {}, false)
+            )
+        {
+            return Err(invalid("Execution, authority and result kinds must agree"));
+        }
+        if controller && raw.targets.is_some() {
+            return Err(invalid("Controller tools must omit targets"));
+        }
+        let targets = raw.targets.unwrap_or_default();
+        if !controller
+            && (targets.is_empty()
+                || targets.len() > 32
+                || targets.iter().collect::<BTreeSet<_>>().len() != targets.len()
+                || targets.iter().any(|v| !target_exists(v)))
+        {
+            return Err(invalid("Targets must be unique configured logical targets"));
+        }
+        if raw.effects.is_empty()
+            || raw.effects.iter().collect::<BTreeSet<_>>().len() != raw.effects.len()
+        {
+            return Err(invalid("Effects must be nonempty and unique"));
+        }
+        let (execution, raw_argv, mut separator) = match raw.execution {
+            RawExecution::NativeArgv { program, argv, cwd } => {
+                if !absolute(&program)
+                    || program.ends_with('/')
+                    || cwd.as_deref().is_some_and(|v| !absolute(v))
+                    || argv.len() > 64
+                {
+                    return Err(invalid("Invalid fixed executable layout"));
+                }
+                if matches!(authority, Authority::Sudo(_)) && cwd.is_some() {
+                    return Err(invalid("Elevated bindings do not support cwd"));
+                }
+                (
+                    Execution::NativeArgv {
+                        program,
+                        cwd,
+                        authority,
+                    },
+                    argv,
+                    false,
+                )
+            }
+            RawExecution::RemoteScript {
+                source,
+                interpreter,
+                argv,
+                cwd,
+            } => {
+                if !matches!(authority, Authority::Ordinary) {
+                    return Err(invalid("Remote scripts require ordinary authority"));
+                }
+                if !absolute(&source.path)
+                    || source.path.ends_with('/')
+                    || !absolute(&interpreter.program)
+                    || interpreter.program.ends_with('/')
+                    || cwd.as_deref().is_some_and(|v| !absolute(v))
+                    || interpreter.argv.len() > 64
+                    || argv.len() > 64 - interpreter.argv.len()
+                    || interpreter
+                        .argv
+                        .iter()
+                        .any(|v| v.len() > 4096 || v.contains('\0'))
+                {
+                    return Err(invalid("Invalid fixed remote script layout"));
+                }
+                let mut content_sha256 = [0; 32];
+                if source.content_sha256.len() != 64
+                    || hex::decode_to_slice(&source.content_sha256, &mut content_sha256).is_err()
+                {
+                    return Err(invalid(
+                        "Script content_sha256 requires exactly 64 hexadecimal ASCII characters",
+                    ));
+                }
+                let ceiling = limits.max_file_bytes.min(1_048_576);
+                let max_bytes = source.max_bytes.unwrap_or(ceiling);
+                if max_bytes == 0 || max_bytes > ceiling {
+                    return Err(invalid(
+                        "Script byte bound must be positive and within the server and 1 MiB ceilings",
+                    ));
+                }
+                let separator = interpreter.argv.iter().any(|v| v == "--");
+                (
+                    Execution::RemoteScript {
+                        source: ScriptSource {
+                            path: source.path,
+                            content_sha256,
+                            max_bytes: max_bytes as usize,
+                        },
+                        program: interpreter.program,
+                        prefix: interpreter.argv,
+                        cwd,
+                    },
+                    argv,
+                    separator,
+                )
+            }
+            RawExecution::ControllerScript {
+                source,
+                interpreter,
+                environment,
+                cwd,
+            } => {
+                if !absolute(&source.path)
+                    || source.path.ends_with('/')
+                    || !absolute(&interpreter.program)
+                    || interpreter.program.ends_with('/')
+                    || cwd.as_deref().is_some_and(|v| !absolute(v))
+                    || interpreter.argv.len() > 64
+                    || interpreter
+                        .argv
+                        .iter()
+                        .any(|v| v.len() > 4096 || v.contains('\0'))
+                {
+                    return Err(invalid("Invalid fixed controller script layout"));
+                }
+                let mut digest = [0; 32];
+                if source.content_sha256.len() != 64
+                    || hex::decode_to_slice(&source.content_sha256, &mut digest).is_err()
+                {
+                    return Err(invalid("Invalid script content_sha256"));
+                }
+                let ceiling = limits.max_file_bytes.min(1_048_576);
+                let max_bytes = source.max_bytes.unwrap_or(ceiling);
+                if max_bytes == 0 || max_bytes > ceiling {
+                    return Err(invalid("Invalid script byte bound"));
+                }
+                let environment = controller_environment(environment.unwrap_or_default())?;
+                let plan = activation.prepare(
+                    enabled,
+                    ScriptSource {
+                        path: source.path,
+                        content_sha256: digest,
+                        max_bytes: max_bytes as usize,
+                    },
+                    interpreter,
+                    environment,
+                    cwd,
+                )?;
+                (Execution::ControllerScript { plan }, Vec::new(), false)
+            }
+            RawExecution::AnsibleModule { .. }
+            | RawExecution::AnsibleRole { .. }
+            | RawExecution::AnsiblePlaybook { .. } => {
+                unreachable!("compiled separately")
+            }
+        };
+        let timeout_secs = raw.limits.as_ref().and_then(|v| v.timeout_secs);
+        let max_output_bytes = raw.limits.as_ref().and_then(|v| v.max_output_bytes);
+        if timeout_secs.is_some_and(|v| v == 0 || v > limits.max_timeout_secs)
+            || max_output_bytes.is_some_and(|v| v == 0 || v > limits.max_output_bytes)
+        {
+            return Err(invalid(
+                "Tool limits must be positive and no greater than server ceilings",
+            ));
+        }
+        if !schema_fits(&(&raw.input_schema, &targets)) {
+            return Err(invalid("Input schema exceeds metadata bound"));
+        }
+        let schema: RawSchema = raw
+            .input_schema
+            .try_into()
+            .map_err(|_| invalid("Unsupported input schema"))?;
+        if schema.kind != "object"
+            || schema.additional_properties
+            || schema.properties.len() > 16
+            || schema.required.len() != schema.properties.len()
+            || schema.required.iter().collect::<BTreeSet<_>>().len() != schema.required.len()
+            || schema
+                .required
+                .iter()
+                .any(|v| !schema.properties.contains_key(v))
+        {
+            return Err(invalid(
+                "Input schema must be a closed flat required object",
+            ));
+        }
+        let mut inputs = Vec::with_capacity(schema.properties.len());
+        let mut properties = JsonObject::new();
+        for (name, mut property) in schema.properties {
+            if !parameter(&name) || property.description.as_ref().is_some_and(|v| v.len() > 512) {
+                return Err(invalid("Invalid input identifier or description"));
+            }
+            let domain = match property.kind.as_str() {
+                "string" if property.minimum.is_none() && property.maximum.is_none() => {
+                    let minimum = property.min_length.unwrap_or(0);
+                    let maximum = property
+                        .max_length
+                        .ok_or_else(|| invalid("Strings require maxLength"))?;
+                    if minimum > maximum || maximum > 4096 {
+                        return Err(invalid("Invalid string length bounds"));
+                    }
+                    Domain::String { minimum, maximum }
+                }
+                "integer" if property.min_length.is_none() && property.max_length.is_none() => {
+                    let minimum = property
+                        .minimum
+                        .ok_or_else(|| invalid("Integers require minimum"))?;
+                    let maximum = property
+                        .maximum
+                        .ok_or_else(|| invalid("Integers require maximum"))?;
+                    if minimum > maximum {
+                        return Err(invalid("Invalid integer bounds"));
+                    }
+                    Domain::Integer { minimum, maximum }
+                }
+                "boolean"
+                    if property.min_length.is_none()
+                        && property.max_length.is_none()
+                        && property.minimum.is_none()
+                        && property.maximum.is_none() =>
+                {
+                    Domain::Boolean
+                }
+                _ => return Err(invalid("Unsupported property schema")),
+            };
+            if matches!(domain, Domain::Integer { .. })
+                && let Some(choices) = &mut property.choices
+            {
+                for value in choices {
+                    *value = canonical_integer(std::mem::take(value));
+                }
+            }
+            let input = Input {
+                name: name.clone(),
+                domain,
+                choices: property.choices.clone(),
+            };
+            if let Some(choices) = &input.choices
+                && (choices.is_empty()
+                    || choices.len() > 32
+                    || choices.iter().enumerate().any(|(i, v)| {
+                        choices[..i].contains(v)
+                            || !input.matches_type(v)
+                            || input.validate(v).is_err()
+                    }))
+            {
+                return Err(invalid("Invalid input enumeration"));
+            }
+            properties.insert(
+                name,
+                serde_json::to_value(property).map_err(|_| invalid("Invalid property metadata"))?,
+            );
+            inputs.push(input);
+        }
+        let mut used = vec![false; inputs.len()];
+        let mut argv = Vec::with_capacity(raw_argv.len());
+        for slot in raw_argv {
+            argv.push(match slot {
+                RawSlot::Fixed(value) => {
+                    if value.len() > 4096 || value.contains('\0') {
+                        return Err(invalid("Invalid fixed argv literal"));
+                    }
+                    if value == "--" {
+                        separator = true;
+                    }
+                    Slot::Fixed(value)
+                }
+                RawSlot::Input(slot) => {
+                    let index = inputs
+                        .iter()
+                        .position(|v| v.name == slot.input)
+                        .ok_or_else(|| invalid("Unknown input mapping"))?;
+                    if !separator && !inputs[index].option_safe() {
+                        return Err(invalid(
+                            "Unrestricted inputs require a preceding fixed option separator",
+                        ));
+                    }
+                    used[index] = true;
+                    Slot::Input(index)
+                }
+            });
+        }
+        if !controller && used.contains(&false) {
+            return Err(invalid("Every input must occupy an argv slot"));
+        }
+        let ceiling = timeout_secs.unwrap_or(limits.max_timeout_secs);
+        if !controller {
+            properties.insert("host".into(), json!({"type":"string", "enum":targets}));
+        }
+        properties.insert(
+            "timeout_secs".into(),
+            json!({"type":"integer", "minimum":1, "maximum":ceiling}),
+        );
+        properties.insert(
+            "retain_output".into(),
+            json!({"type":"boolean", "default":false}),
+        );
+        let mut required = schema.required;
+        if !controller {
+            required.push("host".into());
+        }
+        let metadata = json!({"type":"object", "additionalProperties":false, "properties":properties, "required":required});
+        let Value::Object(metadata) = metadata else {
+            return Err(invalid("Invalid schema metadata"));
+        };
+        if !schema_fits(&metadata) {
+            return Err(invalid("Generated input schema exceeds metadata bound"));
+        }
+        let input_schema = Arc::new(metadata);
+        let binding = Self {
+            name,
+            description: raw.description,
+            revision: raw.revision,
+            targets,
+            input_schema,
+            enabled,
+            effects: raw.effects,
+            inputs,
+            execution,
+            argv,
+            timeout_secs,
+            max_output_bytes,
+        };
+        if !controller {
+            let mut arguments = binding.arguments();
+            arguments.extend(binding.argv.iter().filter_map(|v| match v {
+                Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
+                Slot::Input(_) => None,
+            }));
+            binding
+                .invocation(arguments)
+                .encoded_len()
+                .map_err(|_| invalid("Fixed command exceeds encoded command bound"))?;
+        }
+        Ok(binding)
+    }
+    pub(crate) fn public_authority(&self) -> Value {
+        if let Some(authority) = self.automation_authority() {
+            serde_json::json!(authority)
+        } else if self.is_controller() {
+            serde_json::json!("controller")
+        } else {
+            self.sudo().map_or_else(
+                || serde_json::json!("ordinary"),
+                |(user, _)| serde_json::json!({"sudo": user}),
+            )
+        }
+    }
+
+    pub(crate) fn execution_location(&self) -> &'static str {
+        if self.is_controller() {
+            "controller"
+        } else if self.is_automation() {
+            "controller_and_remote"
+        } else {
+            "remote"
+        }
+    }
+
+    pub(crate) fn trusted_controller_code(&self) -> bool {
+        self.is_controller() || self.is_automation()
+    }
+
+    pub(crate) fn restriction_boundary(&self) -> Value {
+        serde_json::json!({
+            "mcp":"request_policy",
+            "os":if self.is_controller() { "service_account" } else { "service_account_and_remote_identity" },
+            "service_account_separation":"operator_managed_not_observed",
+            "sandbox":"not_provided_by_estus",
+        })
+    }
+
+    pub(crate) fn executor_kind(&self) -> &'static str {
+        match self.execution {
+            Execution::NativeArgv { .. } => EXECUTOR_KIND,
+            Execution::RemoteScript { .. } => "remote_script",
+            Execution::ControllerScript { .. } => "controller_script",
+            Execution::Ansible {
+                source: AnsibleSource::Role { .. },
+                ..
+            } => "ansible_role",
+            Execution::Ansible {
+                source: AnsibleSource::Playbook { .. },
+                ..
+            } => "ansible_playbook",
+            Execution::Ansible {
+                source: AnsibleSource::Module,
+                ..
+            } => "ansible_module",
+        }
+    }
+
+    pub(crate) fn is_controller(&self) -> bool {
+        matches!(self.execution, Execution::ControllerScript { .. })
+    }
+
+    pub(crate) fn is_automation(&self) -> bool {
+        matches!(self.execution, Execution::Ansible { .. })
+    }
+
+    pub(crate) fn automation_authority(&self) -> Option<&AutomationAuthority> {
+        match &self.execution {
+            Execution::Ansible { authority, .. } => Some(authority),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn automation_activated(&self) -> bool {
+        matches!(self.execution, Execution::Ansible { plan: Some(_), .. })
+    }
+
+    pub(crate) fn projection(&self) -> Option<&Arc<crate::contracts::projection::Plan>> {
+        match &self.execution {
+            Execution::Ansible { projection, .. } => projection.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn result_kind(&self) -> &'static str {
+        if self.projection().is_some() {
+            "ansible_projection"
+        } else if self.is_automation() {
+            "ansible_summary"
+        } else if self.is_controller() {
+            "controller_command"
+        } else {
+            RESULT_KIND
+        }
+    }
+
+    pub(crate) fn sudo(&self) -> Option<(&str, &str)> {
+        match &self.execution {
+            Execution::NativeArgv {
+                program,
+                authority: Authority::Sudo(user),
+                ..
+            } => Some((user, program)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub(crate) fn read_only(&self) -> bool {
+        self.effects
+            .iter()
+            .all(|v| matches!(v, Effect::Read | Effect::SensitiveRead))
+    }
+    pub(crate) fn effects(&self) -> &[Effect] {
+        &self.effects
+    }
+    pub(crate) fn parse_request(
+        &self,
+        mut arguments: JsonObject,
+    ) -> Result<BindingCall, ErrorData> {
+        let host = if self.is_controller() {
+            None
+        } else {
+            match arguments.remove("host") {
+                Some(Value::String(host)) => Some(host),
+                _ => return Err(shape()),
+            }
+        };
+        let timeout_secs = arguments
+            .remove("timeout_secs")
+            .map(|v| unsigned_integer(&v).ok_or_else(shape))
+            .transpose()?;
+        if self.is_automation() {
+            let inputs = arguments.remove("inputs").ok_or_else(shape)?;
+            if !arguments.is_empty() {
+                return Err(shape());
+            }
+            let Execution::Ansible { overlay, .. } = &self.execution else {
+                unreachable!("module request selected");
+            };
+            crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
+                .map_err(|_| shape())?;
+            return Ok(BindingCall::Automation(AutomationRequest {
+                host: host.ok_or_else(shape)?,
+                timeout_secs,
+                inputs,
+            }));
+        }
+        let retain_output = arguments
+            .remove("retain_output")
+            .map(|value| value.as_bool().ok_or_else(shape))
+            .transpose()?
+            .unwrap_or(false);
+        let values = self
+            .inputs
+            .iter()
+            .map(|input| {
+                let value = arguments.remove(&input.name).ok_or_else(shape)?;
+                if !input.matches_type(&value) {
+                    return Err(shape());
+                }
+                Ok(if matches!(input.domain, Domain::Integer { .. }) {
+                    canonical_integer(value)
+                } else {
+                    value
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        if !arguments.is_empty() {
+            return Err(shape());
+        }
+        Ok(match host {
+            Some(host) => BindingCall::Remote(BindingRequest {
+                host,
+                timeout_secs,
+                retain_output,
+                values,
+            }),
+            None => BindingCall::Controller(ControllerRequest {
+                timeout_secs,
+                retain_output,
+                values,
+            }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;
