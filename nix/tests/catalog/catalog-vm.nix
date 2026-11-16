@@ -12,19 +12,7 @@ let
         testModule = pkgs.stdenv.mkDerivation {
           pname = "estus-catalog-module";
           version = "1";
-          src = pkgs.writeTextDir "estus_catalog.c" ''
-            #include <linux/module.h>
-            #include <linux/init.h>
-            static int value = 7;
-            module_param(value, int, 0644);
-            MODULE_PARM_DESC(value, "Harmless catalog fixture value");
-            static int __init catalog_init(void) { return 0; }
-            static void __exit catalog_exit(void) { }
-            module_init(catalog_init);
-            module_exit(catalog_exit);
-            MODULE_LICENSE("GPL");
-            MODULE_DESCRIPTION("Disposable Estus qualification fixture; no hooks or devices");
-          '';
+          src = sourceRoot + "/tests/fixtures/catalog/kernel/estus-catalog";
           nativeBuildInputs = kernel.moduleBuildDependencies;
           buildPhase = ''
             printf 'obj-m := estus_catalog.o\n' > Makefile
@@ -40,7 +28,7 @@ let
         nicModelModule = pkgs.stdenv.mkDerivation {
           pname = "estus-nic-model";
           version = "1";
-          src = pkgs.writeTextDir "estus_nic_model.c" (builtins.readFile (sourceRoot + "/nix/catalog-nic-model.c"));
+          src = sourceRoot + "/tests/fixtures/catalog/kernel/estus-nic-model";
           nativeBuildInputs = kernel.moduleBuildDependencies;
           buildPhase = ''
             printf 'obj-m := estus_nic_model.o\n' > Makefile
@@ -58,42 +46,22 @@ let
           pkgs.iputils pkgs.traceroute pkgs.bind pkgs.gnugrep pkgs.gnused pkgs.findutils
           pkgs.openssh pkgs.acl ] ++ lib.optionals lab [ pkgs.mdadm pkgs.nvme-cli pkgs.smartmontools ];
         python = packageFixture.python;
-        unitFiles = pkgs.runCommand "estus-catalog-units" {} ''
-          mkdir -p "$out"
-          for name in estus-fixture estus-fixture-idle; do
-            cat > "$out/$name.service" <<EOF
-          [Unit]
-          Description=Disposable Estus catalog service
-          [Service]
-          ExecStart=${pkgs.writeShellScript "estus-catalog-service" ''
+        unitFiles = pkgs.runCommand "estus-catalog-units" {
+          fixtureSource = sourceRoot + "/tests/fixtures/catalog/services";
+          coreutils = pkgs.coreutils;
+          serviceRunner = pkgs.writeShellScript "estus-catalog-service" ''
             echo ESTUS_CATALOG_JOURNAL_MARKER
             exec ${pkgs.coreutils}/bin/sleep infinity
-          ''}
-          ExecReload=${pkgs.coreutils}/bin/touch /var/lib/estus-catalog/reload-marker
-          [Install]
-          WantedBy=multi-user.target
-          EOF
+          '';
+        } ''
+          mkdir -p "$out"
+          for name in estus-fixture estus-fixture-idle; do
+            substitute "$fixtureSource/estus-fixture.service.in" "$out/$name.service" \
+              --subst-var serviceRunner --subst-var coreutils
           done
-          cat > "$out/estus-fixture-fail.service" <<EOF
-          [Service]
-          Type=oneshot
-          ExecStart=${pkgs.coreutils}/bin/false
-          EOF
-          cat > "$out/estus-fixture.timer" <<EOF
-          [Timer]
-          OnBootSec=1h
-          Unit=estus-fixture-idle.service
-          [Install]
-          WantedBy=timers.target
-          EOF
-          cat > "$out/estus-fixture.socket" <<EOF
-          [Socket]
-          ListenStream=127.0.0.1:18990
-          Accept=no
-          Service=estus-fixture-idle.service
-          [Install]
-          WantedBy=sockets.target
-          EOF
+          substitute "$fixtureSource/estus-fixture-fail.service.in" "$out/estus-fixture-fail.service" \
+            --subst-var coreutils
+          cp "$fixtureSource/estus-fixture.timer" "$fixtureSource/estus-fixture.socket" "$out/"
         '';
       in {
         system.stateVersion = "26.05";
@@ -138,26 +106,9 @@ let
         system.activationScripts.estusMutableUnits = {
           deps = [ "etc" ];
           text = ''
-            ${pkgs.python3}/bin/python3 - <<'PY'
-            import os
-            from pathlib import Path
-            import shutil
-            source = Path(${builtins.toJSON (toString config.environment.etc."systemd/system".source)})
-            def install_directory(source, target, depth=0):
-                if depth > 8:
-                    raise RuntimeError('fixture unit directory exceeds bound')
-                target.mkdir(mode=0o755, parents=True, exist_ok=True)
-                for entry in source.iterdir():
-                    destination = target / entry.name
-                    if entry.is_dir():
-                        install_directory(entry, destination, depth + 1)
-                    elif not destination.exists() and not destination.is_symlink():
-                        if entry.is_symlink():
-                            destination.symlink_to(os.readlink(entry))
-                        else:
-                            shutil.copy2(entry, destination)
-            install_directory(source, Path('/etc/systemd/system'))
-            PY
+            ${pkgs.python3}/bin/python3 ${sourceRoot + "/tests/fixtures/catalog/services/install-mutable-units.py"} \
+              ${lib.escapeShellArg (toString config.environment.etc."systemd/system".source)} \
+              /etc/systemd/system
           '';
         };
         services.openssh = {

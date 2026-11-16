@@ -24,7 +24,7 @@
               || pkgs.lib.hasPrefix "${toString sourceRoot}/examples/" path
               || pkgs.lib.hasPrefix "${toString sourceRoot}/catalog/" path
               || pkgs.lib.hasPrefix "${toString sourceRoot}/vendor/openssh-sftp-client/" path
-              || pkgs.lib.hasPrefix "${toString sourceRoot}/tests/catalog/fixtures/" path);
+              || pkgs.lib.hasPrefix "${toString sourceRoot}/tests/fixtures/catalog/" path);
         };
         strictDeps = true;
         doCheck = true;

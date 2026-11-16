@@ -1,0 +1,4 @@
+#!@maintainerShell@
+set -eu
+mkdir -p "${DPKG_ROOT}/var/lib/estus-catalog"
+printf '%s\n' '@name@ @version@ removed' >> "${DPKG_ROOT}/var/lib/estus-catalog/package-effects"

@@ -1,0 +1,5 @@
+[Timer]
+OnBootSec=1h
+Unit=estus-fixture-idle.service
+[Install]
+WantedBy=timers.target

@@ -1526,6 +1526,12 @@ That health check verifies imports and identity, not Ansible workload execution.
 SFTP uses the published `openssh-sftp-protocol` 0.26.1 release for lossless Unix
 filename handling; no vendored protocol fork is required.
 
+Catalog fixture-only kernel sources, public test-only signing material, service
+templates, captured observations and provenance live under `tests/fixtures/catalog/`.
+Their derivations live under `nix/tests/catalog/`; generated packages, indexes,
+rootfs and disks remain build outputs. Never trust the published fixture signing
+identity outside the disposable guest.
+
 ### Explicit development preparation
 
 From the checkout root (including checkouts whose path contains spaces):

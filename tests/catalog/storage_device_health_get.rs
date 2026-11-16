@@ -77,7 +77,7 @@ async fn storage_device_health_get() -> Result<()> {
 #[test]
 fn captured_smart_logs_use_the_production_parser() -> Result<()> {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/catalog/fixtures/storage_device_health_get");
+        .join("tests/fixtures/catalog/captures/storage_device_health_get");
     for phase in ["before", "after"] {
         for variant in ["captured", "truncated"] {
             let hex = std::fs::read_to_string(fixtures.join(format!("{phase}.hex")))?;

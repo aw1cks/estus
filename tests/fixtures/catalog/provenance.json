@@ -1,0 +1,14 @@
+{
+  "purpose": "Disposable Estus catalog qualification fixtures only; no production trust or physical-hardware claims",
+  "kernel": {
+    "estus-catalog/estus_catalog.c": "Extracted unchanged from the catalog VM's harmless inline module; parameter only, no hooks or devices",
+    "estus-nic-model/estus_nic_model.c": "Moved byte-for-byte from nix/catalog-nic-model.c; synthetic EEE and SFF-8472 configuration fixture, not a PHY or data-plane model"
+  },
+  "packages": {
+    "signing/test-only-signing-key.asc": "Existing unencrypted PUBLIC TEST-ONLY signing material, intentionally public including signing capability. Never use or trust this identity outside disposable qualification fixtures; not a private credential",
+    "templates": "Existing package control and real maintainer scripts extracted from catalog-package-fixture.nix; configured/removed effects and DPKG_ROOT behavior retained"
+  },
+  "services": "Existing disposable unit templates and bounded recursive mutable-unit installer extracted from catalog-vm.nix",
+  "captures": "Existing NVMe and Linux MD observations moved with their original per-capture provenance, independent oracles and qualification scope",
+  "generated_only": ["deb packages", "repository indexes", "repository signatures", "rootfs", "disks", "per-run SSH keys"]
+}

@@ -66,7 +66,7 @@ async fn storage_raid_status() -> Result<()> {
 #[test]
 fn captured_md_states_use_the_production_parser() -> Result<()> {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/catalog/fixtures/storage_raid_status");
+        .join("tests/fixtures/catalog/captures/storage_raid_status");
     for phase in ["healthy", "degraded"] {
         let mut snapshot: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixtures.join(format!("{phase}.json")))?)?;

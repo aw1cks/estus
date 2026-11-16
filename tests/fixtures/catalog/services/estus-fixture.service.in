@@ -1,0 +1,7 @@
+[Unit]
+Description=Disposable Estus catalog service
+[Service]
+ExecStart=@serviceRunner@
+ExecReload=@coreutils@/bin/touch /var/lib/estus-catalog/reload-marker
+[Install]
+WantedBy=multi-user.target

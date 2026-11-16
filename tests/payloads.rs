@@ -61,7 +61,7 @@ fn md_attributes_enforce_byte_encoding_and_both_bounds() -> Result<()> {
 #[test]
 fn md_members_counts_and_unknown_reported_states() -> Result<()> {
     let baseline: Value = serde_json::from_str(include_str!(
-        "catalog/fixtures/storage_raid_status/healthy.json"
+        "fixtures/catalog/captures/storage_raid_status/healthy.json"
     ))?;
     let mut state = baseline.clone();
     state["members"][0]["state"] = json!("in_sync,new_kernel_state");

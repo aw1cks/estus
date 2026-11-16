@@ -1,0 +1,7 @@
+Package: @name@
+Version: @version@
+Architecture: all
+Maintainer: Estus Fixture <fixture.invalid@example.invalid>
+Description: Tiny local signed catalog acceptance package
+Section: misc
+Priority: optional
