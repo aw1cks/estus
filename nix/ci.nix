@@ -91,6 +91,8 @@
                   nix run -L --no-update-lock-file .#controller-scripts-msrv
                   nix run -L --no-update-lock-file .#doctor-acceptance-msrv
                   nix run -L --no-update-lock-file .#progress-acceptance-msrv
+                  nix run -L --no-update-lock-file .#wheel-acceptance
+                  nix run -L --no-update-lock-file .#sdist-acceptance
                 '';
               }
               {

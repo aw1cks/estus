@@ -1,4 +1,12 @@
 { pkgs, craneLib, commonArgs, cargoArtifacts, package, controllerTestPrograms }:
+let
+  inherit (import ../libtest.nix { inherit pkgs; }) mkTestScript;
+  mkFilteredRunner = name: listArgs: runArgs:
+    mkTestScript {
+      inherit name listArgs runArgs;
+      harness = "\${ESTUS_LIBTEST_HARNESS:?}";
+    };
+in
 craneLib.mkCargoDerivation (commonArgs // {
   pnameSuffix = "-acceptance";
   inherit cargoArtifacts;
@@ -30,34 +38,34 @@ craneLib.mkCargoDerivation (commonArgs // {
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
       --add-flags '--ignored --nocapture --test-threads=2'
-    makeWrapper "$out/libexec/ssh_local" "$out/bin/mkdir-acceptance" \
+    makeWrapper ${mkFilteredRunner "mkdir-acceptance" [ "--ignored" "ssh_mkdir" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_mkdir" ]} "$out/bin/mkdir-acceptance" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
-      --add-flags '--ignored --nocapture --test-threads=2 ssh_mkdir'
-    makeWrapper "$out/libexec/ssh_local" "$out/bin/rename-acceptance" \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}
+    makeWrapper ${mkFilteredRunner "rename-acceptance" [ "--ignored" "ssh_rename" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_rename" ]} "$out/bin/rename-acceptance" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
-      --add-flags '--ignored --nocapture --test-threads=2 ssh_rename'
-    makeWrapper "$out/libexec/ssh_local" "$out/bin/remove-file-acceptance" \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}
+    makeWrapper ${mkFilteredRunner "remove-file-acceptance" [ "--ignored" "ssh_remove_file" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_remove_file" ]} "$out/bin/remove-file-acceptance" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
-      --add-flags '--ignored --nocapture --test-threads=2 ssh_remove_file'
-    makeWrapper "$out/libexec/ssh_local" "$out/bin/remove-directory-acceptance" \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}
+    makeWrapper ${mkFilteredRunner "remove-directory-acceptance" [ "--ignored" "ssh_remove_directory" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_remove_directory" ]} "$out/bin/remove-directory-acceptance" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
-      --add-flags '--ignored --nocapture --test-threads=2 ssh_remove_directory'
-    makeWrapper "$out/libexec/ssh_local" "$out/bin/replace-file-acceptance" \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}
+    makeWrapper ${mkFilteredRunner "replace-file-acceptance" [ "--ignored" "ssh_replace_file" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_replace_file" ]} "$out/bin/replace-file-acceptance" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
-      --add-flags '--ignored --nocapture --test-threads=2 ssh_replace_file'
-    makeWrapper "$out/libexec/ssh_local" "$out/bin/output-native" \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}
+    makeWrapper ${mkFilteredRunner "output-native" [ "--ignored" "ssh_output_" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_output_" ]} "$out/bin/output-native" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
-      --add-flags '--ignored --nocapture --test-threads=2 ssh_output_'
-    makeWrapper "$out/libexec/controller" "$out/bin/output-controller" \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}
+    makeWrapper ${mkFilteredRunner "output-controller" [ "--include-ignored" "controller_output_" ] [ "--include-ignored" "--nocapture" "--test-threads=2" "controller_output_" ]} "$out/bin/output-controller" \
+      --set ESTUS_LIBTEST_HARNESS "$out/libexec/controller" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath controllerTestPrograms} \
-      --add-flags '--include-ignored --nocapture --test-threads=2 controller_output_'
+      --prefix PATH : ${pkgs.lib.makeBinPath controllerTestPrograms}
     cat > "$out/bin/output-acceptance" <<EOF
     #!${pkgs.runtimeShell}
     set -eu

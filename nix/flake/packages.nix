@@ -41,6 +41,7 @@
       inherit (defaultBuild) cargoArtifacts package acceptance;
       automationRuntime = import ../packages/automation-runtime.nix { inherit pkgs sourceRoot; };
       wheel = import ../packages/wheel.nix { inherit pkgs sourceRoot; craneLib = msrvLib; };
+      cargoVendor = msrvLib.vendorCargoDeps commonArgs;
       withAutomation = native: pkgs.runCommand "estus-automation-${native.version}" {
         nativeBuildInputs = [ pkgs.makeWrapper ];
         meta.mainProgram = "estus";
@@ -56,8 +57,9 @@
     in
     {
       _module.args.estusBuild = {
-        inherit craneLib fuzzLib commonArgs msrvBuild cargoArtifacts package acceptance automationRuntime
-          wheel automation automationMsrv catalogVm catalogLabVm;
+        inherit craneLib fuzzLib commonArgs msrvBuild msrvToolchain cargoVendor cargoArtifacts
+          package acceptance automationRuntime wheel automation automationMsrv catalogVm
+          catalogLabVm;
       };
       packages = {
         default = package;

@@ -381,9 +381,10 @@ async fn installed_wheel_channels() -> Result<()> {
         runtime.is_absolute() && runtime.join("runtime.json").is_file(),
         "missing immutable Ansible bundle"
     );
-    let canonical: Value = serde_json::from_slice(&fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json"),
-    )?)?;
+    let catalog_assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
+    let canonical: Value = serde_json::from_slice(&fs::read(catalog_assets.join("catalog.json"))?)?;
     let installed = Installed::new()?;
     let python = installed.python().await?;
     let extra_requirement = format!("{}[ansible]", wheel.to_str().context("UTF-8 wheel path")?);
@@ -1316,16 +1317,21 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
                     .and_then(|(_, value)| value.split_once(']'))
                     .context("unrecognized ELF DT_NEEDED entry")?
                     .0;
+                let dynamic_linker = Path::new(interpreter)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("missing dynamic linker name")?;
                 ensure!(
-                    matches!(
-                        library,
-                        "libc.so.6"
-                            | "libgcc_s.so.1"
-                            | "libm.so.6"
-                            | "libpthread.so.0"
-                            | "librt.so.1"
-                            | "libdl.so.2"
-                    ),
+                    library == dynamic_linker
+                        || matches!(
+                            library,
+                            "libc.so.6"
+                                | "libgcc_s.so.1"
+                                | "libm.so.6"
+                                | "libpthread.so.0"
+                                | "librt.so.1"
+                                | "libdl.so.2"
+                        ),
                     "nonportable ELF dependency outside the system C runtime: {library}"
                 );
                 needed_seen = true;

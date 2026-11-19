@@ -2,24 +2,86 @@
 {
   perSystem = { pkgs, estusBuild, ... }:
     let
-      inherit (estusBuild) package acceptance msrvBuild automationRuntime wheel
-        automation automationMsrv commonArgs catalogVm catalogLabVm;
+      inherit (estusBuild) package acceptance msrvBuild msrvToolchain cargoVendor automationRuntime
+        wheel automation automationMsrv commonArgs catalogVm catalogLabVm;
+      inherit (import ../tests/libtest.nix { inherit pkgs; }) mkTestScript;
+      runExactTest = { name, harness, scenario, extraFlags ? [ "--nocapture" ], extraSetup ? "" }:
+        mkTestScript {
+          inherit name harness extraSetup;
+          exactScenario = scenario;
+          listArgs = [ "--ignored" "--exact" scenario ];
+          runArgs = [ "--ignored" "--exact" scenario ] ++ extraFlags;
+        };
+      runFilteredTest = { name, harness, listArgs, runArgs }:
+        mkTestScript {
+          inherit name harness listArgs runArgs;
+        };
+      wheelFlags = [
+        "--ignored"
+        "--skip"
+        "source_distribution_roundtrip_preserves_manifest_selected_assets"
+      ];
+      wheelRunner = runFilteredTest {
+        name = "wheel-acceptance";
+        harness = "${msrvBuild.acceptance}/libexec/wheel";
+        listArgs = wheelFlags;
+        runArgs = wheelFlags ++ [ "--nocapture" "--test-threads=1" ];
+      };
       wheelAcceptance = pkgs.runCommand "estus-wheel-acceptance" {
         nativeBuildInputs = [ pkgs.makeWrapper ];
       } ''
         mkdir -p "$out/bin"
-        makeWrapper ${msrvBuild.acceptance}/libexec/wheel "$out/bin/wheel-acceptance" \
+        makeWrapper ${wheelRunner} "$out/bin/wheel-acceptance" \
           --set ESTUS_TEST_WHEEL ${wheel}/${wheel.wheelName} \
           --set ESTUS_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
           --set ESTUS_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
           --set ESTUS_TEST_AUTOMATION_SUITE ${msrvBuild.acceptance}/libexec/automation \
           --set ESTUS_TEST_BINARY ${msrvBuild.package}/bin/estus \
           --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+          --set ESTUS_TEST_CATALOG_ASSETS ${msrvBuild.package}/share/estus/catalog \
           --prefix PATH : ${pkgs.lib.makeBinPath (
             [ pkgs.uv pkgs.openssh pkgs.coreutils pkgs.bash pkgs.unzip pkgs.llvmPackages.llvm ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
-          )} \
-          --add-flags '--ignored --nocapture --test-threads=1'
+          )}
+      '';
+      sourceArchive = pkgs.runCommand "estus-source-archive.tar.gz" {
+        nativeBuildInputs = [ pkgs.gnutar pkgs.gzip ];
+      } ''
+        tar --mode='u+w' -czf "$out" -C ${wheel.wheelSrc} .
+      '';
+      sdistRunner = runExactTest {
+        name = "sdist-acceptance";
+        harness = "${msrvBuild.acceptance}/libexec/wheel";
+        scenario = "source_distribution_roundtrip_preserves_manifest_selected_assets";
+        extraFlags = [ "--nocapture" "--test-threads=1" ];
+        extraSetup = ''
+          ESTUS_CLEANUP_DIR=$(${pkgs.coreutils}/bin/mktemp -d)
+          export ESTUS_CLEANUP_DIR
+          export CARGO_HOME="$ESTUS_CLEANUP_DIR"
+          export CARGO_NET_OFFLINE=true
+          ${pkgs.coreutils}/bin/install -m600 ${cargoVendor}/config.toml "$CARGO_HOME/config.toml"
+        '';
+      };
+      sdistAcceptance = pkgs.runCommand "estus-sdist-acceptance" {
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+      } ''
+        mkdir -p "$out/bin"
+        makeWrapper ${sdistRunner} "$out/bin/sdist-acceptance" \
+          --set ESTUS_TEST_SOURCE_ARCHIVE ${sourceArchive} \
+          --set ESTUS_TEST_BUILD_PYTHON ${wheel.buildPython}/bin/python \
+          --set ESTUS_TEST_NATIVE_CATALOG ${msrvBuild.package}/share/estus/catalog \
+          --set ESTUS_TEST_WHEEL ${wheel}/${wheel.wheelName} \
+          --set ESTUS_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
+          --set ESTUS_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
+          --set ESTUS_TEST_AUTOMATION_SUITE ${msrvBuild.acceptance}/libexec/automation \
+          --set ESTUS_TEST_BINARY ${msrvBuild.package}/bin/estus \
+          --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+          --set ESTUS_TEST_CATALOG_ASSETS ${msrvBuild.package}/share/estus/catalog \
+          --prefix PATH : ${pkgs.lib.makeBinPath (
+            [ pkgs.uv pkgs.openssh pkgs.coreutils pkgs.bash pkgs.unzip pkgs.llvmPackages.llvm
+              pkgs.gnutar pkgs.gzip msrvToolchain pkgs.stdenv.cc ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
+          )}
       '';
       automationAcceptance = native: harness: optional:
         pkgs.runCommand "estus-automation-acceptance" {
@@ -39,8 +101,14 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
         } ''
           mkdir -p "$out/bin"
-          ${pkgs.lib.concatMapStrings (entry: ''
-          makeWrapper ${harness}/libexec/automation_exec "$out/bin/${entry.name}" \
+          ${pkgs.lib.concatMapStrings (entry:
+            let
+              runner = runExactTest {
+                inherit (entry) name scenario;
+                harness = "${harness}/libexec/automation_exec";
+              };
+            in ''
+          makeWrapper ${runner} "$out/bin/${entry.name}" \
             --set ESTUS_TEST_BINARY ${native}/bin/estus \
             --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
             --set ESTUS_TEST_TARGET_PYTHON ${pkgs.python314}/bin/python3 \
@@ -48,8 +116,7 @@
               [ pkgs.openssh pkgs.coreutils pkgs.bash ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
               ++ pkgs.lib.optionals (entry.isolated or false) [ pkgs.docker-client pkgs.gnutar ]
-            )} \
-            --add-flags '--ignored --exact ${entry.scenario} --nocapture'
+            )}
           '') [
             { name = "runner-acceptance"; scenario = "real_runner_fixture_acceptance"; }
             { name = "projection-acceptance"; scenario = "real_runner_projection_acceptance"; }
@@ -79,17 +146,37 @@
       '';
       workflowAcceptance = native: harness:
         let
-          catalog = pkgs.writeShellScriptBin "workflow-catalog-acceptance" ''
-            exec ${catalogAcceptance native harness}/bin/catalog-acceptance workflows:: "$@"
+          catalogRunner = runFilteredTest {
+            name = "workflow-catalog-acceptance";
+            harness = "${harness}/libexec/catalog";
+            listArgs = [ "--ignored" "workflows::" ];
+            runArgs = [ "--ignored" "--nocapture" "--test-threads=2" "workflows::" ];
+          };
+          catalog = pkgs.runCommand "estus-workflow-catalog-acceptance" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p "$out/bin"
+            makeWrapper ${catalogRunner} "$out/bin/workflow-catalog-acceptance" \
+              --set ESTUS_TEST_BINARY ${native}/bin/estus \
+              --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+              --set ESTUS_TEST_CATALOG_ASSETS ${commonArgs.src}/catalog \
+              --set ESTUS_TEST_CATALOG_VM ${catalogVm}/bin/catalog-guest \
+              --set ESTUS_TEST_CATALOG_LAB_VM ${catalogLabVm}/bin/catalog-lab-guest \
+              --prefix PATH : ${pkgs.lib.makeBinPath ([ pkgs.openssh pkgs.coreutils ]
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ])}
           '';
+          filesRunner = runExactTest {
+            name = "workflow-files-acceptance";
+            harness = "${harness}/libexec/deployment_boundary";
+            scenario = "configuration_replacement_workflow";
+          };
           files = pkgs.runCommand "estus-workflow-files-acceptance" {
             nativeBuildInputs = [ pkgs.makeWrapper ];
           } ''
             mkdir -p "$out/bin"
-            makeWrapper ${harness}/libexec/deployment_boundary "$out/bin/workflow-files-acceptance" \
+            makeWrapper ${filesRunner} "$out/bin/workflow-files-acceptance" \
               --set ESTUS_TEST_BINARY ${native}/bin/estus \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils pkgs.bash pkgs.docker-client pkgs.gnutar ]} \
-              --add-flags '--ignored --exact configuration_replacement_workflow --nocapture'
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils pkgs.bash pkgs.docker-client pkgs.gnutar ]}
           '';
           all = pkgs.writeShellScriptBin "workflow-acceptance" ''
             set -eu
@@ -200,6 +287,10 @@
       apps.wheel-acceptance = {
         type = "app";
         program = "${wheelAcceptance}/bin/wheel-acceptance";
+      };
+      apps.sdist-acceptance = {
+        type = "app";
+        program = "${sdistAcceptance}/bin/sdist-acceptance";
       };
       apps.ssh-baseline = {
         type = "app";

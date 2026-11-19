@@ -26,11 +26,7 @@ let
   else
     "macosx_11_0_arm64";
   wheelName = "${lib.replaceStrings [ "-" ] [ "_" ] metadata.name}-${metadata.version}-cp314-cp314-${platformTag}.whl";
-in
-craneLib.mkCargoDerivation {
-  pname = "${metadata.name}-wheel";
-  inherit (metadata) version;
-  src = lib.cleanSourceWith {
+  wheelSrc = lib.cleanSourceWith {
     src = sourceRoot;
     filter = path: type:
       let relative = lib.removePrefix "${toString sourceRoot}/" path;
@@ -49,6 +45,11 @@ craneLib.mkCargoDerivation {
         || (lib.hasPrefix "src/" relative && lib.hasSuffix ".py" relative)
       );
   };
+in
+craneLib.mkCargoDerivation {
+  pname = "${metadata.name}-wheel";
+  inherit (metadata) version;
+  src = wheelSrc;
   strictDeps = true;
   cargoArtifacts = null;
   doInstallCargoArtifacts = false;
@@ -93,6 +94,6 @@ craneLib.mkCargoDerivation {
     install -m644 "dist/${wheelName}" "$out/${wheelName}"
   '';
   passthru = {
-    inherit wheelName platformTag;
+    inherit wheelName platformTag buildPython wheelSrc;
   };
 }

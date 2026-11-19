@@ -2,7 +2,7 @@
 {
   perSystem = { pkgs, estusBuild, ... }:
     let
-      inherit (estusBuild) package msrvBuild craneLib commonArgs cargoArtifacts acceptance;
+      inherit (estusBuild) package msrvBuild craneLib commonArgs cargoArtifacts acceptance wheel;
     in
     {
       checks.package = package;
@@ -12,6 +12,7 @@
       checks.formatting = craneLib.cargoFmt {
         src = commonArgs.src;
       };
+      checks.wheel = wheel;
       checks.clippy = craneLib.cargoClippy (commonArgs // {
         inherit cargoArtifacts;
         cargoExtraArgs = "--locked";
