@@ -415,77 +415,16 @@ impl Engine {
                     error: Some(error),
                 }
             }
-            Ok((rc, value)) => {
-                let mut error = (rc != 0).then(|| {
-                    error(
-                        "payload_failed",
-                        "Payload operation completed with failure",
-                        false,
-                    )
-                });
-                // Censor before domain parsing/publication, including changed evidence.
-                let domain = if !plan.no_log && value.get("overflow") == Some(&Value::Bool(false)) {
-                    value
-                        .get("stdout")
-                        .and_then(Value::as_str)
-                        .and_then(|stdout| parse(stdout.as_bytes()).ok())
-                } else {
-                    None
-                };
-                let changed = if plan.no_log {
-                    None
-                } else {
-                    plan.manifest.change_policy.evidence(rc, domain.as_ref())
-                };
-                let projection = plan.projection.as_ref().map(|projection| {
-                    if plan.no_log {
-                        return ModuleProjection::Censored;
-                    }
-                    if rc != 0 {
-                        return ModuleProjection::Unavailable;
-                    }
-                    match domain
-                        .as_ref()
-                        .and_then(|result| project(projection, result))
-                    {
-                        Some(value) => ModuleProjection::Complete { value },
-                        None => {
-                            if error.is_none() {
-                                error = Some(crate::reply::ToolError::new(
-                                    "invalid_projection",
-                                    "Payload output violates approved projection",
-                                    false,
-                                ));
-                            }
-                            ModuleProjection::Invalid
-                        }
-                    }
-                });
-                let data = AutomationData {
-                    host: host.to_owned(),
-                    status: if rc == 0 {
-                        AutomationStatus::Successful
-                    } else {
-                        AutomationStatus::Failed
-                    },
-                    runner_rc: Some(rc),
-                    changed,
-                    tasks: AutomationTasks {
-                        ok: u32::from(rc == 0),
-                        failed: u32::from(rc != 0),
-                        ..Default::default()
-                    },
-                    censored: plan.no_log,
-                    complete: true,
-                    duration_ms: elapsed(started),
-                    owned_group_cleanup: GroupCleanup::NotApplicable,
-                    projection,
-                };
-                ToolReply {
-                    data: Some(data),
-                    error,
-                }
-            }
+            Ok((rc, value, output_status)) => complete_reply(
+                host,
+                plan.no_log,
+                &plan.manifest.change_policy,
+                plan.projection.as_deref(),
+                rc,
+                &value,
+                output_status,
+                started,
+            ),
         }
     }
 }
@@ -556,8 +495,122 @@ fn discovery_identity(out: Output, id: &str) -> Result<Value, Failure> {
         .ok_or_else(|| failed("discovery_failed", "Missing discovery identity", false))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputStatus {
+    Complete,
+    Overflow,
+    InvalidUtf8,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_reply(
+    host: &str,
+    no_log: bool,
+    change_policy: &crate::native_payload::ChangePolicy,
+    projection_plan: Option<&crate::contracts::projection::Plan>,
+    rc: i32,
+    value: &Value,
+    output_status: OutputStatus,
+    started: std::time::Instant,
+) -> ToolReply<AutomationData> {
+    let mut error = (rc != 0).then(|| {
+        error(
+            "payload_failed",
+            "Payload operation completed with failure",
+            false,
+        )
+    });
+    // Censor before domain parsing/publication, including changed evidence.
+    let domain = if !no_log && output_status == OutputStatus::Complete {
+        value
+            .get("stdout")
+            .and_then(Value::as_str)
+            .and_then(|stdout| parse(stdout.as_bytes()).ok())
+    } else {
+        None
+    };
+    let changed = if no_log {
+        None
+    } else {
+        change_policy.evidence(rc, domain.as_ref())
+    };
+    if !no_log && error.is_none() {
+        match output_status {
+            OutputStatus::Overflow => {
+                error = Some(crate::reply::ToolError::new(
+                    "resource_limit",
+                    "Payload output exceeded retention limit",
+                    false,
+                ));
+            }
+            OutputStatus::InvalidUtf8 => {
+                error = Some(crate::reply::ToolError::new(
+                    "invalid_projection",
+                    "Payload output was not valid UTF-8",
+                    false,
+                ));
+            }
+            OutputStatus::Complete => {}
+        }
+    }
+    let projection = projection_plan.map(|projection| {
+        if no_log {
+            return ModuleProjection::Censored;
+        }
+        match output_status {
+            OutputStatus::Overflow => ModuleProjection::Unavailable,
+            OutputStatus::InvalidUtf8 => ModuleProjection::Invalid,
+            OutputStatus::Complete => {
+                if rc != 0 {
+                    return ModuleProjection::Unavailable;
+                }
+                match domain
+                    .as_ref()
+                    .and_then(|result| project(projection, result))
+                {
+                    Some(value) => ModuleProjection::Complete { value },
+                    None => {
+                        if error.is_none() {
+                            error = Some(crate::reply::ToolError::new(
+                                "invalid_projection",
+                                "Payload output violates approved projection",
+                                false,
+                            ));
+                        }
+                        ModuleProjection::Invalid
+                    }
+                }
+            }
+        }
+    });
+    let data = AutomationData {
+        host: host.to_owned(),
+        status: if rc == 0 {
+            AutomationStatus::Successful
+        } else {
+            AutomationStatus::Failed
+        },
+        runner_rc: Some(rc),
+        changed,
+        tasks: AutomationTasks {
+            ok: u32::from(rc == 0),
+            failed: u32::from(rc != 0),
+            ..Default::default()
+        },
+        censored: no_log,
+        complete: true,
+        duration_ms: elapsed(started),
+        owned_group_cleanup: GroupCleanup::NotApplicable,
+        projection,
+    };
+    ToolReply {
+        data: Some(data),
+        error,
+    }
+}
+
 /// A bootstrap terminal record and its SSH exit status must agree independently.
-fn terminal(out: Output, id: &str) -> Result<(i32, Value), ToolError> {
+fn terminal(out: Output, id: &str) -> Result<(i32, Value, OutputStatus), ToolError> {
     let invalid = || {
         error(
             "invalid_result",
@@ -605,7 +658,19 @@ fn terminal(out: Output, id: &str) -> Result<(i32, Value), ToolError> {
     if out.rc != if rc == 0 { 0 } else { 1 } {
         return Err(invalid());
     }
-    Ok((rc, value))
+    let overflow = value
+        .get("overflow")
+        .and_then(Value::as_bool)
+        .ok_or_else(invalid)?;
+    let output_status = match value.get("output_status").and_then(Value::as_str) {
+        Some("complete") if !overflow && value.get("stdout").and_then(Value::as_str).is_some() => {
+            OutputStatus::Complete
+        }
+        Some("overflow") if overflow => OutputStatus::Overflow,
+        Some("invalid_utf8") if !overflow => OutputStatus::InvalidUtf8,
+        _ => return Err(invalid()),
+    };
+    Ok((rc, value, output_status))
 }
 
 fn elapsed(started: std::time::Instant) -> u64 {
@@ -986,6 +1051,129 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.code, "invalid_result");
+        }
+    }
+    #[test]
+    fn overflow_and_invalid_utf8_preserve_completion_without_remote_state_unknown() {
+        let plan = crate::contracts::projection::compile(json!({
+            "fields": {"ok": ["ok"]},
+            "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}}
+            },
+            "max_bytes": 1024,
+            "max_items": 16,
+            "max_depth": 4
+        }))
+        .unwrap();
+        for (status_str, overflow, expected_status, expected_code, expected_proj) in [
+            (
+                "overflow",
+                true,
+                OutputStatus::Overflow,
+                "resource_limit",
+                "unavailable",
+            ),
+            (
+                "invalid_utf8",
+                false,
+                OutputStatus::InvalidUtf8,
+                "invalid_projection",
+                "invalid",
+            ),
+        ] {
+            for (rc, ssh_rc) in [(0, 0), (3, 1)] {
+                let stdout = serde_json::to_vec(&json!({
+                    "schema": 1,
+                    "id": "owned",
+                    "phase": "complete",
+                    "rc": rc,
+                    "overflow": overflow,
+                    "output_status": status_str,
+                }))
+                .unwrap();
+                let (parsed_rc, value, parsed_status) = terminal(
+                    Output {
+                        stdout,
+                        overflow: false,
+                        rc: ssh_rc,
+                    },
+                    "owned",
+                )
+                .unwrap();
+                assert_eq!(parsed_rc, rc);
+                assert_eq!(parsed_status, expected_status);
+
+                let reply = complete_reply(
+                    "host-a",
+                    false,
+                    &crate::native_payload::ChangePolicy::ReportedChanged,
+                    Some(&plan),
+                    parsed_rc,
+                    &value,
+                    parsed_status,
+                    std::time::Instant::now(),
+                );
+                let data = reply.data.unwrap();
+                assert!(data.complete);
+                assert_eq!(data.runner_rc, Some(rc));
+                assert_eq!(data.changed, None);
+                let proj_json = serde_json::to_value(&data.projection).unwrap();
+                assert_eq!(proj_json["status"], expected_proj);
+                let err = reply.error.unwrap();
+                assert!(!err.remote_state_unknown);
+                assert_eq!(
+                    err.code,
+                    if rc == 0 {
+                        expected_code
+                    } else {
+                        "payload_failed"
+                    }
+                );
+            }
+        }
+        let censored = complete_reply(
+            "host-a",
+            true,
+            &crate::native_payload::ChangePolicy::MutationSuccess,
+            Some(&plan),
+            0,
+            &json!({"schema": 1, "id": "owned", "phase": "complete", "rc": 0, "overflow": true, "output_status": "overflow"}),
+            OutputStatus::Overflow,
+            std::time::Instant::now(),
+        );
+        assert!(censored.error.is_none());
+        let censored_data = censored.data.unwrap();
+        assert!(censored_data.complete);
+        assert_eq!(censored_data.runner_rc, Some(0));
+        assert_eq!(censored_data.changed, None);
+        assert_eq!(
+            serde_json::to_value(&censored_data.projection).unwrap()["status"],
+            "censored"
+        );
+    }
+
+    #[test]
+    fn terminal_rejects_mismatched_overflow_or_unknown_output_status() {
+        for bad in [
+            json!({"schema": 1, "id": "owned", "phase": "complete", "rc": 0, "overflow": false}),
+            json!({"schema": 1, "id": "owned", "phase": "complete", "rc": 0, "overflow": false, "output_status": "complete"}),
+            json!({"schema": 1, "id": "owned", "phase": "complete", "rc": 0, "overflow": false, "output_status": "overflow"}),
+            json!({"schema": 1, "id": "owned", "phase": "complete", "rc": 0, "overflow": true, "output_status": "invalid_utf8"}),
+            json!({"schema": 1, "id": "owned", "phase": "complete", "rc": 0, "overflow": false, "output_status": "unknown"}),
+        ] {
+            let err = terminal(
+                Output {
+                    stdout: serde_json::to_vec(&bad).unwrap(),
+                    overflow: false,
+                    rc: 0,
+                },
+                "owned",
+            )
+            .unwrap_err();
+            assert_eq!(err.code, "invalid_result");
         }
     }
 }

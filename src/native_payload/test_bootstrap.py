@@ -66,15 +66,41 @@ class Execution(unittest.TestCase):
         exit_code, evidence = self.execute(source, output_limit=32)
         self.assertEqual(exit_code, 0)
         self.assertEqual(evidence['phase'], 'complete')
+        self.assertEqual(evidence['rc'], 0)
         self.assertTrue(evidence['overflow'])
-        self.assertEqual(len(evidence['stdout']), 32)
+        self.assertEqual(evidence['output_status'], 'overflow')
+        self.assertNotIn('stdout', evidence)
         self.assertNotIn('stderr', evidence)
+
+    def test_multibyte_utf8_cut_at_overflow_limit_preserves_completion(self):
+        # Write 31 ASCII bytes + 2-byte UTF-8 sequence (33 bytes total) at output_limit=32.
+        source = b'import os,sys; os.write(1, b"a"*31 + b"\\xc3\\xa9"); sys.exit(0)'
+        exit_code, evidence = self.execute(source, output_limit=32)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(evidence['phase'], 'complete')
+        self.assertEqual(evidence['rc'], 0)
+        self.assertTrue(evidence['overflow'])
+        self.assertEqual(evidence['output_status'], 'overflow')
+        self.assertNotIn('stdout', evidence)
+
+    def test_invalid_utf8_preserves_completion_for_zero_and_nonzero_rc(self):
+        for rc, expected_exit in ((0, 0), (3, 1)):
+            with self.subTest(rc=rc):
+                source = f'import os,sys; os.write(1, b"\\xff"); sys.exit({rc})'.encode()
+                exit_code, evidence = self.execute(source)
+                self.assertEqual(exit_code, expected_exit)
+                self.assertEqual(evidence['phase'], 'complete')
+                self.assertEqual(evidence['rc'], rc)
+                self.assertFalse(evidence['overflow'])
+                self.assertEqual(evidence['output_status'], 'invalid_utf8')
+                self.assertNotIn('stdout', evidence)
 
     def test_failed_operation_has_matching_terminal_and_exit(self):
         exit_code, evidence = self.execute(b'import sys; print("{\\"changed\\":true}"); sys.exit(7)')
         self.assertEqual(exit_code, 1)
         self.assertEqual(evidence['phase'], 'complete')
         self.assertEqual(evidence['rc'], 7)
+        self.assertEqual(evidence['output_status'], 'complete')
 
 if __name__ == '__main__':
     unittest.main()

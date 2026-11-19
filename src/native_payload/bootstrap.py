@@ -136,8 +136,15 @@ def run():
                             output[name].extend(chunk[:available])
                             overflow = overflow or len(chunk) > available
             rc = child.wait(timeout=max(.001, deadline - time.monotonic()))
-            response.update(phase='complete', rc=rc, overflow=overflow,
-                            stdout=output['stdout'].decode('utf-8', errors='strict'))
+            response.update(phase='complete', rc=rc, overflow=overflow)
+            if overflow:
+                response['output_status'] = 'overflow'
+            else:
+                try:
+                    response['stdout'] = output['stdout'].decode('utf-8', errors='strict')
+                    response['output_status'] = 'complete'
+                except UnicodeDecodeError:
+                    response['output_status'] = 'invalid_utf8'
             # stderr is drained but never published; it can contain secrets.
             return response, 0 if rc == 0 else 1
         finally:
