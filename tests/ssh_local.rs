@@ -1077,6 +1077,98 @@ async fn ssh_local() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking and a usable non-root local account"]
+async fn ssh_master_eviction_across_twenty_targets_and_immediate_reacquire() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let mut targets = String::new();
+        for i in 0..20 {
+            targets.push_str(&format!("[targets.sweep{i:02}]\nssh_host = 'plain'\n"));
+        }
+        let config = fixture.root.path().join("sweep20.toml");
+        fs::write(
+            &config,
+            formatdoc! {r#"
+                profile = "baseline"
+                [ssh]
+                config_file = {ssh_config}
+                [limits]
+                connect_timeout_secs = 3
+                operation_timeout_secs = 5
+                max_timeout_secs = 10
+                max_output_bytes = 4096
+                max_file_bytes = 4096
+                {targets}
+            "#,
+                ssh_config = serde_json::to_string(&fixture.ssh_config.to_string_lossy())?,
+            },
+        )?;
+        let client = Client::start(&config).await?;
+        let run = async {
+            for i in 0..20 {
+                let target = format!("sweep{i:02}");
+                let reply = client
+                    .call(
+                        "ssh_exec",
+                        json!({"host": target, "command": format!("printf %s {target}")}),
+                    )
+                    .await?;
+                ensure!(
+                    succeeded(&reply)?["stdout"] == target,
+                    "target {target} failed: {reply}"
+                );
+            }
+            // At least 4 masters had to be evicted to fit 20 targets under MAX_MASTERS = 16.
+            let finishes = client
+                .log
+                .records()?
+                .into_iter()
+                .filter(|record| record["event"] == "master_finish")
+                .count();
+            ensure!(
+                finishes >= 4,
+                "expected at least 4 evicted masters, saw {finishes}"
+            );
+
+            // Immediately close the last active master and re-acquire without connection_lost.
+            let last = masters(&client.log)?.pop().context("last master")?;
+            let closed = support::run(
+                Command::new(&fixture.ssh)
+                    .arg("-F")
+                    .arg(&fixture.ssh_config)
+                    .arg("-S")
+                    .arg(&last.1)
+                    .args(["-O", "exit", "plain"]),
+            )
+            .await?;
+            ensure!(closed.status.success(), "failed to exit test master");
+            let reacquired = client
+                .call(
+                    "ssh_exec",
+                    json!({"host": "sweep19", "command": "printf REACQUIRED"}),
+                )
+                .await?;
+            ensure!(
+                succeeded(&reacquired)?["stdout"] == "REACQUIRED",
+                "immediate re-acquire failed: {reacquired}"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let owned = masters(&client.log);
+        let stopped = client.stop().await;
+        run?;
+        stopped?;
+        assert_masters_gone(&owned?).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking and a usable non-root local account"]
 async fn ssh_channel_timeout() -> Result<()> {
     let mut fixture = Fixture::start_with_sshd_config(indoc! {"
         ChannelTimeout session=1s

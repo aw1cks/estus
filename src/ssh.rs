@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use tokio::{
     io::AsyncReadExt,
     process::{Child, Command},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{Instant, sleep, sleep_until, timeout_at},
 };
@@ -54,6 +54,7 @@ struct Entry {
     ready: CancellationToken,
     stop: CancellationToken,
     done: CancellationToken,
+    zero_interests: Notify,
 }
 
 struct State {
@@ -103,6 +104,7 @@ impl Drop for Interest {
             if state.session.is_none() {
                 self.0.stop.cancel();
             }
+            self.0.zero_interests.notify_waiters();
         }
     }
 }
@@ -241,108 +243,224 @@ impl Pool {
         };
         check_control()?;
         let key = (target.to_owned(), role);
-        let (entry, launch, permit) = {
-            let mut entries = lock(&self.entries);
+        enum AcquireStep {
+            Ready {
+                entry: Arc<Entry>,
+                launch: bool,
+                permit: OwnedSemaphorePermit,
+            },
+            Wait(CancellationToken),
+        }
+        loop {
             check_control()?;
-            if let Some(entry) = entries.get(&key) {
-                if entry.stop.is_cancelled() {
-                    return Err(Failure::Lost.error());
+            let step = {
+                let mut entries = lock(&self.entries);
+                check_control()?;
+                if let Some(entry) = entries.get(&key) {
+                    if entry.stop.is_cancelled() {
+                        AcquireStep::Wait(entry.done.clone())
+                    } else {
+                        let mut state = lock(&entry.state);
+                        if entry.stop.is_cancelled() {
+                            AcquireStep::Wait(entry.done.clone())
+                        } else {
+                            let permit =
+                                Arc::clone(&entry.channels)
+                                    .try_acquire_owned()
+                                    .map_err(|_| {
+                                        ToolError::new(
+                                            "resource_limit",
+                                            "SSH channel limit reached",
+                                            false,
+                                        )
+                                    })?;
+                            state.interests += 1;
+                            AcquireStep::Ready {
+                                entry: Arc::clone(entry),
+                                launch: false,
+                                permit,
+                            }
+                        }
+                    }
+                } else if entries.len() >= MAX_MASTERS {
+                    let mut victim: Option<(bool, Instant, Arc<Entry>)> = None;
+                    for candidate in entries.values() {
+                        let stopped = candidate.stop.is_cancelled();
+                        let idle = {
+                            let state = lock(&candidate.state);
+                            if state.interests != 0 {
+                                continue;
+                            }
+                            state.idle_since
+                        };
+                        let replace = match &victim {
+                            None => true,
+                            Some((best_stopped, best_idle, _)) => {
+                                (stopped && !*best_stopped)
+                                    || (stopped == *best_stopped && idle < *best_idle)
+                            }
+                        };
+                        if replace {
+                            victim = Some((stopped, idle, Arc::clone(candidate)));
+                        }
+                    }
+                    let Some((_, _, victim)) = victim else {
+                        return Err(ToolError::new(
+                            "resource_limit",
+                            "SSH master limit reached",
+                            false,
+                        ));
+                    };
+                    let done = {
+                        let state = lock(&victim.state);
+                        if state.interests == 0 {
+                            victim.stop.cancel();
+                        }
+                        victim.done.clone()
+                    };
+                    AcquireStep::Wait(done)
+                } else {
+                    let entry = Arc::new(Entry {
+                        generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        state: Mutex::new(State {
+                            session: None,
+                            interests: 1,
+                            idle_since: Instant::now(),
+                            failure: None,
+                        }),
+                        channels: Arc::new(Semaphore::new(CHANNELS)),
+                        ready: CancellationToken::new(),
+                        stop: CancellationToken::new(),
+                        done: CancellationToken::new(),
+                        zero_interests: Notify::new(),
+                    });
+                    // Reserve the creator's channel before publishing the entry.
+                    // Followers cannot consume its slot and strand an unowned launch.
+                    let permit = Arc::clone(&entry.channels)
+                        .try_acquire_owned()
+                        .map_err(|_| {
+                            ToolError::new("resource_limit", "SSH channel limit reached", false)
+                        })?;
+                    entries.insert(key.clone(), Arc::clone(&entry));
+                    AcquireStep::Ready {
+                        entry,
+                        launch: true,
+                        permit,
+                    }
                 }
-                let permit = Arc::clone(&entry.channels)
-                    .try_acquire_owned()
-                    .map_err(|_| {
-                        ToolError::new("resource_limit", "SSH channel limit reached", false)
-                    })?;
-                lock(&entry.state).interests += 1;
-                (Arc::clone(entry), false, permit)
-            } else {
-                if entries.len() >= MAX_MASTERS {
-                    return Err(ToolError::new(
-                        "resource_limit",
-                        "SSH master limit reached",
-                        false,
-                    ));
+            };
+            let (entry, launch, permit) = match step {
+                AcquireStep::Wait(done) => {
+                    tokio::select! {
+                        biased;
+                        _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                        _ = done.cancelled() => {}
+                    }
+                    continue;
                 }
-                let entry = Arc::new(Entry {
-                    generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    state: Mutex::new(State {
-                        session: None,
-                        interests: 1,
-                        idle_since: Instant::now(),
-                        failure: None,
-                    }),
-                    channels: Arc::new(Semaphore::new(CHANNELS)),
-                    ready: CancellationToken::new(),
-                    stop: CancellationToken::new(),
-                    done: CancellationToken::new(),
+                AcquireStep::Ready {
+                    entry,
+                    launch,
+                    permit,
+                } => (entry, launch, permit),
+            };
+            let interest = Interest(Arc::clone(&entry));
+            if launch {
+                let owner = Arc::downgrade(self);
+                let executable = self.executable.clone();
+                let agent = self.agent.clone();
+                let config = self.ssh_config.clone();
+                let policy = self.policy;
+                let destination = destination.to_owned();
+                // The shared launch has its own timeout. Each interested request
+                // enforces its deadline independently; the last one cancels launch.
+                let connection_deadline = Instant::now().checked_add(self.connect_timeout);
+                let worker_entry = Arc::clone(&entry);
+                let shutdown = self.shutdown.clone();
+                let stopping = self.stopping.clone();
+                let worker_key = key.clone();
+                // This task is never aborted: it owns initialization and cleanup even
+                // if the request future is dropped at the very next await point.
+                tokio::spawn(async move {
+                    let control = EntryControl {
+                        executable,
+                        policy,
+                        agent,
+                        deadline: connection_deadline,
+                        shutdown,
+                        stopping,
+                    };
+                    run_entry(
+                        owner,
+                        worker_key,
+                        worker_entry,
+                        config,
+                        destination,
+                        control,
+                    )
+                    .await;
                 });
-                // Reserve the creator's channel before publishing the entry.
-                // Followers cannot consume its slot and strand an unowned launch.
-                let permit = Arc::clone(&entry.channels)
-                    .try_acquire_owned()
-                    .map_err(|_| {
-                        ToolError::new("resource_limit", "SSH channel limit reached", false)
-                    })?;
-                entries.insert(key.clone(), Arc::clone(&entry));
-                (entry, true, permit)
             }
-        };
-        let interest = Interest(Arc::clone(&entry));
-        if launch {
-            let owner = Arc::downgrade(self);
-            let executable = self.executable.clone();
-            let agent = self.agent.clone();
-            let config = self.ssh_config.clone();
-            let policy = self.policy;
-            let destination = destination.to_owned();
-            // The shared launch has its own timeout. Each interested request
-            // enforces its deadline independently; the last one cancels launch.
-            let connection_deadline = Instant::now().checked_add(self.connect_timeout);
-            let worker_entry = Arc::clone(&entry);
-            let shutdown = self.shutdown.clone();
-            let stopping = self.stopping.clone();
-            // This task is never aborted: it owns initialization and cleanup even
-            // if the request future is dropped at the very next await point.
-            tokio::spawn(async move {
-                let control = EntryControl {
-                    executable,
-                    policy,
-                    agent,
-                    deadline: connection_deadline,
-                    shutdown,
-                    stopping,
-                };
-                run_entry(owner, key, worker_entry, config, destination, control).await;
+            tokio::select! {
+                biased;
+                _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                _ = entry.ready.cancelled() => {}
+            }
+            check_control()?;
+            enum ReadyOutcome {
+                Connected(Arc<Session>),
+                Retired,
+            }
+            let ready_outcome = {
+                let state = lock(&entry.state);
+                if let Some(failure) = state.failure {
+                    if !launch && entry.stop.is_cancelled() && matches!(failure, Failure::Lost) {
+                        ReadyOutcome::Retired
+                    } else {
+                        return Err(failure.error());
+                    }
+                } else if entry.stop.is_cancelled() {
+                    ReadyOutcome::Retired
+                } else {
+                    ReadyOutcome::Connected(
+                        state
+                            .session
+                            .as_ref()
+                            .map(Arc::clone)
+                            .ok_or_else(|| Failure::Connect.error())?,
+                    )
+                }
+            };
+            let session = match ready_outcome {
+                ReadyOutcome::Connected(session) => session,
+                ReadyOutcome::Retired => {
+                    let done = entry.done.clone();
+                    drop(permit);
+                    drop(interest);
+                    drop(entry);
+                    tokio::select! {
+                        biased;
+                        _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                        _ = done.cancelled() => {}
+                    }
+                    continue;
+                }
+            };
+            return Ok(Lease {
+                session,
+                _permit: permit,
+                interest,
             });
         }
-        tokio::select! {
-            biased;
-            _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
-            _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
-            _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
-            _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
-            _ = entry.ready.cancelled() => {}
-        }
-        check_control()?;
-        let session = {
-            let state = lock(&entry.state);
-            if let Some(failure) = state.failure {
-                return Err(failure.error());
-            }
-            if entry.stop.is_cancelled() {
-                return Err(Failure::Lost.error());
-            }
-            state
-                .session
-                .as_ref()
-                .map(Arc::clone)
-                .ok_or_else(|| Failure::Connect.error())?
-        };
-        Ok(Lease {
-            session,
-            _permit: permit,
-            interest,
-        })
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -465,10 +583,11 @@ impl Master {
         if let Some(session) = session {
             let _ = timeout_at(until, async {
                 loop {
+                    let notified = entry.zero_interests.notified();
                     if lock(&entry.state).interests == 0 {
                         break;
                     }
-                    sleep(READINESS_POLL).await;
+                    notified.await;
                 }
                 match Arc::try_unwrap(session) {
                     Ok(session) => {
@@ -831,6 +950,7 @@ mod tests {
             ready: CancellationToken::new(),
             stop: CancellationToken::new(),
             done: CancellationToken::new(),
+            zero_interests: Notify::new(),
         });
         lock(&pool.entries).insert(key.clone(), Arc::clone(&entry));
         let directory = tempfile::tempdir().unwrap();
@@ -873,5 +993,210 @@ mod tests {
         assert!(matches!(kill(pid, None), Err(Errno::ESRCH)));
         assert!(!owned_path.exists());
         assert!(!lock(&pool.entries).contains_key(&key));
+    }
+
+    fn test_entry(interests: usize, idle_since: Instant) -> Arc<Entry> {
+        Arc::new(Entry {
+            generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            state: Mutex::new(State {
+                session: None,
+                interests,
+                idle_since,
+                failure: None,
+            }),
+            channels: Arc::new(Semaphore::new(CHANNELS)),
+            ready: CancellationToken::new(),
+            stop: CancellationToken::new(),
+            done: CancellationToken::new(),
+            zero_interests: Notify::new(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acquire_waits_for_teardown_then_launches_fresh_generation() {
+        let pool = Pool::new(
+            PathBuf::from("/nonexistent-ssh"),
+            None,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        let key = ("reacquire-target".to_owned(), IdentityRole::Ordinary);
+        let old = test_entry(0, Instant::now());
+        let old_gen = old.generation;
+        old.stop.cancel();
+        lock(&pool.entries).insert(key.clone(), Arc::clone(&old));
+
+        let pool_clone = Arc::clone(&pool);
+        let key_clone = key.clone();
+        let old_clone = Arc::clone(&old);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            lock(&pool_clone.entries).remove(&key_clone);
+            old_clone.done.cancel();
+        });
+
+        let err = pool
+            .acquire(
+                "reacquire-target",
+                "reacquire-target",
+                IdentityRole::Ordinary,
+                Instant::now() + Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("nonexistent ssh fails launch");
+        // Must not return connection_lost from the invalidated generation;
+        // wait for teardown and attempt launch of a new generation.
+        assert_eq!(err.code, "ssh_connect_failed");
+        assert!(
+            lock(&pool.entries)
+                .get(&key)
+                .is_none_or(|e| e.generation > old_gen)
+        );
+        pool.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acquire_evicts_idle_victim_at_max_masters_and_rejects_when_all_busy() {
+        let pool = Pool::new(
+            PathBuf::from("/nonexistent-ssh"),
+            None,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        let now = Instant::now();
+        let mut entries_list = Vec::new();
+        for i in 0..MAX_MASTERS {
+            let key = (format!("host-{i:02}"), IdentityRole::Ordinary);
+            let idle_at = now - Duration::from_secs((MAX_MASTERS - i) as u64);
+            let entry = test_entry(0, idle_at);
+            if i == 5 {
+                entry.stop.cancel();
+            }
+            lock(&pool.entries).insert(key.clone(), Arc::clone(&entry));
+            entries_list.push((key, entry));
+        }
+        // Victim #5 is already stop-cancelled, so it must be chosen before #0 (oldest idle_since).
+        let victim_key = entries_list[5].0.clone();
+        let victim = Arc::clone(&entries_list[5].1);
+        let pool_clone = Arc::clone(&pool);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            lock(&pool_clone.entries).remove(&victim_key);
+            victim.done.cancel();
+        });
+
+        let err = pool
+            .acquire(
+                "host-new",
+                "host-new",
+                IdentityRole::Ordinary,
+                Instant::now() + Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("nonexistent ssh fails launch after eviction");
+        assert_eq!(err.code, "ssh_connect_failed");
+        assert!(!entries_list[0].1.stop.is_cancelled());
+        for (key, entry) in entries_list {
+            lock(&pool.entries).remove(&key);
+            entry.done.cancel();
+        }
+        pool.shutdown().await;
+
+        // When every master has active interest > 0, return resource_limit immediately.
+        let busy_pool = Pool::new(
+            PathBuf::from("/nonexistent-ssh"),
+            None,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        for i in 0..MAX_MASTERS {
+            let key = (format!("busy-{i:02}"), IdentityRole::Ordinary);
+            lock(&busy_pool.entries).insert(key, test_entry(1, Instant::now()));
+        }
+        let err = busy_pool
+            .acquire(
+                "busy-new",
+                "busy-new",
+                IdentityRole::Ordinary,
+                Instant::now() + Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("busy pool must reject");
+        assert_eq!(err.code, "resource_limit");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acquire_retries_when_master_retires_at_ready_wakeup() {
+        let pool = Pool::new(
+            PathBuf::from("/nonexistent-ssh"),
+            None,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        let key = ("race-target".to_owned(), IdentityRole::Ordinary);
+        let old = test_entry(0, Instant::now());
+        lock(&pool.entries).insert(key.clone(), Arc::clone(&old));
+
+        let pool_clone = Arc::clone(&pool);
+        let old_clone = Arc::clone(&old);
+        let key_clone = key.clone();
+        tokio::spawn(async move {
+            // Wait for follower to register interest.
+            while lock(&old_clone.state).interests == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Retire the entry right as ready wakes without populating failure.
+            old_clone.stop.cancel();
+            old_clone.ready.cancel();
+            // Wait until follower drops its interest, then finalize entry.
+            let notified = old_clone.zero_interests.notified();
+            if lock(&old_clone.state).interests != 0 {
+                notified.await;
+            }
+            lock(&pool_clone.entries).remove(&key_clone);
+            old_clone.done.cancel();
+        });
+
+        let err = pool
+            .acquire(
+                "race-target",
+                "race-target",
+                IdentityRole::Ordinary,
+                Instant::now() + Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("fresh launch fails on nonexistent ssh");
+        assert_eq!(err.code, "ssh_connect_failed");
+        pool.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_interests_notify_wakes_waiter_without_polling_delay() {
+        let entry = test_entry(1, Instant::now());
+        let interest = Interest(Arc::clone(&entry));
+        let waiter_entry = Arc::clone(&entry);
+        let waiter = tokio::spawn(async move {
+            loop {
+                let notified = waiter_entry.zero_interests.notified();
+                if lock(&waiter_entry.state).interests == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        });
+        tokio::task::yield_now().await;
+        drop(interest);
+        timeout_at(Instant::now() + Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
