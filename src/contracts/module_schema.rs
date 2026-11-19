@@ -1905,3 +1905,249 @@ mod setup_overlay {
         }
     }
 }
+
+#[cfg(test)]
+mod differential_jsonschema {
+    use super::*;
+    use serde_json::json;
+
+    fn draft202012(schema: &Value) -> jsonschema::Validator {
+        jsonschema::draft202012::new(schema).expect("supported subset compiles in jsonschema")
+    }
+
+    #[test]
+    fn supported_subset_matches_jsonschema_evaluator() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "enabled"],
+            "minProperties": 2,
+            "maxProperties": 7,
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["0600", "0644", "0755"]
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10
+                },
+                "ratio": {
+                    "type": "number",
+                    "exclusiveMinimum": 0.0,
+                    "exclusiveMaximum": 1.0
+                },
+                "label": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 4
+                },
+                "tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "uniqueItems": true,
+                    "items": {
+                        "anyOf": [
+                            {"const": "alpha"},
+                            {"type": "integer", "minimum": 1, "maximum": 3}
+                        ]
+                    }
+                },
+                "marker": {
+                    "oneOf": [
+                        {"type": "null"},
+                        {"allOf": [{"type": "string"}, {"not": {"const": "forbidden"}}]}
+                    ]
+                }
+            },
+            "if": {
+                "properties": {"enabled": {"const": true}},
+                "required": ["enabled"]
+            },
+            "then": {
+                "required": ["count"]
+            },
+            "else": {
+                "not": {"required": ["count"]}
+            }
+        });
+        check_schema(&schema, true).expect("schema fits bounded subset");
+        let reference = draft202012(&schema);
+
+        let cases = [
+            (json!({"mode": "0644", "enabled": true, "count": 5}), true),
+            (
+                json!({"mode": "0755", "enabled": false, "label": "é🙂", "tags": ["alpha", 1, 1.0]}),
+                false,
+            ), // uniqueItems: 1 == 1.0
+            (
+                json!({"mode": "0755", "enabled": false, "label": "é🙂", "tags": ["alpha", 2]}),
+                true,
+            ),
+            (
+                json!({"mode": "0600", "enabled": true, "count": 0, "ratio": 0.5, "marker": null}),
+                true,
+            ),
+            (
+                json!({"mode": "0600", "enabled": true, "count": 0, "marker": "ok"}),
+                true,
+            ),
+            // Octal-mode strings remain strict strings, never integer or stripped-zero coercions.
+            (json!({"mode": 644, "enabled": false}), false),
+            (json!({"mode": "644", "enabled": false}), false),
+            (json!({"mode": "0o644", "enabled": false}), false),
+            // Strict booleans reject Ansible truthy strings and integers.
+            (json!({"mode": "0644", "enabled": "yes"}), false),
+            (json!({"mode": "0644", "enabled": "true"}), false),
+            (json!({"mode": "0644", "enabled": 1}), false),
+            (json!({"mode": "0644", "enabled": 0}), false),
+            // Conditional if/then/else.
+            (json!({"mode": "0644", "enabled": true}), false),
+            (json!({"mode": "0644", "enabled": false, "count": 1}), false),
+            // Bounds & Unicode scalar minLength/maxLength.
+            (
+                json!({"mode": "0644", "enabled": false, "label": "a"}),
+                false,
+            ),
+            (
+                json!({"mode": "0644", "enabled": false, "label": "é🙂a!"}),
+                true,
+            ),
+            (
+                json!({"mode": "0644", "enabled": false, "label": "é🙂a!x"}),
+                false,
+            ),
+            (
+                json!({"mode": "0644", "enabled": false, "ratio": 0.0}),
+                false,
+            ),
+            (
+                json!({"mode": "0644", "enabled": false, "ratio": 1.0}),
+                false,
+            ),
+            (json!({"mode": "0644", "enabled": false, "tags": []}), false),
+            (
+                json!({"mode": "0644", "enabled": false, "tags": ["alpha", 1, 2, 3]}),
+                false,
+            ),
+            (
+                json!({"mode": "0644", "enabled": false, "tags": [4]}),
+                false,
+            ),
+            (
+                json!({"mode": "0644", "enabled": false, "marker": "forbidden"}),
+                false,
+            ),
+            (json!({"mode": "0644", "enabled": false, "extra": 1}), false),
+            (
+                json!({"mode": "0644", "enabled": true, "count": 1.5}),
+                false,
+            ),
+            (json!({"mode": "0644", "enabled": true, "count": 2.0}), true),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                validate(&schema, &value).is_ok(),
+                expected,
+                "local validate diverged from expectation for {value}"
+            );
+            assert_eq!(
+                validate(&schema, &value).is_ok(),
+                reference.is_valid(&value),
+                "local validate diverged from jsonschema for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn documents_exact_divergences_for_integer_precision_aliases_and_recursion() {
+        // 1. Integer precision: MAX_EXACT_INTEGER (2^53 - 1) is the exact binary64 boundary.
+        let int_schema = json!({"type": "integer"});
+        let int_validator = draft202012(&int_schema);
+        let exact_max = json!(MAX_EXACT_INTEGER);
+        assert!(validate(&int_schema, &exact_max).is_ok());
+        assert!(int_validator.is_valid(&exact_max));
+
+        let imprecise = json!(MAX_EXACT_INTEGER + 1);
+        assert!(
+            validate(&int_schema, &imprecise).is_err(),
+            "evaluator must reject integers beyond binary64 exactness"
+        );
+        assert!(
+            int_validator.is_valid(&imprecise),
+            "documented divergence: jsonschema accepts > 2^53 - 1 integers"
+        );
+        assert!(!bounded(&imprecise));
+
+        // Integral JSON floats/exponentials satisfy both evaluators and canonicalize to integers.
+        let exp_int: Value = serde_json::from_str("1e2").unwrap();
+        assert!(validate(&int_schema, &exp_int).is_ok());
+        assert!(int_validator.is_valid(&exp_int));
+        assert_eq!(canonical_integer(&exp_int), Some(100));
+
+        // 2. Aliases: module contract preparation canonicalizes documented aliases before validate,
+        // whereas raw jsonschema against the canonical backend schema sees uncanonicalized keys.
+        let contract = import_document(&json!({
+            "doc": {
+                "options": {
+                    "path": {
+                        "type": "str",
+                        "required": true,
+                        "aliases": ["dest"]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let overlay = json!({
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string"}
+                },
+                "required": ["src"],
+                "additionalProperties": false
+            },
+            "fixed_args": {},
+            "input_map": {"dest": "src"}
+        });
+        let compiled = compile_binding(&contract, &overlay).unwrap();
+        assert_eq!(
+            compiled.prepare(&json!({"src": "/etc/hosts"})).unwrap(),
+            json!({"path": "/etc/hosts"})
+        );
+        let raw_backend = draft202012(&contract["schema"]);
+        assert!(raw_backend.is_valid(&json!({"path": "/etc/hosts"})));
+        assert!(
+            !raw_backend.is_valid(&json!({"dest": "/etc/hosts"})),
+            "documented divergence: raw jsonschema does not apply Ansible alias canonicalization"
+        );
+
+        // 3. Recursion and depth bounds: jsonschema allows $ref recursion, whereas
+        // import_explicit_schema rejects $ref and bounds structure depth at DEPTH (32).
+        let recursive = json!({
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/$defs/node"}}
+                }
+            },
+            "$ref": "#/$defs/node"
+        });
+        assert!(draft202012(&recursive).is_valid(&json!({"next": {"next": {}}})));
+        assert!(import_explicit_schema(&recursive).is_err());
+
+        let mut shallow = json!(1);
+        for _ in 0..31 {
+            shallow = json!({"a": shallow});
+        }
+        assert!(bounded(&shallow));
+        let too_deep = json!({"a": {"a": shallow}});
+        assert!(!bounded(&too_deep));
+    }
+}

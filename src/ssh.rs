@@ -4,7 +4,10 @@ use futures_util::FutureExt;
 use openssh::Session;
 use std::{
     collections::HashMap,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     process::Stdio,
@@ -27,6 +30,8 @@ const CHANNELS: usize = 4;
 const IDLE: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(2);
 const READINESS_POLL: Duration = Duration::from_millis(25);
+const MAX_SOCKET_BYTES: usize = 100;
+const SOCKET_ENTRY_RESERVE_BYTES: usize = 12;
 
 type Key = (String, IdentityRole);
 
@@ -64,7 +69,7 @@ struct State {
     failure: Option<Failure>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Failure {
     Launch,
     Connect,
@@ -487,6 +492,79 @@ struct Master {
     finalizer: Option<EntryFinalizer>,
 }
 
+fn validated_xdg_socket_parent(
+    xdg_runtime_dir: Option<&std::ffi::OsStr>,
+    current_uid: u32,
+) -> Option<PathBuf> {
+    let raw = xdg_runtime_dir?;
+    if raw.is_empty() || raw.as_bytes().contains(&0) {
+        return None;
+    }
+    let runtime_dir = Path::new(raw);
+    if !runtime_dir.is_absolute() {
+        return None;
+    }
+    let runtime_meta = std::fs::symlink_metadata(runtime_dir).ok()?;
+    if runtime_meta.file_type().is_symlink()
+        || !runtime_meta.is_dir()
+        || runtime_meta.uid() != current_uid
+        || (runtime_meta.mode() & 0o077) != 0
+    {
+        return None;
+    }
+    let estus_dir = runtime_dir.join("estus");
+    if estus_dir.as_os_str().as_bytes().len() + SOCKET_ENTRY_RESERVE_BYTES > MAX_SOCKET_BYTES {
+        return None;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(&estus_dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(&estus_dir)
+        .ok()?;
+    let estus_meta = opened.metadata().ok()?;
+    if !estus_meta.is_dir()
+        || estus_meta.uid() != current_uid
+        || (estus_meta.mode() & 0o777) != 0o700
+    {
+        return None;
+    }
+    Some(estus_dir)
+}
+
+fn create_socket_directory(
+    xdg_runtime_dir: Option<&std::ffi::OsStr>,
+    current_uid: u32,
+) -> Result<TempDir, Failure> {
+    if let Some(parent) = validated_xdg_socket_parent(xdg_runtime_dir, current_uid)
+        && let Ok(directory) = tempfile::Builder::new()
+            .prefix("sm-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(&parent)
+    {
+        let socket = directory.path().join("c");
+        if socket.as_os_str().as_bytes().len() <= MAX_SOCKET_BYTES {
+            return Ok(directory);
+        }
+    }
+    let directory = tempfile::Builder::new()
+        .prefix("sm-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")
+        .map_err(|_| Failure::Launch)?;
+    // Request owner-only permissions at creation; never inherit TMPDIR or a
+    // destination-derived pathname for the control socket.
+    let socket = directory.path().join("c");
+    if socket.as_os_str().as_bytes().len() > MAX_SOCKET_BYTES {
+        return Err(Failure::Launch);
+    }
+    Ok(directory)
+}
+
 impl Master {
     fn launch(
         executable: &Path,
@@ -495,17 +573,11 @@ impl Master {
         policy: Policy,
         agent: &Option<Option<std::ffi::OsString>>,
     ) -> Result<(Self, Session), Failure> {
-        let directory = tempfile::Builder::new()
-            .prefix("sm-")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in("/tmp")
-            .map_err(|_| Failure::Launch)?;
-        // Request owner-only permissions at creation; never inherit TMPDIR or a
-        // destination-derived pathname for the control socket.
+        let directory = create_socket_directory(
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            nix::unistd::Uid::current().as_raw(),
+        )?;
         let socket = directory.path().join("c");
-        if socket.as_os_str().as_bytes().len() > 100 {
-            return Err(Failure::Launch);
-        }
         let mut command = Command::new(executable);
         if let Some(agent) = agent {
             command.env_remove("SSH_AUTH_SOCK");
@@ -1198,5 +1270,108 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn xdg_runtime_socket_directory_requires_private_owner_mode_length_and_cleans_up() {
+        let uid = nix::unistd::Uid::current().as_raw();
+        let scratch = tempfile::Builder::new()
+            .prefix("xdg-")
+            .tempdir_in("/tmp")
+            .unwrap();
+
+        // Valid private $XDG_RUNTIME_DIR creates a private `estus` subdirectory and cleans up sm-*.
+        let valid = scratch.path().join("rt");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&valid)
+            .unwrap();
+        let dir = create_socket_directory(Some(valid.as_os_str()), uid).unwrap();
+        let created_path = dir.path().to_path_buf();
+        let estus_subdir = valid.join("estus");
+        assert_eq!(created_path.parent(), Some(estus_subdir.as_path()));
+        assert_eq!(
+            std::fs::metadata(&estus_subdir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&created_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert!(created_path.join("c").as_os_str().as_bytes().len() <= MAX_SOCKET_BYTES);
+        drop(dir);
+        assert!(!created_path.exists());
+
+        // Invalid owner falls back to /tmp without creating `estus` inside unowned runtime dir.
+        let unowned = scratch.path().join("other-uid");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&unowned)
+            .unwrap();
+        let dir =
+            create_socket_directory(Some(unowned.as_os_str()), uid.saturating_add(1)).unwrap();
+        assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
+        assert!(!unowned.join("estus").exists());
+        drop(dir);
+
+        // Permissive mode (group/other bits set) falls back to /tmp.
+        let permissive = scratch.path().join("loose");
+        std::fs::DirBuilder::new()
+            .mode(0o750)
+            .create(&permissive)
+            .unwrap();
+        std::fs::set_permissions(&permissive, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let dir = create_socket_directory(Some(permissive.as_os_str()), uid).unwrap();
+        assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
+        assert!(!permissive.join("estus").exists());
+        drop(dir);
+
+        // Symlink runtime dir or relative path falls back to /tmp.
+        let linked = scratch.path().join("sym");
+        std::os::unix::fs::symlink(&valid, &linked).unwrap();
+        let dir = create_socket_directory(Some(linked.as_os_str()), uid).unwrap();
+        assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
+        drop(dir);
+        let dir =
+            create_socket_directory(Some(std::ffi::OsStr::new("relative/runtime")), uid).unwrap();
+        assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
+        drop(dir);
+
+        // Long $XDG_RUNTIME_DIR exceeding socket bound falls back to /tmp without creating estus/.
+        let deep = scratch.path().join("a".repeat(80));
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::set_permissions(&deep, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            deep.join("estus").as_os_str().as_bytes().len() + SOCKET_ENTRY_RESERVE_BYTES
+                > MAX_SOCKET_BYTES
+        );
+        let dir = create_socket_directory(Some(deep.as_os_str()), uid).unwrap();
+        assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
+        assert!(!deep.join("estus").exists());
+        drop(dir);
+
+        // Pre-existing permissive `estus` child falls back to /tmp.
+        let poisoned_parent = scratch.path().join("poison");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&poisoned_parent)
+            .unwrap();
+        let poisoned_child = poisoned_parent.join("estus");
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&poisoned_child)
+            .unwrap();
+        std::fs::set_permissions(&poisoned_child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = create_socket_directory(Some(poisoned_parent.as_os_str()), uid).unwrap();
+        assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
+        drop(dir);
     }
 }
