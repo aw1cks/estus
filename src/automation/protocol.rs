@@ -765,7 +765,8 @@ pub(crate) fn reduce(
         // Incomplete execution may have mutated after the last false observation.
         // Positive evidence remains authoritative even when later work is unknown.
         changed: observed.and_then(|t| {
-            if unknown && t.changed != Some(true) {
+            let unrescued_failure = t.tasks.failed > 0 || t.tasks.unreachable > 0;
+            if t.censored || ((unknown || unrescued_failure) && t.changed != Some(true)) {
                 None
             } else {
                 t.changed
@@ -1403,5 +1404,136 @@ mod observation_deltas {
         assert!(!ignored.ready);
         assert_eq!(ignored.tasks, 0);
         assert!(!ignored.terminal);
+    }
+}
+#[cfg(test)]
+mod module_evidence {
+    use super::*;
+    use serde_json::json;
+
+    fn send(evidence: &mut Evidence, mut value: serde_json::Value) {
+        let object = value.as_object_mut().unwrap();
+        object.insert("schema".into(), json!(2));
+        object.insert("id".into(), json!("mod"));
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        evidence.feed(&bytes);
+    }
+
+    fn module_plan() -> crate::contracts::projection::Plan {
+        crate::contracts::projection::compile(json!({
+            "fields": {"ok": ["ok"]},
+            "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}}
+            },
+            "max_bytes": 256,
+            "max_items": 8,
+            "max_depth": 4
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_module_false_becomes_null_while_positive_and_censored_hold() {
+        for (reported, censored, expected) in [
+            (Some(false), false, None),
+            (Some(true), false, Some(true)),
+            (Some(true), true, None),
+        ] {
+            let mut evidence = Evidence::new("mod".into(), ExecutionMode::Module);
+            send(&mut evidence, json!({"kind": "ready"}));
+            send(
+                &mut evidence,
+                json!({
+                    "kind": "task",
+                    "outcome": "failed",
+                    "changed": if censored { serde_json::Value::Null } else { json!(reported) },
+                    "censored": censored
+                }),
+            );
+            send(
+                &mut evidence,
+                json!({
+                    "kind": "terminal",
+                    "status": "failed",
+                    "rc": 2,
+                    "changed": if censored { serde_json::Value::Null } else { json!(reported) },
+                    "tasks": {"ok": 0, "failed": 1, "unreachable": 0, "skipped": 0},
+                    "censored": censored,
+                    "complete": true
+                }),
+            );
+            let reply = reduce(
+                Some(evidence),
+                "host".into(),
+                None,
+                Completion {
+                    started_child: true,
+                    error: None,
+                    duration_ms: 1,
+                    group_cleanup: GroupCleanup::SignalledAndReaped,
+                },
+            );
+            let data = reply.data.unwrap();
+            assert!(data.complete);
+            assert_eq!(data.status, AutomationStatus::Failed);
+            assert_eq!(data.runner_rc, Some(2));
+            assert_eq!(data.changed, expected);
+            assert_eq!(data.censored, censored);
+            assert_eq!(reply.error.unwrap().code, "automation_failed");
+        }
+    }
+
+    #[test]
+    fn unavailable_oversized_projection_preserves_terminal_evidence() {
+        let plan = module_plan();
+        let mut evidence = Evidence::new("mod".into(), ExecutionMode::Module);
+        send(&mut evidence, json!({"kind": "ready"}));
+        send(
+            &mut evidence,
+            json!({"kind": "task", "outcome": "ok", "changed": false, "censored": false}),
+        );
+        send(
+            &mut evidence,
+            json!({"kind": "projection", "projection": {"status": "unavailable"}}),
+        );
+        send(
+            &mut evidence,
+            json!({
+                "kind": "terminal",
+                "status": "successful",
+                "rc": 0,
+                "changed": false,
+                "tasks": {"ok": 1, "failed": 0, "unreachable": 0, "skipped": 0},
+                "censored": false,
+                "complete": true
+            }),
+        );
+        let reply = reduce(
+            Some(evidence),
+            "host".into(),
+            Some(&plan),
+            Completion {
+                started_child: true,
+                error: None,
+                duration_ms: 1,
+                group_cleanup: GroupCleanup::SignalledAndReaped,
+            },
+        );
+        let data = reply.data.unwrap();
+        assert!(data.complete);
+        assert_eq!(data.status, AutomationStatus::Successful);
+        assert_eq!(data.runner_rc, Some(0));
+        assert_eq!(data.changed, Some(false));
+        assert!(matches!(
+            data.projection,
+            Some(ModuleProjection::Unavailable)
+        ));
+        let err = reply.error.unwrap();
+        assert_eq!(err.code, "invalid_result");
+        assert!(!err.remote_state_unknown);
     }
 }

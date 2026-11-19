@@ -47,9 +47,66 @@ fn explicit_module_result_honors_nested_censorship_and_bounds() -> Result<()> {
     )?;
     ensure!(value == json!({"stdout":"literal {{ x }}","nested":{"ok":true}}));
     ensure!(
-        reduce(json!({"stdout":"x".repeat(1024)}), false, 64)?
-            == json!({"status":"truncated","value":{"module_result_json":"{}"}})
+        reduce(json!({"stdout":"x".repeat(1024)}), false, 64)? == json!({"status":"unavailable"})
     );
+    Ok(())
+}
+
+#[test]
+fn runner_evidence_treats_failed_false_as_unknown_while_reconciling_stats() -> Result<()> {
+    let script = r#"
+import json, runpy, sys
+m = runpy.run_path(sys.argv[1], run_name='evidence_test')
+class Sink:
+    def __init__(self):
+        self.events = []
+    def emit(self, kind, **fields):
+        self.events.append((kind, fields))
+def run_case(changed, stats_changed, no_log=False):
+    sink = Sink()
+    ev = m['Evidence'](sink, 'ansible.builtin.command', no_log)
+    ev.status({'status': 'starting'}, {})
+    ev.status({'status': 'running'}, {})
+    ev.status({'status': 'failed'}, {})
+    ev.event({'event': 'playbook_on_task_start', 'event_data': {'host': 'estus_target', 'task': 'estus_module', 'task_action': 'ansible.builtin.command', 'task_uuid': 'u1'}})
+    ev.event({'event': 'runner_on_failed', 'event_data': {'host': 'estus_target', 'task': 'estus_module', 'task_action': 'ansible.builtin.command', 'task_uuid': 'u1', 'res': {'changed': changed}}})
+    ev.event({'event': 'playbook_on_stats', 'event_data': {'ok': {}, 'failures': {'estus_target': 1}, 'dark': {}, 'skipped': {}, 'changed': {'estus_target': stats_changed} if stats_changed else {}, 'processed': {'estus_target': 1}, 'rescued': {}, 'ignored': {}}})
+    class R:
+        rc = 2
+        status = 'failed'
+    try:
+        ev.reconcile(R())
+    except m['Invalid']:
+        pass
+    return dict(invalid=ev.invalid, changed=ev.changed, task=[e[1] for e in sink.events if e[0] == 'task'][0])
+out = {
+    'failed_false': run_case(False, 0),
+    'failed_true': run_case(True, 0),
+    'failed_censored': run_case(True, 1, no_log=True),
+    'contradiction': run_case(False, 1),
+}
+print(json.dumps(out))
+"#;
+    let output =
+        Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
+            .args(["-I", "-B", "-c", script])
+            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/automation/python/runner.py"))
+            .output()?;
+    ensure!(
+        output.status.success(),
+        "runner evidence check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(parsed["failed_false"]["invalid"] == false);
+    ensure!(parsed["failed_false"]["changed"].is_null());
+    ensure!(parsed["failed_false"]["task"]["changed"].is_null());
+    ensure!(parsed["failed_true"]["invalid"] == false);
+    ensure!(parsed["failed_true"]["changed"] == true);
+    ensure!(parsed["failed_true"]["task"]["changed"] == true);
+    ensure!(parsed["failed_censored"]["invalid"] == false);
+    ensure!(parsed["failed_censored"]["changed"].is_null());
+    ensure!(parsed["contradiction"]["invalid"] == true);
     Ok(())
 }
 

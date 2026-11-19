@@ -345,7 +345,7 @@ def module_result(result, censored, policy):
     except ProjectionCensored:
         return dict(status="censored")
     except ProjectionLimit:
-        return dict(status="truncated", value={"module_result_json": "{}"})
+        return dict(status="unavailable")
     except Exception:
         return dict(status="invalid")
 
@@ -360,6 +360,7 @@ class Evidence:
         self.task_started = False
         self.outcome = None
         self.changed = None
+        self.raw_changed = None
         self.stats = None
         self.statuses = []
         self.tasks = dict(ok=0, failed=0, unreachable=0, skipped=0)
@@ -407,8 +408,12 @@ class Evidence:
             self.censored = self.censored or bool(result.get("_ansible_no_log")) or "censored" in result
             changed = result.get("changed")
             require(changed is None or type(changed) is bool)
-            self.changed = None if self.censored else changed
             self.outcome = kind.removeprefix("runner_on_")
+            self.raw_changed = None if self.censored else changed
+            if self.censored or (self.outcome in ("failed", "unreachable") and changed is False):
+                self.changed = None
+            else:
+                self.changed = changed
             self.tasks[self.outcome] = 1
             self.frames.emit("task", outcome=self.outcome, changed=self.changed, censored=self.censored)
             if self.projection is not None:
@@ -427,10 +432,10 @@ class Evidence:
             require(observed["processed"] == 1 and not observed["rescued"] and not observed["ignored"])
             for source, target in (("ok", "ok"), ("failures", "failed"), ("dark", "unreachable"), ("skipped", "skipped")):
                 require(observed[source] == self.tasks[target])
-            if self.changed is not None:
+            if self.raw_changed is not None:
                 # Core's changed stats can omit a failed task's observed mutation.
-                require(observed["changed"] <= int(self.changed))
-                require(self.outcome == "failed" or observed["changed"] == int(self.changed))
+                require(observed["changed"] <= int(self.raw_changed))
+                require(self.outcome == "failed" or observed["changed"] == int(self.raw_changed))
             require(not observed["changed"] or self.outcome in ("ok", "failed"))
             if self.censored:
                 self.changed = None
