@@ -271,23 +271,34 @@ async fn run_session(
     terminate: &mut tokio::signal::unix::Signal,
 ) -> ExitCode {
     let shutdown = application.shutdown_token();
+    let overload = CancellationToken::new();
     let (input, output) = rmcp::transport::stdio();
     let input = EofStdin {
         inner: input,
         shutdown: shutdown.clone(),
     };
-    let transport = progress::BoundedTransport::new(rmcp::transport::async_rw::AsyncRwTransport::<
-        rmcp::RoleServer,
-        _,
-        _,
-    >::new(input, output));
+    let transport = progress::BoundedTransport::with_control(
+        rmcp::transport::async_rw::AsyncRwTransport::<rmcp::RoleServer, _, _>::new(input, output),
+        shutdown.clone(),
+        overload.clone(),
+    );
     let service = tokio::select! {
+        biased;
+        _ = overload.cancelled() => return fail("mcp_session_overloaded"),
         result = application.clone().serve(transport) => match result {
             Ok(service) => service,
             Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {
+                if overload.is_cancelled() {
+                    return fail("mcp_session_overloaded");
+                }
                 return ExitCode::SUCCESS;
             },
-            Err(_) => return fail("mcp_initialize_failed"),
+            Err(_) => {
+                if overload.is_cancelled() {
+                    return fail("mcp_session_overloaded");
+                }
+                return fail("mcp_initialize_failed");
+            }
         },
         _ = interrupt.recv() => return ExitCode::SUCCESS,
         _ = terminate.recv() => return ExitCode::SUCCESS,
@@ -296,17 +307,28 @@ async fn run_session(
     let waiting = service.waiting();
     tokio::pin!(waiting);
     tokio::select! {
-        result = &mut waiting => return if result.is_ok() {
-            ExitCode::SUCCESS
-        } else {
-            fail("mcp_session_failed")
+        biased;
+        _ = overload.cancelled() => {},
+        result = &mut waiting => {
+            if overload.is_cancelled() {
+                return fail("mcp_session_overloaded");
+            }
+            return if result.is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                fail("mcp_session_failed")
+            };
         },
         _ = interrupt.recv() => {},
         _ = terminate.recv() => {},
     }
     shutdown.cancel();
     cancellation.cancel();
-    match tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await {
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await;
+    if overload.is_cancelled() {
+        return fail("mcp_session_overloaded");
+    }
+    match finished {
         Ok(Ok(_)) => ExitCode::SUCCESS,
         _ => fail("mcp_shutdown_failed"),
     }

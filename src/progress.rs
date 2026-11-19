@@ -10,11 +10,11 @@ use rmcp::{
     RoleServer,
     model::{
         ClientJsonRpcMessage, ProgressNotification, ProgressNotificationParam, ProgressToken,
-        ServerNotification,
+        RequestId, ServerJsonRpcMessage, ServerNotification,
     },
     service::RequestContext,
+    transport::Transport,
 };
-use rmcp::{model::ServerJsonRpcMessage, transport::Transport};
 use std::io;
 use tokio::{sync::watch, task::AbortHandle};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -310,16 +310,86 @@ async fn publish(
     }
 }
 
+struct PendingState {
+    ids: HashSet<RequestId>,
+    overloaded: bool,
+}
+
+struct PendingReplies {
+    state: Mutex<PendingState>,
+    shutdown: CancellationToken,
+    overload: CancellationToken,
+}
+
+impl PendingReplies {
+    fn new(shutdown: CancellationToken, overload: CancellationToken) -> Self {
+        Self {
+            state: Mutex::new(PendingState {
+                ids: HashSet::new(),
+                overloaded: false,
+            }),
+            shutdown,
+            overload,
+        }
+    }
+
+    fn is_overloaded(&self) -> bool {
+        lock(&self.state).overloaded
+    }
+
+    fn reserve(&self, id: &RequestId) -> bool {
+        let overloaded = {
+            let mut state = lock(&self.state);
+            if state.overloaded || state.ids.len() >= MAX_ACTIVE || !state.ids.insert(id.clone()) {
+                state.overloaded = true;
+                true
+            } else {
+                false
+            }
+        };
+        if overloaded {
+            self.shutdown.cancel();
+            self.overload.cancel();
+            return false;
+        }
+        true
+    }
+}
+
+struct ReplyCredit {
+    pending: Arc<PendingReplies>,
+    id: Option<RequestId>,
+}
+
+impl Drop for ReplyCredit {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            lock(&self.pending.state).ids.remove(&id);
+        }
+    }
+}
+
 pub(crate) struct BoundedTransport<T> {
     inner: T,
-    writer: std::sync::Arc<tokio::sync::Mutex<()>>,
+    writer: Arc<tokio::sync::Mutex<()>>,
+    pending: Arc<PendingReplies>,
 }
 
 impl<T> BoundedTransport<T> {
+    #[cfg(test)]
     pub(crate) fn new(inner: T) -> Self {
+        Self::with_control(inner, CancellationToken::new(), CancellationToken::new())
+    }
+
+    pub(crate) fn with_control(
+        inner: T,
+        shutdown: CancellationToken,
+        overload: CancellationToken,
+    ) -> Self {
         Self {
             inner,
-            writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            writer: Arc::new(tokio::sync::Mutex::new(())),
+            pending: Arc::new(PendingReplies::new(shutdown, overload)),
         }
     }
 }
@@ -334,6 +404,11 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
         // Validate the actual SDK message, including protocol errors and any
         // version-specific fields, before its encoder allocates the wire frame.
         let fits = frame_fits(&message);
+        let release_id = match &message {
+            ServerJsonRpcMessage::Response(response) => Some(response.id.clone()),
+            ServerJsonRpcMessage::Error(error) => error.id.clone(),
+            ServerJsonRpcMessage::Notification(_) | ServerJsonRpcMessage::Request(_) => None,
+        };
         let gate = match &message {
             ServerJsonRpcMessage::Notification(notification) => {
                 use rmcp::model::GetExtensions;
@@ -351,8 +426,13 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
             .as_ref()
             .map(|_| self.writer.clone().try_lock_owned().ok());
         let writer = self.writer.clone();
+        let credit = release_id.map(|id| ReplyCredit {
+            pending: Arc::clone(&self.pending),
+            id: Some(id),
+        });
         let send = fits.then(|| self.inner.send(message));
         async move {
+            let _credit = credit;
             let Some(send) = send else {
                 return Err(size_error());
             };
@@ -369,12 +449,27 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
         }
     }
 
-    fn receive(&mut self) -> impl Future<Output = Option<ClientJsonRpcMessage>> + Send {
-        self.inner.receive()
+    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        if self.pending.is_overloaded() {
+            return None;
+        }
+        let message = self.inner.receive().await?;
+        if let ClientJsonRpcMessage::Request(request) = &message
+            && !self.pending.reserve(&request.id)
+        {
+            return None;
+        }
+        Some(message)
     }
 
     fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.inner.close()
+        let pending = Arc::clone(&self.pending);
+        let close = self.inner.close();
+        async move {
+            let result = close.await;
+            lock(&pending.state).ids.clear();
+            result
+        }
     }
 }
 #[cfg(test)]
@@ -526,5 +621,161 @@ mod tests {
         })
         .await
         .expect("a blocked progress frame stalled or corrupted the final reply");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_requests_retain_credits_until_session_shutdown() {
+        use rmcp::{
+            ErrorData,
+            handler::server::ServerHandler,
+            model::{
+                CallToolRequestParams, CallToolResponse, InitializeResult, ServerCapabilities,
+            },
+            service::ServiceExt,
+        };
+        use tokio::io::AsyncWriteExt;
+
+        struct HoldUntilCancel {
+            started: Arc<tokio::sync::Mutex<Vec<RequestId>>>,
+        }
+        impl ServerHandler for HoldUntilCancel {
+            fn get_info(&self) -> InitializeResult {
+                InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+            }
+            async fn call_tool(
+                &self,
+                _request: CallToolRequestParams,
+                context: RequestContext<RoleServer>,
+            ) -> Result<CallToolResponse, ErrorData> {
+                self.started.lock().await.push(context.id.clone());
+                context.ct.cancelled().await;
+                Err(ErrorData::internal_error("cancelled", None))
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (server_in, mut client_in) = tokio::io::duplex(4096);
+            let (client_out, server_out) = tokio::io::duplex(4096);
+            let shutdown = CancellationToken::new();
+            let overload = CancellationToken::new();
+            let transport = BoundedTransport::with_control(
+                rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
+                    server_in, server_out,
+                ),
+                shutdown.clone(),
+                overload.clone(),
+            );
+            let started = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let handler = HoldUntilCancel {
+                started: Arc::clone(&started),
+            };
+            let server_task = tokio::spawn(async move {
+                let service = handler.serve(transport).await.unwrap();
+                let _ = service.waiting().await;
+            });
+            let mut reader = tokio::io::BufReader::new(client_out);
+            client_in
+                .write_all(
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+                )
+                .await
+                .unwrap();
+            client_in.write_all(b"\n").await.unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"id\":1"));
+            client_in
+                .write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+                .await
+                .unwrap();
+            client_in.write_all(b"\n").await.unwrap();
+
+            for id in 2..=17_u64 {
+                let call = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": {"name": "noop", "arguments": {}}
+                });
+                client_in
+                    .write_all(&serde_json::to_vec(&call).unwrap())
+                    .await
+                    .unwrap();
+                client_in.write_all(b"\n").await.unwrap();
+                loop {
+                    if started
+                        .lock()
+                        .await
+                        .contains(&RequestId::Number(id as i64))
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                let cancel = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": id, "reason": "test"}
+                });
+                client_in
+                    .write_all(&serde_json::to_vec(&cancel).unwrap())
+                    .await
+                    .unwrap();
+                client_in.write_all(b"\n").await.unwrap();
+            }
+            assert!(!overload.is_cancelled());
+            let seventeenth = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 18,
+                "method": "tools/call",
+                "params": {"name": "noop", "arguments": {}}
+            });
+            client_in
+                .write_all(&serde_json::to_vec(&seventeenth).unwrap())
+                .await
+                .unwrap();
+            client_in.write_all(b"\n").await.unwrap();
+            overload.cancelled().await;
+            assert!(shutdown.is_cancelled());
+            server_task.await.unwrap();
+            assert!(
+                !started.lock().await.contains(&RequestId::Number(18)),
+                "17th request after 16 cancelled requests must not dispatch"
+            );
+        })
+        .await
+        .expect("sequential cancel overload test stalled");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_live_request_id_triggers_overload() {
+        use tokio::io::AsyncWriteExt;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (server_in, mut client_in) = tokio::io::duplex(4096);
+            let (_client_out, server_out) = tokio::io::duplex(4096);
+            let shutdown = CancellationToken::new();
+            let overload = CancellationToken::new();
+            let mut transport = BoundedTransport::with_control(
+                rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
+                    server_in, server_out,
+                ),
+                shutdown.clone(),
+                overload.clone(),
+            );
+            for _ in 0..2 {
+                client_in
+                    .write_all(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#)
+                    .await
+                    .unwrap();
+                client_in.write_all(b"\n").await.unwrap();
+            }
+            assert!(transport.receive().await.is_some());
+            assert!(transport.receive().await.is_none());
+            assert!(overload.is_cancelled());
+            assert!(shutdown.is_cancelled());
+            transport.close().await.unwrap();
+        })
+        .await
+        .expect("duplicate id overload test stalled");
     }
 }

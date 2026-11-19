@@ -973,7 +973,7 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
     let mut ready = Vec::new();
     let release = fixture.root.path().join("global-release");
     let expired = fixture.root.path().join("global-expired");
-    for index in 0..16 {
+    for index in 0..8 {
         let start = fixture.root.path().join(format!("global-{index}-started"));
         let done = fixture.root.path().join(format!("global-{index}-done"));
         fixture.eventual_markers.push(done.clone());
@@ -985,7 +985,7 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
             &format!("GLOBAL_{index}"),
         );
         requests.push(
-            json!({"host":format!("slots-{}", index / 4),"command":command,"timeout_secs":15}),
+            json!({"host":format!("slots-{}", index % 4),"command":command,"timeout_secs":15}),
         );
         ready.push(start);
     }

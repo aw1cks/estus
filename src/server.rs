@@ -76,7 +76,7 @@ impl Estus {
                 sudo_name,
                 pool,
                 shutdown,
-                operations: Arc::new(Semaphore::new(16)),
+                operations: Arc::new(Semaphore::new(8)),
                 tasks: TaskTracker::new(),
                 local_tasks: TaskTracker::new(),
                 outputs,

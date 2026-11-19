@@ -6,7 +6,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -359,7 +358,10 @@ async fn progress_controller_script_counts_interruption_and_blocked_consumer_cle
 set -eu
 case "$MCP_MODE" in
   count) chunks=64 ;;
-  slow) chunks=4096 ;;
+  slow) chunks=1024 ;;
+  overload)
+    printf ran > {observations}/overload-ran
+    exit 0 ;;
   interrupt)
     printf PARTIAL_OUT
     printf PARTIAL_ERR >&2
@@ -396,21 +398,22 @@ exit 23
     let mut configuration = format!(
         r#"
 profile = "actions-only"
-enabled_tools = ["count_controller", "slow_controller", "timeout_controller", "cancel_controller"]
+enabled_tools = ["count_controller", "slow_controller", "timeout_controller", "cancel_controller", "overload_controller"]
 [controller]
 workspace_root = {}
 [limits]
 operation_timeout_secs = 15
 max_timeout_secs = 15
-max_output_bytes = 8192
+max_output_bytes = 1048576
 "#,
         string(&root)?
     );
-    for (name, mode, seconds) in [
-        ("count_controller", "count", 10),
-        ("slow_controller", "slow", 10),
-        ("timeout_controller", "interrupt", 2),
-        ("cancel_controller", "interrupt", 10),
+    for (name, mode, seconds, limit) in [
+        ("count_controller", "count", 10, 4096),
+        ("slow_controller", "slow", 10, 524_288),
+        ("timeout_controller", "interrupt", 2, 4096),
+        ("cancel_controller", "interrupt", 10, 4096),
+        ("overload_controller", "overload", 10, 4096),
     ] {
         configuration.push_str(&format!(r#"
 [tools.{name}]
@@ -421,7 +424,7 @@ effects = ["read"]
 execution = {{ kind = "controller_script", source = {{ path = {source}, content_sha256 = "{digest}", max_bytes = 65536 }}, interpreter = {{ program = {sh}, argv = [] }}, environment = {{ MCP_MODE = "{mode}" }} }}
 input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
 result = {{ kind = "controller_command" }}
-limits = {{ timeout_secs = {seconds}, max_output_bytes = 4096 }}
+limits = {{ timeout_secs = {seconds}, max_output_bytes = {limit} }}
 "#, source = string(&source)?, sh = string(&sh)?));
     }
     fs::write(&config, configuration)?;
@@ -514,33 +517,20 @@ limits = {{ timeout_secs = {seconds}, max_output_bytes = 4096 }}
             barrier(&mut server, 100 + id).await?;
         }
 
-        // WireServer does not background-read stdout. Queue more than a pipe's
-        // capacity of ordinary replies, then leave stdout entirely unread.
-        // These calls do not depend on progress being implemented at all.
-        let list = server
-            .request_with_size(json!(200), "tools/list", json!({}))
-            .await?;
-        let queued = (1_048_576 / list.1).max(64) + 1;
-        timeout(WAIT, async {
-            for index in 0..queued {
-                server
-                    .send(json!({"jsonrpc":"2.0","id":1000 + index as u64,
-                    "method":"tools/list","params":{}}))
-                    .await?;
-            }
-            call(
-                &mut server,
-                300,
-                "slow_controller",
-                json!({}),
-                Some(json!("slow-controller-private")),
-            )
-            .await
-        })
-        .await
-        .context("blocked consumer prevented request intake")??;
-        // Independent filesystem and audit evidence, while protocol reads remain
-        // paused: output pipes drained, child exited/reaped, private files removed.
+        // Leave stdout unread while filling 16 request credits, cancelling one
+        // active request before overload, then submitting a 17th request.
+        let ready = observations.join("interrupt-ready");
+        if ready.exists() {
+            fs::remove_file(&ready)?;
+        }
+        call(
+            &mut server,
+            300,
+            "slow_controller",
+            json!({}),
+            Some(json!("slow-controller-private")),
+        )
+        .await?;
         Fixture::await_file(&observations.join("slow-drained")).await?;
         let audit = finish(&server.log, 300, Some("command_failed")).await?;
         ensure!(
@@ -548,56 +538,77 @@ limits = {{ timeout_secs = {seconds}, max_output_bytes = 4096 }}
             "blocked stdout delayed owned completion: {audit}"
         );
         controller_clean(&root).await?;
-
-        let mut pending: BTreeMap<u64, ()> =
-            (0..queued).map(|index| (1000 + index as u64, ())).collect();
-        let mut final_seen = false;
-        let mut count = 0;
+        // Let slow_controller's ~2 MiB frame enter BoundedTransport::send and block on the OS pipe.
+        // Request 5 (cancelled earlier) already retains 1 credit, plus 300 (1) + 13 tools/list + 301 (1) = 16.
+        sleep(Duration::from_millis(50)).await;
         timeout(WAIT, async {
-            while !pending.is_empty() || !final_seen {
-                let (frame, size) = server.frame().await?;
-                if frame["id"] == 300 {
-                    ensure!(!final_seen, "duplicate slow final");
-                    final_seen = true;
-                    controller_failure(&frame, 4096)?;
-                } else if let Some(id) = frame["id"].as_u64() {
-                    ensure!(
-                        pending.remove(&id).is_some(),
-                        "unexpected queued reply: {frame}"
-                    );
-                    ensure!(frame["result"]["tools"].is_array());
-                } else {
-                    notification(&frame)?;
-                    ensure!(!final_seen, "late progress after slow final: {frame}");
-                    ensure!(
-                        size <= 1024
-                            && frame["params"]["progressToken"] == "slow-controller-private"
-                    );
-                    ensure!(frame["params"]["message"] == "Command output bytes received");
-                    ensure!(frame["params"].get("total").is_none());
-                    count += 1;
-                    // Busy normal reply serialization drops progress instead of
-                    // allowing an unbounded backlog behind the blocked consumer.
-                    ensure!(count <= 2, "blocked consumer accumulated progress backlog");
-                }
+            for index in 0..13_u64 {
+                server
+                    .send(json!({"jsonrpc":"2.0","id":1000 + index,
+                    "method":"tools/list","params":{}}))
+                    .await?;
             }
-            Ok::<_, anyhow::Error>(())
+            call(&mut server, 301, "cancel_controller", json!({}), None).await
         })
         .await
-        .context("resumed consumer could not read complete protocol frames")??;
-        barrier(&mut server, 400).await?;
+        .context("blocked consumer prevented request intake")??;
+        Fixture::await_file(&ready).await?;
+        server
+            .send(json!({"jsonrpc":"2.0","method":"notifications/cancelled",
+            "params":{"requestId":301,"reason":"cancel before overload"}}))
+            .await?;
+        let audit = finish(&server.log, 301, Some("cancelled")).await?;
+        ensure!(
+            audit["owned_group_cleanup"] == "signalled_and_reaped",
+            "cancel before overload failed owned cleanup: {audit}"
+        );
+        controller_clean(&root).await?;
+        call(&mut server, 302, "overload_controller", json!({}), None).await?;
         Ok::<_, anyhow::Error>(())
     }
     .await
     .with_context(|| format!("controller progress audit: {}", server.log.text()));
-    // Release any real child even if an earlier consumer assertion failed.
     let release = fs::write(observations.join("release"), b"release");
-    // SIGTERM also shuts down if a failure left a request active. Success has
-    // drained all queued replies, so ordinary stdin closure cannot block here.
-    let stopped = server.stop(Some(nix::sys::signal::Signal::SIGTERM)).await;
+    let exited = server.wait_exit().await;
     scenario?;
     release?;
-    let log = stopped?;
+    let (status, frames, log) = exited?;
+    ensure!(
+        !status.success(),
+        "overloaded session exited cleanly: {status}"
+    );
+    let records = log.final_records()?;
+    ensure!(
+        records
+            .iter()
+            .any(|record| record["event"] == "error" && record["code"] == "mcp_session_overloaded"),
+        "missing mcp_session_overloaded audit record: {}",
+        log.text()
+    );
+    ensure!(
+        !observations.join("overload-ran").exists(),
+        "17th overloaded request executed handler"
+    );
+    ensure!(
+        !observations.join("interrupt-done").exists(),
+        "cancelled script survived overload shutdown"
+    );
+    let response_count = frames
+        .iter()
+        .filter(|frame| frame.get("id").is_some())
+        .count();
+    ensure!(
+        response_count <= 16,
+        "retained response count exceeded 16: {response_count}"
+    );
+    let slow_progress_count = frames
+        .iter()
+        .filter(|frame| frame["params"]["progressToken"] == "slow-controller-private")
+        .count();
+    ensure!(
+        slow_progress_count <= 2,
+        "blocked consumer accumulated progress backlog: {slow_progress_count}"
+    );
     for secret in [
         STRING_TOKEN,
         "slow-controller-private",
@@ -609,6 +620,104 @@ limits = {{ timeout_secs = {seconds}, max_output_bytes = 4096 }}
             "progress/controller payload leaked into audit"
         );
     }
+    controller_clean(&root).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
+async fn sequential_cancelled_requests_trigger_overload_without_blocking_stdout() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))?;
+    let root = temp.path().join("controller-private");
+    let observations = temp.path().join("observations");
+    for path in [&root, &observations] {
+        fs::create_dir(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    fs::write(root.join("operator-owned-sentinel"), b"retain me")?;
+    let sh = support::find_program("sh")?;
+    let sleeper = support::find_program("sleep")?;
+    let source = temp.path().join("reviewed-cancel.sh");
+    let config = temp.path().join("controller.toml");
+    let script = format!(
+        r#"
+set -eu
+case "$MCP_MODE" in
+  overload)
+    printf ran > {observations}/overload-ran
+    exit 0 ;;
+  interrupt)
+    printf ready > {observations}/interrupt-ready
+    i=0
+    while [ ! -f {observations}/release ] && [ "$i" -lt 1000 ]; do
+      {sleep} 0.02
+      i=$((i+1))
+    done
+    exit 0 ;;
+esac
+"#,
+        observations = quote(text(&observations)?),
+        sleep = quote(text(&sleeper)?),
+    );
+    fs::write(&source, &script)?;
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600))?;
+    let digest = hex::encode(Sha256::digest(script.as_bytes()));
+    let string = |path: &Path| -> Result<String> {
+        Ok(toml::Value::String(text(path)?.to_owned()).to_string())
+    };
+    let mut configuration = format!(
+        "profile = \"actions-only\"\nenabled_tools = [\"cancel_controller\", \"overload_controller\"]\n[controller]\nworkspace_root = {}\n",
+        string(&root)?
+    );
+    for (name, mode) in [
+        ("cancel_controller", "interrupt"),
+        ("overload_controller", "overload"),
+    ] {
+        configuration.push_str(&format!(
+            "\n[tools.{name}]\ndescription = \"Cancel credit test\"\nrevision = \"cancel-1\"\nauthority = \"controller\"\neffects = [\"read\"]\nexecution = {{ kind = \"controller_script\", source = {{ path = {}, content_sha256 = \"{digest}\", max_bytes = 65536 }}, interpreter = {{ program = {}, argv = [] }}, environment = {{ MCP_MODE = \"{mode}\" }} }}\ninput_schema = {{ type = \"object\", additionalProperties = false, required = [], properties = {{}} }}\nresult = {{ kind = \"controller_command\" }}\n",
+            string(&source)?,
+            string(&sh)?
+        ));
+    }
+    fs::write(&config, configuration)?;
+    let mut server = WireServer::start(&config)?;
+    let ready = observations.join("interrupt-ready");
+    let scenario = async {
+        server.initialize().await?;
+        for id in 2..=17_u64 {
+            if ready.exists() {
+                fs::remove_file(&ready)?;
+            }
+            call(&mut server, id, "cancel_controller", json!({}), None).await?;
+            Fixture::await_file(&ready).await?;
+            server
+                .send(json!({"jsonrpc":"2.0","method":"notifications/cancelled",
+                "params":{"requestId":id,"reason":"sequential cancel"}}))
+                .await?;
+            let audit = finish(&server.log, id, Some("cancelled")).await?;
+            ensure!(audit["owned_group_cleanup"] == "signalled_and_reaped");
+            controller_clean(&root).await?;
+        }
+        call(&mut server, 18, "overload_controller", json!({}), None).await
+    }
+    .await;
+    let release = fs::write(observations.join("release"), b"release");
+    let exited = server.wait_exit().await;
+    scenario?;
+    release?;
+    let (status, _frames, log) = exited?;
+    ensure!(
+        !status.success(),
+        "overloaded session exited cleanly: {status}"
+    );
+    ensure!(
+        log.final_records()?
+            .iter()
+            .any(|record| record["event"] == "error" && record["code"] == "mcp_session_overloaded"),
+        "missing mcp_session_overloaded audit record: {}",
+        log.text()
+    );
+    ensure!(!observations.join("overload-ran").exists());
     controller_clean(&root).await
 }
 

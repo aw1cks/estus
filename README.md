@@ -468,6 +468,12 @@ cannot retract bytes already sent. A blocked consumer can delay protocol output,
 not stream draining, execution deadlines, reaping or owned cleanup. Progress is
 not output retrieval, proof of completion, replay, or a background-task API.
 
+At most 16 requests may hold outstanding reply credits (including cancelled
+requests whose handlers may still be finishing, as well as initialization,
+discovery, and errors); a 17th request or duplicate live request ID terminates
+the overloaded session with `mcp_session_overloaded`, and clients must
+reconnect.
+
 `nix run .#progress-acceptance-msrv` exercises real native/controller/SFTP progress.
 `nix run .#runner-progress-acceptance-msrv` separately exercises the selected real
 Runner environment; it is not a prerequisite for native progress.

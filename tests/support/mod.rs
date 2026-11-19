@@ -868,6 +868,38 @@ impl WireServer {
         ensure!(status.success(), "server shutdown status: {status}");
         Ok(self.log)
     }
+
+    #[allow(dead_code)]
+    pub async fn wait_exit(mut self) -> Result<(std::process::ExitStatus, Vec<Value>, Log)> {
+        drop(self.input.take());
+        let status = match timeout(CLEANUP, self.child.wait()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                self.child.kill().await?;
+                self.close_stderr().await?;
+                bail!("server overload exit exceeded ten seconds");
+            }
+        };
+        let mut frames = Vec::new();
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = timeout(CLEANUP, self.output.read_until(b'\n', &mut line)).await??;
+            if read == 0 {
+                break;
+            }
+            if line.last() == Some(&b'\n') {
+                let value: Value = serde_json::from_slice(&line)?;
+                ensure!(value["jsonrpc"] == "2.0", "non-protocol trailing stdout");
+                frames.push(value);
+            }
+        }
+        if let Some(drain) = self.drain.take() {
+            timeout(CLEANUP, drain).await???;
+            self.log.final_records()?;
+        }
+        Ok((status, frames, self.log))
+    }
 }
 
 pub fn masters(log: &Log) -> Result<Vec<(u32, PathBuf)>> {

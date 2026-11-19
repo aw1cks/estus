@@ -1184,12 +1184,12 @@ async fn global_admission_is_held_by_live_controller_owners_and_recovers_after_c
     let mut server = Server::start(&fixture).await?;
     let mut observed = Vec::new();
     let scenario = async {
-        for id in 10..26 {
+        for id in 10..18 {
             server.call(id, arguments()).await?;
         }
-        let records = fixture.ready(16, &mut server, 10).await?;
+        let records = fixture.ready(8, &mut server, 10).await?;
         ensure!(
-            fixture.operation_directories()?.len() == 16,
+            fixture.operation_directories()?.len() == 8,
             "admitted operations do not own distinct workspaces"
         );
         for record in &records {
@@ -1203,20 +1203,20 @@ async fn global_admission_is_held_by_live_controller_owners_and_recovers_after_c
             "admission overflow: {result}"
         );
         ensure!(
-            fixture.records()?.len() == 16 && fixture.operation_directories()?.len() == 16,
+            fixture.records()?.len() == 8 && fixture.operation_directories()?.len() == 8,
             "rejected call performed local work"
         );
         // Cancellation keeps the actual operation owner responsible for cleanup.
-        for id in 10..26 {
+        for id in 10..18 {
             server.cancel(id).await?;
         }
-        for id in 10..26 {
+        for id in 10..18 {
             server.finished(id, "cancelled").await?;
         }
         fixture.gone(&observed).await?;
         fixture.clean().await?;
         server.call(101, arguments()).await?;
-        let all_records = fixture.ready(17, &mut server, 101).await?;
+        let all_records = fixture.ready(9, &mut server, 101).await?;
         let next = all_records
             .iter()
             .find(|path| !records.contains(path))
