@@ -1110,6 +1110,7 @@ pub(crate) async fn run(
     } else {
         GroupCleanup::Incomplete
     };
+    let cancelled = matches!(outcome, Outcome::Cancelled) || context.ct.is_cancelled();
     let (exit_code, signal, termination, mut failure) = match outcome {
         Outcome::Completed(status) => (
             status.code(),
@@ -1194,16 +1195,22 @@ pub(crate) async fn run(
     let (stdout, stdout_truncated, stdout_lossy, retained_stdout) = output.finish();
     let (stderr, stderr_truncated, stderr_lossy, retained_stderr) = errors.finish();
     let duration_ms = u64::try_from(context.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let output = match context.retention {
-        Some(retention) => Some(
-            retention
-                .finish(
-                    retained_stdout.unwrap_or_default(),
-                    retained_stderr.unwrap_or_default(),
-                )
-                .await,
-        ),
-        None => None,
+    let output = if cancelled {
+        drop(context.retention);
+        None
+    } else {
+        match context.retention {
+            Some(retention) => {
+                retention
+                    .finish(
+                        retained_stdout.unwrap_or_default(),
+                        retained_stderr.unwrap_or_default(),
+                        context.ct,
+                    )
+                    .await
+            }
+            None => None,
+        }
     };
     let data = ControllerData {
         stdout,

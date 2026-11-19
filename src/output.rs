@@ -420,15 +420,19 @@ impl Session {
         mut self,
         stdout: RetainedBytes,
         stderr: RetainedBytes,
-    ) -> OutputReceipt {
+        request_ct: &CancellationToken,
+    ) -> Option<OutputReceipt> {
+        if request_ct.is_cancelled() {
+            return None;
+        }
         let Some(quota) = self.quota.take() else {
-            return unavailable(self.reason);
+            return Some(unavailable(self.reason));
         };
         let Some(store) = self.store.upgrade() else {
-            return unavailable("shutdown");
+            return Some(unavailable("shutdown"));
         };
         if store.stop.is_cancelled() {
-            return unavailable("shutdown");
+            return Some(unavailable("shutdown"));
         }
         // Defend the private ownership boundary even if an internal caller errs.
         if stdout.bytes.len() as u64 > self.limit
@@ -436,30 +440,39 @@ impl Session {
             || stdout.bytes.capacity() as u64 > self.limit
             || stderr.bytes.capacity() as u64 > self.limit
         {
-            return unavailable("resource_limit");
+            return Some(unavailable("resource_limit"));
         }
         let stdout_info = stdout.info();
         let stderr_info = stderr.info();
         let cancel = store.stop.child_token();
         let _guard = cancel.clone().drop_guard();
         let worker_cancel = cancel.clone();
+        let request_cancel = request_ct.clone();
         let deadline = Instant::now() + FINALIZE_GRACE;
         let workers = store.workers.clone();
-        let worker = store
-            .workers
-            .spawn_blocking(move || write_artifact(stdout, stderr, quota, &worker_cancel, workers));
+        let worker = store.workers.spawn_blocking(move || {
+            write_artifact(
+                stdout,
+                stderr,
+                quota,
+                &worker_cancel,
+                &request_cancel,
+                workers,
+            )
+        });
         let artifact = tokio::select! {
             biased;
-            _ = store.stop.cancelled() => return unavailable("shutdown"),
+            _ = store.stop.cancelled() => return Some(unavailable("shutdown")),
+            _ = request_ct.cancelled() => return None,
             result = tokio::time::timeout(FINALIZE_GRACE, worker) => match result {
                 Ok(Ok(Ok(artifact))) => artifact,
-                Ok(_) => return unavailable("io_error"),
-                Err(_) => return unavailable("timeout"),
+                Ok(_) => return Some(unavailable("io_error")),
+                Err(_) => return Some(unavailable("timeout")),
             }
         };
         let mut random = [0u8; 16];
         if getrandom::fill(&mut random).is_err() {
-            return unavailable("io_error");
+            return Some(unavailable("io_error"));
         }
         let handle = hex::encode(random);
         let ttl = store.limits.ttl_secs;
@@ -468,13 +481,16 @@ impl Session {
         {
             let mut ready = lock(&store.ready);
             if store.stop.is_cancelled() {
-                return unavailable("shutdown");
+                return Some(unavailable("shutdown"));
+            }
+            if request_ct.is_cancelled() {
+                return None;
             }
             if Instant::now() >= deadline {
-                return unavailable("timeout");
+                return Some(unavailable("timeout"));
             }
             if ready.contains_key(&handle) {
-                return unavailable("io_error");
+                return Some(unavailable("io_error"));
             }
             ready.insert(
                 handle.clone(),
@@ -495,12 +511,12 @@ impl Session {
                 }
             }
         });
-        OutputReceipt::Ready {
+        Some(OutputReceipt::Ready {
             handle,
             expires_in_secs: ttl,
             stdout: stdout_info,
             stderr: stderr_info,
-        }
+        })
     }
 }
 
@@ -509,9 +525,11 @@ fn write_artifact(
     stderr: RetainedBytes,
     mut quota: Quota,
     cancel: &CancellationToken,
+    request_cancel: &CancellationToken,
     workers: TaskTracker,
 ) -> io::Result<Artifact> {
-    if cancel.is_cancelled() {
+    let cancelled = || cancel.is_cancelled() || request_cancel.is_cancelled();
+    if cancelled() {
         return Err(io::ErrorKind::Interrupted.into());
     }
     let directory = tempfile::Builder::new()
@@ -520,7 +538,7 @@ fn write_artifact(
         .tempdir()?;
     let lengths = [stdout.bytes.len() as u64, stderr.bytes.len() as u64];
     for (name, bytes) in [("stdout", stdout.bytes), ("stderr", stderr.bytes)] {
-        if cancel.is_cancelled() {
+        if cancelled() {
             return Err(io::ErrorKind::Interrupted.into());
         }
         let mut file = OpenOptions::new()
@@ -532,7 +550,7 @@ fn write_artifact(
         // Closing before returning is essential: only closed artifacts publish.
         drop(file);
     }
-    if cancel.is_cancelled() {
+    if cancelled() {
         return Err(io::ErrorKind::Interrupted.into());
     }
     quota.shrink(lengths[0] + lengths[1]);
@@ -596,8 +614,13 @@ mod tests {
         let store = Store::new(limits(), CancellationToken::new());
         let receipt = store
             .reserve()
-            .finish(retained(b"abc"), retained(b"err"))
-            .await;
+            .finish(
+                retained(b"abc"),
+                retained(b"err"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("retention receipt");
         let OutputReceipt::Ready { handle, .. } = receipt else {
             panic!("publication failed");
         };
@@ -641,8 +664,13 @@ mod tests {
         let store = Store::new(limits(), CancellationToken::new());
         let receipt = store
             .reserve()
-            .finish(retained(b"data"), RetainedBytes::default())
-            .await;
+            .finish(
+                retained(b"data"),
+                RetainedBytes::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("retention receipt");
         let OutputReceipt::Ready { handle, .. } = receipt else {
             panic!("publication failed");
         };
@@ -657,9 +685,13 @@ mod tests {
         assert!(matches!(
             store
                 .reserve()
-                .finish(RetainedBytes::default(), RetainedBytes::default())
+                .finish(
+                    RetainedBytes::default(),
+                    RetainedBytes::default(),
+                    &CancellationToken::new()
+                )
                 .await,
-            OutputReceipt::Unavailable { reason: "shutdown" }
+            Some(OutputReceipt::Unavailable { reason: "shutdown" })
         ));
     }
 
@@ -668,8 +700,13 @@ mod tests {
         let store = Store::new(limits(), CancellationToken::new());
         let receipt = store
             .reserve()
-            .finish(retained(b"0123456789abcdef"), retained(b"fedcba9876543210"))
-            .await;
+            .finish(
+                retained(b"0123456789abcdef"),
+                retained(b"fedcba9876543210"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("retention receipt");
         let OutputReceipt::Ready { handle, .. } = receipt else {
             panic!("publication failed");
         };
@@ -703,8 +740,13 @@ mod tests {
         let store = Store::new(limits(), CancellationToken::new());
         let receipt = store
             .reserve()
-            .finish(retained(b"a\0\xffz"), RetainedBytes::default())
-            .await;
+            .finish(
+                retained(b"a\0\xffz"),
+                RetainedBytes::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("retention receipt");
         let OutputReceipt::Ready { handle, .. } = receipt else {
             panic!("publication failed");
         };
@@ -738,6 +780,73 @@ mod tests {
             .error
             .unwrap();
         assert_eq!(error.code, "invalid_encoding");
+        store.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_finish_reclaims_quota_and_normal_post_return_cancel_keeps_entry() {
+        let store = Store::new(limits(), CancellationToken::new());
+        let pre_cancelled = CancellationToken::new();
+        pre_cancelled.cancel();
+        assert!(
+            store
+                .reserve()
+                .finish(retained(b"abc"), RetainedBytes::default(), &pre_cancelled)
+                .await
+                .is_none()
+        );
+        assert_eq!(lock(&store.inner.usage).handles, 0);
+        assert_eq!(lock(&store.inner.usage).bytes, 0);
+
+        let post_return = CancellationToken::new();
+        let receipt = store
+            .reserve()
+            .finish(retained(b"ok"), RetainedBytes::default(), &post_return)
+            .await;
+        let Some(OutputReceipt::Ready { handle, .. }) = receipt else {
+            panic!("expected ready receipt");
+        };
+        // RMCP cancels the request token after the handler returns; published output must survive.
+        post_return.cancel();
+        tokio::task::yield_now().await;
+        assert!(lock(&store.inner.ready).contains_key(&handle));
+        store.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_before_ready_insert_drops_artifact_and_reclaims_quota() {
+        let store = Store::new(limits(), CancellationToken::new());
+        let session = store.reserve();
+        let ct = CancellationToken::new();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let inner = Arc::clone(&store.inner);
+        let holder = std::thread::spawn(move || {
+            let _guard = lock(&inner.ready);
+            let _ = locked_tx.send(());
+            let _ = release_rx.recv();
+        });
+        locked_rx.recv().unwrap();
+        let ct_for_task = ct.clone();
+        let task = tokio::spawn(async move {
+            session
+                .finish(retained(b"race"), RetainedBytes::default(), &ct_for_task)
+                .await
+        });
+        // Give write_artifact time to finish and park on lock(&store.inner.ready).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        ct.cancel();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(task.await.unwrap().is_none());
+        assert!(lock(&store.inner.ready).is_empty());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while lock(&store.inner.usage).handles != 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(lock(&store.inner.usage).handles, 0);
+        assert_eq!(lock(&store.inner.usage).bytes, 0);
+        assert_eq!(store.reserve().capture_limit(), 16);
         store.shutdown().await;
     }
 }

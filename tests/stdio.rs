@@ -6595,3 +6595,175 @@ async fn directory_cursor_discovery_and_output_schema_are_consumer_visible() -> 
     directory.close()?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_retained_output_calls_reclaim_handles_for_later_reads() -> Result<()> {
+    let fixture = ControllerProtocolFixture::new()?;
+    let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|path| path.join("sleep"))
+        .chain([std::path::PathBuf::from("/bin/sleep")])
+        .find(|path| path.is_file())
+        .context("sleep executable is required")?;
+    let sleep_q = format!("'{}'", sleep.to_string_lossy().replace('\'', "'\\''"));
+    let marker_dir = fixture.directory.path().join("markers");
+    std::fs::create_dir(&marker_dir)?;
+    let marker_dir_q = format!(
+        "'{}'",
+        marker_dir
+            .to_str()
+            .context("marker dir UTF-8")?
+            .replace('\'', "'\\''")
+    );
+    let release = fixture.directory.path().join("release");
+    let release_q = format!(
+        "'{}'",
+        release
+            .to_str()
+            .context("release path UTF-8")?
+            .replace('\'', "'\\''")
+    );
+    let script = format!(
+        r#"IFS= read -r payload < "$1" || :
+case "$payload" in
+  *'"count":1'*) idx=1 ;;
+  *'"count":2'*) idx=2 ;;
+  *'"count":3'*) idx=3 ;;
+  *'"count":4'*) idx=4 ;;
+  *) idx=0 ;;
+esac
+if [ "$idx" != 0 ]; then
+  printf 'PARTIAL_OUT'
+  : > {marker_dir_q}/started-"$idx"
+  i=0
+  while [ ! -f {release_q} ] && [ "$i" -lt 200 ]; do
+    {sleep_q} 0.05
+    i=$((i+1))
+  done
+else
+  printf '%s' "$payload"
+fi
+"#
+    );
+    std::fs::write(&fixture.source, script.as_bytes())?;
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(std::fs::read(&fixture.source)?));
+    let config = fixture.config.replace(&fixture.hash, &hash);
+
+    let mut server = fixture.start(&config)?;
+    let scenario = async {
+        server.initialize().await?;
+        // 4 immediate/pre-dispatch cancellations (count: -1) and 4 mid-stream cancellations (count: 1..=4).
+        for id in 10..=13 {
+            server
+                .send(modern_request(
+                    json!(id),
+                    "tools/call",
+                    json!({
+                        "name": "observe_controller",
+                        "arguments": {"label": "CONTROLLER_CANCEL_SECRET", "count": -1, "verbose": false, "retain_output": true}
+                    }),
+                    MODERN_VERSION,
+                ))
+                .await?;
+            server
+                .send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": id, "reason": "pre-dispatch cancel"}
+                }))
+                .await?;
+        }
+        for idx in 1..=4 {
+            let id = 20 + idx;
+            server
+                .send(modern_request(
+                    json!(id),
+                    "tools/call",
+                    json!({
+                        "name": "observe_controller",
+                        "arguments": {"label": "CONTROLLER_CANCEL_SECRET", "count": idx, "verbose": false, "retain_output": true}
+                    }),
+                    MODERN_VERSION,
+                ))
+                .await?;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        for idx in 1..=4 {
+            let marker = marker_dir.join(format!("started-{idx}"));
+            while !marker.exists() {
+                ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "mid-stream controller {idx} did not start"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        for idx in 1..=4 {
+            let id = 20 + idx;
+            server
+                .send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": id, "reason": "mid-stream cancel"}
+                }))
+                .await?;
+        }
+        // Ensure all cancelled controller workspaces have finished cleanup before the 9th call.
+        let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&fixture.root)?.next().is_some() {
+            ensure!(
+                tokio::time::Instant::now() < cleanup_deadline,
+                "cancelled controller workspaces remained"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // 9th normal call under default max_handles = 8 must retain and be readable.
+        server
+            .send(modern_request(
+                json!(99),
+                "tools/call",
+                json!({
+                    "name": "observe_controller",
+                    "arguments": {"label": "CONTROLLER_INPUT_SECRET", "count": 0, "verbose": false, "retain_output": true}
+                }),
+                MODERN_VERSION,
+            ))
+            .await?;
+        let response = server.response(99).await?;
+        ensure!(response["result"]["isError"] != true, "9th call failed: {response}");
+        let data = &response["result"]["structuredContent"]["data"];
+        let receipt = &data["output"];
+        ensure!(receipt["status"] == "ready", "9th call handle exhausted: {receipt}");
+        let handle = receipt["handle"].as_str().context("output handle")?;
+        server
+            .send(modern_request(
+                json!(100),
+                "tools/call",
+                json!({
+                    "name": "ssh_read_output",
+                    "arguments": {"handle": handle, "stream": "stdout", "max_bytes": 1024}
+                }),
+                MODERN_VERSION,
+            ))
+            .await?;
+        let read = server.response(100).await?;
+        ensure!(read["result"]["isError"] != true, "ssh_read_output failed: {read}");
+        ensure!(
+            read["result"]["structuredContent"]["data"]["content"] == data["stdout"],
+            "read output mismatch"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let _ = std::fs::write(&release, b"done");
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    fixture.public_only(&stderr)?;
+    no_remote_dispatch(&stderr)?;
+    ensure!(!std::str::from_utf8(&stderr)?.contains("CONTROLLER_CANCEL_SECRET"));
+    Ok(())
+}
