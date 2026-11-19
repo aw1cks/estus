@@ -51,6 +51,18 @@ fn name(value: &str) -> bool {
             .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
 }
 
+fn matches_display(value: &Value, expected: &str) -> bool {
+    struct StrEq<'a>(&'a str);
+    impl std::fmt::Write for StrEq<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0 = self.0.strip_prefix(s).ok_or(std::fmt::Error)?;
+            Ok(())
+        }
+    }
+    let mut eq = StrEq(expected);
+    std::fmt::write(&mut eq, format_args!("{value}")).is_ok() && eq.0.is_empty()
+}
+
 fn parameter(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -362,7 +374,7 @@ fn import_options(
                             "int" | "float" => {
                                 let value: Value =
                                     serde_json::from_str(key).map_err(|_| INVALID)?;
-                                if !value.is_number() || value.to_string() != *key {
+                                if !value.is_number() || !matches_display(&value, key) {
                                     return Err(INVALID);
                                 }
                                 Ok(value)

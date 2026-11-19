@@ -538,27 +538,6 @@ async fn perform(
     Ok(report)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duplicate_keys_and_nonregular_or_oversized_authoring_inputs_reject() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("input.json");
-        for text in [
-            r#"{"state":"present","state":"absent"}"#,
-            r#"{"x":{"a":1,"a":2}}"#,
-        ] {
-            std::fs::write(&path, text).unwrap();
-            assert_eq!(read_json(&path, INPUT_LIMIT), Err("invalid_schema_json"));
-        }
-        std::fs::write(&path, vec![b' '; INPUT_LIMIT + 1]).unwrap();
-        assert_eq!(read_json(&path, INPUT_LIMIT), Err("schema_file_limit"));
-        assert!(read_json(root.path(), INPUT_LIMIT).is_err());
-    }
-}
-
 pub(crate) async fn author_module(
     runtime: Option<PathBuf>,
     module: &str,
@@ -584,4 +563,24 @@ pub(crate) async fn author_module(
     tokio::task::spawn_blocking(move || write_snapshot(&output, &snapshot))
         .await
         .map_err(|_| "schema_output_failed")?
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_keys_and_nonregular_or_oversized_authoring_inputs_reject() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("input.json");
+        for text in [
+            r#"{"state":"present","state":"absent"}"#,
+            r#"{"x":{"a":1,"a":2}}"#,
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(read_json(&path, INPUT_LIMIT), Err("invalid_schema_json"));
+        }
+        std::fs::write(&path, vec![b' '; INPUT_LIMIT + 1]).unwrap();
+        assert_eq!(read_json(&path, INPUT_LIMIT), Err("schema_file_limit"));
+        assert!(read_json(root.path(), INPUT_LIMIT).is_err());
+    }
 }

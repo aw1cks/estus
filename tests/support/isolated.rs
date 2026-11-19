@@ -26,6 +26,7 @@ const CLEANUP: Duration = Duration::from_secs(10);
 const ACCOUNTS: [&str; 5] = ["mcp", "mcp-sudo", "mcp-admin", "mcp-password", "mcp-tty"];
 const AUTOMATION_ACCOUNTS: [&str; 2] = ["mcp-automation", "mcp-automation-password"];
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum ImageKind {
     Native,
@@ -920,6 +921,7 @@ impl Fixture {
     }
 
     /// Set up real OS identities only inside this fixture's owned container.
+    #[allow(dead_code)]
     pub async fn prepare_deployment(&self) -> Result<()> {
         ensure!(
             matches!(self.kind, ImageKind::Deployment),
@@ -989,6 +991,7 @@ impl Fixture {
 
     /// Provision only the disposable target's config directory as file authority.
     /// The supplied reviewed recipe is consumed verbatim; no fabricated approvals.
+    #[allow(dead_code)]
     pub async fn prepare_restricted_files(&self, recipe: &str) -> Result<()> {
         self.prepare_deployment().await?;
         self.primary_exec(indoc! {r#"
@@ -1040,6 +1043,7 @@ impl Fixture {
 
     /// Change only the owned sshd policy, never a host user or daemon config.
     /// Every new session remains forced internal-sftp, including failure cases.
+    #[allow(dead_code)]
     pub async fn restricted_files_policy(&self) -> Result<()> {
         self.primary_exec(indoc! {r#"
             cp /fixture/replacement-sshd-base /fixture/sshd_config
@@ -1063,6 +1067,7 @@ impl Fixture {
     }
 
     /// All caller work, including SSH transport, runs under the disposable client UID.
+    #[allow(dead_code)]
     pub fn deployment_client_command(&self, args: &[&str]) -> Result<Command> {
         ensure!(
             matches!(self.kind, ImageKind::Deployment),
@@ -1075,6 +1080,7 @@ impl Fixture {
         Ok(command)
     }
 
+    #[allow(dead_code)]
     pub async fn deployment_client_exec(&self, script: &str) -> Result<Output> {
         bounded(
             &mut self.deployment_client_command(&["/bin/sh", "-c", script])?,

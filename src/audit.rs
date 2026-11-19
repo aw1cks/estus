@@ -33,11 +33,15 @@ struct Delivery {
 
 impl Delivery {
     fn lost(&self) {
-        let _ = self
-            .dropped
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(1))
-            });
+        let mut current = self.dropped.load(Ordering::Relaxed);
+        while let Err(next) = self.dropped.compare_exchange_weak(
+            current,
+            current.saturating_add(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            current = next;
+        }
     }
 }
 
@@ -82,16 +86,21 @@ impl Diagnostics {
         if self.delivery.closing.load(Ordering::Acquire) {
             return;
         }
-        if self
-            .delivery
-            .retained
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n < MAX_RECORDS).then_some(n + 1)
-            })
-            .is_err()
-        {
-            self.delivery.lost();
-            return;
+        let mut retained = self.delivery.retained.load(Ordering::Relaxed);
+        loop {
+            if retained >= MAX_RECORDS {
+                self.delivery.lost();
+                return;
+            }
+            match self.delivery.retained.compare_exchange_weak(
+                retained,
+                retained + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => retained = next,
+            }
         }
         let mut pending = PendingRecord {
             line: Vec::with_capacity(MAX_RECORD_BYTES),

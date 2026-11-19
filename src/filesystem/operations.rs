@@ -226,14 +226,13 @@ impl<T: AsyncRead + Unpin> AsyncRead for ChannelStream<T> {
         let before = buf.filled().len();
         let capacity = buf.remaining();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if matches!(&result, Poll::Ready(Err(_)))
+        if (matches!(&result, Poll::Ready(Err(_)))
             || (matches!(&result, Poll::Ready(Ok(())))
                 && capacity != 0
-                && buf.filled().len() == before)
+                && buf.filled().len() == before))
+            && let Some(closed) = &self.closed
         {
-            if let Some(closed) = &self.closed {
-                closed.cancel();
-            }
+            closed.cancel();
         }
         result
     }
@@ -1262,20 +1261,21 @@ impl DirectoryChannel {
                 drop(sftp);
             }
         }
-        if graceful && result.is_ok() {
-            if let Some(child) = self.child.take() {
-                result = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
-                    .await
-                    .map_err(|_| Failure::cleanup())
-                    .and_then(|result| result.map_err(ssh_failure))
-                    .and_then(|status| {
-                        if status.success() {
-                            Ok(())
-                        } else {
-                            Err(Failure::io())
-                        }
-                    });
-            }
+        if graceful
+            && result.is_ok()
+            && let Some(child) = self.child.take()
+        {
+            result = tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
+                .await
+                .map_err(|_| Failure::cleanup())
+                .and_then(|result| result.map_err(ssh_failure))
+                .and_then(|status| {
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(Failure::io())
+                    }
+                });
         }
         let cleanup = close_channel(
             &self.cancel,
@@ -1420,7 +1420,7 @@ async fn directory_owner(
                 }
             },
             result => {
-                terminal = result.map(|data| Some(data));
+                terminal = result.map(Some);
                 final_reply = Some(request.reply);
                 break;
             }

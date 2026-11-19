@@ -137,18 +137,20 @@ impl Estus {
             let audit = Audit::start(metadata, started);
             let reply = state
                 .payload
-                .run(
-                    prepared.plan,
-                    &request.host,
-                    &authority,
+                .run(crate::native_payload::PayloadRun {
+                    plan: prepared.plan,
+                    host: &request.host,
+                    authority: &authority,
                     target,
-                    prepared.argv,
-                    Duration::from_secs(state.config.limits().connect_timeout_secs),
-                    prepared.output_limit,
+                    argv: prepared.argv,
+                    connect_timeout: Duration::from_secs(
+                        state.config.limits().connect_timeout_secs,
+                    ),
+                    output_limit: prepared.output_limit,
                     deadline,
-                    &context.ct,
+                    ct: &context.ct,
                     started,
-                )
+                })
                 .await;
             audit.finish_automation(&reply);
             let _ = sender.send(reply);

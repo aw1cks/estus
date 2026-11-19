@@ -451,10 +451,10 @@ impl Policy {
         if self.raw.runtime_policy == RuntimePolicy::Locked && approved != observed {
             return Err("generic_runtime_drift");
         }
-        if let Scope::Exact { modules } = &self.raw.scope {
-            if modules.iter().any(|m| !observed.modules.contains_key(m)) {
-                return Err("generic_module_not_provisioned");
-            }
+        if let Scope::Exact { modules } = &self.raw.scope
+            && modules.iter().any(|m| !observed.modules.contains_key(m))
+        {
+            return Err("generic_module_not_provisioned");
         }
         let mut restrictions = BTreeMap::new();
         for (name, overlay) in &self.raw.restrictions {
@@ -843,8 +843,10 @@ mod tests {
     }
     #[test]
     fn envelope_and_argument_bounds_fail_closed() {
-        let mut c = Ceilings::default();
-        c.argument_depth = 1;
+        let c = Ceilings {
+            argument_depth: 1,
+            ..Default::default()
+        };
         assert!(check_arguments(&json!({"a":{"b":1}}), &c).is_err());
         assert!(
             serde_json::from_value::<Request>(

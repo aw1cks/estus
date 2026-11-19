@@ -248,16 +248,16 @@ impl Bindings {
         });
         // Await blocking ownership even if activation cancellation arrives meanwhile.
         let loaded = tokio::task::spawn_blocking(move || {
-            PayloadPlan::load(
-                &snapshot,
-                &source,
-                &overlay,
-                &result,
-                &authority,
-                &revision,
+            crate::native_payload::PayloadPlan::load(crate::native_payload::PayloadApproval {
+                snapshot: &snapshot,
+                source: &source,
+                overlay: &overlay,
+                result: &result,
+                authority: &authority,
+                revision: &revision,
                 no_log,
-                Some(projection),
-            )
+                projection: Some(projection),
+            })
         })
         .await
         .map_err(|_| invalid("Payload approval loading failed"))??;

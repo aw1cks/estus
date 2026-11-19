@@ -6,7 +6,7 @@ use crate::{
     reply::ToolError,
     strict_json::parse,
 };
-pub(crate) use engine::Engine;
+pub(crate) use engine::{Engine, PayloadRun};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -276,17 +276,29 @@ impl std::fmt::Debug for PayloadPlan {
         f.write_str("PayloadPlan { approved: <private> }")
     }
 }
+pub(crate) struct PayloadApproval<'a> {
+    pub(crate) snapshot: &'a Path,
+    pub(crate) source: &'a Path,
+    pub(crate) overlay: &'a Value,
+    pub(crate) result: &'a Value,
+    pub(crate) authority: &'a str,
+    pub(crate) revision: &'a str,
+    pub(crate) no_log: bool,
+    pub(crate) projection: Option<Arc<projection::Plan>>,
+}
+
 impl PayloadPlan {
-    pub(crate) fn load(
-        snapshot: &Path,
-        source: &Path,
-        overlay: &Value,
-        result: &Value,
-        authority: &str,
-        revision: &str,
-        no_log: bool,
-        projection: Option<Arc<projection::Plan>>,
-    ) -> Result<Self, ConfigError> {
+    pub(crate) fn load(approval: PayloadApproval<'_>) -> Result<Self, ConfigError> {
+        let PayloadApproval {
+            snapshot,
+            source,
+            overlay,
+            result,
+            authority,
+            revision,
+            no_log,
+            projection,
+        } = approval;
         let manifest: Manifest = parse(&read_bounded(snapshot, MAX_INPUT)?)
             .and_then(serde_json::from_value)
             .map_err(|_| invalid())?;

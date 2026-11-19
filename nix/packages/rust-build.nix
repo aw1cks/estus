@@ -37,5 +37,5 @@ let
   };
 in
 {
-  inherit package acceptance;
+  inherit cargoArtifacts package acceptance;
 }

@@ -36,3 +36,6 @@ shell-escape = "0.1.5"
 rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process"] }
 openssh-sftp-protocol = { version = "=0.26.1", default-features = false }
 jsonschema = { version = "0.40", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"

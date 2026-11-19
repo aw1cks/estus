@@ -262,6 +262,7 @@ pub async fn run(command: &mut Command) -> Result<std::process::Output> {
     run_bounded(command, Duration::from_secs(10)).await
 }
 
+#[allow(dead_code)]
 pub async fn run_authoring(command: &mut Command) -> Result<std::process::Output> {
     // The application enforces its 60-second authoring deadline; allow cleanup
     // without applying the short credential/readiness helper deadline.

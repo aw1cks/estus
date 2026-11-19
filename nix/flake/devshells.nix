@@ -23,6 +23,7 @@
           pkgs.coreutils
           pkgs.docker-client
           pkgs.gnutar
+          pkgs.cargo-audit
         ];
       };
       # Optional tooling only; normal builds/checks retain their stable toolchain.

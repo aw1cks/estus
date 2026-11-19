@@ -167,6 +167,68 @@
             ];
           };
         };
+        "fuzz-corpus.yml" = {
+          name = "Fuzz corpus";
+          on = {
+            schedule = [
+              { cron = "17 4 * * 1"; }
+            ];
+            workflow_dispatch = { };
+          };
+          permissions.contents = "read";
+          jobs.fuzz = {
+            name = "Build fuzzers and replay committed corpora";
+            runs-on = "ubuntu-26.04";
+            timeout-minutes = 30;
+            permissions = {
+              contents = "read";
+              actions = "write";
+            };
+            steps = [
+              {
+                uses = checkout;
+                "with".persist-credentials = false;
+              }
+              {
+                uses = lixInstaller;
+                "with" = {
+                  github_access_token = "\${{ secrets.GITHUB_TOKEN }}";
+                  extra_nix_config = "auto-optimise-store = false\n";
+                };
+              }
+              {
+                uses = nixCache;
+                "with" = {
+                  primary-key = cachePrefix + "fuzz-\${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', '**/Cargo.lock', '**/*.rs') }}";
+                  restore-prefixes-first-match = cachePrefix + "fuzz-";
+                  save = true;
+                  purge = "\${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
+                  purge-prefixes = cachePrefix + "fuzz-";
+                  purge-created = 0;
+                  purge-primary-key = "never";
+                  gc-max-store-size-linux = "2G";
+                  gc-max-store-size-macos = "2G";
+                };
+              }
+              {
+                name = "Build fuzz targets";
+                run = "nix develop --no-update-lock-file .#fuzz --command cargo fuzz build";
+              }
+              {
+                name = "Replay committed seed corpora";
+                shell = "bash";
+                run = ''
+                  set -euo pipefail
+                  for target in wire_budget file_encoding filename_metadata adapter_protocol binding_schema command_encoding; do
+                    echo "::group::$target"
+                    nix develop --no-update-lock-file .#fuzz --command cargo fuzz run "$target" "fuzz/corpus/$target" -- -runs=0
+                    echo "::endgroup::"
+                  done
+                '';
+              }
+            ];
+          };
+        };
       };
       rendered = lib.mapAttrs (name: workflow:
         pkgs.writeText "${name}.json" (builtins.toJSON workflow)

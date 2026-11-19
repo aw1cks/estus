@@ -38,7 +38,7 @@
         commonArgs = commonArgs // { preBuild = "rustc --version"; };
         cargoTestExtraArgs = "--all-targets";
       };
-      inherit (defaultBuild) package acceptance;
+      inherit (defaultBuild) cargoArtifacts package acceptance;
       automationRuntime = import ../packages/automation-runtime.nix { inherit pkgs sourceRoot; };
       wheel = import ../packages/wheel.nix { inherit pkgs sourceRoot; craneLib = msrvLib; };
       withAutomation = native: pkgs.runCommand "estus-automation-${native.version}" {
@@ -56,7 +56,7 @@
     in
     {
       _module.args.estusBuild = {
-        inherit craneLib fuzzLib commonArgs msrvBuild package acceptance automationRuntime
+        inherit craneLib fuzzLib commonArgs msrvBuild cargoArtifacts package acceptance automationRuntime
           wheel automation automationMsrv catalogVm catalogLabVm;
       };
       packages = {

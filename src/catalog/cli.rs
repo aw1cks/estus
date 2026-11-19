@@ -606,7 +606,7 @@ fn prepare_payload(definition: &mut toml::Value, name: &str, output: &Path) -> R
     Ok(())
 }
 
-async fn prepare(
+struct PrepareArgs {
     catalog: Catalog,
     pin_root: bool,
     site: PathBuf,
@@ -615,7 +615,19 @@ async fn prepare(
     path: PathBuf,
     cli: crate::config::Cli,
     shutdown: CancellationToken,
-) -> Result<Value, Failure> {
+}
+
+async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
+    let PrepareArgs {
+        catalog,
+        pin_root,
+        site,
+        definitions,
+        targets,
+        path,
+        cli,
+        shutdown,
+    } = args;
     let version = catalog.manifest().version.clone();
     let work = tokio::task::spawn_blocking(move || {
         let site = if site.is_absolute() {
@@ -1009,16 +1021,16 @@ pub(crate) async fn run(
                 output,
                 timeout_secs,
             } => {
-                let operation = prepare(
+                let operation = prepare(PrepareArgs {
                     catalog,
-                    explicit_root,
+                    pin_root: explicit_root,
                     site,
                     definitions,
                     targets,
-                    output,
+                    path: output,
                     cli,
-                    shutdown.clone(),
-                );
+                    shutdown: shutdown.clone(),
+                });
                 tokio::pin!(operation);
                 tokio::select! {
                     result = &mut operation => result,

@@ -200,16 +200,16 @@ impl Engine {
         Ok((probe, true))
     }
 
-    async fn discover(
-        &self,
-        key: String,
-        lease: Lease,
-        python: String,
-        r#become: Option<&AutomationBecome>,
-        requirements: Value,
-        deadline: Instant,
-        ct: &CancellationToken,
-    ) -> Result<(Value, String), ToolError> {
+    async fn discover(&self, request: DiscoverRequest<'_>) -> Result<(Value, String), ToolError> {
+        let DiscoverRequest {
+            key,
+            lease,
+            python,
+            r#become,
+            requirements,
+            deadline,
+            ct,
+        } = request;
         let requirement_bytes = serde_json::to_vec(&requirements)
             .map_err(|_| error("invalid_argument", "Invalid requirements", false))?;
         let key = format!(
@@ -234,16 +234,16 @@ impl Engine {
                     "requirements": requirements,
                 });
                 let result = match frame(&spec, &[]) {
-                    Ok(frame) => channel(
-                        lease.session(),
-                        &python,
-                        r#become.as_ref(),
-                        &frame,
-                        PROBE_LIMIT,
-                        Instant::now() + Duration::from_secs(30),
-                        &worker.stop,
-                        &shutdown,
-                    )
+                    Ok(frame) => channel(ChannelRequest {
+                        session: lease.session(),
+                        python: &python,
+                        r#become: r#become.as_ref(),
+                        input: &frame,
+                        limit: PROBE_LIMIT,
+                        deadline: Instant::now() + Duration::from_secs(30),
+                        ct: &worker.stop,
+                        shutdown: &shutdown,
+                    })
                     .await
                     .and_then(|out| discovery_identity(out, &id)),
                     Err(error) => Err(error),
@@ -272,19 +272,19 @@ impl Engine {
         }
     }
 
-    pub(crate) async fn run(
-        &self,
-        plan: &PayloadPlan,
-        host: &str,
-        authority: &str,
-        target: ResolvedAutomation<'_>,
-        argv: Vec<String>,
-        connect_timeout: Duration,
-        output_limit: usize,
-        deadline: Instant,
-        ct: &CancellationToken,
-        started: std::time::Instant,
-    ) -> ToolReply<AutomationData> {
+    pub(crate) async fn run(&self, request: PayloadRun<'_>) -> ToolReply<AutomationData> {
+        let PayloadRun {
+            plan,
+            host,
+            authority,
+            target,
+            argv,
+            connect_timeout,
+            output_limit,
+            deadline,
+            ct,
+            started,
+        } = request;
         let operation = async {
             let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
             let candidates = interpreters(plan, &target.target.python)?;
@@ -313,15 +313,15 @@ impl Engine {
                     ));
                 }
                 match self
-                    .discover(
-                        key.clone(),
-                        probe_lease,
-                        python.to_owned(),
+                    .discover(DiscoverRequest {
+                        key: key.clone(),
+                        lease: probe_lease,
+                        python: python.to_owned(),
                         r#become,
-                        requirements.clone(),
+                        requirements: requirements.clone(),
                         deadline,
                         ct,
-                    )
+                    })
                     .await
                 {
                     Ok((identity, cache_key)) => {
@@ -364,16 +364,16 @@ impl Engine {
                 "timeout": remaining.min(600.0), "output_limit": output_limit,
             });
             let input = frame(&spec, &plan.source).map_err(Failure::tool)?;
-            let out = channel(
-                lease.session(),
+            let out = channel(ChannelRequest {
+                session: lease.session(),
                 python,
                 r#become,
-                &input,
-                output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
+                input: &input,
+                limit: output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
                 deadline,
                 ct,
-                &self.shutdown,
-            )
+                shutdown: &self.shutdown,
+            })
             .await
             .map_err(Failure::tool)?;
             let decoded = terminal(out, &id);
@@ -683,16 +683,51 @@ async fn bounded<R: AsyncRead + Unpin>(
     Ok((bytes, overflow))
 }
 
-async fn channel(
-    session: &Session,
-    python: &str,
-    r#become: Option<&AutomationBecome>,
-    input: &Frame<'_>,
+pub(crate) struct PayloadRun<'a> {
+    pub(crate) plan: &'a PayloadPlan,
+    pub(crate) host: &'a str,
+    pub(crate) authority: &'a str,
+    pub(crate) target: ResolvedAutomation<'a>,
+    pub(crate) argv: Vec<String>,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) output_limit: usize,
+    pub(crate) deadline: Instant,
+    pub(crate) ct: &'a CancellationToken,
+    pub(crate) started: std::time::Instant,
+}
+
+struct DiscoverRequest<'a> {
+    key: String,
+    lease: Lease,
+    python: String,
+    r#become: Option<&'a AutomationBecome>,
+    requirements: Value,
+    deadline: Instant,
+    ct: &'a CancellationToken,
+}
+
+struct ChannelRequest<'a> {
+    session: &'a Session,
+    python: &'a str,
+    r#become: Option<&'a AutomationBecome>,
+    input: &'a Frame<'a>,
     limit: usize,
     deadline: Instant,
-    ct: &CancellationToken,
-    shutdown: &CancellationToken,
-) -> Result<Output, Failure> {
+    ct: &'a CancellationToken,
+    shutdown: &'a CancellationToken,
+}
+
+async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
+    let ChannelRequest {
+        session,
+        python,
+        r#become,
+        input,
+        limit,
+        deadline,
+        ct,
+        shutdown,
+    } = request;
     let operation = async {
         let mut command = if let Some(AutomationBecome::Sudo { user, executable }) = r#become {
             let mut command = session.command(executable);
