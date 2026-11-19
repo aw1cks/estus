@@ -5,7 +5,8 @@
 # Review snapshot before activation; /var/lib/estus/runner must be mode 0700 owned by MCP.
 # Mutations require separately configured automation:catalog identity with root become; no retry after uncertainty.
 # Package commands may run maintainer scripts. No rollback, transactional snapshot or quiescence is promised.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["packages_list"]
 [targets.server]
 ssh_host = "server-ordinary"

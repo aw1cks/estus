@@ -1088,7 +1088,7 @@ async fn ssh_master_eviction_across_twenty_targets_and_immediate_reacquire() -> 
         fs::write(
             &config,
             formatdoc! {r#"
-                profile = "baseline"
+                capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
                 [ssh]
                 config_file = {ssh_config}
                 [limits]
@@ -3818,19 +3818,19 @@ async fn ssh_startup_file_profiles() -> Result<()> {
         fs::write(
             &config,
             formatdoc! {"
-            profile = 'files-only'
+            capabilities = {{ file_read = true, file_write = true }}
             [ssh]
             config_file = {ssh_config}
             [targets.allowed]
             ssh_host = 'plain'
-            profile = 'baseline'
+            capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
             [targets.allowed.sudo]
             mode = 'same-account'
             users = ['root']
             programs = ['/usr/bin/true']
             [targets.locked]
             ssh_host = 'plain'
-            profile = 'read-only-files'
+            capabilities = {{ file_read = true }}
         "},
         )?;
         let directory = fixture.root.path().join("profile-owned-files");
@@ -4342,7 +4342,7 @@ async fn ssh_mkdir() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.mkdir-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+            "\n[targets.mkdir-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("mkdir-private");
@@ -4744,7 +4744,7 @@ async fn ssh_named_bindings() -> Result<()> {
         let id_path = serde_json::to_string(&id.to_string_lossy())?;
         let sleep_path = serde_json::to_string(&sleeper.to_string_lossy())?;
         fs::write(&config, formatdoc! {r#"
-            profile = "actions-only"
+            capabilities = {{ named = true }}
             enabled_tools = ["literal_values", "ordinary_identity", "missing_account", "bounded_pause"]
             [ssh]
             config_file = {ssh_config}
@@ -4762,7 +4762,7 @@ async fn ssh_named_bindings() -> Result<()> {
             ssh_host = "must-never-connect"
             [targets.locked]
             ssh_host = "must-never-connect"
-            profile = "read-only-files"
+            capabilities = {{ file_read = true }}
             [tools.literal_values]
             description = "Emit bounded literal data with a fixed format."
             revision = "literal-r1"
@@ -5013,7 +5013,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.rename-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+            "\n[targets.rename-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("rename-private");
@@ -5513,7 +5513,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.remove-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+            "\n[targets.remove-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("remove-private");
@@ -5891,7 +5891,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.rmdir-locked]\nssh_host = 'plain'\nprofile = 'read-only-files'\n",
+            "\n[targets.rmdir-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("rmdir-private");
@@ -6773,7 +6773,7 @@ async fn ssh_output_exact_ranges_permissions_and_local_reads() -> Result<()> {
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))?;
         let config = fixture.root.path().join("output.toml");
         fs::write(&config, format!(
-            "profile = 'baseline'\n[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nper_stream_bytes = 64\ntotal_bytes = 128\nmax_handles = 1\n[targets.plain]\nssh_host = 'plain'\n",
+            "capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}\n[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nper_stream_bytes = 64\ntotal_bytes = 128\nmax_handles = 1\n[targets.plain]\nssh_host = 'plain'\n",
             serde_json::to_string(&fixture.ssh_config.to_string_lossy())?,
         ))?;
         let mut command = support::server_command(&config)?;
@@ -6868,7 +6868,7 @@ async fn ssh_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result
             else { fs::create_dir(&temporary)?; }
             let config = fixture.root.path().join(format!("output-{mode}.toml"));
             fs::write(&config, format!(
-                "profile = 'baseline'\n[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nenabled = {}\nper_stream_bytes = 8\ntotal_bytes = 16\nmax_handles = 1\nttl_secs = {}\n[targets.plain]\nssh_host = 'plain'\n",
+                "capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}\n[ssh]\nconfig_file = {}\n[limits]\nmax_output_bytes = 4\n[output]\nenabled = {}\nper_stream_bytes = 8\ntotal_bytes = 16\nmax_handles = 1\nttl_secs = {}\n[targets.plain]\nssh_host = 'plain'\n",
                 serde_json::to_string(&fixture.ssh_config.to_string_lossy())?,
                 mode != "disabled", if mode == "expiry" { 1 } else { 300 },
             ))?;
@@ -6961,7 +6961,7 @@ async fn ssh_output_argv_and_named_native() -> Result<()> {
         let printf = binding_program("printf")?;
         let config = fixture.root.path().join("output-bindings.toml");
         fs::write(&config, formatdoc! {r#"
-            profile = "baseline"
+            capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
             enabled_tools = ["retained_native"]
             [ssh]
             config_file = {ssh_config}
@@ -7202,7 +7202,7 @@ print(json.dumps({"ok": True}))
         fs::write(
             &config,
             formatdoc! {r#"
-                profile = "actions-only"
+                capabilities = {{ named = true }}
                 enabled_tools = ["read_probe", "write_probe"]
                 [ssh]
                 config_file = {ssh_config}
@@ -7533,6 +7533,91 @@ print(json.dumps({"ok": True}))
             )
             .await?;
             succeeded(&recovered_write)?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let log = server.log.clone();
+        let owned = masters(&log);
+        let stopped = server.stop(None).await;
+        if let Err(err) = cases {
+            anyhow::bail!("{err}; stderr: {}", log.text());
+        }
+        let gone = match owned {
+            Ok(owned) => assert_masters_gone(&owned).await,
+            Err(error) => Err(error),
+        };
+        let _ = stopped?;
+        gone
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH/coreutils, python3, and a non-root local account"]
+async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
+    let python3 = support::find_program("python3")?;
+    let python_dir = python3.parent().context("python3 dir")?;
+    let fixture = Fixture::start_with_sshd_config(&format!(
+        "SetEnv PATH={}:/usr/bin:/bin\n",
+        python_dir.display()
+    ))
+    .await?;
+    let scenario = async {
+        let mut command = support::raw_server_command()?;
+        command.arg("--ssh-config").arg(&fixture.ssh_config).env(
+            "ESTUS_CATALOG_ROOT",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"),
+        );
+        let mut server = WireServer::start_command(command)?;
+        let cases = async {
+            server.initialize().await?;
+            let listed = server.request(2, "tools/list", json!({})).await?;
+            let tools = listed["result"]["tools"]
+                .as_array()
+                .context("workstation tools")?;
+            for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+                let tool = tools
+                    .iter()
+                    .find(|t| t["name"] == name)
+                    .with_context(|| format!("missing bundled dynamic tool {name}"))?;
+                ensure!(
+                    tool["inputSchema"]["properties"]["host"]
+                        == json!({"type": "string", "minLength": 1, "maxLength": 256}),
+                    "unexpected host schema on {name}: {}",
+                    tool["inputSchema"]["properties"]["host"]
+                );
+            }
+            ensure!(
+                !tools.iter().any(|t| t["name"] == "ssh_sudo"),
+                "workstation mode without configured sudo exposed ssh_sudo"
+            );
+
+            let targets = script_wire_call(&mut server, 3, "ssh_targets", json!({})).await?;
+            let targets_data = succeeded(&targets)?;
+            ensure!(targets_data["mode"] == "open");
+            ensure!(targets_data["targets"] == json!([]));
+
+            for (id, name, inputs) in [
+                (4, "cpu_stats", json!({"limit": 4})),
+                (5, "memory_stats", json!({})),
+                (6, "pressure_get", json!({})),
+            ] {
+                let reply = script_wire_call(
+                    &mut server,
+                    id,
+                    name,
+                    json!({"host": "plain", "inputs": inputs}),
+                )
+                .await?;
+                let data = succeeded(&reply)?;
+                ensure!(
+                    data["status"] == "successful" && data["projection"]["status"] == "complete",
+                    "{name} failed: {data}"
+                );
+            }
             Ok::<_, anyhow::Error>(())
         }
         .await;

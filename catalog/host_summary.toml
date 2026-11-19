@@ -6,7 +6,8 @@
 # Provision /var/lib/estus/runner mode 0700 owned by the MCP account.
 # Select an installed optional automation runtime; target needs /usr/bin/python3.
 # MCP: {"host":"server","inputs":{}}
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["host_summary"]
 
 [targets.server]

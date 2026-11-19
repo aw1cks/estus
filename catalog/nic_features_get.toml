@@ -5,7 +5,8 @@
 # estus --config nic_features_get.toml schema import-role nic_features_get --role-path /etc/estus/roles/nic_features_get --overlay overlay.json --output /etc/estus/nic_features_get.schema.json
 # Provision mode0700 /var/lib/estus/runner, Python3 and declared inspection utilities.
 # Selected maintained offload facts retain fixed/requested annotations. Missing capabilities explicit; no duplicate ethtool feature collector.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["nic_features_get"]
 [targets.server]
 ssh_host = "server-ordinary"

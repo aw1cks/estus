@@ -2,7 +2,8 @@
 # This example assumes GNU id at /usr/bin/id on the configured SSH destination.
 # Revision identifies this reviewed definition, not immutable remote executable bytes.
 # Approved inputs are data, not a sandbox; cancellation does not prove remote termination.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["observe_account"]
 
 [targets.server]

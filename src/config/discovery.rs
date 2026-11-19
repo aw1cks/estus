@@ -36,8 +36,9 @@ struct TargetSummary<'a> {
 struct TargetSummaries<'a> {
     targets: Option<&'a BTreeMap<String, Target>>,
     tools: &'a ToolCatalog,
-    profile: Profile,
+    capabilities: Capabilities,
     bindings: &'a Bindings,
+    rules: &'a [HostRule],
 }
 
 impl Serialize for TargetSummaries<'_> {
@@ -51,10 +52,10 @@ impl Serialize for TargetSummaries<'_> {
                 permitted_operations: PermittedOperations {
                     tools: self.tools,
                     bindings: self.bindings,
+                    rules: self.rules,
                     target_name: name,
                     sudo: &target.sudo,
-                    global_profile: self.profile,
-                    target_profile: target.profile,
+                    effective_capabilities: self.capabilities.intersect(target.capabilities.into()),
                     selection: target.selected_bindings.as_ref(),
                 },
                 observed_capabilities: ObservedCapabilities::Unknown,
@@ -66,10 +67,10 @@ impl Serialize for TargetSummaries<'_> {
 struct PermittedOperations<'a> {
     tools: &'a ToolCatalog,
     bindings: &'a Bindings,
+    rules: &'a [HostRule],
     target_name: &'a str,
     sudo: &'a Sudo,
-    global_profile: Profile,
-    target_profile: Profile,
+    effective_capabilities: Capabilities,
     selection: Option<&'a BTreeSet<String>>,
 }
 
@@ -81,8 +82,14 @@ impl Serialize for PermittedOperations<'_> {
                 .iter()
                 .filter(|entry| match entry.id {
                     ToolKey::Builtin(id) => {
-                        self.global_profile.permits(id)
-                            && self.target_profile.permits(id)
+                        self.effective_capabilities.permits(id)
+                            && rules::check_host_tool(
+                                self.rules,
+                                self.target_name,
+                                entry.name.as_ref(),
+                                super::policy::risk_tier_for_builtin(id),
+                            )
+                            .is_ok()
                             && match id {
                                 ToolId::Targets
                                 | ToolId::ReadOutput
@@ -102,15 +109,21 @@ impl Serialize for PermittedOperations<'_> {
                             }
                     }
                     ToolKey::Binding(id) => {
-                        self.global_profile.permits_bindings()
-                            && self.target_profile.permits_bindings()
+                        self.effective_capabilities.permits_bindings()
                             && self.bindings.get(id).is_some_and(|binding| {
                                 binding.enabled()
                                     && self
                                         .selection
                                         .is_none_or(|names| names.contains(entry.name.as_ref()))
                                     && !binding.is_controller()
-                                    && binding.targets.iter().any(|name| name == self.target_name)
+                                    && binding.permits_host(self.target_name)
+                                    && rules::check_host_tool(
+                                        self.rules,
+                                        self.target_name,
+                                        entry.name.as_ref(),
+                                        super::policy::risk_tier_for_binding(binding),
+                                    )
+                                    .is_ok()
                                     && binding.sudo().is_none_or(|(user, program)| {
                                         self.sudo.permits(user, program)
                                     })
@@ -157,8 +170,9 @@ impl Config {
             targets: TargetSummaries {
                 targets: self.targets.as_ref(),
                 tools,
-                profile: self.profile,
+                capabilities: self.capabilities,
                 bindings: &self.bindings,
+                rules: &self.rules,
             },
             limits: DiscoveryLimits {
                 connect_timeout_secs: self.limits.connect_timeout_secs,
@@ -193,7 +207,7 @@ mod tests {
     #[test]
     fn discovery_intersects_target_policy_with_enabled_catalog() {
         let config = load_text(
-            "profile='baseline'\n[targets.one]\nssh_host='private'\n[targets.one.sudo]\nmode='same-account'",
+            "capabilities={named=true,file_read=true,file_write=true,exec=true,sudo=true}\n[targets.one]\nssh_host='private'\n[targets.one.sudo]\nmode='same-account'",
             &[],
         )
         .unwrap();
@@ -215,7 +229,7 @@ mod tests {
     #[test]
     fn empty_program_policy_keeps_global_sudo_but_excludes_target_permission() {
         let config = load_text(
-            "profile='baseline'\n[targets.one]\nssh_host='private'\n[targets.one.sudo]\n\
+            "capabilities={named=true,file_read=true,file_write=true,exec=true,sudo=true}\n[targets.one]\nssh_host='private'\n[targets.one.sudo]\n\
              mode='same-account'\nprograms=[]",
             &[],
         )
@@ -233,7 +247,7 @@ mod tests {
     fn discovery_sorts_supplied_names_and_targets_without_exposing_aliases() {
         let config = load_text(
             r#"
-profile = "baseline"
+capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
 [targets.zebra]
 ssh_host = "ordinary-secret"
 [targets.zebra.sudo]
@@ -286,7 +300,7 @@ mode = "same-account"
     fn metadata_is_advisory_and_empty_program_allowlists_do_not_advertise_sudo() {
         let config = load_text(
             r#"
-profile = "baseline"
+capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
 [targets.disabled]
 ssh_host='private-ordinary'
 description='sudo is available'

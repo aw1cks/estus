@@ -9,7 +9,7 @@ pub(crate) fn expand(
     presets: &[String],
     disabled: &[String],
 ) -> Result<BTreeSet<String>, &'static str> {
-    if included.len() > 32 || disabled.len() > 113 || presets.len() > 16 {
+    if included.len() > 256 || disabled.len() > 256 || presets.len() > 32 {
         return Err("selection exceeds supported bounds");
     }
     let known = |name: &str| {
@@ -37,8 +37,8 @@ pub(crate) fn expand(
     for name in disabled {
         names.remove(name);
     }
-    if names.len() > 32 {
-        return Err("at most 32 named tools may be selected");
+    if names.len() > 256 {
+        return Err("at most 256 named tools may be selected");
     }
     Ok(names)
 }

@@ -259,11 +259,61 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .map(|tool| tool["name"].as_str().context("default tool name"))
             .collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"], "omitted profile exposed native routes");
+        for expected_builtin in [
+            "clear_target_quarantine",
+            "ssh_exec",
+            "ssh_list_directory",
+            "ssh_mkdir",
+            "ssh_read_file",
+            "ssh_read_output",
+            "ssh_remove_directory",
+            "ssh_remove_file",
+            "ssh_rename",
+            "ssh_replace_file",
+            "ssh_run",
+            "ssh_stat",
+            "ssh_targets",
+            "ssh_write_file",
+        ] {
+            ensure!(names.contains(&expected_builtin), "missing workstation builtin {expected_builtin}: {names:?}");
+        }
+        ensure!(!names.contains(&"ssh_sudo"), "no-config workstation exposed ssh_sudo");
+        for extra in &names {
+            let is_builtin = matches!(
+                *extra,
+                "clear_target_quarantine"
+                    | "ssh_exec"
+                    | "ssh_list_directory"
+                    | "ssh_mkdir"
+                    | "ssh_read_file"
+                    | "ssh_read_output"
+                    | "ssh_remove_directory"
+                    | "ssh_remove_file"
+                    | "ssh_rename"
+                    | "ssh_replace_file"
+                    | "ssh_run"
+                    | "ssh_stat"
+                    | "ssh_targets"
+                    | "ssh_write_file"
+            );
+            if !is_builtin {
+                ensure!(
+                    matches!(*extra, "cpu_stats" | "memory_stats" | "pressure_get"),
+                    "unexpected extra tool in no-config workstation: {extra}"
+                );
+                let tool = tools.iter().find(|t| t["name"] == *extra).unwrap();
+                ensure!(
+                    tool["inputSchema"]["properties"]["host"]
+                        == json!({"type": "string", "minLength": 1, "maxLength": 256}),
+                    "workstation dynamic tool {extra} had unexpected host schema: {}",
+                    tool["inputSchema"]["properties"]["host"]
+                );
+            }
+        }
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
-        ensure!(discovery_data(result, "configured")?["targets"] == json!([]));
+        ensure!(discovery_data(result, "open")?["targets"] == json!([]));
         ensure!(result["isError"] != true);
         let content = result["content"].as_array().context("text compatibility content")?;
         ensure!(content.len() == 1);
@@ -271,18 +321,11 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         ensure!(text == result["structuredContent"]);
         server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{"extra":true}}})).await?;
         ensure!(server.response(4).await?["error"]["code"] == -32602);
-        for (index, tool) in [
-            "ssh_exec", "ssh_run", "ssh_sudo", "ssh_read_file", "ssh_stat",
-            "ssh_list_directory", "ssh_write_file", "ssh_mkdir", "ssh_rename",
-            "ssh_replace_file", "ssh_remove_file", "ssh_remove_directory",
-        ].into_iter().enumerate() {
-            let id = 5 + index as u64;
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":tool,"arguments":profile_call_arguments(tool, "DO_NOT_CONNECT.invalid")}})).await?;
-            let denied = server.response(id).await?;
-            ensure!(denied["error"]["code"] == -32602, "{tool}: {denied}");
-            ensure!(denied.get("result").is_none());
-        }
+        server.send(json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+            "params":{"name":"ssh_sudo","arguments":profile_call_arguments("ssh_sudo", "DO_NOT_CONNECT.invalid")}})).await?;
+        let denied = server.response(5).await?;
+        ensure!(denied["error"]["code"] == -32602, "ssh_sudo: {denied}");
+        ensure!(denied.get("result").is_none());
         Ok::<_, anyhow::Error>(())
     }.await;
     let finished = server.finish().await;
@@ -334,7 +377,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
         std::fs::write(
             &path,
             indoc::indoc! {"
-            profile = 'baseline'
+            capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
             [ssh]
             config_file = 'ssh-private-marker.conf'
             [limits]
@@ -805,7 +848,7 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
     std::fs::write(
         &path,
         indoc::indoc! {"
-            profile = 'baseline'
+            capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
             [limits]
             max_file_bytes = 64
             [targets.allowed]
@@ -909,7 +952,7 @@ async fn accepted_sudo_keeps_validated_identifiers_on_transport_failure() -> Res
     std::fs::write(
         &path,
         indoc::indoc! {"
-            profile = 'baseline'
+            capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
             [targets.allowed]
             ssh_host = 'never-connected.invalid'
             [targets.allowed.sudo]
@@ -976,7 +1019,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
     std::fs::write(
         &path,
         indoc::indoc! {"
-            profile = 'baseline'
+            capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
             [targets.allowed]
             ssh_host = 'encoded-command.invalid'
             [targets.allowed.sudo]
@@ -1125,7 +1168,9 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable() -> Result<()> {
     const MESSAGE_LIMIT: usize = 16_777_216;
-    let (mut server, _directory) = server_with_config("profile = 'baseline'\n[targets]\n")?;
+    let (mut server, _directory) = server_with_config(
+        "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[targets]\n",
+    )?;
     let scenario = async {
         server.initialize().await?;
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})).await?;
@@ -1305,7 +1350,9 @@ fn no_remote_dispatch(stderr: &[u8]) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Result<()> {
-    let (mut server, directory) = server_with_config("profile = 'baseline'\n[targets]\n")?;
+    let (mut server, directory) = server_with_config(
+        "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[targets]\n",
+    )?;
     let scenario = async {
         server.send(modern_request(json!("discover"), "server/discover", json!({}), MODERN_VERSION)).await?;
         let discovered = server.response_with_id(&json!("discover")).await?.0;
@@ -1490,7 +1537,7 @@ async fn malformed_input_is_isolated_and_following_requests_still_correlate() ->
 async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_audit() -> Result<()>
 {
     let (mut server, directory) = server_with_config(
-        "profile = 'baseline'\n[output]\nenabled = true\n[targets.fixture]\nssh_host = 'never-connected.invalid'\n[targets.fixture.sudo]\nmode = 'same-account'\nusers = ['root']\nprograms = ['/usr/bin/true']\n",
+        "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[output]\nenabled = true\n[targets.fixture]\nssh_host = 'never-connected.invalid'\n[targets.fixture.sudo]\nmode = 'same-account'\nusers = ['root']\nprograms = ['/usr/bin/true']\n",
     )?;
     let cases = [
         (
@@ -1678,7 +1725,9 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Result<()> {
     for incomplete_json in [false, true] {
-        let (mut server, directory) = server_with_config("profile = 'baseline'\n[targets]\n")?;
+        let (mut server, directory) = server_with_config(
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[targets]\n",
+        )?;
         let scenario = async {
             server.initialize().await?;
             let mut frame = serde_json::to_vec(&json!({
@@ -1735,7 +1784,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
         std::fs::write(
             &path,
             format!(
-                "profile='baseline'\n[ssh]\nconfig_file='replacement.conf'\n{limits}\
+                "capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}\n[ssh]\nconfig_file='replacement.conf'\n{limits}\
                  [targets.allowed]\nssh_host='private-schema-backend.invalid'\n\
                  [targets.allowed.sudo]\nmode='same-account'\nprograms=['/SCHEMA_INPUT_SECRET']\n"
             ),
@@ -1981,7 +2030,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Result<()> {
     let (mut server, directory) = server_with_config(
-        "profile = 'read-only-files'\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
+        "capabilities = { file_read = true }\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
     )?;
     let scenario = async {
         server.initialize().await?;
@@ -2092,7 +2141,8 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
-    let (mut server, directory) = server_with_config("profile = 'read-only-files'\n[targets]\n")?;
+    let (mut server, directory) =
+        server_with_config("capabilities = { file_read = true }\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
         for (index, (arguments, code)) in [
@@ -2169,7 +2219,8 @@ async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
-    let (mut server, directory) = server_with_config("profile = 'read-only-files'\n[targets]\n")?;
+    let (mut server, directory) =
+        server_with_config("capabilities = { file_read = true }\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
         for (index, (arguments, code)) in [
@@ -2263,7 +2314,7 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
     let (mut server, directory) = server_with_config(indoc::indoc! {"
-        profile = 'files-only'
+        capabilities = { file_read = true, file_write = true }
         [limits]
         max_file_bytes = 4
         [targets]
@@ -2364,7 +2415,7 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
     std::fs::write(
         &path,
         indoc::indoc! {"
-            profile = 'files-only'
+            capabilities = { file_read = true, file_write = true }
             [ssh]
             config_file = 'replacement.conf'
             [limits]
@@ -2521,7 +2572,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
         std::fs::write(
             &path,
             indoc::indoc! {"
-            profile = 'files-only'
+            capabilities = { file_read = true, file_write = true }
             [ssh]
             config_file = 'replacement.conf'
             [limits]
@@ -2765,7 +2816,7 @@ async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()>
     std::fs::write(
         &path,
         indoc::indoc! {"
-        profile = 'baseline'
+        capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
         [targets.one]
         ssh_host = 'private-empty-policy.invalid'
         [targets.one.sudo]
@@ -2906,14 +2957,20 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
         "ssh_sudo",
         "ssh_write_file",
     ];
-    for (profile, expected) in [
-        ("baseline", ordinary.as_slice()),
+    for (profile, caps, expected) in [
+        (
+            "baseline",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+            ordinary.as_slice(),
+        ),
         (
             "read-only-files",
+            "capabilities = { file_read = true }",
             &["ssh_list_directory", "ssh_read_file", "ssh_stat"][..],
         ),
         (
             "files-only",
+            "capabilities = { file_read = true, file_write = true }",
             &[
                 "ssh_list_directory",
                 "ssh_mkdir",
@@ -2926,7 +2983,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                 "ssh_write_file",
             ][..],
         ),
-        ("actions-only", &[][..]),
+        ("actions-only", "capabilities = { named = true }", &[][..]),
     ] {
         // An empty configured target set must not change global publication.
         for target_kind in ["sudo", "ordinary", "empty"] {
@@ -2944,16 +3001,14 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                 )?;
                 let target = match target_kind {
                     "sudo" => {
-                        "[targets.one]\nssh_host = 'private-backend.invalid'\nprofile = 'baseline'\n[targets.one.sudo]\nmode = 'same-account'\n"
+                        "[targets.one]\nssh_host = 'private-backend.invalid'\ncapabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[targets.one.sudo]\nmode = 'same-account'\n"
                     }
                     "ordinary" => "[targets.one]\nssh_host = 'private-backend.invalid'\n",
                     _ => "[targets]\n",
                 };
                 std::fs::write(
                     &path,
-                    format!(
-                        "profile = '{profile}'\n[ssh]\nconfig_file = 'replacement.conf'\n{target}"
-                    ),
+                    format!("{caps}\n[ssh]\nconfig_file = 'replacement.conf'\n{target}"),
                 )?;
                 let mut server =
                     Server::start(&["--config", path.to_str().context("config path")?])?;
@@ -3080,7 +3135,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
     std::fs::write(
         &path,
         indoc::indoc! {"
-        profile = 'baseline'
+        capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
         [ssh]
         config_file = 'replacement.conf'
         [limits]
@@ -3088,26 +3143,26 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
         operation_timeout_secs = 2
         [targets.read]
         ssh_host = 'private-backend-read.invalid'
-        profile = 'read-only-files'
+        capabilities = { file_read = true }
         [targets.read.sudo]
         mode = 'separate-identity'
         ssh_host = 'private-identity.invalid'
         [targets.files]
         ssh_host = 'private-backend-files.invalid'
-        profile = 'files-only'
+        capabilities = { file_read = true, file_write = true }
         [targets.files.sudo]
         mode = 'same-account'
         [targets.actions]
         ssh_host = 'private-backend-actions.invalid'
-        profile = 'actions-only'
+        capabilities = { named = true }
         [targets.actions.sudo]
         mode = 'same-account'
         [targets.base]
         ssh_host = 'private-backend-base.invalid'
-        profile = 'baseline'
+        capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
         [targets.empty]
         ssh_host = 'private-backend-empty.invalid'
-        profile = 'baseline'
+        capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
         [targets.empty.sudo]
         mode = 'same-account'
         programs = []
@@ -3260,7 +3315,8 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
-    let (mut server, directory) = server_with_config("profile = 'actions-only'\n[targets]\n")?;
+    let (mut server, directory) =
+        server_with_config("capabilities = { named = true }\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
         for (index, arguments) in [
@@ -3284,7 +3340,7 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
         }
         std::fs::write(
             directory.path().join("operator.toml"),
-            "profile = 'baseline'\n[targets]\n",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[targets]\n",
         )?;
         server
             .send(json!({"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}))
@@ -3337,59 +3393,70 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
 async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("private-profile-config.toml");
-    for value in [
-        "'private-profile-secret'",
-        "['private-profile-secret']",
-        "42",
-        "true",
-        "{ private_profile_secret = 'private-profile-secret' }",
+    for (target, value, field) in [
+        (false, "'private-profile-secret'", "config"),
+        (true, "'private-profile-secret'", "targets.*"),
     ] {
-        for target in [false, true] {
-            let text = if target {
-                format!(
-                    "[targets.private_profile_secret]\nssh_host = 'private-backend.invalid'\nprofile = {value}\n"
-                )
-            } else {
-                format!("profile = {value}\n[targets]\n")
-            };
-            std::fs::write(&path, text)?;
-            let output = timeout(
-                Duration::from_secs(5),
-                command(&["--config", path.to_str().context("config path")?]).output(),
+        let text = if target {
+            format!(
+                "[targets.private_profile_secret]\nssh_host = 'private-backend.invalid'\nprofile = {value}\n"
             )
-            .await??;
-            ensure!(!output.status.success(), "accepted profile {value}");
-            ensure!(output.stdout.is_empty(), "invalid profile started MCP");
-            let stderr = std::str::from_utf8(&output.stderr)?;
-            for secret in [
-                "private-profile-secret",
-                "private_profile_secret",
-                "private-backend",
-                path.to_str().context("config path")?,
-            ] {
-                ensure!(
-                    !stderr.contains(secret),
-                    "profile diagnostic reflected private input"
-                );
-            }
-            let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
-            ensure!(diagnostic["code"] == "invalid_config");
-            let field = if target {
-                "targets.*.profile"
-            } else {
-                "profile"
-            };
+        } else {
+            format!("profile = {value}\n[targets]\n")
+        };
+        std::fs::write(&path, text)?;
+        let output = timeout(
+            Duration::from_secs(5),
+            command(&["--config", path.to_str().context("config path")?]).output(),
+        )
+        .await??;
+        ensure!(!output.status.success(), "accepted legacy profile {value}");
+        ensure!(output.stdout.is_empty(), "invalid profile started MCP");
+        let stderr = std::str::from_utf8(&output.stderr)?;
+        for secret in [
+            "private-profile-secret",
+            "private_profile_secret",
+            "private-backend",
+            path.to_str().context("config path")?,
+        ] {
             ensure!(
-                diagnostic["schema_path"] == field && diagnostic["phase"] == "config_validation",
-                "wrong profile diagnostic context: {diagnostic}"
+                !stderr.contains(secret),
+                "profile diagnostic reflected private input"
             );
         }
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(diagnostic["code"] == "invalid_config");
+        ensure!(
+            diagnostic["schema_path"] == field && diagnostic["phase"] == "config_validation",
+            "wrong profile diagnostic context: {diagnostic}"
+        );
+    }
+    for (text, field) in [
+        (
+            "capabilities = { exec = 'private-profile-secret' }\n",
+            "capabilities",
+        ),
+        ("mode = 'private-profile-secret'\n", "mode"),
+        ("[rules.'*']\nrequire_preview = true\n", "rules.*"),
+    ] {
+        std::fs::write(&path, text)?;
+        let output = timeout(
+            Duration::from_secs(5),
+            command(&["--config", path.to_str().context("config path")?]).output(),
+        )
+        .await??;
+        ensure!(!output.status.success());
+        ensure!(output.stdout.is_empty());
+        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+        ensure!(diagnostic["code"] == "invalid_config");
+        ensure!(diagnostic["schema_path"] == field);
+        ensure!(!std::str::from_utf8(&output.stderr)?.contains("private-profile-secret"));
     }
     Ok(())
 }
 
 const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
-    profile = "actions-only"
+    capabilities = { named = true }
     enabled_tools = ["observe_account", "change_account"]
     [ssh]
     config_file = "replacement.conf"
@@ -3405,10 +3472,10 @@ const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
     ssh_host = "private-binding-elevated.invalid"
     [targets.read]
     ssh_host = "private-binding-read.invalid"
-    profile = "read-only-files"
+    capabilities = { file_read = true }
     [targets.files]
     ssh_host = "private-binding-files.invalid"
-    profile = "files-only"
+    capabilities = { file_read = true, file_write = true }
     [targets.other]
     ssh_host = "private-binding-other.invalid"
     [tools.observe_account]
@@ -3472,7 +3539,7 @@ fn binding_public_only(bytes: &[u8]) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() -> Result<()> {
-    let config = NAMED_TOOL_CONFIG.replacen("profile = \"actions-only\"\n", "", 1);
+    let config = NAMED_TOOL_CONFIG.replacen("capabilities = { named = true }\n", "", 1);
     let (mut server, directory) = named_tools_server(&config)?;
     let scenario = async {
         server.initialize().await?;
@@ -3671,11 +3738,11 @@ async fn named_tool_validation_and_target_policy_precede_ssh() -> Result<()> {
 
 #[tokio::test]
 async fn file_profiles_do_not_publish_enabled_native_bindings() -> Result<()> {
-    for profile in ["read-only-files", "files-only"] {
-        let config = NAMED_TOOL_CONFIG.replace(
-            "profile = \"actions-only\"",
-            &format!("profile = \"{profile}\""),
-        );
+    for caps in [
+        "capabilities = { file_read = true }",
+        "capabilities = { file_read = true, file_write = true }",
+    ] {
+        let config = NAMED_TOOL_CONFIG.replace("capabilities = { named = true }", caps);
         let (mut server, directory) = named_tools_server(&config)?;
         let scenario = async {
             server.initialize().await?;
@@ -3813,7 +3880,10 @@ async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<(
         (NAMED_TOOL_CONFIG, ["observe_account", "change_account"]),
         (FIXED_SUDO_TOOL_CONFIG, ["fixed_id", "fixed_printf"]),
     ] {
-        let config = fixture.replace("profile = \"actions-only\"", "profile = \"baseline\"");
+        let config = fixture.replace(
+            "capabilities = { named = true }",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+        );
         let (mut server, directory) = named_tools_server(&config)?;
         let scenario = async {
             server.initialize().await?;
@@ -3854,7 +3924,7 @@ async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<(
 }
 
 const FIXED_SUDO_TOOL_CONFIG: &str = indoc::indoc! {r#"
-    profile = "actions-only"
+    capabilities = { named = true }
     enabled_tools = ["fixed_id", "fixed_printf"]
     [ssh]
     config_file = "replacement.conf"
@@ -3872,19 +3942,19 @@ const FIXED_SUDO_TOOL_CONFIG: &str = indoc::indoc! {r#"
     programs = ["/usr/bin/id", "/usr/bin/printf"]
     [targets.same]
     ssh_host = "private-binding-same.invalid"
-    profile = "actions-only"
+    capabilities = { named = true }
     [targets.same.sudo]
     mode = "same-account"
     users = ["root"]
     programs = ["/usr/bin/id", "/usr/bin/printf"]
     [targets.read]
     ssh_host = "private-binding-read.invalid"
-    profile = "read-only-files"
+    capabilities = { file_read = true }
     [targets.read.sudo]
     mode = "same-account"
     [targets.files]
     ssh_host = "private-binding-files.invalid"
-    profile = "files-only"
+    capabilities = { file_read = true, file_write = true }
     [targets.files.sudo]
     mode = "same-account"
     [targets.other]
@@ -4054,12 +4124,11 @@ async fn fixed_sudo_controls_and_target_policy_reject_before_ssh() -> Result<()>
 
 #[tokio::test]
 async fn fixed_sudo_file_profiles_hide_routes_and_reject_direct_calls() -> Result<()> {
-    for profile in ["read-only-files", "files-only"] {
-        let config = FIXED_SUDO_TOOL_CONFIG.replacen(
-            "profile = \"actions-only\"",
-            &format!("profile = \"{profile}\""),
-            1,
-        );
+    for caps in [
+        "capabilities = { file_read = true }",
+        "capabilities = { file_read = true, file_write = true }",
+    ] {
+        let config = FIXED_SUDO_TOOL_CONFIG.replacen("capabilities = { named = true }", caps, 1);
         let (mut server, directory) = named_tools_server(&config)?;
         let scenario = async {
             server.initialize().await?;
@@ -4183,7 +4252,11 @@ async fn fixed_sudo_invalid_or_unauthorized_definitions_fail_sanitized_startup()
     ));
     cases.push((
         "profile-hidden unauthorized definition",
-        unauthorized.replacen("profile = \"actions-only\"", "profile = \"files-only\"", 1),
+        unauthorized.replacen(
+            "capabilities = { named = true }",
+            "capabilities = { file_read = true, file_write = true }",
+            1,
+        ),
     ));
     cases.push((
         "disabled malformed definition",
@@ -4235,7 +4308,7 @@ async fn remote_script_definitions_fail_sanitized_startup_before_mcp() -> Result
         "Host *\n  ProxyCommand false\n",
     )?;
     let config = indoc::indoc! {r#"
-        profile = "actions-only"
+        capabilities = { named = true }
         enabled_tools = ["observe_script"]
         [ssh]
         config_file = "replacement.conf"
@@ -4324,7 +4397,7 @@ impl ControllerProtocolFixture {
             )?)
         };
         let config = format!(
-            r#"profile = "actions-only"
+            r#"capabilities = {{ named = true }}
 enabled_tools = ["observe_controller"]
 [ssh]
 config_file = "replacement.conf"
@@ -4338,7 +4411,7 @@ max_file_bytes = 8192
 workspace_root = {}
 [targets.base]
 ssh_host = "controller-protocol-never-connect.invalid"
-profile = "read-only-files"
+capabilities = {{ file_read = true }}
 [tools.observe_controller]
 description = "Observe explicit controller authority."
 revision = "review-controller-1"
@@ -4465,12 +4538,17 @@ fn controller_no_remote_fields(value: &Value) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controller_tools_publish_hostless_private_contract_and_actual_typed_result() -> Result<()>
 {
-    for profile in ["baseline", "actions-only"] {
+    for (profile, caps) in [
+        (
+            "baseline",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+        ),
+        ("actions-only", "capabilities = { named = true }"),
+    ] {
         let fixture = ControllerProtocolFixture::new()?;
-        let config = fixture.config.replace(
-            "profile = \"actions-only\"",
-            &format!("profile = \"{profile}\""),
-        );
+        let config = fixture
+            .config
+            .replace("capabilities = { named = true }", caps);
         let mut server = fixture.start(&config)?;
         let scenario = async {
             server.initialize().await?;
@@ -4664,15 +4742,25 @@ async fn controller_inputs_reject_host_and_execution_controls_without_dispatch()
 
 #[tokio::test]
 async fn controller_enablement_profiles_and_inactive_native_independence() -> Result<()> {
-    for (profile, selection) in [
-        ("actions-only", Some("enabled_tools = []")),
-        ("baseline", None),
+    for (profile, caps, selection) in [
+        (
+            "actions-only",
+            "capabilities = { named = true }",
+            Some("enabled_tools = []"),
+        ),
+        (
+            "baseline",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+            None,
+        ),
         (
             "files-only",
+            "capabilities = { file_read = true, file_write = true }",
             Some("enabled_tools = [\"observe_controller\"]"),
         ),
         (
             "read-only-files",
+            "capabilities = { file_read = true }",
             Some("enabled_tools = [\"observe_controller\"]"),
         ),
     ] {
@@ -4684,10 +4772,7 @@ async fn controller_enablement_profiles_and_inactive_native_independence() -> Re
         std::fs::remove_dir(&fixture.root)?;
         let mut config = fixture
             .config
-            .replace(
-                "profile = \"actions-only\"",
-                &format!("profile = \"{profile}\""),
-            )
+            .replace("capabilities = { named = true }", caps)
             .replace(
                 "enabled_tools = [\"observe_controller\"]",
                 selection.unwrap_or(""),
@@ -4805,7 +4890,10 @@ async fn controller_malformed_definitions_fail_sanitized_startup_even_when_inact
         fixture
             .rejects_startup(
                 &format!("inactive {label}"),
-                &config.replace("profile = \"actions-only\"", "profile = \"files-only\""),
+                &config.replace(
+                    "capabilities = { named = true }",
+                    "capabilities = { file_read = true, file_write = true }",
+                ),
             )
             .await?;
     }
@@ -4995,7 +5083,10 @@ async fn remote_transport_failure_never_executes_controller_source_as_fallback()
             "authority = \"controller\"",
             "targets = [\"base\"]\nauthority = \"ordinary\"",
         )
-        .replace("profile = \"read-only-files\"", "profile = \"baseline\"")
+        .replace(
+            "capabilities = { file_read = true }",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+        )
         .replace(
             &format!(
                 "kind = \"controller_script\", source = {{ path = {}, content_sha256 = \"{}\", max_bytes = 4096 }}, interpreter = {{ program = {interpreter}, argv = [] }}, environment = {{ MCP_APPLICATION = \"CONTROLLER_CONFIG_SECRET\" }}",
@@ -5059,7 +5150,7 @@ async fn remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
         std::fs::write(
             &path,
             indoc::indoc! {"
-            profile = 'files-only'
+            capabilities = { file_read = true, file_write = true }
             [ssh]
             config_file = 'replacement.conf'
             [limits]
@@ -5349,7 +5440,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
         std::fs::write(
             &config,
             indoc::indoc! {"
-                profile = 'files-only'
+                capabilities = { file_read = true, file_write = true }
                 [ssh]
                 config_file = 'replacement.conf'
                 [limits]
@@ -5759,7 +5850,8 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result<()> {
     const MESSAGE_LIMIT: usize = 16_777_216;
-    let (mut server, _directory) = server_with_config("profile = 'files-only'\n[targets]\n")?;
+    let (mut server, _directory) =
+        server_with_config("capabilities = { file_read = true, file_write = true }\n[targets]\n")?;
     let scenario = timeout(Duration::from_secs(20), async {
         server
             .send(modern_request(
@@ -5838,7 +5930,7 @@ async fn ssh_output_read_contract_validation_and_privacy_need_no_ssh() -> Result
         let path = directory.path().join("operator.toml");
         std::fs::write(
             &path,
-            "profile='actions-only'\n[ssh]\nconfig_file='replacement.conf'\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
+            "capabilities = { named = true }\n[ssh]\nconfig_file='replacement.conf'\n[limits]\nmax_file_bytes=33554432\n[targets]\n",
         )?;
         let mut server = Server::start(&["--config", path.to_str().context("config path")?])?;
         let scenario = async {
@@ -6097,7 +6189,7 @@ async fn controller_output_actual_id_receipt_budget_precedes_dispatch() -> Resul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() -> Result<()> {
-    let builtin = "profile='baseline'\n[ssh]\nconfig_file='replacement.conf'\n[targets.base]\nssh_host='private-binding-backend.invalid'\n[targets.base.sudo]\nmode='same-account'\n";
+    let builtin = "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[ssh]\nconfig_file='replacement.conf'\n[targets.base]\nssh_host='private-binding-backend.invalid'\n[targets.base.sudo]\nmode='same-account'\n";
     for (config, calls) in [
         (
             builtin,
@@ -6188,7 +6280,7 @@ async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() ->
 #[tokio::test]
 async fn directory_cursor_discovery_and_output_schema_are_consumer_visible() -> Result<()> {
     let (mut server, directory) = server_with_config(
-        "profile='read-only-files'\n[directory]\nmax_cursors=1\nidle_timeout_secs=1\n[targets]\n",
+        "capabilities = { file_read = true }\n[directory]\nmax_cursors=1\nidle_timeout_secs=1\n[targets]\n",
     )?;
     let scenario = async {
         server.initialize().await?;
@@ -6450,7 +6542,10 @@ done
     let config = fixture
         .config
         .replace(&fixture.hash, &hash)
-        .replace("profile = \"actions-only\"", "profile = \"baseline\"")
+        .replace(
+            "capabilities = { named = true }",
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+        )
         .replace("timeout_secs = 2", "timeout_secs = 5");
     let mut server = fixture.start(&config)?;
     let scenario = async {
@@ -6529,5 +6624,97 @@ done
     scenario?;
     let (status, _) = finished?;
     ensure!(status.success());
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_config_defaults_to_headless_named_only() -> Result<()> {
+    let (mut server, _directory) = server_with_config("")?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(2).await?;
+        let mut names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .context("headless tools")?
+            .iter()
+            .map(|t| t["name"].as_str().context("tool name"))
+            .collect::<Result<_>>()?;
+        names.sort_unstable();
+        ensure!(names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"]);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, _) = finished?;
+    ensure!(status.success());
+    Ok(())
+}
+
+#[tokio::test]
+async fn host_rules_enforce_deny_tiers_allow_tools_and_constraints_before_ssh() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let probe = directory.path().join("rules-probe");
+    let replacement = directory.path().join("replacement.conf");
+    std::fs::write(
+        &replacement,
+        format!(
+            "Host *\n  ProxyCommand false\nMatch exec \"touch '{}'\"\n  User nobody\n",
+            probe.display()
+        ),
+    )?;
+    let config_path = directory.path().join("operator.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+mode = "headless"
+capabilities = { named = true, file_read = true, file_write = true, exec = true }
+[ssh]
+config_file = "replacement.conf"
+[targets.prod-web]
+ssh_host = "prod-web.invalid"
+[rules."prod-*"]
+deny_tiers = ["exec", "change"]
+allow_tools = ["ssh_stat", "ssh_read_file"]
+[rules."*-web".constraints.ssh_read_file.path]
+enum = ["/etc/hosts"]
+"#,
+    )?;
+    let mut server = Server::start(&["--config", config_path.to_str().context("config")?])?;
+    let scenario = async {
+        server.initialize().await?;
+        for (id, name, arguments) in [
+            (2, "ssh_exec", json!({"host": "prod-web", "command": "true"})),
+            (3, "ssh_write_file", json!({"host": "prod-web", "path": "/tmp/a", "content": "x"})),
+            (4, "ssh_list_directory", json!({"host": "prod-web", "path": "/etc"})),
+            (5, "ssh_read_file", json!({"host": "prod-web", "path": "/etc/shadow"})),
+        ] {
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
+                .await?;
+            let reply = server.response(id).await?;
+            profile_policy_denied(&reply)?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    ensure!(status.success());
+    for line in stderr
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let record: Value = serde_json::from_slice(line)?;
+        ensure!(
+            record["event"] != "master_start",
+            "rule denial launched SSH: {record}"
+        );
+    }
+    ensure!(!probe.exists(), "rule denial probed SSH");
     Ok(())
 }

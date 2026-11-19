@@ -1,6 +1,7 @@
 # Explicit opt-in. Runs a reviewed fixed native_argv observation command with
 # one literal label argument. No source upload or remote script fetch occurs.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["observe_system"]
 
 [targets.server]

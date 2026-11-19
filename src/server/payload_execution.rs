@@ -30,10 +30,8 @@ impl Estus {
             request_id: &context.id,
             tool: self.state.binding_name(id),
             host: binding
-                .targets
-                .iter()
-                .find(|h| **h == request.host)
-                .map(String::as_str),
+                .permits_host(&request.host)
+                .then_some(request.host.as_str()),
             identity_role: binding
                 .automation_authority()
                 .expect("payload authority")

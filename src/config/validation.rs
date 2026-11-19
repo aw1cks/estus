@@ -318,14 +318,96 @@ fn string(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_profile(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
+fn validate_mode(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
     let value = value
         .as_str()
         .ok_or_else(|| invalid(field, "must be a string"))?;
-    let value = serde::de::value::BorrowedStrDeserializer::<serde::de::value::Error>::new(value);
-    Profile::deserialize(value)
-        .map(|_| ())
-        .map_err(|_| invalid(field, "unknown startup profile"))
+    match value {
+        "workstation" | "headless" => Ok(()),
+        _ => Err(invalid(field, "must be workstation or headless")),
+    }
+}
+
+fn validate_capabilities(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
+    let capabilities = table(
+        value,
+        field,
+        &["named", "file_read", "file_write", "exec", "sudo"],
+    )?;
+    for value in capabilities.values() {
+        if !value.is_bool() {
+            return Err(invalid(field, "capabilities must be booleans"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_rules_schema(value: &toml::Value) -> Result<(), ConfigError> {
+    let rules = value
+        .as_table()
+        .ok_or_else(|| invalid("rules", "must be a table"))?;
+    if rules.len() > 64 {
+        return Err(invalid("rules", "exceeds maximum host rule count"));
+    }
+    for (pattern, entry) in rules {
+        if pattern.is_empty() || pattern.len() > 256 || pattern.chars().any(char::is_control) {
+            return Err(invalid(
+                "rules",
+                "host rule pattern must be nonempty, bounded, and contain no control characters",
+            ));
+        }
+        let rule = table(
+            entry,
+            "rules.*",
+            &["deny_tiers", "allow_tools", "constraints"],
+        )?;
+        if let Some(tiers) = rule.get("deny_tiers") {
+            let tiers = tiers
+                .as_array()
+                .ok_or_else(|| invalid("rules.*.deny_tiers", "must be an array"))?;
+            for tier in tiers {
+                if !matches!(
+                    tier.as_str(),
+                    Some("observe" | "inspect" | "preview" | "change" | "exec")
+                ) {
+                    return Err(invalid("rules.*.deny_tiers", "must name valid risk tiers"));
+                }
+            }
+        }
+        if let Some(tools) = rule.get("allow_tools") {
+            let tools = tools
+                .as_array()
+                .ok_or_else(|| invalid("rules.*.allow_tools", "must be an array of strings"))?;
+            for tool in tools {
+                string(tool, "rules.*.allow_tools")?;
+            }
+        }
+        if let Some(constraints) = rule.get("constraints") {
+            let tools = constraints
+                .as_table()
+                .ok_or_else(|| invalid("rules.*.constraints", "must be a table"))?;
+            for params in tools.values() {
+                let params = params
+                    .as_table()
+                    .ok_or_else(|| invalid("rules.*.constraints.*", "must be a table"))?;
+                for constraint in params.values() {
+                    table(
+                        constraint,
+                        "rules.*.constraints.*.*",
+                        &[
+                            "enum",
+                            "const",
+                            "min_length",
+                            "max_length",
+                            "minimum",
+                            "maximum",
+                        ],
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_tool_selection(table: &toml::Table, field: &'static str) -> Result<(), ConfigError> {
@@ -352,11 +434,13 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
         value,
         "config",
         &[
-            "profile",
+            "mode",
+            "capabilities",
             "destination_policy",
             "ssh",
             "limits",
             "targets",
+            "rules",
             "tools",
             "enabled_tools",
             "enabled_generic_tools",
@@ -381,8 +465,14 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             string(value, "catalog")?;
         }
     }
-    if let Some(value) = root.get("profile") {
-        validate_profile(value, "profile")?;
+    if let Some(value) = root.get("mode") {
+        validate_mode(value, "mode")?;
+    }
+    if let Some(value) = root.get("capabilities") {
+        validate_capabilities(value, "capabilities")?;
+    }
+    if let Some(value) = root.get("rules") {
+        validate_rules_schema(value)?;
     }
     if let Some(value) = root.get("destination_policy")
         && !matches!(value.as_str(), Some("configured" | "open"))
@@ -510,7 +600,7 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 "targets.*",
                 &[
                     "ssh_host",
-                    "profile",
+                    "capabilities",
                     "sudo",
                     "description",
                     "labels",
@@ -526,8 +616,8 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                     .ok_or_else(|| invalid("targets.*.ssh_host", "required field is missing"))?,
                 "targets.*.ssh_host",
             )?;
-            if let Some(value) = target.get("profile") {
-                validate_profile(value, "targets.*.profile")?;
+            if let Some(value) = target.get("capabilities") {
+                validate_capabilities(value, "targets.*.capabilities")?;
             }
             if let Some(value) = target.get("description") {
                 string(value, "targets.*.description")?;
@@ -884,6 +974,7 @@ mod tests {
                 ("programs=['/usr/bin/id-other']", false),
             ] {
                 for profile in ["baseline", "actions-only", "files-only", "read-only-files"] {
+                    let caps = super::super::test_support::capabilities_toml(profile);
                     for enabled in ["[]", "['observe']"] {
                         for bad_second in [false, true] {
                             let definition = if bad_second {
@@ -894,8 +985,8 @@ mod tests {
                             };
                             let result = load_text(
                                 &format!(
-                                    "profile='{profile}'\nenabled_tools={enabled}\n\
-                                     [targets.one]\nssh_host='secret_ordinary'\nprofile='{profile}'\n\
+                                    "{caps}\nenabled_tools={enabled}\n\
+                                     [targets.one]\nssh_host='secret_ordinary'\n{caps}\n\
                                      [targets.one.sudo]\nmode='{mode}'\n{alias}{policy}\n\
                                      [targets.two]\nssh_host='secret_second'\n{definition}",
                                 ),
@@ -957,33 +1048,43 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_wrong_type_profiles_use_only_fixed_secret_free_schema_paths() {
-        for value in [
-            "'secret_payload'",
-            "'Baseline'",
-            "'read_only_files'",
-            "''",
-            "42",
-            "true",
-            "1.5",
-            "['secret_payload']",
-            "{secret_payload='secret_payload'}",
+    fn unknown_and_wrong_type_capabilities_and_legacy_profiles_use_fixed_secret_free_paths() {
+        for (text, field) in [
+            ("profile='baseline'".to_owned(), "config"),
+            (
+                "[targets.secret_target]\nssh_host='secret_alias'\nprofile='baseline'".to_owned(),
+                "targets.*",
+            ),
+            ("mode='secret_payload'".to_owned(), "mode"),
+            ("mode=42".to_owned(), "mode"),
+            (
+                "capabilities={secret_payload=true}".to_owned(),
+                "capabilities",
+            ),
+            (
+                "capabilities={exec='secret_payload'}".to_owned(),
+                "capabilities",
+            ),
+            (
+                "[targets.secret_target]\nssh_host='secret_alias'\ncapabilities={exec='secret_payload'}".to_owned(),
+                "targets.*.capabilities",
+            ),
+            (
+                "[rules.'*']\nrequire_preview=true".to_owned(),
+                "rules.*",
+            ),
+            (
+                "[rules.'*']\ndeny_tiers=['secret_payload']".to_owned(),
+                "rules.*.deny_tiers",
+            ),
         ] {
-            for (text, field) in [
-                (format!("profile={value}"), "profile"),
-                (
-                    format!("[targets.secret_target]\nssh_host='secret_alias'\nprofile={value}"),
-                    "targets.*.profile",
-                ),
-            ] {
-                let error = load_text(&text, &[]).err().unwrap();
-                assert_eq!(error.field, field);
-                for secret in ["secret_payload", "secret_target", "secret_alias"] {
-                    assert!(!error.to_string().contains(secret));
-                    assert!(!format!("{error:?}").contains(secret));
-                }
-                assert!(std::error::Error::source(&error).is_none());
+            let error = load_text(&text, &[]).err().unwrap();
+            assert_eq!(error.field, field, "{text}");
+            for secret in ["secret_payload", "secret_target", "secret_alias"] {
+                assert!(!error.to_string().contains(secret));
+                assert!(!format!("{error:?}").contains(secret));
             }
+            assert!(std::error::Error::source(&error).is_none());
         }
     }
 

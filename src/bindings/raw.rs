@@ -5,6 +5,13 @@ use serde_json::Value;
 
 use super::compiled::Effect;
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SiteConstraints {
+    #[serde(default)]
+    pub(crate) allowed_units: Option<Vec<String>>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawBinding {
@@ -18,6 +25,7 @@ pub(super) struct RawBinding {
     pub(super) fixed_args: Option<toml::Value>,
     pub(super) input_map: Option<BTreeMap<String, String>>,
     pub(super) argument_types: Option<toml::Value>,
+    pub(super) constraints: Option<SiteConstraints>,
     pub(super) result: RawResult,
     pub(super) limits: Option<RawLimits>,
 }

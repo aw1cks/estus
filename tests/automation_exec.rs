@@ -2135,7 +2135,8 @@ async fn real_host_summary_acceptance() -> Result<()> {
             "plain":{"destination":"plain","python":"/usr/bin/python3"}
         }))?);
         config.insert("automation".into(), toml::Value::Table(automation));
-        config.insert("profile".into(), example["profile"].clone());
+        config.insert("mode".into(), example["mode"].clone());
+        config.insert("capabilities".into(), example["capabilities"].clone());
         config.insert("enabled_tools".into(), table(json!([]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         // A real executable custom fact would leave an effect if !local regressed.
@@ -3848,7 +3849,7 @@ async fn authority_scenarios(
     );
     fs::write(&fixture.config, toml::to_string(&config)?)?;
     let mut hidden_config = config.clone();
-    hidden_config.insert("profile".into(), "read-only-files".into());
+    hidden_config.insert("capabilities".into(), table(json!({"file_read":true}))?);
     let hidden_path = private.join("profile-hidden.toml");
     fs::write(&hidden_path, toml::to_string(&hidden_config)?)?;
     let mut hidden_server = WireServer::start(&hidden_path)?;

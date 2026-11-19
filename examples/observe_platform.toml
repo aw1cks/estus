@@ -2,7 +2,8 @@
 #   estus schema import ansible.builtin.setup --output /etc/estus/setup.schema.json
 # Provision the workspace mode 0700, owned by the MCP account.
 # MCP input: {"host":"server","inputs":{}}
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["observe_platform"]
 
 [targets.server]

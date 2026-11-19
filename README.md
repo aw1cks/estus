@@ -27,13 +27,12 @@ set `destination_policy = "open"` at the TOML root and omit the targets table.
 Combining open mode with any targets table is rejected. Otherwise only exact
 configured logical names are accepted; backend aliases do not grant authority.
 
-The global exposure profile now defaults to `actions-only`: reviewed named tools
-plus discovery/output retrieval, without generic native execution or file tools.
-Set `profile = "baseline"` explicitly for generic SSH commands, or select
-`read-only-files`/`files-only` for deliberate generic file access. Named-tool
-selection does not grant or restrict those separate native capabilities.
-An omitted target profile inherits the global ceiling; it does not force
-`actions-only` onto a target under an explicit global file profile.
+No-config startup uses `mode = "workstation"` with all five capability ceilings
+enabled (`named`, `file_read`, `file_write`, `exec`, `sudo`) and open ordinary SSH
+resolution (actual `ssh_sudo` still requires configured target sudo). Explicit
+configuration files default to `mode = "headless"` with `[capabilities]`
+`named = true` only unless `[capabilities]` or `mode = "workstation"` is specified.
+Per-target `[targets.<name>.capabilities]` fields only narrow the global set.
 
 ## Base wheel
 
@@ -193,7 +192,7 @@ SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
 
 ## Bounded directory enumeration
 
-With an explicit file profile, call `ssh_list_directory` with a logical host,
+With `file_read = true` capability enabled, call `ssh_list_directory` with a logical host,
 literal UTF-8 path and optional `max_entries` (1–1000, default200). Empty/exhausted
 listings remain one-shot results. A truncated page returns `continuation` and
 `expires_in_secs`; send that token with the identical host/path for the next page
@@ -246,8 +245,8 @@ sandbox. The existing-entry check is diagnostic, not a race-free no-follow
 guarantee; intermediate components retain server symlink semantics. MKDIR itself
 does not replace an existing entry.
 
-Baseline/files-only startup profiles can publish the tool; read-only-files and
-actions-only profiles omit it. Target restrictions, argument/deadline validation
+Configurations enabling `file_write = true` can publish the tool; read-only and
+named-only capabilities omit it. Target restrictions, argument/deadline validation
 and the complete response budget apply before connecting. Calls use the existing
 global admission, ordinary master and independently owned SFTP cleanup path.
 
@@ -627,7 +626,7 @@ again before dispatch; this is drift detection, not immutable attestation.
 
 Generic module execution is separately disabled by default. Neither catalog presets
 nor `enabled_tools` enable it: select each configured policy with
-`enabled_generic_tools`. Global/target profiles still restrict exposure; target
+`enabled_generic_tools`. Global/target capabilities and `[rules."<pattern>"]` still restrict exposure; target
 selection and `disabled_tools` can only narrow access. Reviewed bindings never fall
 back to this surface.
 
@@ -783,7 +782,7 @@ reviewed bounds or choices produce tool errors before execution.
 Each module definition fixes `execution.snapshot`, `authority = "automation"`,
 `result.kind = "ansible_summary"`, effects, logical targets, `input_schema`,
 `fixed_args` and `input_map`. A stored snapshot overlay, when present, must match.
-Only explicitly enabled/profile-effective definitions inspect snapshots or start
+Only explicitly enabled/capability-effective definitions inspect snapshots or start
 Python. Enabled stale/incompatible bindings fail before MCP starts; requests
 never regenerate approval or install dependencies.
 
@@ -860,7 +859,7 @@ Standalone execution fixes `role_path`; collection execution omits it and resolv
 only within the selected runtime. The reviewed snapshot fixes role and entry
 point. No caller can select role/path/entry, extra-vars, tags or connection controls.
 
-Roles use the same `{"host":"server","inputs":{...}}` envelope, target/profile
+Roles use the same `{"host":"server","inputs":{...}}` envelope, target/capability
 authorization, timeout/admission, child owner and cancellation path as modules.
 Rust validates and canonicalizes the assembled inputs before starting any role
 or dependency. Source content is checked again before Runner dispatch; no
@@ -1049,7 +1048,8 @@ For native Linux health tools, provide the actual SSH mapping in `site.toml`;
 no controller Ansible runtime or Runner workspace is needed:
 
 ```toml
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 tool_presets = ["linux-health"]
 disabled_tools = []
 
@@ -1122,7 +1122,7 @@ Global named selection is preset membership plus `enabled_tools`, minus
 `disabled_tools`. Target selectors only narrow that result; omission inherits,
 explicit empty selection denies, and global disable always wins. Unknown or
 duplicate names fail. Catalog templates are inert until reviewed definitions
-are supplied; they do not consume the existing32-definition bound.
+are supplied; up to 256 named bindings are supported.
 
 Presets require an explicit catalog version; use the version reported by
 `estus catalog list --json` after reviewing the installed inventory. Catalog
@@ -1130,12 +1130,12 @@ schema3/version7 adds executor-specific assets and the native catalog cutover.
 Review existing pins rather than silently adopting an upgrade. Source/runtime/
 overlay drift still invalidates snapshots; startup never refreshes approval.
 
-`profile` is the exposure ceiling, **not** a task preset. Its default is now
-`actions-only`, permitting selected named tools without generic native execution
-or file access. Explicit `baseline` additionally permits generic native tools;
-`read-only-files` and `files-only` exclude all named bindings. A small
-`enabled_tools` list never narrows an explicitly selected native profile.
-Profiles are not OS/account sandboxes.
+`[capabilities]` (`named`, `file_read`, `file_write`, `exec`, `sudo`) sets
+independent exposure ceilings, **not** task presets. Explicit configuration files
+default to `mode = "headless"` (`named = true` only); no-config startup uses
+`mode = "workstation"` with all five ceilings enabled and dynamic ordinary SSH
+resolution. `[rules."<pattern>"]` narrows per-host permissions via `deny_tiers`,
+`allow_tools`, and per-tool `constraints`. Capabilities are not OS/account sandboxes.
 
 Privileged/sensitive entries require separately configured `automation:catalog`
 authority where declared, never an inferred native sudo grant. Typed sensitive
@@ -1168,7 +1168,7 @@ Catalog workflows expose only their reviewed named tool and non-executing
 discovery/output tools. Replacement deliberately uses `files-only`, not
 `actions-only`, with a dedicated root-owned chroot/forced-internal-SFTP boundary;
 only `/config` is writable in the disposable qualification target. The file
-profile is not itself a pathname sandbox. Replacement does not promise crash
+capability is not itself a pathname sandbox. Replacement does not promise crash
 durability or compare-and-swap against concurrent writers.
 
 ```sh
@@ -1357,7 +1357,7 @@ estus --config catalog/host_summary.toml
 
 Import does not execute the role. Review the generated snapshot; no preapproved
 snapshot is shipped. The example explicitly selects only `host_summary` in an
-actions-only profile, restricts it to `server`, and caps execution at 30 seconds.
+`named = true` capability, restricts it to `server`, and caps execution at 30 seconds.
 Its only domain input is the empty object:
 
 ```json
@@ -1394,7 +1394,7 @@ Docker-compatible backend. No host account, service or sudo policy is changed.
 
 [`catalog/cpu_stats.toml`](catalog/cpu_stats.toml) selects the reviewed
 [`cpu_stats` payload](catalog/payloads/cpu_stats), retaining ordinary `automation`
-authority and the actions-only profile. It requires target `/usr/bin/python3`,
+authority and the `named = true` capability. It requires target `/usr/bin/python3`,
 not Ansible or a controller workspace. Nothing installs packages, escalates,
 changes services/sysctls or hotplugs CPUs.
 
@@ -1648,10 +1648,10 @@ An explicit authority runtime does not depend on an unused ordinary runtime or
 ambient agent. Import the binding snapshot against that same runtime using the
 operator authoring configuration. Source/runtime approval is not refreshed on calls.
 
-Profiles name declared logical targets only, never fallback native/elevated aliases.
-Missing profiles/mappings and malformed definitions fail startup even if disabled;
+Authorities name declared logical targets only, never fallback native/elevated aliases.
+Missing authorities/mappings and malformed definitions fail startup even if disabled;
 inactive valid file/runtime references remain unopened. Global and target startup
-profiles still apply, and all authorities share admission for the same logical target.
+capabilities still apply, and all authorities share admission for the same logical target.
 Public metadata advertises only the logical authority name. Audit uses
 `identity_role="automation"` and authoritative automation finish `complete`; it
 does not expose private destinations, configuration, socket or key paths.

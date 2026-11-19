@@ -466,11 +466,12 @@ fn module_compilation_is_lazy_and_preserves_recursive_public_domain() {
                 &Limits::default(),
                 AutomationTransport {
                     authority: crate::config::ResolvedAutomation {
-                        target: &target,
+                        target: std::borrow::Cow::Borrowed(&target),
                         ssh_config: None,
                         ssh_executable: Path::new("/usr/bin/ssh"),
                         r#become: None,
                         agent: crate::config::AutomationAgent::Inherit,
+                        dynamic_python: false,
                     },
                     scratch_bytes: 1024,
                     scratch_files: 10,
@@ -1289,7 +1290,11 @@ fn static_layout_and_metadata_bounds_reject_overflow() {
         ),
     );
     assert!(compile(raw).is_err(), "Aggregate enum text is bounded");
-    let raw = (0..33)
+    let ok_raw = (0..256)
+        .map(|i| (format!("tool_{i}"), definition()))
+        .collect();
+    assert!(Bindings::compile(ok_raw, &[], &Limits::default(), |_| true, None, true).is_ok());
+    let raw = (0..257)
         .map(|i| (format!("tool_{i}"), definition()))
         .collect();
     assert!(Bindings::compile(raw, &[], &Limits::default(), |_| true, None, true).is_err());
@@ -1399,4 +1404,70 @@ fn generated_host_enums_share_the_complete_input_schema_budget() {
             "generated host choices escaped the schema cap"
         );
     }
+}
+
+#[test]
+fn site_constraints_derive_both_allowed_units_and_unit_enum_and_reject_duplication() {
+    let raw: toml::Value = toml::from_str(
+        r#"
+description = "Restart reviewed unit"
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["runtime_write", "read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/systemd_unit_restart.payload.json", source = "/etc/estus/payloads/systemd_unit_restart/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3", manager_scope = "system" }
+input_map = { unit = "unit" }
+constraints = { allowed_units = ["nginx.service", "caddy.service"] }
+input_schema = { type = "object", properties = { unit = { type = "string", maxLength = 128 } }, required = ["unit"], additionalProperties = false }
+result = { kind = "capability_projection", fields = { unit = ["mcp_result", "unit"] }, max_bytes = 4096, max_items = 64, max_depth = 4, schema = { type = "object", properties = { unit = { type = "string", maxLength = 128 } }, required = ["unit"], additionalProperties = false } }
+"#,
+    )
+    .unwrap();
+    let compiled = Bindings::compile(
+        BTreeMap::from([("systemd_unit_restart".into(), raw.clone())]),
+        &["systemd_unit_restart".into()],
+        &Limits::default(),
+        |target| target == "server",
+        None,
+        true,
+    )
+    .unwrap();
+    let (_, binding) = compiled.entries().next().unwrap();
+    assert_eq!(
+        binding.input_schema["properties"]["inputs"]["properties"]["unit"]["enum"],
+        json!(["nginx.service", "caddy.service"])
+    );
+    if let Execution::Payload { overlay, .. } = &binding.execution {
+        assert_eq!(
+            overlay["fixed_args"]["allowed_units"],
+            json!(["nginx.service", "caddy.service"])
+        );
+    } else {
+        panic!("expected payload binding");
+    }
+
+    // Duplicated manual allowed_units alongside constraints.allowed_units must reject.
+    let mut dup = raw;
+    dup.as_table_mut()
+        .unwrap()
+        .get_mut("fixed_args")
+        .unwrap()
+        .as_table_mut()
+        .unwrap()
+        .insert(
+            "allowed_units".into(),
+            toml::Value::Array(vec!["nginx.service".into()]),
+        );
+    assert!(
+        Bindings::compile(
+            BTreeMap::from([("systemd_unit_restart".into(), dup)]),
+            &["systemd_unit_restart".into()],
+            &Limits::default(),
+            |target| target == "server",
+            None,
+            true,
+        )
+        .is_err()
+    );
 }

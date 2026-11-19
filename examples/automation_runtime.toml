@@ -6,7 +6,8 @@
 #   estus --config examples/automation_runtime.toml
 # This validates dependencies only; it does not publish or execute Ansible tools.
 # The native package stays independent unless this prerequisite is explicitly required.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = []
 
 [automation]

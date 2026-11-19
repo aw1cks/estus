@@ -3,7 +3,8 @@
 # estus --config storage_devices_list.toml schema import-role storage_devices_list --role-path /etc/estus/roles/storage_devices_list --overlay overlay.json --output /etc/estus/storage_devices_list.schema.json
 # Provision mode0700 /var/lib/estus/runner, Python3 and declared inspection utilities.
 # Maintained block geometry, partitions and holder/master relationships; no health probing or sensitive UUIDs/labels/serials.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["storage_devices_list"]
 [targets.server]
 ssh_host = "server-ordinary"

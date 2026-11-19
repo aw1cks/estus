@@ -1,7 +1,8 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
 # Export, review payloads/nic_coalesce_get/manifest.json and fixed policy, then catalog prepare.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["nic_coalesce_get"]
 [targets.server]
 ssh_host = "server-ordinary"

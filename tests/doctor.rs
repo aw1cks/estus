@@ -541,7 +541,7 @@ async fn doctor_native_selected_ssh_executable_is_shared_with_native_tools() -> 
         fs::write(
             &fixture.config,
             format!(
-                "profile = 'baseline'\n{}",
+                "capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}\n{}",
                 config.replacen("[ssh]\n", "[ssh]\nexecutable = 'selected ssh'\n", 1)
             ),
         )?;
@@ -626,12 +626,16 @@ async fn doctor_native_restrictive_profiles_are_ordinary_read_only_and_do_not_lo
             );
             fs::write(&fixture.ssh_config, ssh)?;
             let mut body = String::new();
-            for (name, profile) in [("alpha", "actions-only"), ("beta", "files-only"), ("gamma", "read-only-files")] {
-                body.push_str(&format!("[targets.{name}]\nssh_host = 'plain'\nprofile = '{profile}'\n[targets.{name}.sudo]\nmode = 'separate-identity'\nssh_host = 'PRIVATE_ELEVATED_D01'\n"));
+            for (name, caps) in [
+                ("alpha", "{ named = true }"),
+                ("beta", "{ file_read = true, file_write = true }"),
+                ("gamma", "{ file_read = true }"),
+            ] {
+                body.push_str(&format!("[targets.{name}]\nssh_host = 'plain'\ncapabilities = {caps}\n[targets.{name}.sudo]\nmode = 'separate-identity'\nssh_host = 'PRIVATE_ELEVATED_D01'\n"));
             }
             native_config(&fixture, &body)?;
             let config = fs::read_to_string(&fixture.config)?;
-            fs::write(&fixture.config, format!("profile = 'actions-only'\n{config}"))?;
+            fs::write(&fixture.config, format!("capabilities = {{ named = true }}\n{config}"))?;
             let before = snapshots(&fixture)?;
             let logs: Vec<_> = fixture.listeners.iter().map(|listener| listener.log.text()).collect();
             let auth = fixture.authentications();
@@ -817,7 +821,7 @@ async fn doctor_reports_ssh_executable_and_effective_policy_warnings() -> Result
     fs::write(
         &config,
         format!(
-            "profile = 'baseline'\n[ssh]\nexecutable = {}\nconfig_file = {}\n[targets.insecure]\nssh_host = 'insecure.invalid'\n",
+            "capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}\n[ssh]\nexecutable = {}\nconfig_file = {}\n[targets.insecure]\nssh_host = 'insecure.invalid'\n",
             serde_json::to_string(&ssh.to_string_lossy())?,
             serde_json::to_string(&ssh_config.to_string_lossy())?,
         ),

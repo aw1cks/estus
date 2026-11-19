@@ -3,7 +3,8 @@
 # estus --config hardware_identifiers_get.toml schema import-role hardware_identifiers_get --role-path /etc/estus/roles/hardware_identifiers_get --overlay overlay.json --output /etc/estus/hardware_identifiers_get.schema.json
 # Provision mode0700 /var/lib/estus/runner, Python3 and declared inspection utilities.
 # Selected firmware-reported DMI fields; unknown placeholders omitted, not authenticated identity. Sensitive serial/UUID/asset capability requires independent privileged approval; results intentionally disclose these selected identifiers.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["hardware_identifiers_get"]
 [targets.server]
 ssh_host = "server-ordinary"

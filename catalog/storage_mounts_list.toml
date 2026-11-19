@@ -3,7 +3,8 @@
 # estus --config storage_mounts_list.toml schema import-role storage_mounts_list --role-path /etc/estus/roles/storage_mounts_list --overlay overlay.json --output /etc/estus/storage_mounts_list.schema.json
 # Provision mode0700 /var/lib/estus/runner, Python3 and declared inspection utilities.
 # Current mounts including overmount duplicates; no static configuration, options, labels, UUIDs or raw context. Capacity is non-atomic.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["storage_mounts_list"]
 [targets.server]
 ssh_host = "server-ordinary"

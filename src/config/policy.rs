@@ -4,35 +4,67 @@ use crate::bindings::AutomationAuthority;
 
 use super::{validation::validate_runtime_path, *};
 
-impl Profile {
+pub(crate) fn risk_tier_for_builtin(tool: ToolId) -> RiskTier {
+    match tool {
+        ToolId::Targets | ToolId::Stat => RiskTier::Observe,
+        ToolId::ReadOutput | ToolId::ReadFile | ToolId::ListDirectory => RiskTier::Inspect,
+        ToolId::WriteFile
+        | ToolId::Mkdir
+        | ToolId::Rename
+        | ToolId::RemoveFile
+        | ToolId::RemoveDirectory
+        | ToolId::ReplaceFile
+        | ToolId::ClearTargetQuarantine => RiskTier::Change,
+        ToolId::Exec | ToolId::Run | ToolId::Sudo => RiskTier::Exec,
+    }
+}
+
+pub(crate) fn risk_tier_for_binding(binding: &crate::bindings::CompiledBinding) -> RiskTier {
+    if binding.is_generic() || binding.sudo().is_some() {
+        return RiskTier::Exec;
+    }
+    if binding.is_shared_read() {
+        if binding
+            .effects()
+            .contains(&crate::bindings::Effect::SensitiveRead)
+        {
+            RiskTier::Inspect
+        } else {
+            RiskTier::Observe
+        }
+    } else if binding.read_only() || binding.effects().contains(&crate::bindings::Effect::Probe) {
+        RiskTier::Inspect
+    } else {
+        RiskTier::Change
+    }
+}
+
+impl Capabilities {
     pub(super) fn permits(self, tool: ToolId) -> bool {
         // Keep every ID classified explicitly so a new binding requires a policy decision.
         match tool {
             ToolId::Targets | ToolId::ReadOutput => true,
-            ToolId::ReadFile | ToolId::Stat | ToolId::ListDirectory => {
-                matches!(self, Self::Baseline | Self::ReadOnlyFiles | Self::FilesOnly)
-            }
+            ToolId::ReadFile | ToolId::Stat | ToolId::ListDirectory => self.file_read,
             ToolId::WriteFile
             | ToolId::Mkdir
             | ToolId::Rename
             | ToolId::RemoveFile
             | ToolId::ReplaceFile
-            | ToolId::RemoveDirectory => {
-                matches!(self, Self::Baseline | Self::FilesOnly)
-            }
-            ToolId::Exec | ToolId::Run | ToolId::Sudo => matches!(self, Self::Baseline),
+            | ToolId::RemoveDirectory => self.file_write,
+            ToolId::Exec | ToolId::Run => self.exec,
+            ToolId::Sudo => self.sudo,
             ToolId::ClearTargetQuarantine => self.permits_bindings(),
         }
     }
 
     pub(super) fn permits_bindings(self) -> bool {
-        matches!(self, Self::Baseline | Self::ActionsOnly)
+        self.named
     }
 }
 
 impl Target {
     pub(super) fn permits_binding(&self, name: &str) -> bool {
-        self.profile.permits_bindings()
+        Capabilities::from(self.capabilities).permits_bindings()
             && self
                 .selected_bindings
                 .as_ref()
@@ -147,7 +179,11 @@ impl Config {
         let payloads: Vec<_> = self
             .bindings
             .entries()
-            .filter(|(id, binding)| binding.is_payload() && self.binding_enabled(*id))
+            .filter(|(id, binding)| {
+                binding.is_payload()
+                    && self.binding_enabled(*id)
+                    && binding.payload_plan().is_none()
+            })
             .map(|(id, _)| id)
             .collect();
         let mut inspected_payload_authorities = BTreeSet::new();
@@ -273,6 +309,56 @@ impl Config {
         )
     }
 
+    pub(crate) fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub(crate) fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    pub(crate) fn allows_dynamic_hosts(&self) -> bool {
+        self.targets.is_none()
+    }
+
+    pub(crate) fn check_builtin_params(
+        &self,
+        host: &str,
+        tool_name: &str,
+        tool: ToolId,
+        params: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), ToolError> {
+        rules::check_host_params(
+            &self.rules,
+            host,
+            tool_name,
+            risk_tier_for_builtin(tool),
+            params,
+        )
+    }
+
+    pub(crate) fn check_binding_params(
+        &self,
+        host: &str,
+        id: BindingId,
+        params: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), ToolError> {
+        let Some(binding) = self.bindings.get(id) else {
+            return Err(ToolError::new(
+                "policy_denied",
+                "Operation is not authorized",
+                false,
+            ));
+        };
+        rules::check_host_params(
+            &self.rules,
+            host,
+            &binding.name,
+            risk_tier_for_binding(binding),
+            params,
+        )
+    }
+
     pub(crate) fn automation_target(
         &self,
         id: BindingId,
@@ -280,9 +366,65 @@ impl Config {
     ) -> Result<ResolvedAutomation<'_>, ToolError> {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
         let binding = self.bindings.get(id).ok_or_else(denied)?;
-        if !self.binding_enabled(id)
-            || binding.automation_authority().is_none()
-            || !binding.targets.iter().any(|target| target == host)
+        if !self.binding_enabled(id) || binding.automation_authority().is_none() {
+            return Err(denied());
+        }
+        let ssh_executable = self.ssh_executable();
+        if binding.has_dynamic_targets() {
+            if self.mode != Mode::Workstation
+                || !matches!(
+                    binding.automation_authority(),
+                    Some(AutomationAuthority::Ordinary)
+                )
+            {
+                return Err(denied());
+            }
+            destination(host, "host").map_err(|_| {
+                ToolError::new(
+                    "invalid_argument",
+                    "Host must be a safe nonempty SSH destination",
+                    false,
+                )
+            })?;
+            if let Some(target) = self.targets.as_ref().and_then(|targets| targets.get(host))
+                && !target.permits_binding(&binding.name)
+            {
+                return Err(denied());
+            }
+            rules::check_host_tool(
+                &self.rules,
+                host,
+                &binding.name,
+                risk_tier_for_binding(binding),
+            )?;
+            if let Some(mapped) = self.automation.targets.get(host) {
+                return Ok(ResolvedAutomation {
+                    target: Cow::Borrowed(mapped),
+                    ssh_config: self.ssh_config.as_deref(),
+                    ssh_executable,
+                    r#become: None,
+                    agent: AutomationAgent::Inherit,
+                    dynamic_python: mapped.python.is_empty(),
+                });
+            }
+            let resolved_destination = self
+                .targets
+                .as_ref()
+                .and_then(|targets| targets.get(host))
+                .map_or(host, |target| target.ssh_host.as_str());
+            return Ok(ResolvedAutomation {
+                target: Cow::Owned(AutomationTarget {
+                    destination: resolved_destination.to_owned(),
+                    python: String::new(),
+                }),
+                ssh_config: self.ssh_config.as_deref(),
+                ssh_executable,
+                r#become: None,
+                agent: AutomationAgent::Inherit,
+                dynamic_python: true,
+            });
+        }
+        if !binding.targets.iter().any(|target| target == host)
             || !self
                 .targets
                 .as_ref()
@@ -291,19 +433,25 @@ impl Config {
         {
             return Err(denied());
         }
-        let ssh_executable = self.ssh_executable();
+        rules::check_host_tool(
+            &self.rules,
+            host,
+            &binding.name,
+            risk_tier_for_binding(binding),
+        )?;
         match binding.automation_authority() {
             Some(AutomationAuthority::Ordinary) => Ok(ResolvedAutomation {
-                target: self.automation.targets.get(host).ok_or_else(denied)?,
+                target: Cow::Borrowed(self.automation.targets.get(host).ok_or_else(denied)?),
                 ssh_config: self.ssh_config.as_deref(),
                 ssh_executable,
                 r#become: None,
                 agent: AutomationAgent::Inherit,
+                dynamic_python: false,
             }),
             Some(AutomationAuthority::Named(name)) => {
                 let authority = self.automation.authorities.get(name).ok_or_else(denied)?;
                 Ok(ResolvedAutomation {
-                    target: authority.targets.get(host).ok_or_else(denied)?,
+                    target: Cow::Borrowed(authority.targets.get(host).ok_or_else(denied)?),
                     ssh_config: Some(&authority.ssh_config_file),
                     ssh_executable,
                     r#become: Some(&authority.r#become),
@@ -311,6 +459,7 @@ impl Config {
                         .ssh_auth_sock
                         .as_deref()
                         .map_or(AutomationAgent::Disabled, AutomationAgent::Fixed),
+                    dynamic_python: false,
                 })
             }
             None => Err(denied()),
@@ -357,10 +506,11 @@ impl Config {
     }
 
     pub(crate) fn binding_enabled(&self, id: BindingId) -> bool {
-        self.profile.permits_bindings()
+        self.capabilities.permits_bindings()
             && self.bindings.get(id).is_some_and(|binding| {
                 binding.enabled()
                     && (binding.automation_authority().is_none()
+                        || (binding.has_dynamic_targets() && self.mode == Mode::Workstation)
                         || binding.targets.iter().any(|name| {
                             self.targets
                                 .as_ref()
@@ -399,6 +549,12 @@ impl Config {
         if !target.permits_binding(&binding.name) {
             return Err(denied());
         }
+        rules::check_host_tool(
+            &self.rules,
+            host,
+            &binding.name,
+            risk_tier_for_binding(binding),
+        )?;
         match binding.sudo() {
             Some((user, program)) => target.sudo.resolve(host, &target.ssh_host, user, program),
             None => self.resolve_ordinary(host),
@@ -406,7 +562,7 @@ impl Config {
     }
 
     pub(crate) fn tool_enabled(&self, tool: ToolId) -> bool {
-        self.profile.permits(tool) && (tool != ToolId::Sudo || self.has_sudo())
+        self.capabilities.permits(tool) && (tool != ToolId::Sudo || self.has_sudo())
     }
 
     pub(crate) fn has_sudo(&self) -> bool {
@@ -446,17 +602,23 @@ impl Config {
             | ToolId::Stat
             | ToolId::ListDirectory => {}
         }
-        if !self.profile.permits(tool) {
+        if !self.capabilities.permits(tool) {
             return Err(denied());
         }
         if self
             .targets
             .as_ref()
             .and_then(|targets| targets.get(host))
-            .is_some_and(|target| !target.profile.permits(tool))
+            .is_some_and(|target| !Capabilities::from(target.capabilities).permits(tool))
         {
             return Err(denied());
         }
+        rules::check_host_tool(
+            &self.rules,
+            host,
+            tool.wire_name(),
+            risk_tier_for_builtin(tool),
+        )?;
         self.resolve_ordinary(host)
     }
 
@@ -527,7 +689,7 @@ impl Config {
                 false,
             )
         };
-        if !self.profile.permits(ToolId::Sudo) {
+        if !self.capabilities.permits(ToolId::Sudo) {
             return Err(denied());
         }
         let target = self
@@ -535,9 +697,15 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target.profile.permits(ToolId::Sudo) {
+        if !Capabilities::from(target.capabilities).permits(ToolId::Sudo) {
             return Err(denied());
         }
+        rules::check_host_tool(
+            &self.rules,
+            host,
+            ToolId::Sudo.wire_name(),
+            risk_tier_for_builtin(ToolId::Sudo),
+        )?;
         target.sudo.resolve(host, &target.ssh_host, user, program)
     }
 
@@ -783,7 +951,14 @@ mod tests {
             }
         }
         // The operator-only restriction must not close native open-host mode.
-        let open = load_text("profile='baseline'\ndestination_policy='open'", &[]).unwrap();
+        let open = load_text(
+            &format!(
+                "{}\ndestination_policy='open'",
+                super::super::test_support::capabilities_toml("baseline")
+            ),
+            &[],
+        )
+        .unwrap();
         assert_eq!(
             open.resolve("user@host", ToolId::Exec).unwrap().destination,
             "user@host",
@@ -799,10 +974,12 @@ mod tests {
                     "[targets.one.sudo]\nmode='same-account'\n",
                     "[targets.one.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n",
                 ] {
+                    let g_caps = super::super::test_support::capabilities_toml(global);
+                    let t_caps = super::super::test_support::capabilities_toml(target);
                     let config = load_text(
                         &format!(
-                            "profile='{global}'\n[targets.one]\n\
-                             ssh_host='private-ordinary'\nprofile='{target}'\n{sudo}"
+                            "{g_caps}\n[targets.one]\n\
+                             ssh_host='private-ordinary'\n{t_caps}\n{sudo}"
                         ),
                         &[],
                     )
@@ -871,9 +1048,11 @@ mod tests {
                 ("files-only", false),
             ] {
                 for selected in [false, true] {
+                    let g_caps = super::super::test_support::capabilities_toml(global);
+                    let t_caps = super::super::test_support::capabilities_toml(target);
                     let text = format!(
-                        "profile='{global}'\nenabled_tools={enabled}\n\
-                         [targets.one]\nssh_host='ordinary-private'\nprofile='{target}'\n\
+                        "{g_caps}\nenabled_tools={enabled}\n\
+                         [targets.one]\nssh_host='ordinary-private'\n{t_caps}\n\
                          [targets.one.sudo]\nmode='separate-identity'\nssh_host='elevated-private'\n\
                          [targets.two]\nssh_host='other-private'\n{definition}",
                         enabled = if selected { "['observe']" } else { "[]" },
@@ -953,10 +1132,12 @@ mod tests {
                     ("read-only-files", false),
                 ] {
                     for selected in [false, true] {
+                        let g_caps = super::super::test_support::capabilities_toml(global);
+                        let t_caps = super::super::test_support::capabilities_toml(profile);
                         let config = load_text(
                             &format!(
-                                "profile='{global}'\nenabled_tools={enabled}\n\
-                                 [targets.one]\nssh_host='ordinary-private'\nprofile='{profile}'\n\
+                                "{g_caps}\nenabled_tools={enabled}\n\
+                                 [targets.one]\nssh_host='ordinary-private'\n{t_caps}\n\
                                  [targets.one.sudo]\nmode='{mode}'\n{alias}\
                                  users=['root']\nprograms=['/usr/bin/id']\n\
                                  [targets.two]\nssh_host='other-private'\n{elevated}{ordinary}",
@@ -1058,10 +1239,11 @@ mod tests {
             ),
             (vec!["root".to_owned()], None, true, false),
         ] {
+            let caps = super::super::test_support::capabilities_toml("actions-only");
             let mut config = load_text(
                 &format!(
-                    "profile='actions-only'\nenabled_tools=['observe','ordinary']\n\
-                     [targets.one]\nssh_host='ordinary-private'\nprofile='actions-only'\n\
+                    "{caps}\nenabled_tools=['observe','ordinary']\n\
+                     [targets.one]\nssh_host='ordinary-private'\n{caps}\n\
                      [targets.one.sudo]\nmode='same-account'\n{definition}{ordinary}",
                 ),
                 &[],
@@ -1104,7 +1286,13 @@ mod tests {
 
     #[test]
     fn omitted_profile_closes_generic_authority_and_explicit_baseline_preserves_it() {
-        for (root, native_allowed) in [("", false), ("profile='baseline'\n", true)] {
+        for (root, native_allowed) in [
+            ("", false),
+            (
+                "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n",
+                true,
+            ),
+        ] {
             let config = load_text(
                 &format!(
                     "{root}[targets.one]\nssh_host='ordinary'\n\
@@ -1187,9 +1375,10 @@ mod tests {
             ),
             ("actions-only", vec!["0-global-discovery"], vec![]),
         ] {
+            let caps = super::super::test_support::capabilities_toml(profile);
             let config = load_text(
                 &format!(
-                    "profile='{profile}'\n[targets.one]\nssh_host='private-alias'\n\
+                    "{caps}\n[targets.one]\nssh_host='private-alias'\n\
                      description='execution allowed'\nlabels={{exec='enabled'}}\n\
                      [targets.one.sudo]\nmode='same-account'"
                 ),
@@ -1246,11 +1435,17 @@ mod tests {
     #[test]
     fn target_profiles_intersect_global_policy_without_changing_publication() {
         let config = load_text(
-            "profile='files-only'\n\
-             [targets.base]\nssh_host='base-alias'\nprofile='baseline'\n\
-             [targets.reader]\nssh_host='reader-alias'\nprofile='read-only-files'\n\
-             [targets.actions]\nssh_host='actions-alias'\nprofile='actions-only'\n\
-             [targets.implicit]\nssh_host='implicit-alias'",
+            &format!(
+                "{}\n\
+                 [targets.base]\nssh_host='base-alias'\n{}\n\
+                 [targets.reader]\nssh_host='reader-alias'\n{}\n\
+                 [targets.actions]\nssh_host='actions-alias'\n{}\n\
+                 [targets.implicit]\nssh_host='implicit-alias'",
+                super::super::test_support::capabilities_toml("files-only"),
+                super::super::test_support::capabilities_toml("baseline"),
+                super::super::test_support::capabilities_toml("read-only-files"),
+                super::super::test_support::capabilities_toml("actions-only"),
+            ),
             &[],
         )
         .unwrap();
@@ -1285,15 +1480,23 @@ mod tests {
     #[test]
     fn restrictive_targets_do_not_hide_baseline_routes_or_authorize_sudo() {
         let config = load_text(
-            "profile='baseline'\n[targets.reader]\nssh_host='private-reader'\nprofile='read-only-files'\n\
-             [targets.reader.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n\
-             [targets.files]\nssh_host='private-files'\nprofile='files-only'\n\
-             [targets.files.sudo]\nmode='same-account'\n\
-             [targets.actions]\nssh_host='private-actions'\nprofile='actions-only'\n\
-             [targets.actions.sudo]\nmode='same-account'\n\
-             [targets.disabled]\nssh_host='private-disabled'\nprofile='baseline'\n\
-             [targets.empty]\nssh_host='private-empty'\nprofile='baseline'\n\
-             [targets.empty.sudo]\nmode='same-account'\nprograms=[]",
+            &format!(
+                "{}\n[targets.reader]\nssh_host='private-reader'\n{}\n\
+                 [targets.reader.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n\
+                 [targets.files]\nssh_host='private-files'\n{}\n\
+                 [targets.files.sudo]\nmode='same-account'\n\
+                 [targets.actions]\nssh_host='private-actions'\n{}\n\
+                 [targets.actions.sudo]\nmode='same-account'\n\
+                 [targets.disabled]\nssh_host='private-disabled'\n{}\n\
+                 [targets.empty]\nssh_host='private-empty'\n{}\n\
+                 [targets.empty.sudo]\nmode='same-account'\nprograms=[]",
+                super::super::test_support::capabilities_toml("baseline"),
+                super::super::test_support::capabilities_toml("read-only-files"),
+                super::super::test_support::capabilities_toml("files-only"),
+                super::super::test_support::capabilities_toml("actions-only"),
+                super::super::test_support::capabilities_toml("baseline"),
+                super::super::test_support::capabilities_toml("baseline"),
+            ),
             &[],
         )
         .unwrap();
@@ -1322,7 +1525,14 @@ mod tests {
 
     #[test]
     fn profile_policy_preserves_open_validation_closed_targets_and_resolver_boundaries() {
-        let open = load_text("destination_policy='open'\nprofile='read-only-files'", &[]).unwrap();
+        let open = load_text(
+            &format!(
+                "destination_policy='open'\n{}",
+                super::super::test_support::capabilities_toml("read-only-files")
+            ),
+            &[],
+        )
+        .unwrap();
         let resolved = open.resolve("user@example", ToolId::ReadFile).unwrap();
         assert_eq!(resolved.destination, "user@example");
         assert_eq!(resolved.role, IdentityRole::Ordinary);
@@ -1341,17 +1551,34 @@ mod tests {
             "policy_denied"
         );
         let closed = load_text(
-            "profile='read-only-files'\n[targets.logical]\nssh_host='private-alias'",
+            &format!(
+                "{}\n[targets.logical]\nssh_host='private-alias'",
+                super::super::test_support::capabilities_toml("read-only-files")
+            ),
             &[],
         )
         .unwrap();
         assert!(closed.resolve("logical", ToolId::ReadFile).is_ok());
         assert!(closed.resolve("private-alias", ToolId::ReadFile).is_err());
-        let empty = load_text("profile='files-only'\n[targets]", &[]).unwrap();
+        let empty = load_text(
+            &format!(
+                "{}\n[targets]",
+                super::super::test_support::capabilities_toml("files-only")
+            ),
+            &[],
+        )
+        .unwrap();
         assert!(empty.tool_enabled(ToolId::WriteFile));
         assert!(empty.tool_enabled(ToolId::Targets));
         assert!(empty.resolve("anything", ToolId::ReadFile).is_err());
-        let baseline_empty = load_text("profile='baseline'\n[targets]", &[]).unwrap();
+        let baseline_empty = load_text(
+            &format!(
+                "{}\n[targets]",
+                super::super::test_support::capabilities_toml("baseline")
+            ),
+            &[],
+        )
+        .unwrap();
         assert!(baseline_empty.tool_enabled(ToolId::Exec));
         assert!(baseline_empty.tool_enabled(ToolId::WriteFile));
         assert!(!baseline_empty.tool_enabled(ToolId::Sudo));
@@ -1388,7 +1615,7 @@ mod tests {
 workspace_root={root:?}
 [targets.server]
 ssh_host="never-used"
-profile="read-only-files"
+capabilities = {{ file_read = true }}
 [tools.local]
 description="Controller observation"
 revision="1"
@@ -1402,8 +1629,9 @@ result={{kind="controller_command"}}
             source = source.to_str().unwrap()
         );
         for profile in ["baseline", "actions-only"] {
+            let caps = super::super::test_support::capabilities_toml(profile);
             let config = load_text(
-                &format!("profile={profile:?}\nenabled_tools=['local']\n{definition}"),
+                &format!("{caps}\nenabled_tools=['local']\n{definition}"),
                 &[],
             )
             .unwrap();
@@ -1422,8 +1650,9 @@ result={{kind="controller_command"}}
         }
         std::fs::remove_file(source).unwrap();
         for profile in ["files-only", "read-only-files"] {
+            let caps = super::super::test_support::capabilities_toml(profile);
             let config = load_text(
-                &format!("profile={profile:?}\nenabled_tools=['local']\n{definition}"),
+                &format!("{caps}\nenabled_tools=['local']\n{definition}"),
                 &[],
             )
             .unwrap();
@@ -1451,7 +1680,14 @@ result={{kind="controller_command"}}
                 "{source}"
             );
         }
-        let open = load_text("profile='baseline'\ndestination_policy='open'", &[]).unwrap();
+        let open = load_text(
+            &format!(
+                "{}\ndestination_policy='open'",
+                super::super::test_support::capabilities_toml("baseline")
+            ),
+            &[],
+        )
+        .unwrap();
         assert!(open.resolve("user@example", ToolId::Exec).is_ok());
         let discovery = serde_json::to_value(open.targets(&catalog())).unwrap();
         assert_eq!(discovery["mode"], "open");
@@ -1517,7 +1753,10 @@ result={{kind="controller_command"}}
     #[test]
     fn configured_dispatch_never_accepts_aliases_and_open_dispatch_is_validated() {
         let config = load_text(
-            "profile='baseline'\n[targets.logical]\nssh_host='ordinary-alias'",
+            &format!(
+                "{}\n[targets.logical]\nssh_host='ordinary-alias'",
+                super::super::test_support::capabilities_toml("baseline")
+            ),
             &[],
         )
         .unwrap();
@@ -1537,7 +1776,14 @@ result={{kind="controller_command"}}
             empty.resolve("anything", ToolId::Exec).err().unwrap().code,
             "policy_denied"
         );
-        let open = load_text("profile='baseline'\ndestination_policy='open'", &[]).unwrap();
+        let open = load_text(
+            &format!(
+                "{}\ndestination_policy='open'",
+                super::super::test_support::capabilities_toml("baseline")
+            ),
+            &[],
+        )
+        .unwrap();
         let resolved = open.resolve("user@example", ToolId::Exec).unwrap();
         assert_eq!(
             (resolved.name, resolved.destination),
@@ -1563,7 +1809,7 @@ result={{kind="controller_command"}}
     fn sudo_dispatch_uses_exact_policy_and_the_configured_role() {
         let config = load_text(
             r#"
-profile = "baseline"
+capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
 [targets.same]
 ssh_host = "ordinary"
 [targets.same.sudo]
@@ -1641,5 +1887,76 @@ mode = "same-account"
                 "invalid_argument"
             );
         }
+    }
+
+    #[test]
+    fn capabilities_combine_independently_and_rules_narrow_by_intersection() {
+        let config = load_text(
+            r#"
+mode = "headless"
+capabilities = { named = true, file_read = true }
+[targets.prod-web-01]
+ssh_host = "prod-web-01"
+[targets.dev-01]
+ssh_host = "dev-01"
+[rules."prod-*"]
+deny_tiers = ["exec", "change"]
+allow_tools = ["ssh_stat", "ssh_read_file", "cpu_stats"]
+[rules."*-web-*".constraints.ssh_read_file.path]
+enum = ["/etc/nginx/nginx.conf", "/etc/hosts"]
+[rules."prod-web-*"]
+allow_tools = ["ssh_stat", "ssh_read_file"]
+"#,
+            &[],
+        )
+        .unwrap();
+        assert!(config.tool_enabled(ToolId::Stat));
+        assert!(config.tool_enabled(ToolId::ReadFile));
+        assert!(config.tool_enabled(ToolId::ClearTargetQuarantine));
+        assert!(!config.tool_enabled(ToolId::WriteFile));
+        assert!(!config.tool_enabled(ToolId::Exec));
+        assert!(config.resolve("prod-web-01", ToolId::Stat).is_ok());
+        assert!(config.resolve("prod-web-01", ToolId::ReadFile).is_ok());
+        assert!(config.resolve("prod-web-01", ToolId::Exec).is_err());
+        // Rule intersection on prod-web-01 drops cpu_stats (not in prod-web-* allow_tools).
+        assert!(
+            rules::check_host_tool(&config.rules, "prod-web-01", "cpu_stats", RiskTier::Observe)
+                .is_err()
+        );
+        // Parameter constraint on prod-web-01 permits /etc/hosts, denies /etc/shadow.
+        let ok_params = serde_json::json!({"path": "/etc/hosts"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let bad_params = serde_json::json!({"path": "/etc/shadow"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(
+            config
+                .check_builtin_params("prod-web-01", "ssh_read_file", ToolId::ReadFile, &ok_params)
+                .is_ok()
+        );
+        assert!(
+            config
+                .check_builtin_params(
+                    "prod-web-01",
+                    "ssh_read_file",
+                    ToolId::ReadFile,
+                    &bad_params
+                )
+                .is_err()
+        );
+        // Conflicting constraints across overlapping wildcard patterns reject configuration.
+        let conflict = load_text(
+            r#"
+[rules."prod-*".constraints.ssh_read_file.path]
+enum = ["/etc/hosts"]
+[rules."*-web".constraints.ssh_read_file.path]
+enum = ["/etc/passwd"]
+"#,
+            &[],
+        );
+        assert_eq!(conflict.err().unwrap().field, "rules");
     }
 }

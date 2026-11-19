@@ -145,7 +145,7 @@ pub fn find_program(name: &str) -> Result<PathBuf> {
     bail!("native prerequisite missing from PATH: {name}")
 }
 
-pub fn server_command(config: &Path) -> Result<Command> {
+pub fn raw_server_command() -> Result<Command> {
     let binary = match std::env::var_os("ESTUS_TEST_BINARY") {
         Some(path) => executable(Path::new(&path))?,
         None => executable(Path::new(
@@ -158,7 +158,13 @@ pub fn server_command(config: &Path) -> Result<Command> {
             command.env_remove(name);
         }
     }
-    command.arg("--config").arg(config).kill_on_drop(true);
+    command.kill_on_drop(true);
+    Ok(command)
+}
+
+pub fn server_command(config: &Path) -> Result<Command> {
+    let mut command = raw_server_command()?;
+    command.arg("--config").arg(config);
     Ok(command)
 }
 
@@ -614,7 +620,7 @@ impl Fixture {
     pub fn write_server_config(&self, path: &Path, ssh_config: &Path) -> Result<()> {
         let ssh_path = serde_json::to_string(&ssh_config.to_string_lossy())?;
         let mut config = formatdoc! {"
-            profile = 'baseline'
+            capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
 
             [ssh]
             config_file = {ssh_path}

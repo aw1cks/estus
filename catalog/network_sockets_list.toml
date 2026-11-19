@@ -1,7 +1,8 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
 # Export, review payloads/network_sockets_list/manifest.json and fixed policy, then catalog prepare.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["network_sockets_list"]
 [targets.server]
 ssh_host = "server-ordinary"

@@ -295,7 +295,7 @@ impl Engine {
         } = request;
         let operation = async {
             let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
-            let candidates = interpreters(plan, &target.target.python)?;
+            let candidates = interpreters(plan, &target.target.python, target.dynamic_python)?;
             let r#become = target.r#become;
             let role = if r#become.is_some() {
                 crate::config::IdentityRole::Automation
@@ -437,35 +437,63 @@ impl Engine {
     }
 }
 
-fn interpreters<'a>(plan: &'a PayloadPlan, configured: &'a str) -> Result<Vec<&'a str>, ToolError> {
+fn interpreters<'a>(
+    plan: &'a PayloadPlan,
+    configured: &'a str,
+    dynamic_python: bool,
+) -> Result<Vec<&'a str>, ToolError> {
+    if !configured.is_empty() {
+        if !configured.starts_with('/') || configured.contains('\0') {
+            return Err(error(
+                "discovery_failed",
+                "An approved absolute target interpreter is required",
+                false,
+            ));
+        }
+        return Ok(vec![configured]);
+    }
     let fixed = plan
         .manifest
         .approval
         .overlay
         .get("fixed_args")
         .and_then(|arguments| arguments.get("target_python"));
-    let candidates: Vec<&str> = if let Some(fixed) = fixed {
-        vec![fixed.as_str().ok_or_else(|| {
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(fixed) = fixed {
+        let fixed = fixed.as_str().ok_or_else(|| {
             error(
                 "discovery_failed",
                 "Invalid approved collector interpreter",
                 false,
             )
-        })?]
-    } else if !configured.is_empty() {
-        vec![configured]
-    } else {
-        plan.manifest
-            .requirements
-            .interpreters
-            .iter()
-            .map(String::as_str)
-            .collect()
-    };
+        })?;
+        candidates.push(fixed);
+    }
+    if dynamic_python || fixed.is_none() {
+        for interpreter in &plan.manifest.requirements.interpreters {
+            if !candidates.contains(&interpreter.as_str()) {
+                candidates.push(interpreter.as_str());
+            }
+        }
+    }
+    if dynamic_python {
+        for fallback in [
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/run/current-system/sw/bin/python3",
+            "python3",
+        ] {
+            if !candidates.contains(&fallback) {
+                candidates.push(fallback);
+            }
+        }
+    }
     if candidates.is_empty()
-        || candidates
-            .iter()
-            .any(|path| !path.starts_with('/') || path.contains('\0'))
+        || candidates.iter().any(|path| {
+            path.is_empty()
+                || path.contains('\0')
+                || (!path.starts_with('/') && !(dynamic_python && *path == "python3"))
+        })
     {
         return Err(error(
             "discovery_failed",
@@ -975,11 +1003,12 @@ mod tests {
             python: "/usr/bin/python3".into(),
         };
         let resolved = crate::config::ResolvedAutomation {
-            target: &target,
+            target: std::borrow::Cow::Borrowed(&target),
             ssh_config: None,
             ssh_executable: std::path::Path::new("/usr/bin/ssh"),
             r#become: None,
             agent: crate::config::AutomationAgent::Disabled,
+            dynamic_python: false,
         };
         let (_, first) = engine
             .pool("logical-a", "automation", &resolved, Duration::from_secs(1))
@@ -1183,5 +1212,79 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, "invalid_result");
         }
+    }
+
+    #[test]
+    fn configured_target_python_takes_precedence_over_template_default() {
+        let mut manifest = super::super::Manifest {
+            approved: true,
+            manifest_sha256: String::new(),
+            schema: 1,
+            protocol: 1,
+            adapter_version: 1,
+            change_policy: super::super::ChangePolicy::ReadOnly,
+            source_sha256: "0".repeat(64),
+            max_source_bytes: 4096,
+            argv: Vec::new(),
+            requirements: super::super::Requirements {
+                python_min: [3, 8],
+                interpreters: vec!["/usr/local/bin/python3".into()],
+                modules: Vec::new(),
+                executables: Vec::new(),
+                paths: Vec::new(),
+            },
+            contract: json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {"target_python": {"type": "string"}},
+                    "required": ["target_python"],
+                    "additionalProperties": false
+                },
+                "aliases": {"aliases": {}, "properties": {"target_python": {"aliases": {}, "properties": {}}}},
+                "defaults": {},
+                "review_required": ["test"]
+            }),
+            approval: super::super::Approval {
+                overlay: json!({"fixed_args": {"target_python": "/usr/bin/python3"}}),
+                result: json!({"kind": "capability_projection"}),
+                authority: "automation".into(),
+                no_log: false,
+                revision: "1".into(),
+            },
+        };
+        manifest.manifest_sha256 = "0".repeat(64);
+        let plan = PayloadPlan {
+            manifest,
+            source: Arc::from(b"# empty\n".as_slice()),
+            binding: crate::contracts::module_schema::compile_binding(
+                &json!({
+                    "schema": {
+                        "type": "object",
+                        "properties": {"target_python": {"type": "string"}},
+                        "required": ["target_python"],
+                        "additionalProperties": false
+                    },
+                    "aliases": {"aliases": {}, "properties": {"target_python": {"aliases": {}, "properties": {}}}},
+                    "defaults": {},
+                    "review_required": ["test"]
+                }),
+                &json!({"input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}}),
+            )
+            .unwrap(),
+            no_log: false,
+            projection: None,
+        };
+        assert_eq!(
+            interpreters(&plan, "/opt/site/bin/python3", false).unwrap(),
+            vec!["/opt/site/bin/python3"]
+        );
+        assert_eq!(
+            interpreters(&plan, "", false).unwrap(),
+            vec!["/usr/bin/python3"]
+        );
+        let dynamic = interpreters(&plan, "", true).unwrap();
+        assert_eq!(dynamic[0], "/usr/bin/python3");
+        assert!(dynamic.contains(&"/usr/local/bin/python3"));
+        assert!(dynamic.contains(&"python3"));
     }
 }

@@ -76,6 +76,7 @@ impl CompiledBinding {
             ),
             revision: raw.revision,
             targets,
+            dynamic_targets: false,
             input_schema: Arc::new(
                 schema
                     .as_object()

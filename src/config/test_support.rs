@@ -16,14 +16,26 @@ python='/private-authority/python'
 "#
 }
 
+pub(super) fn capabilities_toml(profile: &str) -> &'static str {
+    match profile {
+        "baseline" => {
+            "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }"
+        }
+        "actions-only" => "capabilities = { named = true }",
+        "read-only-files" => "capabilities = { file_read = true }",
+        "files-only" => "capabilities = { file_read = true, file_write = true }",
+        _ => panic!("unknown test capability preset {profile}"),
+    }
+}
+
 pub(super) fn automation_text(global: &str, target: &str, enabled: bool) -> String {
     format!(
         r#"
-profile={global:?}
-enabled_tools={}
+{global_caps}
+enabled_tools={enabled}
 [targets.server]
 ssh_host='native-alias'
-profile={target:?}
+{target_caps}
 [automation]
 runtime='/unavailable/runtime.json'
 workspace_root='/unavailable/workspace'
@@ -40,7 +52,9 @@ execution={{kind='ansible_module',snapshot='/unavailable/snapshot.json'}}
 result={{kind='ansible_summary'}}
 input_schema={{type='object',additionalProperties=false,required=[],properties={{}}}}
 "#,
-        if enabled { "['probe']" } else { "[]" }
+        global_caps = capabilities_toml(global),
+        target_caps = capabilities_toml(target),
+        enabled = if enabled { "['probe']" } else { "[]" }
     )
 }
 

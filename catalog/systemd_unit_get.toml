@@ -3,9 +3,10 @@
 # input_schema/fixed_args/input_map as overlay.json, then import offline:
 # estus --config systemd_unit_get.toml schema import-role systemd_unit_get --role-path /etc/estus/roles/systemd_unit_get --overlay overlay.json --output /etc/estus/systemd_unit_get.schema.json
 # Review snapshot before activation; provision workspace 0700, target Python/systemctl.
-# Unit policy changes require reviewing BOTH schema enum and fixed allowed_units.
+# Unit policy changes review constraints.allowed_units (single source for schema enum and backend allowlist).
 # User scope needs the executing account's running user manager and runtime environment.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["systemd_unit_get"]
 [targets.server]
 ssh_host = "server-ordinary"
@@ -24,10 +25,11 @@ targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "ansible_role", snapshot = "/etc/estus/systemd_unit_get.schema.json", role_path = "/etc/estus/systemd_unit_get.schema.roles/systemd_unit_get", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
 input_map = { "unit" = "unit" }
+constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
 limits = { timeout_secs = 60 }
-input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "enum" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"], "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
 [tools.systemd_unit_get.result]
 kind = "ansible_projection"
 fields = { "scope" = ["mcp_result", "scope"], "properties" = ["mcp_result", "properties"], "unavailable" = ["mcp_result", "unavailable"] }

@@ -58,16 +58,40 @@ pub(crate) struct DoctorArgs {
     pub timeout_secs: Option<u64>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawCapabilities {
+    named: Option<bool>,
+    file_read: Option<bool>,
+    file_write: Option<bool>,
+    exec: Option<bool>,
+    sudo: Option<bool>,
+}
+
+impl RawCapabilities {
+    fn resolve(self, defaults: Capabilities) -> Capabilities {
+        Capabilities {
+            named: self.named.unwrap_or(defaults.named),
+            file_read: self.file_read.unwrap_or(defaults.file_read),
+            file_write: self.file_write.unwrap_or(defaults.file_write),
+            exec: self.exec.unwrap_or(defaults.exec),
+            sudo: self.sudo.unwrap_or(defaults.sudo),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Document {
-    profile: Profile,
-    destination_policy: TargetMode,
+    mode: Mode,
+    capabilities: Option<RawCapabilities>,
+    destination_policy: Option<TargetMode>,
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
     directory: crate::filesystem::data::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
+    rules: BTreeMap<String, rules::RawHostRule>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
     enabled_generic_tools: Vec<String>,
@@ -81,15 +105,15 @@ struct Document {
 impl Default for Document {
     fn default() -> Self {
         Self {
-            // Target profile omission still uses Profile::default (Baseline),
-            // which imposes no additional restriction on this global ceiling.
-            profile: Profile::ActionsOnly,
-            destination_policy: TargetMode::default(),
+            mode: Mode::Headless,
+            capabilities: None,
+            destination_policy: None,
             ssh: Ssh::default(),
             limits: Limits::default(),
             output: crate::output::Limits::default(),
             directory: crate::filesystem::data::DirectoryLimits::default(),
             targets: None,
+            rules: BTreeMap::new(),
             tools: BTreeMap::new(),
             enabled_tools: Vec::new(),
             enabled_generic_tools: Vec::new(),
@@ -101,7 +125,6 @@ impl Default for Document {
         }
     }
 }
-
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct CatalogSettings {
@@ -337,12 +360,33 @@ impl Config {
             let base = path.parent().unwrap_or(cwd).to_path_buf();
             (document, base)
         } else {
-            (Document::default(), cwd.to_path_buf())
+            let document = Document {
+                mode: Mode::Workstation,
+                destination_policy: Some(TargetMode::Open),
+                ..Default::default()
+            };
+            (document, cwd.to_path_buf())
         };
 
-        // Omission never grants destination authority. None is the resolved
-        // representation of explicit open mode only, not a document default.
-        match document.destination_policy {
+        let capabilities = match (document.mode, document.capabilities.take()) {
+            (Mode::Workstation, None) => Capabilities::all(),
+            (Mode::Workstation, Some(raw)) => raw.resolve(Capabilities::all()),
+            (Mode::Headless, None) => Capabilities::actions_only(),
+            (Mode::Headless, Some(raw)) => raw.resolve(Capabilities {
+                named: false,
+                file_read: false,
+                file_write: false,
+                exec: false,
+                sudo: false,
+            }),
+        };
+
+        let destination_policy = match (document.mode, document.destination_policy.take()) {
+            (_, Some(policy)) => policy,
+            (Mode::Workstation, None) if document.targets.is_none() => TargetMode::Open,
+            (_, None) => TargetMode::Configured,
+        };
+        match destination_policy {
             TargetMode::Configured => {
                 document.targets.get_or_insert_with(BTreeMap::new);
             }
@@ -456,7 +500,8 @@ impl Config {
             &document.automation,
             document.targets.as_ref(),
         )?;
-        let bindings = Bindings::compile(
+        let rules = rules::compile_rules(document.rules)?;
+        let mut bindings = Bindings::compile_with_mode(
             document.tools,
             &document.enabled_tools,
             &document.limits,
@@ -467,9 +512,40 @@ impl Config {
                     .is_some_and(|targets| targets.contains_key(name))
             },
             document.controller.workspace_root.as_deref(),
-            document.profile.permits_bindings(),
+            capabilities.permits_bindings(),
+            document.mode == Mode::Workstation,
         )?;
         validate_bindings(&bindings, document.targets.as_ref(), &document.automation)?;
+        if document.mode == Mode::Workstation && capabilities.named {
+            let catalog_source = document
+                .catalog
+                .root
+                .clone()
+                .or_else(|| env("ESTUS_CATALOG_ROOT").map(PathBuf::from))
+                .map(|p| resolve_path(p, &base, "catalog.root"))
+                .transpose()?;
+            if let Some(path) = catalog_source {
+                let catalog = crate::catalog::assets::Catalog::load(Some(&path))
+                    .map_err(|reason| invalid("catalog", reason))?;
+                for name in crate::catalog::assets::pinned_dynamic_payload_names() {
+                    if document.disabled_tools.iter().any(|d| d == name)
+                        || bindings.entries().any(|(_, b)| b.name == name)
+                    {
+                        continue;
+                    }
+                    let (tool_def, source, manifest_bytes) = catalog
+                        .load_pinned_payload(name)
+                        .map_err(|reason| invalid("catalog", reason))?;
+                    bindings.push_dynamic_payload(
+                        name.to_owned(),
+                        tool_def,
+                        source,
+                        &manifest_bytes,
+                        &document.limits,
+                    )?;
+                }
+            }
+        }
         let ssh_override = cli.ssh.or_else(|| env("ESTUS_SSH").map(PathBuf::from));
         let selected = match ssh_override {
             Some(path) => Some(resolve_path(path, cwd, "ssh.executable")?),
@@ -481,13 +557,15 @@ impl Config {
         };
         let ssh_executable = resolve_ssh_executable(selected, || env("PATH"))?;
         Ok(Self {
-            profile: document.profile,
+            mode: document.mode,
+            capabilities,
             ssh_config,
             ssh_executable,
             limits: document.limits,
             output: document.output,
             directory: document.directory,
             targets: document.targets,
+            rules,
             bindings,
             automation: document.automation,
         })
@@ -1057,7 +1135,32 @@ mod tests {
         )
         .unwrap();
         let config = Config::load_with(cli(), dir.path(), |_| None).unwrap();
-        assert!(config.targets.as_ref().is_some_and(BTreeMap::is_empty));
+        assert_eq!(config.mode, Mode::Workstation);
+        assert_eq!(config.capabilities, Capabilities::all());
+        assert!(config.targets.is_none());
+    }
+
+    #[tokio::test]
+    async fn workstation_loads_pinned_bundled_dynamic_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+        let mut config = Config::load_with(cli(), dir.path(), |key| {
+            (key == "ESTUS_CATALOG_ROOT").then(|| root.as_os_str().to_owned())
+        })
+        .unwrap();
+        assert_eq!(config.mode, Mode::Workstation);
+        config
+            .activate_automation(&tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+            assert!(
+                config.bindings.entries().any(|(id, b)| b.name == name
+                    && config.binding_enabled(id)
+                    && b.has_dynamic_targets()),
+                "missing dynamic workstation tool {name}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1117,7 +1220,7 @@ result = {{ kind = "command" }}
     fn target_selection_matches_discovery_and_cannot_resurrect_global_disables() {
         let config = load(&format!(
             r#"
-profile = "actions-only"
+capabilities = {{ named = true }}
 enabled_tools = ["observe", "other"]
 disabled_tools = ["other"]
 [targets.one]
@@ -1179,7 +1282,7 @@ enabled_tools = ["other"]
     fn explicit_empty_target_selection_denies_every_named_tool() {
         let config = load(&format!(
             r#"
-profile = "actions-only"
+capabilities = {{ named = true }}
 enabled_tools = ["observe"]
 [targets.one]
 ssh_host = "ordinary-one"
@@ -1209,7 +1312,7 @@ tool_presets = []
         assert_eq!(inert.bindings.entries().count(), 0);
         assert!(!inert.automation.required);
         let prefix = format!(
-            "profile='actions-only'\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[targets.two]\nssh_host='two'\n"
+            "capabilities = {{ named = true }}\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[targets.two]\nssh_host='two'\n"
         );
         assert!(
             load(&prefix).is_err(),

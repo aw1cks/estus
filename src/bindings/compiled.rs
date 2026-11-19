@@ -15,7 +15,7 @@ use crate::{
     reply::ToolError,
 };
 
-use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot};
+use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot, SiteConstraints};
 use plans::AutomationPlan;
 pub(crate) use plans::{AutomationTransport, ControllerPlan, PreparedController, controller_root};
 
@@ -27,6 +27,62 @@ pub(crate) const EXECUTOR_KIND: &str = "native_argv";
 pub(crate) const RESULT_KIND: &str = "command";
 
 const MAX_SCHEMA_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_BINDINGS: usize = 256;
+
+fn valid_unit_name(unit: &str) -> bool {
+    !unit.is_empty()
+        && unit.len() <= 128
+        && unit
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@.:-".contains(&byte))
+}
+
+pub(crate) fn apply_site_constraints(
+    input_schema: &mut Value,
+    fixed_args: &mut Value,
+    constraints: Option<&SiteConstraints>,
+) -> Result<(), &'static str> {
+    let Some(fixed_obj) = fixed_args.as_object_mut() else {
+        return Err("Fixed module arguments must be an object");
+    };
+    let existing_fixed = fixed_obj.get("allowed_units").cloned();
+    let existing_enum = input_schema
+        .get("properties")
+        .and_then(|props| props.get("unit"))
+        .and_then(|unit| unit.get("enum"))
+        .cloned();
+    if let Some(constraints) = constraints {
+        if let Some(units) = &constraints.allowed_units {
+            if units.is_empty()
+                || units.len() > 32
+                || units.iter().any(|u| !valid_unit_name(u))
+                || units.iter().collect::<BTreeSet<_>>().len() != units.len()
+            {
+                return Err("Invalid site unit constraints");
+            }
+            if existing_fixed.is_some() || existing_enum.is_some() {
+                return Err(
+                    "constraints.allowed_units cannot be combined with manual allowed_units or unit enum",
+                );
+            }
+            let unit_prop = input_schema
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+                .and_then(|props| props.get_mut("unit"))
+                .and_then(Value::as_object_mut)
+                .ok_or("constraints.allowed_units requires input_schema.properties.unit")?;
+            let units_value =
+                Value::Array(units.iter().map(|u| Value::String(u.clone())).collect());
+            unit_prop.insert("enum".into(), units_value.clone());
+            fixed_obj.insert("allowed_units".into(), units_value);
+        }
+    } else if let (Some(fixed_units), Some(enum_units)) = (existing_fixed, existing_enum)
+        && fixed_units != enum_units
+    {
+        return Err("Inconsistent fixed_args.allowed_units and input_schema.properties.unit.enum");
+    }
+    Ok(())
+}
 const RESERVED: &[&str] = &[
     "host",
     "timeout_secs",
@@ -371,6 +427,7 @@ pub(crate) struct CompiledBinding {
     pub(crate) description: String,
     pub(crate) revision: String,
     pub(crate) targets: Vec<String>,
+    pub(crate) dynamic_targets: bool,
     pub(crate) input_schema: Arc<JsonObject>,
     enabled: bool,
     effects: Vec<Effect>,
@@ -412,6 +469,7 @@ struct ControllerActivation<'a> {
 }
 
 impl Bindings {
+    #[cfg(test)]
     pub(crate) fn compile(
         raw: BTreeMap<String, toml::Value>,
         enabled: &[String],
@@ -420,8 +478,28 @@ impl Bindings {
         workspace_root: Option<&str>,
         active_profile: bool,
     ) -> Result<Self, ConfigError> {
-        if raw.len() > 32 {
-            return Err(invalid("At most 32 named tools are allowed"));
+        Self::compile_with_mode(
+            raw,
+            enabled,
+            limits,
+            target_exists,
+            workspace_root,
+            active_profile,
+            false,
+        )
+    }
+
+    pub(crate) fn compile_with_mode(
+        raw: BTreeMap<String, toml::Value>,
+        enabled: &[String],
+        limits: &Limits,
+        target_exists: impl Fn(&str) -> bool,
+        workspace_root: Option<&str>,
+        active_profile: bool,
+        workstation: bool,
+    ) -> Result<Self, ConfigError> {
+        if raw.len() > MAX_BINDINGS {
+            return Err(invalid("At most 256 named tools are allowed"));
         }
         let selected: BTreeSet<_> = enabled.iter().map(String::as_str).collect();
         if selected.len() != enabled.len() || enabled.iter().any(|name| !raw.contains_key(name)) {
@@ -452,10 +530,37 @@ impl Bindings {
                     limits,
                     &target_exists,
                     &mut activation,
+                    workstation,
                 )
             })
             .collect::<Result<_, _>>()?;
         Ok(Self { entries })
+    }
+
+    pub(crate) fn push_dynamic_payload(
+        &mut self,
+        name: String,
+        raw_toml: toml::Value,
+        source: Vec<u8>,
+        manifest_bytes: &[u8],
+        limits: &Limits,
+    ) -> Result<BindingId, ConfigError> {
+        if self.entries.len() >= MAX_BINDINGS {
+            return Err(invalid("At most 256 named tools are allowed"));
+        }
+        if !identifier(&name) || self.entries.iter().any(|b| b.name == name) {
+            return Err(invalid("Invalid or duplicate bundled tool identifier"));
+        }
+        let mut raw: RawBinding = raw_toml
+            .try_into()
+            .map_err(|_| invalid("Invalid bundled tool definition"))?;
+        raw.targets = None;
+        let mut compiled =
+            CompiledBinding::compile_payload(name, raw, true, limits, &|_| false, true)?;
+        compiled.activate_bundled_payload(source, manifest_bytes)?;
+        let id = BindingId(self.entries.len());
+        self.entries.push(compiled);
+        Ok(id)
     }
     pub(crate) fn entries(&self) -> impl Iterator<Item = (BindingId, &CompiledBinding)> {
         self.entries
@@ -564,12 +669,12 @@ impl CompiledBinding {
             }
             _ => unreachable!("module result checked"),
         };
-        let schema = serde_json::to_value(
+        let mut schema = serde_json::to_value(
             raw.input_schema
                 .ok_or_else(|| invalid("Input schema is required"))?,
         )
         .map_err(|_| invalid("Invalid module schema"))?;
-        let fixed = raw
+        let mut fixed = raw
             .fixed_args
             .map(serde_json::to_value)
             .transpose()
@@ -578,6 +683,8 @@ impl CompiledBinding {
         if !fixed.is_object() {
             return Err(invalid("Fixed module arguments must be an object"));
         }
+        apply_site_constraints(&mut schema, &mut fixed, raw.constraints.as_ref())
+            .map_err(invalid)?;
         let mut overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
         if let Some(argument_types) = raw.argument_types {
             if !matches!(source, AnsibleSource::Module) {
@@ -625,6 +732,7 @@ impl CompiledBinding {
             description: raw.description,
             revision: raw.revision,
             targets,
+            dynamic_targets: false,
             input_schema: Arc::new(published),
             enabled,
             effects: raw.effects,
@@ -651,12 +759,13 @@ impl CompiledBinding {
         limits: &Limits,
         target_exists: &impl Fn(&str) -> bool,
         activation: &mut ControllerActivation<'_>,
+        workstation: bool,
     ) -> Result<Self, ConfigError> {
         if matches!(&raw.execution, RawExecution::AnsibleGeneric { .. }) {
             return Self::compile_generic(name, raw, enabled, limits, target_exists);
         }
         if matches!(&raw.execution, RawExecution::NativePayload { .. }) {
-            return Self::compile_payload(name, raw, enabled, limits, target_exists);
+            return Self::compile_payload(name, raw, enabled, limits, target_exists, workstation);
         }
         if matches!(
             &raw.execution,
@@ -666,7 +775,11 @@ impl CompiledBinding {
         ) {
             return Self::compile_automation(name, raw, enabled, limits, target_exists);
         }
-        if raw.fixed_args.is_some() || raw.input_map.is_some() || raw.argument_types.is_some() {
+        if raw.fixed_args.is_some()
+            || raw.input_map.is_some()
+            || raw.argument_types.is_some()
+            || raw.constraints.is_some()
+        {
             return Err(invalid(
                 "Module overlay fields require ansible_module execution",
             ));
@@ -945,6 +1058,7 @@ impl CompiledBinding {
             description: raw.description,
             revision: raw.revision,
             targets,
+            dynamic_targets: false,
             input_schema,
             enabled,
             effects: raw.effects,
@@ -1099,6 +1213,16 @@ impl CompiledBinding {
 
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
+    }
+    pub(crate) fn has_dynamic_targets(&self) -> bool {
+        self.dynamic_targets
+    }
+    pub(crate) fn permits_host(&self, host: &str) -> bool {
+        if self.dynamic_targets {
+            crate::config::destination(host, "host").is_ok()
+        } else {
+            self.targets.iter().any(|target| target == host)
+        }
     }
     pub(crate) fn read_only(&self) -> bool {
         !self.is_generic()

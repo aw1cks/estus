@@ -1,4 +1,5 @@
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["record_identity"]
 
 [ssh]

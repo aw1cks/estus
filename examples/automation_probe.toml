@@ -2,7 +2,8 @@
 # before enabling. Provision the workspace as mode 0700, owned by the MCP account.
 # Run through .#automation-msrv or an installed wheel with its ansible extra.
 # MCP input: {"host":"server","inputs":{}}
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["automation_probe"]
 
 [targets.server]

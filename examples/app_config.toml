@@ -8,7 +8,8 @@
 # Provision /var/lib/estus/runner mode 0700 owned by the MCP account.
 # The SSH account must own /srv/example-app; no become or service operation occurs.
 # MCP: {"host":"server","inputs":{"instance":"frontend","config":{"banner":"Hello 雪","enabled":true,"port":8080}}}
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["app_config"]
 
 [targets.server]

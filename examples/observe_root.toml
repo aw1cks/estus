@@ -2,7 +2,8 @@
 # Assumes GNU id at /usr/bin/id and independently configured OpenSSH aliases.
 # The separate alias must use an appropriately restricted privileged SSH identity.
 # Revision identifies the definition, not the remote executable's content.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["observe_root"]
 
 [targets.server]

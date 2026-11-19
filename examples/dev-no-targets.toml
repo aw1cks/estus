@@ -1,5 +1,6 @@
 # Safe policy for the direct development MCP app: no destinations or fixtures.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 destination_policy = "configured"
 
 [targets]

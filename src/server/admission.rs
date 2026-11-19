@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{audit, reply::ToolError};
 
 const READ_SLOTS: usize = 4;
+const MAX_DYNAMIC_GATES: usize = 256;
 
 #[derive(Clone)]
 struct QuarantineState {
@@ -88,21 +89,48 @@ impl TargetGate {
     }
 }
 
+struct GateEntry {
+    gate: Arc<TargetGate>,
+    last_used: u64,
+}
+
+struct AdmissionState {
+    gates: BTreeMap<String, GateEntry>,
+    seq: u64,
+}
+
 pub(super) struct TargetAdmission {
-    gates: BTreeMap<String, Arc<TargetGate>>,
+    dynamic_hosts: bool,
+    state: Mutex<AdmissionState>,
 }
 
 impl TargetAdmission {
-    pub(super) fn new<'a>(hosts: impl Iterator<Item = &'a String>) -> Self {
+    pub(super) fn new<'a>(hosts: impl Iterator<Item = &'a String>, dynamic_hosts: bool) -> Self {
+        let mut seq = 0u64;
+        let gates = hosts
+            .map(|host| {
+                seq += 1;
+                (
+                    host.clone(),
+                    GateEntry {
+                        gate: TargetGate::new(),
+                        last_used: seq,
+                    },
+                )
+            })
+            .collect();
         Self {
-            gates: hosts
-                .map(|host| (host.clone(), TargetGate::new()))
-                .collect(),
+            dynamic_hosts,
+            state: Mutex::new(AdmissionState { gates, seq }),
         }
     }
 
     pub(super) fn contains(&self, host: &str) -> bool {
-        self.gates.contains_key(host)
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .gates
+            .contains_key(host)
     }
 
     pub(super) async fn acquire(
@@ -171,14 +199,58 @@ impl TargetAdmission {
     }
 
     pub(super) fn clear_quarantine(&self, host: &str) -> Option<ClearedQuarantine> {
-        self.gates.get(host)?.clear_quarantine()
+        let gate = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.gates.get(host).map(|entry| Arc::clone(&entry.gate))
+        }?;
+        gate.clear_quarantine()
     }
 
     fn gate(&self, host: &str) -> Result<Arc<TargetGate>, ToolError> {
-        self.gates
-            .get(host)
-            .cloned()
-            .ok_or_else(|| ToolError::new("policy_denied", "Operation is not authorized", false))
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.seq = state.seq.saturating_add(1);
+        let seq = state.seq;
+        if let Some(entry) = state.gates.get_mut(host) {
+            entry.last_used = seq;
+            return Ok(Arc::clone(&entry.gate));
+        }
+        if !self.dynamic_hosts {
+            return Err(ToolError::new(
+                "policy_denied",
+                "Operation is not authorized",
+                false,
+            ));
+        }
+        if state.gates.len() >= MAX_DYNAMIC_GATES {
+            let victim = state
+                .gates
+                .iter()
+                .filter(|(_, entry)| {
+                    Arc::strong_count(&entry.gate) == 1
+                        && !entry.gate.is_quarantined()
+                        && entry.gate.reads.available_permits() == READ_SLOTS
+                        && entry.gate.rw.try_write().is_ok()
+                })
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(name, _)| name.clone());
+            let Some(victim) = victim else {
+                return Err(ToolError::new(
+                    "resource_limit",
+                    "Dynamic target gate capacity reached",
+                    false,
+                ));
+            };
+            state.gates.remove(&victim);
+        }
+        let gate = TargetGate::new();
+        state.gates.insert(
+            host.to_owned(),
+            GateEntry {
+                gate: Arc::clone(&gate),
+                last_used: seq,
+            },
+        );
+        Ok(gate)
     }
 }
 
@@ -305,7 +377,7 @@ mod tests {
 
     fn admission_with(hosts: &[&str]) -> TargetAdmission {
         let owned: Vec<String> = hosts.iter().map(|h| (*h).to_owned()).collect();
-        TargetAdmission::new(owned.iter())
+        TargetAdmission::new(owned.iter(), false)
     }
 
     #[tokio::test]
@@ -524,5 +596,68 @@ mod tests {
         assert_eq!(blocked.code, "target_quarantined");
         let cleared = admission.clear_quarantine("alpha").unwrap();
         assert_eq!(cleared.cause, "worker_lost");
+    }
+
+    #[tokio::test]
+    async fn dynamic_host_gates_cap_at_256_evict_idle_non_quarantined_and_preserve_quarantine() {
+        let admission = TargetAdmission::new(std::iter::empty(), true);
+        let ct = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        // Saturate 256 dynamic gates with active read leases.
+        let mut active_reads = Vec::new();
+        for idx in 0..256 {
+            let host = format!("host-{idx:03}");
+            active_reads.push(
+                admission
+                    .acquire_read(&host, deadline, &ct, &shutdown)
+                    .await
+                    .unwrap(),
+            );
+        }
+        // 257th distinct host must reject with resource_limit while all 256 are active.
+        let overflow = admission
+            .acquire_read("host-256", deadline, &ct, &shutdown)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(overflow.code, "resource_limit");
+
+        // Quarantine host-000, drop its active lease, and verify it cannot be evicted.
+        let first_read = active_reads.remove(0);
+        drop(first_read);
+        let mut w0 = admission
+            .acquire_write("host-000", deadline, &ct, &shutdown)
+            .await
+            .unwrap();
+        w0.mark_dispatched("host-000".into(), "ordinary".into(), "native_payload");
+        w0.finish(true, "timeout");
+
+        // host-000 is idle but quarantined: 257th host still cannot evict it while 255 others remain active.
+        let blocked_evict = admission
+            .acquire_read("host-256", deadline, &ct, &shutdown)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(blocked_evict.code, "resource_limit");
+
+        // Drop idle non-quarantined host-001: now 257th host succeeds by evicting host-001 while host-000 stays quarantined.
+        let second_read = active_reads.remove(0);
+        drop(second_read);
+        let r256 = admission
+            .acquire_read("host-256", deadline, &ct, &shutdown)
+            .await
+            .unwrap();
+        assert!(!admission.contains("host-001"));
+        assert!(admission.contains("host-000"));
+        assert!(
+            admission
+                .acquire_write("host-000", deadline, &ct, &shutdown)
+                .await
+                .is_err()
+        );
+        drop(r256);
+        drop(active_reads);
     }
 }

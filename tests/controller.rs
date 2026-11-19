@@ -331,7 +331,7 @@ impl Fixture {
             &config,
             format!(
                 r#"
-profile = "actions-only"
+capabilities = {{ named = true }}
 enabled_tools = ["observe_controller"]
 [controller]
 workspace_root = {root}

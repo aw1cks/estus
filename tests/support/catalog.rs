@@ -92,7 +92,7 @@ impl Guest {
         }
         let ssh = support::find_program("ssh")?;
         let config = root.path().join("server.toml");
-        let value = json!({"profile":"actions-only", "ssh":{"config_file":root.path().join("ssh_config"),"executable":ssh},"targets":{"plain":{"ssh_host":"plain"}},"automation":{"authorities":{"catalog":{"ssh_config_file":root.path().join("authority_ssh_config"),"become":{"method":"sudo","user":"root"},"targets":{"plain":{"destination":"catalog-admin","python":"/usr/bin/python3"}}}}}});
+        let value = json!({"mode":"headless","capabilities":{"named":true},"ssh":{"config_file":root.path().join("ssh_config"),"executable":ssh},"targets":{"plain":{"ssh_host":"plain"}},"automation":{"authorities":{"catalog":{"ssh_config_file":root.path().join("authority_ssh_config"),"become":{"method":"sudo","user":"root"},"targets":{"plain":{"destination":"catalog-admin","python":"/usr/bin/python3"}}}}}});
         fs::write(&config, toml::to_string(&toml::Value::try_from(value)?)?)?;
         let log = fs::File::create(root.path().join("console.log"))?;
         let child = Command::new(runner)
@@ -318,8 +318,14 @@ impl Binding {
                 !units.as_array().context("reviewed units")?.is_empty(),
                 "empty unit policy"
             );
-            tool["fixed_args"]["allowed_units"] = units.clone();
-            tool["input_schema"]["properties"]["unit"]["enum"] = units.clone();
+            let constraints = tool
+                .as_table_mut()
+                .context("tool table")?
+                .entry("constraints")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .context("constraints table")?;
+            constraints.insert("allowed_units".into(), units.clone());
         }
         let timeout_secs = tool["limits"]["timeout_secs"]
             .as_integer()
@@ -337,7 +343,8 @@ impl Binding {
         fs::create_dir(&workspace)?;
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
         let mut site: toml::Value = toml::from_str(&fs::read_to_string(base)?)?;
-        site["profile"] = "actions-only".into();
+        site["mode"] = "headless".into();
+        site["capabilities"] = toml::Value::try_from(json!({"named":true}))?;
         site.as_table_mut().context("site")?.insert(
             "enabled_tools".into(),
             toml::Value::try_from(json!([name]))?,
@@ -503,7 +510,11 @@ impl Binding {
             .unwrap_or(20);
         fs::write(&definitions, toml::to_string(&document)?)?;
         let mut site: toml::Table = toml::from_str(&fs::read_to_string(base)?)?;
-        site.insert("profile".into(), "actions-only".into());
+        site.insert("mode".into(), "headless".into());
+        site.insert(
+            "capabilities".into(),
+            toml::Value::try_from(json!({"named":true}))?,
+        );
         site.insert(
             "enabled_tools".into(),
             toml::Value::try_from(json!([name]))?,

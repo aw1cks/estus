@@ -1107,20 +1107,21 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
         // test-only sudo policy. The fixture owns this additional config's path.
         let config = fixture.config.with_file_name("sudo-bound-actions.toml");
         let mut baseline: toml::Table = toml::from_str(&std::fs::read_to_string(&fixture.config)?)?;
-        baseline.remove("profile");
+        baseline.remove("capabilities");
+        baseline.remove("mode");
         let baseline = toml::to_string(&baseline)?;
         std::fs::write(
             &config,
             format!(
                 "{}{baseline}{}",
                 indoc::indoc! {r#"
-                    profile = "actions-only"
+                    capabilities = { named = true }
                     enabled_tools = ["ordinary_identity", "root_identity", "root_literal"]
                 "#},
                 indoc::indoc! {r#"
                     [targets.locked]
                     ssh_host = "same"
-                    profile = "read-only-files"
+                    capabilities = { file_read = true }
                     [targets.locked.sudo]
                     mode = "same-account"
                     users = ["root"]

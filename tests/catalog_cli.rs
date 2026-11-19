@@ -317,16 +317,33 @@ result={{kind="command"}}
 "#
         ));
     }
-    for (profile, execution, file_read, file_write, bindings) in [
+    for (caps, execution, file_read, file_write, bindings) in [
         (None, false, false, false, true),
-        (Some("baseline"), true, true, true, true),
-        (Some("read-only-files"), false, true, false, false),
-        (Some("files-only"), false, true, true, false),
+        (
+            Some(
+                "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }",
+            ),
+            true,
+            true,
+            true,
+            true,
+        ),
+        (
+            Some("capabilities = { file_read = true }"),
+            false,
+            true,
+            false,
+            false,
+        ),
+        (
+            Some("capabilities = { file_read = true, file_write = true }"),
+            false,
+            true,
+            true,
+            false,
+        ),
     ] {
-        let selected = profile.map_or_else(
-            || text.clone(),
-            |profile| format!("profile='{profile}'\n{text}"),
-        );
+        let selected = caps.map_or_else(|| text.clone(), |caps| format!("{caps}\n{text}"));
         std::fs::write(&site, selected)?;
         let output = Command::new(test_binary())
             .args(["catalog", "--root"])
@@ -367,7 +384,7 @@ result={{kind="command"}}
             report["global_native_execution"] == execution
                 && report["global_native_file_read"] == file_read
                 && report["global_native_file_write"] == file_write,
-            "inspection disagrees with global exposure for {profile:?}"
+            "inspection disagrees with global exposure for {caps:?}"
         );
         ensure!(
             report["tools"]
@@ -375,7 +392,7 @@ result={{kind="command"}}
                 .context("resolved tools")?
                 .iter()
                 .all(|v| v["enabled"] == bindings && v["targets"][0]["permitted"] == bindings),
-            "inspect did not resolve named authority for {profile:?}"
+            "inspect did not resolve named authority for {caps:?}"
         );
         ensure!(report["qualification_scope"] == "catalog_template");
         for tool in report["tools"].as_array().context("inspected tools")? {
@@ -577,7 +594,7 @@ async fn preparation_rejects_fifo_ssh_config_without_hanging_or_partial_output()
     std::fs::write(
         &site,
         format!(
-            "profile='actions-only'\n[ssh]\nconfig_file={fifo:?}\n[targets.server]\nssh_host='private-alias'\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
+            "capabilities = {{ named = true }}\n[ssh]\nconfig_file={fifo:?}\n[targets.server]\nssh_host='private-alias'\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
         ),
     )?;
     let prepared = root.path().join("prepared");
@@ -643,7 +660,7 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     std::fs::write(
         &site,
         format!(
-            "profile='actions-only'\n[ssh]\nexecutable='missing-site-ssh'\nconfig_file='missing-site.conf'\n[targets.server]\nssh_host='private-alias'\n[automation]\nruntime={runtime:?}\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
+            "capabilities = {{ named = true }}\n[ssh]\nexecutable='missing-site-ssh'\nconfig_file='missing-site.conf'\n[targets.server]\nssh_host='private-alias'\n[automation]\nruntime={runtime:?}\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
         ),
     )?;
     let valid_site = root.path().join("valid-site.toml");
@@ -794,5 +811,107 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         bundles == 1,
         "catalog preparation copied its role parent more than once"
     );
+    Ok(())
+}
+
+#[test]
+fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let export_a = root.path().join("export-a");
+    let export_b = root.path().join("export-b");
+    ensure!(
+        invoke(&[
+            "export".as_ref(),
+            "--tool".as_ref(),
+            "systemd_unit_get".as_ref(),
+            "--tool".as_ref(),
+            "cpu_stats".as_ref(),
+            "--output".as_ref(),
+            export_a.as_os_str(),
+        ])?
+        .status
+        .success()
+    );
+    ensure!(
+        invoke(&[
+            "export".as_ref(),
+            "--tool".as_ref(),
+            "systemd_unit_get".as_ref(),
+            "--tool".as_ref(),
+            "memory_stats".as_ref(),
+            "--output".as_ref(),
+            export_b.as_os_str(),
+        ])?
+        .status
+        .success()
+    );
+    let mut doc_b: toml::Value =
+        toml::from_str(&std::fs::read_to_string(export_b.join("tools.toml"))?)?;
+    doc_b["tools"]["systemd_unit_get"]["constraints"]["allowed_units"] =
+        toml::Value::Array(vec!["nginx.service".into()]);
+    doc_b["tools"]["systemd_unit_get"]["revision"] = "2".into();
+    std::fs::write(export_b.join("tools.toml"), toml::to_string(&doc_b)?)?;
+
+    let diff_out = invoke(&[
+        "diff".as_ref(),
+        "--base".as_ref(),
+        export_a.join("tools.toml").as_os_str(),
+        "--candidate".as_ref(),
+        export_b.join("tools.toml").as_os_str(),
+    ])?;
+    ensure!(
+        diff_out.status.success(),
+        "catalog diff failed: {}",
+        String::from_utf8_lossy(&diff_out.stderr)
+    );
+    let diff: serde_json::Value = serde_json::from_slice(&diff_out.stdout)?;
+    ensure!(diff["ok"] == true);
+    ensure!(diff["added"] == serde_json::json!(["memory_stats"]));
+    ensure!(diff["removed"] == serde_json::json!(["cpu_stats"]));
+    let changed = diff["changed"].as_array().context("changed array")?;
+    ensure!(changed.len() == 1 && changed[0]["name"] == "systemd_unit_get");
+    ensure!(changed[0].get("constraints").is_some());
+    ensure!(changed[0].get("approval_identity").is_some());
+
+    let site = root.path().join("site.toml");
+    std::fs::write(
+        &site,
+        "mode = 'headless'\ncapabilities = { named = true }\n",
+    )?;
+    let inspect_out = Command::new(env!("CARGO_BIN_EXE_estus"))
+        .arg("catalog")
+        .arg("--root")
+        .arg(assets())
+        .args(["inspect", "--site"])
+        .arg(&site)
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_CATALOG_ROOT")
+        .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"))
+        .output()?;
+    ensure!(
+        inspect_out.status.success(),
+        "inspect failed: {}",
+        String::from_utf8_lossy(&inspect_out.stderr)
+    );
+    let inspect: serde_json::Value = serde_json::from_slice(&inspect_out.stdout)?;
+    let omitted = inspect["omitted_templates"]
+        .as_array()
+        .context("omitted_templates")?;
+    ensure!(
+        omitted
+            .iter()
+            .any(|t| t["name"] == "host_summary" && t["reason"] == "requires_runner_and_approval")
+    );
+    ensure!(
+        omitted
+            .iter()
+            .any(|t| t["name"] == "cpu_stats" && t["reason"] == "not_prepared")
+    );
+    ensure!(
+        omitted
+            .iter()
+            .any(|t| t["name"] == "network_links_list" && t["reason"] == "site_policy_required")
+    );
+    ensure!(omitted.iter().any(|t| t["reason"] == "laboratory_only"));
     Ok(())
 }

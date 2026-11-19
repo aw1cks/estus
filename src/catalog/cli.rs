@@ -62,7 +62,9 @@ impl CatalogArgs {
     ) -> Result<(), &'static str> {
         let offline = matches!(
             &self.command,
-            CatalogCommand::List { .. } | CatalogCommand::Export { .. }
+            CatalogCommand::List { .. }
+                | CatalogCommand::Export { .. }
+                | CatalogCommand::Diff { .. }
         );
         if offline && (explicit_config || explicit_ssh) {
             return Err("catalog_option_not_applicable");
@@ -113,6 +115,15 @@ enum CatalogCommand {
         /// Overall offline preparation deadline, including all selected imports.
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600))]
         timeout_secs: u64,
+    },
+    /// Compare reviewed tool definitions, effects, constraints, and approval identities offline.
+    Diff {
+        /// Baseline tools.toml or prepared site estus.toml.
+        #[arg(long)]
+        base: PathBuf,
+        /// Candidate tools.toml or prepared site estus.toml.
+        #[arg(long)]
+        candidate: PathBuf,
     },
 }
 
@@ -267,15 +278,38 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<File, &'static str> {
 
 fn overlay(definition: &toml::Value) -> Result<Value, &'static str> {
     let table = definition.as_table().ok_or("catalog_definition_invalid")?;
-    let mut value = serde_json::Map::new();
-    for key in ["input_schema", "fixed_args", "input_map"] {
-        let field = table.get(key).ok_or("catalog_definition_invalid")?;
-        value.insert(
-            key.to_owned(),
-            serde_json::to_value(field).map_err(|_| "catalog_definition_invalid")?,
-        );
-    }
-    let value = Value::Object(value);
+    let mut input_schema = serde_json::to_value(
+        table
+            .get("input_schema")
+            .ok_or("catalog_definition_invalid")?,
+    )
+    .map_err(|_| "catalog_definition_invalid")?;
+    let mut fixed_args = serde_json::to_value(
+        table
+            .get("fixed_args")
+            .ok_or("catalog_definition_invalid")?,
+    )
+    .map_err(|_| "catalog_definition_invalid")?;
+    let input_map =
+        serde_json::to_value(table.get("input_map").ok_or("catalog_definition_invalid")?)
+            .map_err(|_| "catalog_definition_invalid")?;
+    let constraints: Option<crate::bindings::SiteConstraints> = table
+        .get("constraints")
+        .cloned()
+        .map(|value| value.try_into())
+        .transpose()
+        .map_err(|_| "catalog_definition_invalid")?;
+    crate::bindings::apply_site_constraints(
+        &mut input_schema,
+        &mut fixed_args,
+        constraints.as_ref(),
+    )
+    .map_err(|_| "catalog_definition_invalid")?;
+    let value = json!({
+        "input_schema": input_schema,
+        "fixed_args": fixed_args,
+        "input_map": input_map,
+    });
     crate::contracts::module_schema::validate_overlay(&value)?;
     Ok(value)
 }
@@ -305,7 +339,7 @@ fn selected(
             .ok_or("catalog_preset_unknown")?;
         names.extend(members.iter().cloned());
     }
-    if names.is_empty() || names.len() > 32 {
+    if names.is_empty() || names.len() > 256 {
         return Err("catalog_selection_limit");
     }
     Ok(names)
@@ -650,7 +684,7 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
             .remove("tools")
             .and_then(|v| v.as_table().cloned())
             .ok_or("catalog_definition_invalid")?;
-        if tools.is_empty() || tools.len() > 32 {
+        if tools.is_empty() || tools.len() > 256 {
             return Err("catalog_selection_limit".into());
         }
         let output = PrivateOutput::create(&path)?;
@@ -795,9 +829,12 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
                 None,
             ));
         }
-        document
-            .entry("profile")
-            .or_insert_with(|| "actions-only".into());
+        document.entry("mode").or_insert_with(|| "headless".into());
+        document.entry("capabilities").or_insert_with(|| {
+            let mut caps = toml::Table::new();
+            caps.insert("named".into(), true.into());
+            toml::Value::Table(caps)
+        });
         if !document.contains_key("enabled_tools") && !document.contains_key("tool_presets") {
             document.insert(
                 "enabled_tools".into(),
@@ -939,7 +976,30 @@ pub(crate) async fn run(
         CatalogCommand::Inspect { .. } => "catalog_inspection",
         CatalogCommand::Export { .. } => "catalog_export",
         CatalogCommand::Prepare { .. } => "catalog_preparation",
+        CatalogCommand::Diff { .. } => "catalog_diff",
     };
+    if let CatalogCommand::Diff { base, candidate } = args.command {
+        let result = match tokio::task::spawn_blocking(move || diff(base, candidate)).await {
+            Ok(value) => value.and_then(|v| {
+                serde_json::to_vec(&v).map_err(|_| Failure::from("catalog_output_invalid"))
+            }),
+            Err(_) => Err("catalog_definition_invalid".into()),
+        };
+        return match result {
+            Ok(mut bytes) if !shutdown.is_cancelled() => {
+                if bytes.last() != Some(&b'\n') {
+                    bytes.push(b'\n');
+                }
+                if tokio::io::stdout().write_all(&bytes).await.is_ok() {
+                    0
+                } else {
+                    2
+                }
+            }
+            Ok(_) => Failure::from("cancelled").publish(phase),
+            Err(error) => error.publish(phase),
+        };
+    }
     let explicit_root = args.root.is_some();
     let root = args.root;
     let command = args.command;
@@ -1044,6 +1104,7 @@ pub(crate) async fn run(
                     serde_json::to_vec(&v).map_err(|_| Failure::from("catalog_output_invalid"))
                 })
             }
+            CatalogCommand::Diff { .. } => unreachable!("diff handled before catalog load"),
         },
         Ok(Err(error)) => Err(error),
         Ok(Ok(_)) => Err("cancelled".into()),
@@ -1072,10 +1133,12 @@ fn inspect(
     catalog: &Catalog,
 ) -> Result<Value, Failure> {
     let config = Config::from_file_with_catalog_root(cli, site, root)?;
+    let mut configured_names = BTreeSet::new();
     let tools: Vec<_> = config
         .bindings()
         .entries()
         .map(|(id, binding)| {
+            configured_names.insert(binding.name.as_str());
             let targets: Vec<_> = binding
                 .targets
                 .iter()
@@ -1096,6 +1159,7 @@ fn inspect(
                 .unwrap_or_else(|| json!({"qualification":"unqualified"}));
             json!({
                 "name":binding.name,"enabled":config.binding_enabled(id),
+                "dynamic_targets":binding.has_dynamic_targets(),
                 "targets":targets,"catalog_template":template,
                 "executor":binding.executor_kind(),"authority":binding.public_authority(),
                 "execution_location":binding.execution_location(),
@@ -1105,11 +1169,44 @@ fn inspect(
             })
         })
         .collect();
+    let omitted_templates: Vec<_> = catalog
+        .manifest()
+        .tools
+        .iter()
+        .filter(|(name, _)| !configured_names.contains(name.as_str()))
+        .map(|(name, template)| {
+            let reason = if matches!(
+                template.qualification,
+                super::assets::Qualification::LaboratoryOnly
+            ) {
+                "laboratory_only"
+            } else if matches!(
+                template.executor,
+                super::assets::Executor::AnsibleRole { .. }
+            ) {
+                "requires_runner_and_approval"
+            } else if !config.capabilities().named {
+                "disabled_by_capability"
+            } else if template.policy_required {
+                "site_policy_required"
+            } else {
+                "not_prepared"
+            };
+            json!({
+                "name": name,
+                "reason": reason,
+                "qualification": template.qualification,
+                "executor": template.executor,
+            })
+        })
+        .collect();
     Ok(
-        json!({"scope":"named_tools","global_native_execution":config.tool_enabled(crate::config::ToolId::Exec),
+        json!({"scope":"named_tools","mode":config.mode(),"capabilities":config.capabilities(),
+        "global_native_execution":config.tool_enabled(crate::config::ToolId::Exec),
         "global_native_file_read":config.tool_enabled(crate::config::ToolId::ReadFile),
         "global_native_file_write":config.tool_enabled(crate::config::ToolId::WriteFile),
         "runtime_verification":"not_performed","qualification_scope":"catalog_template","tools":tools,
+        "omitted_templates":omitted_templates,
         "deployment_boundary":{
             "mcp":"request_policy",
             "same_identity_arbitrary_execution":"outside_restriction",
@@ -1117,6 +1214,122 @@ fn inspect(
             "sandbox":"not_provided_by_estus",
         }}),
     )
+}
+
+fn approval_identity(tool: &toml::Value) -> Value {
+    let snapshot_sha256 = tool
+        .get("execution")
+        .and_then(|e| e.get("snapshot"))
+        .and_then(toml::Value::as_str)
+        .and_then(|path| {
+            let path = Path::new(path);
+            if !path.is_absolute() {
+                return None;
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(path)
+                .ok()?;
+            if !file.metadata().ok()?.is_file() {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            file.take(262_145).read_to_end(&mut bytes).ok()?;
+            (bytes.len() <= 262_144).then(|| crate::native_payload::digest(&bytes))
+        });
+    let kind = tool
+        .get("execution")
+        .and_then(|e| e.get("kind"))
+        .and_then(toml::Value::as_str);
+    json!({
+        "revision": tool.get("revision").and_then(toml::Value::as_str),
+        "authority": tool.get("authority").and_then(toml::Value::as_str),
+        "executor_kind": kind,
+        "snapshot_sha256": snapshot_sha256,
+    })
+}
+
+fn tool_constraints_summary(tool: &toml::Value) -> Value {
+    let resolved_overlay = overlay(tool).ok();
+    json!({
+        "constraints": tool.get("constraints"),
+        "fixed_args": resolved_overlay.as_ref().map(|o| &o["fixed_args"]),
+        "raw_fixed_args": tool.get("fixed_args"),
+        "input_schema": resolved_overlay.as_ref().map(|o| &o["input_schema"]),
+    })
+}
+
+fn diff(base: PathBuf, candidate: PathBuf) -> Result<Value, Failure> {
+    let cwd = std::env::current_dir().map_err(|_| "catalog_definition_unavailable")?;
+    let resolve = |p: PathBuf| if p.is_absolute() { p } else { cwd.join(p) };
+    let base_doc = read_toml(&resolve(base))?;
+    let cand_doc = read_toml(&resolve(candidate))?;
+    let extract = |doc: &toml::Table| -> Result<toml::Table, &'static str> {
+        let tools = doc
+            .get("tools")
+            .and_then(toml::Value::as_table)
+            .cloned()
+            .unwrap_or_default();
+        if tools.len() > 256 {
+            return Err("catalog_selection_limit");
+        }
+        Ok(tools)
+    };
+    let base_tools = extract(&base_doc)?;
+    let cand_tools = extract(&cand_doc)?;
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    for name in base_tools.keys() {
+        if !cand_tools.contains_key(name) {
+            removed.push(name.clone());
+        }
+    }
+    for (name, cand_tool) in &cand_tools {
+        let Some(base_tool) = base_tools.get(name) else {
+            added.push(name.clone());
+            continue;
+        };
+        let base_effects = serde_json::to_value(base_tool.get("effects")).unwrap_or(Value::Null);
+        let cand_effects = serde_json::to_value(cand_tool.get("effects")).unwrap_or(Value::Null);
+        let base_constraints = tool_constraints_summary(base_tool);
+        let cand_constraints = tool_constraints_summary(cand_tool);
+        let base_identity = approval_identity(base_tool);
+        let cand_identity = approval_identity(cand_tool);
+        if base_effects != cand_effects
+            || base_constraints != cand_constraints
+            || base_identity != cand_identity
+        {
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".into(), Value::String(name.clone()));
+            if base_effects != cand_effects {
+                entry.insert(
+                    "effects".into(),
+                    json!({"from": base_effects, "to": cand_effects}),
+                );
+            }
+            if base_constraints != cand_constraints {
+                entry.insert(
+                    "constraints".into(),
+                    json!({"from": base_constraints, "to": cand_constraints}),
+                );
+            }
+            if base_identity != cand_identity {
+                entry.insert(
+                    "approval_identity".into(),
+                    json!({"from": base_identity, "to": cand_identity}),
+                );
+            }
+            changed.push(Value::Object(entry));
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+    }))
 }
 
 #[cfg(test)]

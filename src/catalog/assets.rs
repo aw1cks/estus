@@ -14,6 +14,7 @@ use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
 };
+use sha2::{Digest, Sha256};
 
 const MANIFEST_LIMIT: u64 = 256 * 1024;
 const DEFINITION_LIMIT: u64 = 256 * 1024;
@@ -21,6 +22,37 @@ const ROLE_LIMIT: u64 = 8 * 1024 * 1024;
 const ROLE_FILES: usize = 256;
 const ERROR: &str = "invalid or unavailable catalog assets";
 
+struct PinnedDynamicPayload {
+    name: &'static str,
+    toml_sha256: &'static str,
+    source_sha256: &'static str,
+    manifest_sha256: &'static str,
+}
+
+const PINNED_DYNAMIC_PAYLOADS: &[PinnedDynamicPayload] = &[
+    PinnedDynamicPayload {
+        name: "cpu_stats",
+        toml_sha256: "57837875559a4c0c47a90879e3ad692140071b41fdd0cbea1c6bf826e8301ca4",
+        source_sha256: "f8767fb99e075259f3b104f23e5cbff8478cf502f2c91308a9fd27b9117cef64",
+        manifest_sha256: "2157c089d17401766ea6984a01e13ec8979031563e9e82f8d1b0a5ab4ca65a69",
+    },
+    PinnedDynamicPayload {
+        name: "memory_stats",
+        toml_sha256: "3fefabaf6bf1d332f0ad02528544307b5ec2fb2c92c92b11d352ff840dc33d3d",
+        source_sha256: "eae9433cc26d1bb5ae810b9b680ef35acd120da960fadb9db205087d90814b27",
+        manifest_sha256: "3b867cc3bc8acf63bab1f0b49fd3e0097e6caead19448fa4a1811b88b3367ea7",
+    },
+    PinnedDynamicPayload {
+        name: "pressure_get",
+        toml_sha256: "f40c2c3a1aae9b141346a1e30d98044217585890a622abee27c7b14a0e8d268c",
+        source_sha256: "bf1e7663c14cd92cdaa8cc5e603007adea8c668a359ce7e22f907c83f88bdf9e",
+        manifest_sha256: "b0d7672685c4a8630bc80e4d4c3a47e72118a07c07fd59778156373042dfce92",
+    },
+];
+
+pub(crate) fn pinned_dynamic_payload_names() -> impl Iterator<Item = &'static str> {
+    PINNED_DYNAMIC_PAYLOADS.iter().map(|p| p.name)
+}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
@@ -247,6 +279,62 @@ impl Catalog {
         Ok(table)
     }
 
+    pub(crate) fn load_pinned_payload(
+        &self,
+        name: &str,
+    ) -> Result<(toml::Value, Vec<u8>, Vec<u8>), &'static str> {
+        let pinned = PINNED_DYNAMIC_PAYLOADS
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or("unknown pinned bundled payload")?;
+        let template = self
+            .manifest
+            .tools
+            .get(name)
+            .ok_or("unknown catalog tool")?;
+        if matches!(template.qualification, Qualification::LaboratoryOnly)
+            || template.policy_required
+            || !matches!(template.executor, Executor::NativePayload { .. })
+        {
+            return Err(ERROR);
+        }
+        let toml_bytes = bounded_read(
+            open_child(&self.directory, Path::new(&template.definition), false)?,
+            DEFINITION_LIMIT,
+        )?;
+        if hex::encode(Sha256::digest(&toml_bytes)) != pinned.toml_sha256 {
+            return Err(ERROR);
+        }
+        let mut table: toml::Table = std::str::from_utf8(&toml_bytes)
+            .map_err(|_| ERROR)?
+            .parse()
+            .map_err(|_| ERROR)?;
+        let mut tools = table
+            .remove("tools")
+            .and_then(|v| v.try_into::<toml::Table>().ok())
+            .ok_or(ERROR)?;
+        let tool_def = tools.remove(name).ok_or(ERROR)?;
+        if !tools.is_empty() {
+            return Err(ERROR);
+        }
+        let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
+        let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
+        let source_bytes = bounded_read(
+            open_child(&tool_dir, Path::new("collector.py"), false)?,
+            1_048_576,
+        )?;
+        if hex::encode(Sha256::digest(&source_bytes)) != pinned.source_sha256 {
+            return Err(ERROR);
+        }
+        let manifest_bytes = bounded_read(
+            open_child(&tool_dir, Path::new("manifest.json"), false)?,
+            262_144,
+        )?;
+        if hex::encode(Sha256::digest(&manifest_bytes)) != pinned.manifest_sha256 {
+            return Err(ERROR);
+        }
+        Ok((tool_def, source_bytes, manifest_bytes))
+    }
     pub(crate) fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
         let template = self
             .manifest
@@ -390,4 +478,24 @@ fn collect_role(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_bundled_dynamic_payloads_match_manifest_and_hashes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+        let catalog = Catalog::load(Some(&root)).unwrap();
+        let mut names: Vec<&str> = pinned_dynamic_payload_names().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["cpu_stats", "memory_stats", "pressure_get"]);
+        for name in names {
+            let (tool_def, source, manifest) = catalog.load_pinned_payload(name).unwrap();
+            assert!(tool_def.is_table());
+            assert!(!source.is_empty());
+            assert!(!manifest.is_empty());
+        }
+    }
 }

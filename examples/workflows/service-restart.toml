@@ -1,7 +1,7 @@
 # Reviewed disposable Linux system-manager restart, separate catalog identity
 # with noninteractive sudo root. Dependencies/activation may affect other units.
-# Apply this unit set to BOTH fixed_args.allowed_units and input_schema unit enum
-# in canonical exported tools.toml; prepare explicitly with the provisioned site.
+# Apply this unit set to constraints.allowed_units in canonical exported tools.toml;
+# prepare explicitly with the provisioned site.
 # Successful completion is NOT application health. Interrupted work is uncertain:
 # independently inspect the manager before deciding anything; NEVER auto-replay.
 # MCP: systemd_unit_restart {"host":"plain","inputs":{"unit":"estus-fixture.service"}}
@@ -10,7 +10,7 @@ authority = "automation:catalog"
 allowed_units = ["estus-fixture.service"]
 #
 # estus catalog export --tool systemd_unit_restart --output restart-export
-# Review roles; replace BOTH unit lists in restart-export/tools.toml with the
+# Review roles; replace constraints.allowed_units in restart-export/tools.toml with the
 # allowed_units above. Provision catalog authority separately from ordinary SSH.
 # estus catalog prepare --site provisioned-site.toml --definitions restart-export/tools.toml --target plain --output restart-reviewed
 # estus catalog inspect --site restart-reviewed/estus.toml

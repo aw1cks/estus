@@ -17,12 +17,13 @@ use crate::{
 mod discovery;
 mod loading;
 mod policy;
+mod rules;
 mod validation;
 
 pub(crate) use discovery::{CleanupDiagnostics, TargetDiscovery};
 pub(crate) use loading::{Cli, CliCommand, DoctorArgs, RuntimeKind};
+pub(crate) use rules::HostRule;
 pub(crate) use validation::{account_name, destination};
-
 #[cfg(test)]
 mod test_support;
 
@@ -45,23 +46,135 @@ pub(crate) enum ToolId {
     ClearTargetQuarantine,
 }
 
+impl ToolId {
+    pub(crate) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Targets => "ssh_targets",
+            Self::ReadOutput => "ssh_read_output",
+            Self::Exec => "ssh_exec",
+            Self::Run => "ssh_run",
+            Self::ReadFile => "ssh_read_file",
+            Self::WriteFile => "ssh_write_file",
+            Self::Mkdir => "ssh_mkdir",
+            Self::Rename => "ssh_rename",
+            Self::RemoveFile => "ssh_remove_file",
+            Self::RemoveDirectory => "ssh_remove_directory",
+            Self::ReplaceFile => "ssh_replace_file",
+            Self::Stat => "ssh_stat",
+            Self::ListDirectory => "ssh_list_directory",
+            Self::Sudo => "ssh_sudo",
+            Self::ClearTargetQuarantine => "clear_target_quarantine",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolKey {
     Builtin(ToolId),
     Binding(BindingId),
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
-enum Profile {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Mode {
+    Workstation,
     #[default]
-    #[serde(rename = "baseline")]
-    Baseline,
-    #[serde(rename = "read-only-files")]
-    ReadOnlyFiles,
-    #[serde(rename = "files-only")]
-    FilesOnly,
-    #[serde(rename = "actions-only")]
-    ActionsOnly,
+    Headless,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RiskTier {
+    Observe,
+    Inspect,
+    Preview,
+    Change,
+    Exec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Capabilities {
+    pub(crate) named: bool,
+    pub(crate) file_read: bool,
+    pub(crate) file_write: bool,
+    pub(crate) exec: bool,
+    pub(crate) sudo: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self::actions_only()
+    }
+}
+
+impl Capabilities {
+    pub(crate) const fn all() -> Self {
+        Self {
+            named: true,
+            file_read: true,
+            file_write: true,
+            exec: true,
+            sudo: true,
+        }
+    }
+
+    pub(crate) const fn actions_only() -> Self {
+        Self {
+            named: true,
+            file_read: false,
+            file_write: false,
+            exec: false,
+            sudo: false,
+        }
+    }
+
+    pub(crate) const fn intersect(self, other: Self) -> Self {
+        Self {
+            named: self.named && other.named,
+            file_read: self.file_read && other.file_read,
+            file_write: self.file_write && other.file_write,
+            exec: self.exec && other.exec,
+            sudo: self.sudo && other.sudo,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TargetCapabilities(Capabilities);
+
+impl Default for TargetCapabilities {
+    fn default() -> Self {
+        Self(Capabilities::all())
+    }
+}
+
+impl<'de> Deserialize<'de> for TargetCapabilities {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Explicit {
+            named: bool,
+            file_read: bool,
+            file_write: bool,
+            exec: bool,
+            sudo: bool,
+        }
+        let explicit = Explicit::deserialize(deserializer)?;
+        Ok(Self(Capabilities {
+            named: explicit.named,
+            file_read: explicit.file_read,
+            file_write: explicit.file_write,
+            exec: explicit.exec,
+            sudo: explicit.sudo,
+        }))
+    }
+}
+
+impl From<TargetCapabilities> for Capabilities {
+    fn from(value: TargetCapabilities) -> Self {
+        value.0
+    }
 }
 
 #[derive(Debug)]
@@ -105,6 +218,13 @@ impl ToolCatalog {
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.name.as_ref())
+    }
+
+    pub(crate) fn get_by_name(&self, name: &str) -> Option<ToolKey> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.id)
     }
 }
 
@@ -183,13 +303,15 @@ fn invalid(field: &'static str, reason: &'static str) -> ConfigError {
 }
 
 pub(crate) struct Config {
-    profile: Profile,
+    mode: Mode,
+    capabilities: Capabilities,
     ssh_config: Option<PathBuf>,
     ssh_executable: PathBuf,
     limits: Limits,
     output: crate::output::Limits,
     directory: crate::filesystem::data::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
+    rules: Vec<HostRule>,
     bindings: Bindings,
     automation: Automation,
 }
@@ -222,7 +344,7 @@ impl Default for Automation {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AutomationTarget {
     pub(crate) destination: String,
@@ -261,11 +383,12 @@ pub(crate) enum AutomationAgent<'a> {
 }
 
 pub(crate) struct ResolvedAutomation<'a> {
-    pub(crate) target: &'a AutomationTarget,
+    pub(crate) target: Cow<'a, AutomationTarget>,
     pub(crate) ssh_config: Option<&'a Path>,
     pub(crate) ssh_executable: &'a Path,
     pub(crate) r#become: Option<&'a AutomationBecome>,
     pub(crate) agent: AutomationAgent<'a>,
+    pub(crate) dynamic_python: bool,
 }
 
 #[derive(Deserialize)]
@@ -295,7 +418,7 @@ impl Default for Limits {
 struct Target {
     ssh_host: String,
     #[serde(default)]
-    profile: Profile,
+    capabilities: TargetCapabilities,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]

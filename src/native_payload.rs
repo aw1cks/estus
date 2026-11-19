@@ -287,6 +287,15 @@ pub(crate) struct PayloadApproval<'a> {
     pub(crate) projection: Option<Arc<projection::Plan>>,
 }
 
+pub(crate) struct PayloadApprovalInline<'a> {
+    pub(crate) overlay: &'a Value,
+    pub(crate) result: &'a Value,
+    pub(crate) authority: &'a str,
+    pub(crate) revision: &'a str,
+    pub(crate) no_log: bool,
+    pub(crate) projection: Option<Arc<projection::Plan>>,
+}
+
 impl PayloadPlan {
     pub(crate) fn load(approval: PayloadApproval<'_>) -> Result<Self, ConfigError> {
         let PayloadApproval {
@@ -326,6 +335,43 @@ impl PayloadPlan {
             binding,
             no_log,
             projection,
+        })
+    }
+
+    pub(crate) fn load_from_bytes(
+        source: Vec<u8>,
+        manifest_bytes: &[u8],
+        approval: &PayloadApprovalInline<'_>,
+    ) -> Result<Self, ConfigError> {
+        let mut manifest: Manifest = parse(manifest_bytes)
+            .and_then(serde_json::from_value)
+            .map_err(|_| invalid())?;
+        if source.is_empty() || source.len() > manifest.max_source_bytes.min(MAX_SOURCE) {
+            return Err(invalid());
+        }
+        let computed_source = digest(&source);
+        if !manifest.source_sha256.is_empty() && manifest.source_sha256 != computed_source {
+            return Err(invalid());
+        }
+        manifest.source_sha256 = computed_source;
+        manifest.approval = Approval {
+            overlay: approval.overlay.clone(),
+            result: approval.result.clone(),
+            authority: approval.authority.to_owned(),
+            no_log: approval.no_log,
+            revision: approval.revision.to_owned(),
+        };
+        manifest.approved = true;
+        validate_manifest(&manifest)?;
+        manifest.manifest_sha256 = manifest_digest(&manifest)?;
+        let binding = module_schema::compile_binding(&manifest.contract, approval.overlay)
+            .map_err(|_| invalid())?;
+        Ok(Self {
+            manifest,
+            source: source.into(),
+            binding,
+            no_log: approval.no_log,
+            projection: approval.projection.clone(),
         })
     }
     pub(crate) fn arguments(&self, inputs: &Value) -> Result<Vec<String>, ToolError> {

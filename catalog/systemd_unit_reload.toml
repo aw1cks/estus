@@ -1,7 +1,8 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
 # Export, review payloads/systemd_unit_reload/manifest.json and fixed policy, then catalog prepare.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
-profile = "actions-only"
+mode = "headless"
+capabilities = { named = true }
 enabled_tools = ["systemd_unit_reload"]
 [targets.server]
 ssh_host = "server-ordinary"
@@ -23,10 +24,11 @@ targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/systemd_unit_reload.payload.json", source = "/etc/estus/payloads/systemd_unit_reload/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
 input_map = { "unit" = "unit" }
+constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
 limits = { timeout_secs = 60 }
-input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "enum" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"], "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
 [tools.systemd_unit_reload.result]
 kind = "capability_projection"
 fields = { "scope" = ["mcp_result", "scope"], "operation" = ["mcp_result", "operation"], "operation_completed" = ["mcp_result", "operation_completed"], "health" = ["mcp_result", "health"], "unit" = ["mcp_result", "unit"], "properties" = ["mcp_result", "properties"] }

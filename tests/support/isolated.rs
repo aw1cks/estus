@@ -707,7 +707,7 @@ impl Fixture {
             )?;
         }
         let mut config = format!(
-            "profile = 'baseline'\n[ssh]\nconfig_file = {}\n",
+            "capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}\n[ssh]\nconfig_file = {}\n",
             serde_json::to_string(&self.ssh_config.to_string_lossy())?
         );
         for alias in [
@@ -1171,7 +1171,7 @@ impl Fixture {
         fs::write(
             &config,
             formatdoc! {"
-            profile = 'baseline'
+            capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
             [ssh]
             config_file = {replacement}
             [targets.plain]

@@ -397,7 +397,7 @@ exit 23
     };
     let mut configuration = format!(
         r#"
-profile = "actions-only"
+capabilities = {{ named = true }}
 enabled_tools = ["count_controller", "slow_controller", "timeout_controller", "cancel_controller", "overload_controller"]
 [controller]
 workspace_root = {}
@@ -666,7 +666,7 @@ esac
         Ok(toml::Value::String(text(path)?.to_owned()).to_string())
     };
     let mut configuration = format!(
-        "profile = \"actions-only\"\nenabled_tools = [\"cancel_controller\", \"overload_controller\"]\n[controller]\nworkspace_root = {}\n",
+        "capabilities = {{ named = true }}\nenabled_tools = [\"cancel_controller\", \"overload_controller\"]\n[controller]\nworkspace_root = {}\n",
         string(&root)?
     );
     for (name, mode) in [
