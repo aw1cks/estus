@@ -17,13 +17,11 @@ use crate::{
 
 use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot};
 use plans::AutomationPlan;
-pub(crate) use plans::{
-    AutomationTransport, ControllerPlan, PreparedController, controller_root,
-};
+pub(crate) use plans::{AutomationTransport, ControllerPlan, PreparedController, controller_root};
 
-mod plans;
 mod generic;
 mod payload;
+mod plans;
 
 pub(crate) const EXECUTOR_KIND: &str = "native_argv";
 pub(crate) const RESULT_KIND: &str = "command";
@@ -390,7 +388,6 @@ struct ControllerActivation<'a> {
     canonical_root: Option<Arc<Path>>,
 }
 
-
 impl Bindings {
     pub(crate) fn compile(
         raw: BTreeMap<String, toml::Value>,
@@ -446,7 +443,6 @@ impl Bindings {
     pub(crate) fn get(&self, id: BindingId) -> Option<&CompiledBinding> {
         self.entries.get(id.0)
     }
-
 }
 
 impl CompiledBinding {
@@ -546,8 +542,10 @@ impl CompiledBinding {
             _ => unreachable!("module result checked"),
         };
         let schema = serde_json::to_value(
-            raw.input_schema.ok_or_else(|| invalid("Input schema is required"))?
-        ).map_err(|_| invalid("Invalid module schema"))?;
+            raw.input_schema
+                .ok_or_else(|| invalid("Input schema is required"))?,
+        )
+        .map_err(|_| invalid("Invalid module schema"))?;
         let fixed = raw
             .fixed_args
             .map(serde_json::to_value)
@@ -560,7 +558,9 @@ impl CompiledBinding {
         let mut overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
         if let Some(argument_types) = raw.argument_types {
             if !matches!(source, AnsibleSource::Module) {
-                return Err(invalid("Opaque argument representations require a module binding"));
+                return Err(invalid(
+                    "Opaque argument representations require a module binding",
+                ));
             }
             overlay["argument_types"] = serde_json::to_value(argument_types)
                 .map_err(|_| invalid("Invalid opaque argument representations"))?;
@@ -1061,7 +1061,10 @@ impl CompiledBinding {
     }
 
     pub(crate) fn is_automation(&self) -> bool {
-        matches!(self.execution, Execution::Ansible { .. } | Execution::Generic { .. })
+        matches!(
+            self.execution,
+            Execution::Ansible { .. } | Execution::Generic { .. }
+        )
     }
 
     pub(crate) fn is_generic(&self) -> bool {
@@ -1127,9 +1130,11 @@ impl CompiledBinding {
         self.enabled
     }
     pub(crate) fn read_only(&self) -> bool {
-        !self.is_generic() && self.effects
-            .iter()
-            .all(|v| matches!(v, Effect::Read | Effect::SensitiveRead))
+        !self.is_generic()
+            && self
+                .effects
+                .iter()
+                .all(|v| matches!(v, Effect::Read | Effect::SensitiveRead))
     }
     pub(crate) fn effects(&self) -> &[Effect] {
         &self.effects
@@ -1164,8 +1169,11 @@ impl CompiledBinding {
             let Execution::Ansible { overlay, .. } = &self.execution else {
                 unreachable!("module request selected");
             };
-            crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
-                .map_err(|_| shape())?;
+            crate::contracts::module_schema::validate_input_shape(
+                &overlay["input_schema"],
+                &inputs,
+            )
+            .map_err(|_| shape())?;
             return Ok(BindingCall::Automation(AutomationRequest {
                 host: host.ok_or_else(shape)?,
                 timeout_secs,

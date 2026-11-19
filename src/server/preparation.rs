@@ -43,7 +43,11 @@ impl Operation {
 
     // Safe before validation, authorization, admission or cancellation checks.
     // Caller-supplied sudo identifiers are added only from a prepared invocation.
-    pub(super) fn metadata<'a>(&'a self, state: &'a State, request_id: &'a RequestId) -> Metadata<'a> {
+    pub(super) fn metadata<'a>(
+        &'a self,
+        state: &'a State,
+        request_id: &'a RequestId,
+    ) -> Metadata<'a> {
         let (tool, host, user, program, revision, executor) = match self {
             Self::Exec(request) => (
                 ToolKey::Builtin(ToolId::Exec),
@@ -112,7 +116,10 @@ impl Operation {
         }
     }
 
-    pub(super) fn prepare<'a>(&'a self, config: &'a Config) -> Result<PreparedCommand<'a>, ToolError> {
+    pub(super) fn prepare<'a>(
+        &'a self,
+        config: &'a Config,
+    ) -> Result<PreparedCommand<'a>, ToolError> {
         let (target, invocation, stdin, seconds) = match self {
             Self::Exec(request) => {
                 request.validate(config.limits().max_file_bytes)?;
@@ -240,7 +247,11 @@ impl State {
             .expect("executing binding is registered")
     }
 
-    pub(super) fn controller_metadata<'a>(&'a self, id: BindingId, request_id: &'a RequestId) -> Metadata<'a> {
+    pub(super) fn controller_metadata<'a>(
+        &'a self,
+        id: BindingId,
+        request_id: &'a RequestId,
+    ) -> Metadata<'a> {
         let binding = self
             .config
             .bindings()

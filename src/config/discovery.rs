@@ -136,7 +136,6 @@ struct DiscoveryLimits {
     max_directory_page_bytes: usize,
 }
 
-
 impl Config {
     pub(crate) fn targets<'a>(&'a self, tools: &'a ToolCatalog) -> TargetDiscovery<'a> {
         TargetDiscovery {
@@ -162,7 +161,8 @@ impl Config {
                 max_encoded_command_bytes: MAX_COMMAND_BYTES,
                 max_response_bytes: MAX_RESPONSE_BYTES,
                 max_directory_cursors: self.directory.max_cursors,
-                max_directory_cursors_per_target: crate::filesystem::data::DIRECTORY_CURSORS_PER_TARGET,
+                max_directory_cursors_per_target:
+                    crate::filesystem::data::DIRECTORY_CURSORS_PER_TARGET,
                 directory_cursor_idle_timeout_secs: self.directory.idle_timeout_secs,
                 max_directory_page_bytes: crate::filesystem::data::DIRECTORY_PAGE_BYTES,
             },
@@ -172,8 +172,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{builtin, catalog, load_text};
     use super::*;
-    use super::super::test_support::{load_text, catalog, builtin};
 
     #[test]
     fn discovery_intersects_target_policy_with_enabled_catalog() {
@@ -415,5 +415,4 @@ programs=['/private/program']
             assert!(!encoded.contains(private_field), "{private_field}");
         }
     }
-
 }

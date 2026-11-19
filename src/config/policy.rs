@@ -143,22 +143,37 @@ impl Config {
         &mut self,
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<bool, ConfigError> {
-        let payloads: Vec<_> = self.bindings.entries()
+        let payloads: Vec<_> = self
+            .bindings
+            .entries()
             .filter(|(id, binding)| binding.is_payload() && self.binding_enabled(*id))
-            .map(|(id, _)| id).collect();
+            .map(|(id, _)| id)
+            .collect();
         let mut inspected_payload_authorities = BTreeSet::new();
         for id in payloads {
-            if let Some(AutomationAuthority::Named(name)) =
-                self.bindings.get(id).and_then(|binding| binding.automation_authority())
+            if let Some(AutomationAuthority::Named(name)) = self
+                .bindings
+                .get(id)
+                .and_then(|binding| binding.automation_authority())
             {
-                let (name, authority) = self.automation.authorities.get_key_value(name)
+                let (name, authority) = self
+                    .automation
+                    .authorities
+                    .get_key_value(name)
                     .ok_or_else(|| invalid("tools", "automation authority is not configured"))?;
                 if inspected_payload_authorities.insert(name.as_str()) {
                     let config = authority.ssh_config_file.clone();
                     let socket = authority.ssh_auth_sock.clone();
                     tokio::task::spawn_blocking(move || {
                         inspect_automation_authority(&config, socket.as_deref())
-                    }).await.map_err(|_| invalid("automation.authorities.*", "cannot inspect selected authority"))??;
+                    })
+                    .await
+                    .map_err(|_| {
+                        invalid(
+                            "automation.authorities.*",
+                            "cannot inspect selected authority",
+                        )
+                    })??;
                 }
             }
             self.bindings.activate_payload(id, ct).await?;
@@ -568,8 +583,10 @@ fn inspect_automation_authority(config: &Path, socket: Option<&Path>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{
+        automation_text, binding_definition, builtin, catalog, load_text, named_authority_text,
+    };
     use super::*;
-    use super::super::test_support::{load_text, named_authority_text, automation_text, catalog, builtin, binding_definition};
 
     #[test]
     fn active_authority_inspection_rejects_missing_config_and_non_socket_agent_privately() {

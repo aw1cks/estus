@@ -339,26 +339,43 @@ async fn perform(
     let command = match args.command {
         SchemaCommand::ImportInventory { output } => {
             *phase = "runtime_import";
-            let reference = config.automation_runtime().map_err(|_| "runtime_unavailable")?;
-            let duration = config.timeout(args.timeout_secs).map_err(|_| "invalid_timeout")?;
-            let deadline = tokio::time::Instant::now().checked_add(duration).ok_or("invalid_timeout")?;
-            let inventory = automation::import_inventory(reference, RuntimeContext {
-                deadline, ct: &shutdown, shutdown: &shutdown,
-            }).await?;
+            let reference = config
+                .automation_runtime()
+                .map_err(|_| "runtime_unavailable")?;
+            let duration = config
+                .timeout(args.timeout_secs)
+                .map_err(|_| "invalid_timeout")?;
+            let deadline = tokio::time::Instant::now()
+                .checked_add(duration)
+                .ok_or("invalid_timeout")?;
+            let inventory = automation::import_inventory(
+                reference,
+                RuntimeContext {
+                    deadline,
+                    ct: &shutdown,
+                    shutdown: &shutdown,
+                },
+            )
+            .await?;
             stopped(&shutdown, deadline)?;
             *phase = "schema_write";
             tokio::task::spawn_blocking(move || {
-                let mut bytes = serde_json::to_vec(&inventory)
-                    .map_err(|_| "invalid_generic_inventory")?;
+                let mut bytes =
+                    serde_json::to_vec(&inventory).map_err(|_| "invalid_generic_inventory")?;
                 bytes.push(b'\n');
                 if bytes.len() as u64 > crate::automation::generic::INVENTORY_BYTES {
                     return Err("schema_file_limit");
                 }
                 write_document_bytes(&output, &bytes)
-            }).await.map_err(|_| "schema_output_failed")??;
+            })
+            .await
+            .map_err(|_| "schema_output_failed")??;
             return Ok(Report {
-                ok: true, error_code: None, phase: None,
-                binding_validated: None, input_validated: None,
+                ok: true,
+                error_code: None,
+                phase: None,
+                binding_validated: None,
+                input_validated: None,
             });
         }
         SchemaCommand::ImportRole(role) => {
@@ -553,12 +570,18 @@ pub(crate) async fn author_module(
     let contract = module_schema::import_document(&observed.document)?;
     module_schema::compile_binding(&contract, overlay)?;
     let mut snapshot = Snapshot {
-        schema: 1, module: module.to_owned(), runtime: observed.identity,
-        collection: observed.collection, content_sha256: observed.content_sha256,
-        contract, schema_sha256: String::new(), binding: Some(overlay.clone()),
+        schema: 1,
+        module: module.to_owned(),
+        runtime: observed.identity,
+        collection: observed.collection,
+        content_sha256: observed.content_sha256,
+        contract,
+        schema_sha256: String::new(),
+        binding: Some(overlay.clone()),
     };
     snapshot.schema_sha256 = digest(&snapshot)?;
     let output = output.to_path_buf();
     tokio::task::spawn_blocking(move || write_snapshot(&output, &snapshot))
-        .await.map_err(|_| "schema_output_failed")?
+        .await
+        .map_err(|_| "schema_output_failed")?
 }

@@ -4,9 +4,7 @@
 mod support;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use std::{
-    fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 use support::{Fixture, WireServer};
 
 // Calls the shipped reducer, never a replacement implementation.
@@ -170,11 +168,17 @@ async fn reviewed_raw_file(
     let snapshot = fixture.root.path().join("reviewed-file.json");
     fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
     let mut import = support::server_command(&fixture.config)?;
-    import.args(["schema","import","ansible.builtin.file","--overlay"]).arg(&overlay_path)
-        .arg("--output").arg(&snapshot);
+    import
+        .args(["schema", "import", "ansible.builtin.file", "--overlay"])
+        .arg(&overlay_path)
+        .arg("--output")
+        .arg(&snapshot);
     let result = support::run_authoring(&mut import).await?;
-    ensure!(result.status.success(), "reviewed raw-mode import failed: {}",
-        String::from_utf8_lossy(&result.stdout));
+    ensure!(
+        result.status.success(),
+        "reviewed raw-mode import failed: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
     let binding = json!({
         "description":"Owned reviewed file mode", "revision":"1", "targets":["plain"],
         "authority":"automation", "effects":["persistent_write"],
@@ -184,36 +188,61 @@ async fn reviewed_raw_file(
         "result":{"kind":"ansible_summary"}
     });
     let mut config = base.clone();
-    config.insert("tools".into(),toml::Value::try_from(json!({"reviewed_file":binding}))?);
-    config.insert("enabled_generic_tools".into(),toml::Value::try_from(json!([]))?);
-    config.insert("enabled_tools".into(),toml::Value::try_from(json!(["reviewed_file"]))?);
+    config.insert(
+        "tools".into(),
+        toml::Value::try_from(json!({"reviewed_file":binding}))?,
+    );
+    config.insert(
+        "enabled_generic_tools".into(),
+        toml::Value::try_from(json!([]))?,
+    );
+    config.insert(
+        "enabled_tools".into(),
+        toml::Value::try_from(json!(["reviewed_file"]))?,
+    );
     let path = fixture.root.path().join("reviewed.toml");
-    fs::write(&path,toml::to_string(&config)?)?;
+    fs::write(&path, toml::to_string(&config)?)?;
     fs::set_permissions(owned, fs::Permissions::from_mode(0o600))?;
     let mut server = WireServer::start(&path)?;
     let calls: Result<()> = async {
         server.initialize().await?;
-        let result = server.request(2,"tools/call",json!({
-            "name":"reviewed_file","arguments":{"host":"plain","inputs":{}}
-        })).await?;
+        let result = server
+            .request(
+                2,
+                "tools/call",
+                json!({
+                    "name":"reviewed_file","arguments":{"host":"plain","inputs":{}}
+                }),
+            )
+            .await?;
         let receipt = &result["result"]["structuredContent"];
-        ensure!(receipt["error"].is_null() && receipt["data"]["changed"] == true,
-            "reviewed file mode did not execute: {result}");
-        ensure!(fs::metadata(owned)?.permissions().mode() & 0o777 == 0o644,
-            "independent mode observation disagrees");
+        ensure!(
+            receipt["error"].is_null() && receipt["data"]["changed"] == true,
+            "reviewed file mode did not execute: {result}"
+        );
+        ensure!(
+            fs::metadata(owned)?.permissions().mode() & 0o777 == 0o644,
+            "independent mode observation disagrees"
+        );
         let denied = server.request(3,"tools/call",json!({
             "name":"reviewed_file","arguments":{"host":"plain","inputs":{"path":"/unapproved"}}
         })).await?;
-        ensure!(denied["error"]["code"] == -32602, "fixed path override escaped review: {denied}");
+        ensure!(
+            denied["error"]["code"] == -32602,
+            "fixed path override escaped review: {denied}"
+        );
         Ok(())
-    }.await;
+    }
+    .await;
     server.stop(None).await?;
     calls?;
     config["tools"]["reviewed_file"]["fixed_args"]["mode"] = "0777".into();
-    fs::write(&path,toml::to_string(&config)?)?;
+    fs::write(&path, toml::to_string(&config)?)?;
     rejected_activation(&path, "invalid_config").await?;
-    ensure!(fs::metadata(owned)?.permissions().mode() & 0o777 == 0o644,
-        "rejected approval changed the file");
+    ensure!(
+        fs::metadata(owned)?.permissions().mode() & 0o777 == 0o644,
+        "rejected approval changed the file"
+    );
     Ok(())
 }
 
@@ -223,11 +252,16 @@ fn mutable_runtime(source: &std::path::Path, destination: &std::path::Path) -> R
         for entry in fs::read_dir(source)? {
             let entry = entry?;
             let kind = entry.file_type()?;
-            if entry.file_name() == "__pycache__" { continue; }
+            if entry.file_name() == "__pycache__" {
+                continue;
+            }
             ensure!(!kind.is_symlink(), "fixture source has an interior symlink");
             let output = destination.join(entry.file_name());
-            if kind.is_dir() { copy_tree(&entry.path(), &output)?; }
-            else { fs::copy(entry.path(), output)?; }
+            if kind.is_dir() {
+                copy_tree(&entry.path(), &output)?;
+            } else {
+                fs::copy(entry.path(), output)?;
+            }
         }
         Ok(())
     }
@@ -238,17 +272,25 @@ fn mutable_runtime(source: &std::path::Path, destination: &std::path::Path) -> R
     std::os::unix::fs::symlink(source.join("collections"), destination.join("collections"))?;
     std::os::unix::fs::symlink(source.join("ansible.cfg"), destination.join("ansible.cfg"))?;
     let mut manifest: Value = serde_json::from_slice(&fs::read(source.join("runtime.json"))?)?;
-    let core = fs::canonicalize(source.join(manifest["site_packages"].as_str().context("runtime site")?).join("ansible"))?;
+    let core = fs::canonicalize(
+        source
+            .join(manifest["site_packages"].as_str().context("runtime site")?)
+            .join("ansible"),
+    )?;
     copy_tree(&core, &destination.join("site-packages/ansible"))?;
     manifest["site_packages"] = json!("site-packages");
-    fs::write(destination.join("runtime.json"), serde_json::to_vec(&manifest)?)?;
+    fs::write(
+        destination.join("runtime.json"),
+        serde_json::to_vec(&manifest)?,
+    )?;
     Ok(())
 }
 
-#[tokio::test(flavor="multi_thread",worker_threads=2)]
-#[ignore="requires selected runtime and disposable local SSH fixture"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires selected runtime and disposable local SSH fixture"]
 async fn real_mcp_generic_generation_cutover() -> Result<()> {
-    let selected = fs::canonicalize(std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("runtime")?)?;
+    let selected =
+        fs::canonicalize(std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("runtime")?)?;
     let fixture = Fixture::start().await?;
     let result: Result<()> = async {
         let runtime = fixture.root.path().join("mutable-runtime");
@@ -345,11 +387,17 @@ async fn real_mcp_generic_generation_cutover() -> Result<()> {
 async fn rejected_activation(path: &std::path::Path, code: &str) -> Result<()> {
     let mut command = support::server_command(path)?;
     let output = support::run_authoring(&mut command).await?;
-    ensure!(output.status.code() == Some(1) && output.stdout.is_empty(),
-        "invalid approval activated instead of failing closed");
-    ensure!(String::from_utf8_lossy(&output.stderr).lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|record| record["event"] == "error" && record["code"] == code),
-        "activation failed for a different reason: {}", String::from_utf8_lossy(&output.stderr));
+    ensure!(
+        output.status.code() == Some(1) && output.stdout.is_empty(),
+        "invalid approval activated instead of failing closed"
+    );
+    ensure!(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|record| record["event"] == "error" && record["code"] == code),
+        "activation failed for a different reason: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }

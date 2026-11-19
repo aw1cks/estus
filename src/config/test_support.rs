@@ -116,4 +116,3 @@ pub(super) fn load_text(text: &str, vars: &[(&str, &str)]) -> Result<Config, Con
         },
     )
 }
-

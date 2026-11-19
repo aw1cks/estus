@@ -63,7 +63,6 @@ enum Profile {
     ActionsOnly,
 }
 
-
 #[derive(Debug)]
 pub(crate) struct ToolEntry {
     pub(crate) id: ToolKey,
@@ -268,7 +267,6 @@ pub(crate) struct ResolvedAutomation<'a> {
     pub(crate) agent: AutomationAgent<'a>,
 }
 
-
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Limits {
@@ -313,7 +311,6 @@ struct Target {
     selected_bindings: Option<BTreeSet<String>>,
 }
 
-
 #[derive(Default, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 enum Sudo {
@@ -335,7 +332,6 @@ enum Sudo {
 fn root_users() -> Vec<String> {
     vec!["root".to_owned()]
 }
-
 
 #[derive(Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -367,4 +363,3 @@ pub(crate) struct ResolvedTarget<'a> {
     pub(crate) destination: &'a str,
     pub(crate) role: IdentityRole,
 }
-

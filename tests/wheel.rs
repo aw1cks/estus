@@ -461,7 +461,8 @@ async fn installed_wheel_channels() -> Result<()> {
         let listing: Value = serde_json::from_slice(&listed.stdout)?;
         ensure!(
             listing["schema"] == canonical["schema"]
-                && listing["version"] == canonical["version"] && listing["tools"].is_array(),
+                && listing["version"] == canonical["version"]
+                && listing["tools"].is_array(),
             "{channel} invalid catalog listing: {listing}"
         );
         let tools = listing["tools"]
@@ -808,8 +809,10 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             template["definition"] = json!(format!("{name}.toml"));
             template["executor"]["path"] = json!(format!("payloads/{name}"));
             manifest["tools"][name] = template;
-            manifest["version"] = json!(format!("{}-sdist-probe",
-                manifest["version"].as_str().context("catalog version")?));
+            manifest["version"] = json!(format!(
+                "{}-sdist-probe",
+                manifest["version"].as_str().context("catalog version")?
+            ));
             fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
             let mut document: toml::Table =
                 toml::from_str(&fs::read_to_string(catalog.join("pressure_get.toml"))?)?;
@@ -1085,22 +1088,31 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
                 .strip_suffix(".toml")
                 .is_some_and(|name| catalog.manifest().tools.contains_key(name)),
             ["roles", name, directory, rest @ ..] => {
-                matches!(catalog.manifest().tools.get(*name).map(|tool| &tool.executor),
-                    Some(assets::Executor::AnsibleRole { .. }))
-                    && matches!(
-                        *directory,
-                        "tasks" | "meta" | "files" | "defaults" | "vars" | "handlers"
-                    )
-                    && !rest.is_empty()
+                matches!(
+                    catalog
+                        .manifest()
+                        .tools
+                        .get(*name)
+                        .map(|tool| &tool.executor),
+                    Some(assets::Executor::AnsibleRole { .. })
+                ) && matches!(
+                    *directory,
+                    "tasks" | "meta" | "files" | "defaults" | "vars" | "handlers"
+                ) && !rest.is_empty()
                     && Path::new(member)
                         .extension()
                         .and_then(|ext| ext.to_str())
                         .is_some_and(|ext| matches!(ext, "yml" | "yaml" | "py" | "json" | "toml"))
             }
             ["payloads", name, rest @ ..] => {
-                matches!(catalog.manifest().tools.get(*name).map(|tool| &tool.executor),
-                    Some(assets::Executor::NativePayload { .. }))
-                    && !rest.is_empty()
+                matches!(
+                    catalog
+                        .manifest()
+                        .tools
+                        .get(*name)
+                        .map(|tool| &tool.executor),
+                    Some(assets::Executor::NativePayload { .. })
+                ) && !rest.is_empty()
                     && Path::new(member)
                         .extension()
                         .and_then(|ext| ext.to_str())

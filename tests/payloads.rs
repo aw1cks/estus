@@ -533,7 +533,9 @@ print(json.dumps({'violations': violations, 'error': error}))
         .values()
     {
         let executor = &template["executor"];
-        let Some(path) = executor["path"].as_str() else { continue };
+        let Some(path) = executor["path"].as_str() else {
+            continue;
+        };
         let bundle = assets.join(path);
         let files = if executor["kind"] == "native_payload" {
             bundle

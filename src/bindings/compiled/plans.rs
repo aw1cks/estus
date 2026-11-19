@@ -21,12 +21,12 @@ use crate::{
     reply::{ControllerError, ToolError},
 };
 
+use super::super::raw::RawInterpreter;
 use super::{
     AnsibleSource, Authority, AutomationRequest, BindingId, BindingRequest, Bindings,
     CompiledBinding, ControllerActivation, ControllerRequest, Execution, Input, ScriptSource, Slot,
     bound, invalid,
 };
-use super::super::raw::RawInterpreter;
 
 pub(crate) fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigError> {
     let root = root.ok_or_else(|| invalid("Active controller tools require workspace_root"))?;
@@ -327,7 +327,9 @@ impl Bindings {
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<(), ConfigError> {
         if self.get(id).is_some_and(|binding| binding.is_generic()) {
-            return self.activate_generic(id, runtime, root, agent_socket, ct).await;
+            return self
+                .activate_generic(id, runtime, root, agent_socket, ct)
+                .await;
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let check_interrupted = || {
@@ -392,7 +394,10 @@ impl Bindings {
                     crate::contracts::role_import::compile_binding(reviewed.contract(), &overlay)
                 }
                 ReviewedContent::Playbook { .. } => {
-                    crate::contracts::playbook_import::compile_binding(reviewed.contract(), &overlay)
+                    crate::contracts::playbook_import::compile_binding(
+                        reviewed.contract(),
+                        &overlay,
+                    )
                 }
             }
             .map_err(|code| invalid(code).with_cause(code, "binding_compilation"))?;
@@ -411,9 +416,13 @@ impl Bindings {
         };
         match &mut reviewed {
             ReviewedContent::Module { reviewed, source } => {
-                *source = crate::contracts::schema_import::verify_reviewed(reviewed, runtime.clone(), context)
-                    .await
-                    .map_err(|code| invalid(code).with_cause(code, "module_verification"))?;
+                *source = crate::contracts::schema_import::verify_reviewed(
+                    reviewed,
+                    runtime.clone(),
+                    context,
+                )
+                .await
+                .map_err(|code| invalid(code).with_cause(code, "module_verification"))?;
             }
             ReviewedContent::Role {
                 reviewed,
@@ -648,8 +657,10 @@ impl CompiledBinding {
             script: match &self.execution {
                 Execution::RemoteScript { source, .. } => Some(source),
                 Execution::NativeArgv { .. } => None,
-                Execution::ControllerScript { .. } | Execution::Ansible { .. }
-                | Execution::Generic { .. } | Execution::Payload { .. } => {
+                Execution::ControllerScript { .. }
+                | Execution::Ansible { .. }
+                | Execution::Generic { .. }
+                | Execution::Payload { .. } => {
                     return Err(bound("Controller requires local preparation"));
                 }
             },

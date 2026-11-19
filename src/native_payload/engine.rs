@@ -725,11 +725,12 @@ async fn channel(
             .stderr()
             .take()
             .ok_or_else(|| failed("io_error", "Missing payload error pipe", true))?;
-        let (out, err, write) = tokio::join!(bounded(stdout, limit), bounded(stderr, 0), async move {
-            stdin.write_all(&input.header).await?;
-            stdin.write_all(input.source).await?;
-            stdin.shutdown().await
-        },);
+        let (out, err, write) =
+            tokio::join!(bounded(stdout, limit), bounded(stderr, 0), async move {
+                stdin.write_all(&input.header).await?;
+                stdin.write_all(input.source).await?;
+                stdin.shutdown().await
+            },);
         let (stdout, overflow) = out.map_err(|_| {
             failed(
                 "io_error",

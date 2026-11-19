@@ -175,11 +175,18 @@ impl Catalog {
                 || match &template.executor {
                     Executor::AnsibleRole { path } => path != &format!("roles/{name}"),
                     Executor::NativePayload { path } => path != &format!("payloads/{name}"),
-                    Executor::AnsibleModule { module } => module.len() > 256
-                        || module.split('.').count() != 3
-                        || module.split('.').any(|part| part.is_empty()
-                            || !part.bytes().enumerate().all(|(index, byte)| byte.is_ascii_lowercase()
-                                || byte == b'_' || (index > 0 && byte.is_ascii_digit()))),
+                    Executor::AnsibleModule { module } => {
+                        module.len() > 256
+                            || module.split('.').count() != 3
+                            || module.split('.').any(|part| {
+                                part.is_empty()
+                                    || !part.bytes().enumerate().all(|(index, byte)| {
+                                        byte.is_ascii_lowercase()
+                                            || byte == b'_'
+                                            || (index > 0 && byte.is_ascii_digit())
+                                    })
+                            })
+                    }
                 }
                 || template.requires.len() > 32
                 || template
@@ -241,7 +248,8 @@ impl Catalog {
     }
 
     pub(crate) fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
-        let template = self.manifest
+        let template = self
+            .manifest
             .tools
             .get(name)
             .ok_or("unknown catalog tool")?;
@@ -272,7 +280,10 @@ impl Catalog {
             &mut entries,
             0,
         )?;
-        if required.iter().any(|required| !files.iter().any(|(path, _)| path == Path::new(required))) {
+        if required
+            .iter()
+            .any(|required| !files.iter().any(|(path, _)| path == Path::new(required)))
+        {
             return Err(ERROR);
         }
         let parent = destination

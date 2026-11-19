@@ -7,7 +7,9 @@ use crate::reply::ToolReply;
 
 // Keep the envelope and execution evidence generated from the actual reply types.
 // Only the operator-reviewed payload schema is binding-specific.
-pub(super) fn automation_output_schema(plan: Option<&crate::contracts::projection::Plan>) -> Arc<JsonObject> {
+pub(super) fn automation_output_schema(
+    plan: Option<&crate::contracts::projection::Plan>,
+) -> Arc<JsonObject> {
     let schema = schemars::generate::SchemaSettings::draft2020_12()
         .for_serialize()
         .with(|settings| settings.inline_subschemas = true)

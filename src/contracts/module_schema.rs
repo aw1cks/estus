@@ -176,7 +176,12 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
                     })
             });
     let (mut schema, aliases) = import_options(
-        options, "", &mut defaults, &mut opaque_options, &mut choice_descriptions, free_form,
+        options,
+        "",
+        &mut defaults,
+        &mut opaque_options,
+        &mut choice_descriptions,
+        free_form,
     )?;
     let mut prose = Vec::new();
     for key in ["description", "notes"] {
@@ -239,11 +244,15 @@ fn identity_aliases(schema: &Value) -> Result<Aliases, &'static str> {
                 .and_then(Value::as_object)
                 .ok_or(SCHEMA)?
             {
-                aliases.properties.insert(key.clone(), identity_aliases(value)?);
+                aliases
+                    .properties
+                    .insert(key.clone(), identity_aliases(value)?);
             }
         }
         "array" => {
-            aliases.items = Some(Box::new(identity_aliases(schema.get("items").ok_or(SCHEMA)?)?));
+            aliases.items = Some(Box::new(identity_aliases(
+                schema.get("items").ok_or(SCHEMA)?,
+            )?));
         }
         _ => (),
     }
@@ -319,7 +328,12 @@ fn import_options(
         }
         let kind = option.get("type").and_then(Value::as_str).ok_or(INVALID)?;
         let (mut schema, node) = import_type(
-            kind, option, &full, defaults, opaque_options, choice_descriptions,
+            kind,
+            option,
+            &full,
+            defaults,
+            opaque_options,
+            choice_descriptions,
         )?;
         if let Some(prose) = option.get("description") {
             schema
@@ -332,25 +346,30 @@ fn import_options(
                 Value::Array(values) if !values.is_empty() => values.clone(),
                 Value::Object(values) if !values.is_empty() => {
                     let choice_type = if kind == "list" {
-                        option.get("elements").and_then(Value::as_str).ok_or(INVALID)?
+                        option
+                            .get("elements")
+                            .and_then(Value::as_str)
+                            .ok_or(INVALID)?
                     } else {
                         kind
                     };
-                    let values = values.keys().map(|key| {
-                        match choice_type {
+                    let values = values
+                        .keys()
+                        .map(|key| match choice_type {
                             "str" | "path" => Ok(Value::String(key.clone())),
                             "bool" if key == "true" => Ok(Value::Bool(true)),
                             "bool" if key == "false" => Ok(Value::Bool(false)),
                             "int" | "float" => {
-                                let value: Value = serde_json::from_str(key).map_err(|_| INVALID)?;
+                                let value: Value =
+                                    serde_json::from_str(key).map_err(|_| INVALID)?;
                                 if !value.is_number() || value.to_string() != *key {
                                     return Err(INVALID);
                                 }
                                 Ok(value)
                             }
                             _ => Err(INVALID),
-                        }
-                    }).collect::<Result<Vec<_>, _>>()?;
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     choice_descriptions.insert(full.clone(), choices.clone());
                     values
                 }
@@ -414,7 +433,8 @@ fn import_type(
     }
     match kind {
         "raw" => {
-            if option.contains_key("suboptions") || option.contains_key("elements")
+            if option.contains_key("suboptions")
+                || option.contains_key("elements")
                 || option.contains_key("choices")
             {
                 return Err(INVALID);
@@ -432,7 +452,14 @@ fn import_type(
                 .get("suboptions")
                 .and_then(Value::as_object)
                 .ok_or(INVALID)?;
-            import_options(sub, path, defaults, opaque_options, choice_descriptions, false)
+            import_options(
+                sub,
+                path,
+                defaults,
+                opaque_options,
+                choice_descriptions,
+                false,
+            )
         }
         "list" => {
             let elements = option
@@ -445,7 +472,12 @@ fn import_type(
             let mut item = option.clone();
             item.remove("elements");
             let (schema, aliases) = import_type(
-                elements, &item, &format!("{path}[]"), defaults, opaque_options, choice_descriptions,
+                elements,
+                &item,
+                &format!("{path}[]"),
+                defaults,
+                opaque_options,
+                choice_descriptions,
             )?;
             Ok((
                 json!({"type":"array","items":schema}),
@@ -1064,11 +1096,16 @@ fn opaque_node<'a>(
     path: &str,
 ) -> Result<(&'a mut Value, &'a mut Aliases), &'static str> {
     for segment in path.split('.') {
-        let (key, array) = segment.strip_suffix("[]").map_or((segment, false), |key| (key, true));
+        let (key, array) = segment
+            .strip_suffix("[]")
+            .map_or((segment, false), |key| (key, true));
         if !parameter(key) {
             return Err(SCHEMA);
         }
-        schema = schema.get_mut("properties").and_then(|props| props.get_mut(key)).ok_or(SCHEMA)?;
+        schema = schema
+            .get_mut("properties")
+            .and_then(|props| props.get_mut(key))
+            .ok_or(SCHEMA)?;
         aliases = aliases.properties.get_mut(key).ok_or(SCHEMA)?;
         if array {
             schema = schema.get_mut("items").ok_or(SCHEMA)?;
@@ -1095,12 +1132,21 @@ fn check_representation(schema: &Value) -> Result<(), &'static str> {
         "string" if schema.get("maxLength").is_some() => Ok(()),
         "integer" | "number"
             if (schema.get("minimum").is_some() || schema.get("exclusiveMinimum").is_some())
-                && (schema.get("maximum").is_some() || schema.get("exclusiveMaximum").is_some()) => Ok(()),
+                && (schema.get("maximum").is_some()
+                    || schema.get("exclusiveMaximum").is_some()) =>
+        {
+            Ok(())
+        }
         "array" if schema.get("maxItems").is_some() => {
             check_representation(schema.get("items").ok_or(SCHEMA)?)
         }
         "object" => {
-            for child in schema.get("properties").and_then(Value::as_object).ok_or(SCHEMA)?.values() {
+            for child in schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or(SCHEMA)?
+                .values()
+            {
                 check_representation(child)?;
             }
             Ok(())
@@ -1682,30 +1728,49 @@ mod reviewed_opaque_options {
         let contract = import_document(&json!({"doc":{"options":{
             "path":{"type":"path","required":true},
             "mode":{"type":"raw","aliases":["permissions"],"default":null}
-        }}})).unwrap();
+        }}}))
+        .unwrap();
         let mut overlay = json!({
             "input_schema":{"type":"object","properties":{},"additionalProperties":false},
             "fixed_args":{"path":"/owned/file"},"input_map":{}
         });
-        assert_eq!(compile_binding(&contract, &overlay).unwrap().prepare(&json!({})).unwrap(),
-            json!({"path":"/owned/file"}));
+        assert_eq!(
+            compile_binding(&contract, &overlay)
+                .unwrap()
+                .prepare(&json!({}))
+                .unwrap(),
+            json!({"path":"/owned/file"})
+        );
         overlay["fixed_args"]["permissions"] = json!("0644");
         assert!(compile_binding(&contract, &overlay).is_err());
         overlay["argument_types"] = json!({"mode":{"type":"string"}});
         assert!(compile_binding(&contract, &overlay).is_err());
         overlay["argument_types"]["mode"] = json!({"type":"string","enum":["0600","0644"]});
-        assert_eq!(compile_binding(&contract, &overlay).unwrap().prepare(&json!({})).unwrap(),
-            json!({"path":"/owned/file","mode":"0644"}));
+        assert_eq!(
+            compile_binding(&contract, &overlay)
+                .unwrap()
+                .prepare(&json!({}))
+                .unwrap(),
+            json!({"path":"/owned/file","mode":"0644"})
+        );
         overlay["fixed_args"]["mode"] = json!("0600");
         assert!(compile_binding(&contract, &overlay).is_err());
-        overlay["fixed_args"].as_object_mut().unwrap().remove("permissions");
-        overlay["fixed_args"].as_object_mut().unwrap().remove("mode");
+        overlay["fixed_args"]
+            .as_object_mut()
+            .unwrap()
+            .remove("permissions");
+        overlay["fixed_args"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mode");
         overlay["input_schema"]["properties"]["approved_mode"] =
             json!({"type":"string","maxLength":4});
         overlay["input_map"]["permissions"] = json!("approved_mode");
         let binding = compile_binding(&contract, &overlay).unwrap();
-        assert_eq!(binding.prepare(&json!({"approved_mode":"0600"})).unwrap(),
-            json!({"path":"/owned/file","mode":"0600"}));
+        assert_eq!(
+            binding.prepare(&json!({"approved_mode":"0600"})).unwrap(),
+            json!({"path":"/owned/file","mode":"0600"})
+        );
         assert!(binding.prepare(&json!({"approved_mode":"0777"})).is_err());
         assert!(binding.prepare(&json!({"approved_mode":644})).is_err());
         overlay["argument_types"]["path"] = json!({"type":"string","maxLength":10});
@@ -1718,15 +1783,21 @@ mod reviewed_opaque_options {
             "entries":{"type":"list","elements":"dict","suboptions":{
                 "value":{"type":"raw","required":true}
             }}
-        }}})).unwrap();
+        }}}))
+        .unwrap();
         let mut overlay = json!({
             "input_schema":{"type":"object","properties":{},"additionalProperties":false},
             "fixed_args":{"entries":[{"value":true}]},"input_map":{}
         });
         assert!(compile_binding(&contract, &overlay).is_err());
         overlay["argument_types"] = json!({"entries[].value":{"type":"boolean"}});
-        assert_eq!(compile_binding(&contract, &overlay).unwrap().prepare(&json!({})).unwrap(),
-            json!({"entries":[{"value":true}]}));
+        assert_eq!(
+            compile_binding(&contract, &overlay)
+                .unwrap()
+                .prepare(&json!({}))
+                .unwrap(),
+            json!({"entries":[{"value":true}]})
+        );
         overlay["fixed_args"]["entries"] = json!([{}]);
         assert!(compile_binding(&contract, &overlay).is_err());
     }
@@ -1737,7 +1808,8 @@ mod reviewed_opaque_options {
             "manager":{"type":"list","elements":"str","choices":{"auto":"Discover","apt":"Debian"}},
             "strategy":{"type":"str","choices":{"first":"Stop early","all":"Query all"}},
             "count":{"type":"int","choices":{"1":"One","2":"Two"}}
-        }}})).unwrap();
+        }}}))
+        .unwrap();
         let overlay = json!({
             "input_schema":{"type":"object","properties":{
                 "selected":{"type":"array","items":{"type":"string"}},
@@ -1746,13 +1818,20 @@ mod reviewed_opaque_options {
             "fixed_args":{"strategy":"first"},"input_map":{"manager":"selected","count":"count"}
         });
         let binding = compile_binding(&contract, &overlay).unwrap();
-        assert_eq!(binding.prepare(&json!({"selected":["auto","apt"],"count":2})).unwrap(),
-            json!({"manager":["auto","apt"],"strategy":"first","count":2}));
+        assert_eq!(
+            binding
+                .prepare(&json!({"selected":["auto","apt"],"count":2}))
+                .unwrap(),
+            json!({"manager":["auto","apt"],"strategy":"first","count":2})
+        );
         assert!(binding.prepare(&json!({"selected":["Discover"]})).is_err());
         assert!(binding.prepare(&json!({"count":"2"})).is_err());
         assert!(binding.prepare(&json!({"count":3})).is_err());
-        assert!(import_document(&json!({"doc":{"options":{
-            "count":{"type":"int","choices":{"01":"Ambiguous"}}
-        }}})).is_err());
+        assert!(
+            import_document(&json!({"doc":{"options":{
+                "count":{"type":"int","choices":{"01":"Ambiguous"}}
+            }}}))
+            .is_err()
+        );
     }
 }

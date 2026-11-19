@@ -1027,12 +1027,14 @@ impl Fixture {
             chmod 0640 /etc/estus/replacement_ssh_config
             cp /fixture/sshd_config /fixture/replacement-sshd-base
             chmod 0600 /fixture/replacement-sshd-base
-        "#}).await?;
+        "#})
+            .await?;
         self.primary_exec(&format!(
             "printf %s {} > /etc/estus/server.toml; \
              chown 0:1201 /etc/estus/server.toml; chmod 0640 /etc/estus/server.toml",
             quote(recipe),
-        )).await?;
+        ))
+        .await?;
         self.restricted_files_policy().await
     }
 
@@ -1055,7 +1057,8 @@ impl Fixture {
             sshd=$(dirname "$(readlink -f /usr/bin/ssh)")/sshd
             "$sshd" -t -f /fixture/sshd_config
             kill -HUP "$(cat /run/sshd/sshd.pid)"
-        "#}).await?;
+        "#})
+            .await?;
         Ok(())
     }
 

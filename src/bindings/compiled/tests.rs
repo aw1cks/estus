@@ -440,7 +440,10 @@ fn module_compilation_is_lazy_and_preserves_recursive_public_domain() {
     assert!(binding.is_automation());
     assert_eq!(binding.executor_kind(), "ansible_module");
     assert_eq!(binding.result_kind(), "ansible_summary");
-    assert!(binding.input_schema["properties"]["inputs"]["properties"]["nested"]["properties"]["items"].is_object());
+    assert!(
+        binding.input_schema["properties"]["inputs"]["properties"]["nested"]["properties"]["items"]
+            .is_object()
+    );
     let input = json!({"host":"server","inputs":{"nested":{"items":["{{ literal }}"]}}});
     let BindingCall::Automation(request) = binding
         .parse_request(input.as_object().unwrap().clone())
@@ -541,12 +544,10 @@ fn active_controller_rejects_unavailable_and_unverified_prerequisites() {
 #[test]
 fn configured_controller_environment_obeys_entry_value_and_aggregate_bounds() {
     assert!(
-        controller_environment(BTreeMap::from([("MCP_VALUE".into(), "x".repeat(4096))]))
-            .is_ok()
+        controller_environment(BTreeMap::from([("MCP_VALUE".into(), "x".repeat(4096))])).is_ok()
     );
     assert!(
-        controller_environment(BTreeMap::from([("MCP_VALUE".into(), "x".repeat(4097))]))
-            .is_err()
+        controller_environment(BTreeMap::from([("MCP_VALUE".into(), "x".repeat(4097))])).is_err()
     );
     assert!(
         controller_environment(
@@ -659,8 +660,7 @@ fn controller_pins_source_and_rejects_host_controls() {
     let source = dir.path().join("source");
     fs::write(&source, b"abc").unwrap();
     let bindings =
-        controller_compile(controller_definition(&source), true, true, Some(dir.path()))
-            .unwrap();
+        controller_compile(controller_definition(&source), true, true, Some(dir.path())).unwrap();
     let binding = bindings.get(BindingId(0)).unwrap();
     fs::write(&source, b"changed").unwrap();
     for arguments in [
@@ -737,8 +737,7 @@ fn controller_json_limit_counts_actual_escaped_payload() {
             )
         })
         .collect();
-    let BindingCall::Controller(request) = binding.parse_request(arguments.clone()).unwrap()
-    else {
+    let BindingCall::Controller(request) = binding.parse_request(arguments.clone()).unwrap() else {
         panic!("expected controller request")
     };
     assert_eq!(

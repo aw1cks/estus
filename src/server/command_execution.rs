@@ -12,7 +12,10 @@ use crate::{
     wire::ReplyBudget,
 };
 
-use super::{Estus, State, preparation::{Operation, PreparedCommand, request_deadline}};
+use super::{
+    Estus, State,
+    preparation::{Operation, PreparedCommand, request_deadline},
+};
 
 impl Estus {
     pub(super) async fn command(

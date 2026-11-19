@@ -330,7 +330,10 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
             definitions["tools"][name]["execution"]["source"]
                 .as_str()
                 .unwrap(),
-            output.join(format!("payloads/{name}/collector.py")).to_str().unwrap()
+            output
+                .join(format!("payloads/{name}/collector.py"))
+                .to_str()
+                .unwrap()
         );
     }
     assert!(output.join("snapshots").is_dir());

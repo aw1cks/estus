@@ -7,9 +7,12 @@ use crate::{
     audit::Audit,
     config::ToolId,
     filesystem::{
-        data::{ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest,
+        data::{
+            ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest,
             RemoveDirectoryData, RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest,
-            RenameData, RenameRequest, ReplaceData, ReplaceRequest, StatRequest, WriteData, WriteRequest},
+            RenameData, RenameRequest, ReplaceData, ReplaceRequest, StatRequest, WriteData,
+            WriteRequest,
+        },
         metadata::StatData,
         operations::{self, FileContext},
     },
@@ -18,7 +21,10 @@ use crate::{
     wire::ReplyBudget,
 };
 
-use super::{Estus, State, preparation::{file_metadata, request_deadline}};
+use super::{
+    Estus, State,
+    preparation::{file_metadata, request_deadline},
+};
 
 impl Estus {
     pub(super) async fn read_file(

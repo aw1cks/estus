@@ -2,7 +2,10 @@ use std::{sync::Arc, time::Instant};
 
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
-    handler::server::{common::FromContextPart, tool::{ToolCallContext, schema_for_type}},
+    handler::server::{
+        common::FromContextPart,
+        tool::{ToolCallContext, schema_for_type},
+    },
     model::{CallToolResult, JsonObject, ServerCapabilities, ServerConfig},
     service::RequestContext,
     tool, tool_handler,
@@ -16,9 +19,12 @@ use crate::{
     command::{ExecRequest, RunRequest, SudoRequest},
     config::{IdentityRole, SudoMode, TargetDiscovery, ToolId},
     filesystem::{
-        data::{ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest,
+        data::{
+            ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest,
             RemoveDirectoryData, RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest,
-            RenameData, RenameRequest, ReplaceData, ReplaceRequest, StatRequest, WriteData, WriteRequest},
+            RenameData, RenameRequest, ReplaceData, ReplaceRequest, StatRequest, WriteData,
+            WriteRequest,
+        },
         metadata::StatData,
     },
     output::ReadOutputRequest,
@@ -106,12 +112,8 @@ impl Estus {
             Ok(BindingCall::Automation(request)) => {
                 self.automation_binding(id, request, context).await
             }
-            Ok(BindingCall::Generic(request)) => {
-                self.generic_binding(id, request, context).await
-            }
-            Ok(BindingCall::Payload(request)) => {
-                self.payload_binding(id, request, context).await
-            }
+            Ok(BindingCall::Generic(request)) => self.generic_binding(id, request, context).await,
+            Ok(BindingCall::Payload(request)) => self.payload_binding(id, request, context).await,
             Err(error) => {
                 if binding.is_controller() {
                     self.state
@@ -136,7 +138,11 @@ impl Estus {
                     } else {
                         IdentityRole::Ordinary
                     },
-                    sudo_mode: if binding.automation_authority().is_some() { None } else { mode },
+                    sudo_mode: if binding.automation_authority().is_some() {
+                        None
+                    } else {
+                        mode
+                    },
                     user: binding.sudo().map(|(user, _)| user),
                     program: None,
                     binding_revision: Some(&binding.revision),

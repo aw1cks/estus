@@ -775,22 +775,26 @@ pub(crate) async fn import_inventory(
     ctx: RuntimeContext<'_>,
 ) -> Result<super::generic::Inventory, &'static str> {
     let (reply, source) = run_selected(runtime, &ctx, Some(DocumentationRequest::Inventory))
-        .await.map_err(RuntimeFailure::code)?;
+        .await
+        .map_err(RuntimeFailure::code)?;
     let stdout = observed_stdout(reply)?;
-    let report: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| "runtime_protocol_error")?;
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|_| "runtime_protocol_error")?;
     if report["schema"] != 2 || report["status"] != "passed" {
         return Err("generic_inventory_failed");
     }
-    let identity: RuntimeIdentity = serde_json::from_value(report["identity"].clone())
-        .map_err(|_| "runtime_protocol_error")?;
+    let identity: RuntimeIdentity =
+        serde_json::from_value(report["identity"].clone()).map_err(|_| "runtime_protocol_error")?;
     if !valid_identity(&identity) || !matches_source(&identity, &source) {
         return Err("runtime_identity_mismatch");
     }
     let inventory = super::generic::Inventory {
         schema: 1,
         identity,
-        content_sha256: report["inventory"]["content_sha256"].as_str()
-            .ok_or("runtime_protocol_error")?.to_owned(),
+        content_sha256: report["inventory"]["content_sha256"]
+            .as_str()
+            .ok_or("runtime_protocol_error")?
+            .to_owned(),
         modules: serde_json::from_value(report["inventory"]["modules"].clone())
             .map_err(|_| "runtime_protocol_error")?,
     };
@@ -896,7 +900,10 @@ pub(crate) async fn import_role(
     if !crate::contracts::role_schema::valid_entry_point(entry_point) {
         return Err("invalid_role_entry_point");
     }
-    match (crate::contracts::role_schema::is_collection_role(role), role_path) {
+    match (
+        crate::contracts::role_schema::is_collection_role(role),
+        role_path,
+    ) {
         (true, Some(_)) => return Err("invalid_role_source"),
         (false, None) => return Err("role_source_required"),
         (_, Some(path))

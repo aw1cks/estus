@@ -40,7 +40,6 @@ use tokio::{
 };
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
-use crate::reply::{ToolError, ToolReply};
 use super::{
     data::{
         DIRECTORY_CURSORS_PER_TARGET, DirectoryLimits, ListData, ListSpec, MkdirData, MkdirSpec,
@@ -50,6 +49,7 @@ use super::{
     },
     metadata::{ListEntry, StatData, metadata_data},
 };
+use crate::reply::{ToolError, ToolReply};
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 

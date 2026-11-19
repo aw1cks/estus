@@ -13,9 +13,9 @@ use crate::{
 
 mod command_execution;
 mod file_execution;
+mod generic_execution;
 mod handlers;
 mod local_execution;
-mod generic_execution;
 mod payload_execution;
 mod preparation;
 mod registration;
@@ -46,8 +46,11 @@ struct State {
 
 impl Estus {
     pub(crate) fn new(config: Config) -> Result<Self, ConfigError> {
-        let registration::Registration { router: tool_router, tools, sudo_name } =
-            registration::register(&config)?;
+        let registration::Registration {
+            router: tool_router,
+            tools,
+            sudo_name,
+        } = registration::register(&config)?;
         let shutdown = CancellationToken::new();
         let pool = Pool::new(
             config.ssh_executable().to_path_buf(),

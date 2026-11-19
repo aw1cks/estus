@@ -2,13 +2,13 @@
 #![cfg(unix)]
 
 #[allow(dead_code)]
+#[path = "support/catalog.rs"]
+mod catalog;
+#[allow(dead_code)]
 #[path = "support/isolated.rs"]
 mod isolated;
 #[allow(dead_code)]
 mod support;
-#[allow(dead_code)]
-#[path = "support/catalog.rs"]
-mod catalog;
 
 use std::{
     collections::BTreeSet,
@@ -812,7 +812,10 @@ async fn projection_reducer_probes(a: &Acceptance) -> Result<()> {
     source
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
-    fs::write(source.path(), include_str!("../src/automation/python/runner.py"))?;
+    fs::write(
+        source.path(),
+        include_str!("../src/automation/python/runner.py"),
+    )?;
     let bridge = "import json,runpy,sys; module=runpy.run_path(sys.argv[1],run_name='estus_projection_probe'); plan=json.loads(sys.argv[2]); result=json.loads(sys.argv[3]); print(json.dumps(module['Projection'](plan).reduce(result,False)))";
     let cases = [
         (

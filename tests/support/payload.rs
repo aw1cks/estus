@@ -35,7 +35,11 @@ pub fn call(role: &str, function: &str, args: Value) -> Result<Value> {
         .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
     let manifest: Value = serde_json::from_slice(&std::fs::read(assets.join("catalog.json"))?)?;
     let executor = &manifest["tools"][role]["executor"];
-    let bundle = assets.join(executor["path"].as_str().context("catalog payload assets")?);
+    let bundle = assets.join(
+        executor["path"]
+            .as_str()
+            .context("catalog payload assets")?,
+    );
     let source = match executor["kind"].as_str() {
         Some("native_payload") => bundle.join("collector.py"),
         Some("ansible_role") => bundle.join("files/collector.py"),

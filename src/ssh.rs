@@ -159,8 +159,16 @@ impl Pool {
         shutdown: CancellationToken,
         agent: Option<std::ffi::OsString>,
     ) -> Arc<Self> {
-        let mut pool = Self::with_policy(executable, ssh_config, connect_timeout, shutdown, Policy::Diagnostic);
-        Arc::get_mut(&mut pool).expect("new pool is uniquely owned").agent = Some(agent);
+        let mut pool = Self::with_policy(
+            executable,
+            ssh_config,
+            connect_timeout,
+            shutdown,
+            Policy::Diagnostic,
+        );
+        Arc::get_mut(&mut pool)
+            .expect("new pool is uniquely owned")
+            .agent = Some(agent);
         pool
     }
 

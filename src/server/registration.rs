@@ -33,7 +33,10 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
     if config.bindings().entries().any(|(id, binding)| {
         binding.is_payload() && config.binding_enabled(id) && binding.payload_plan().is_none()
     }) {
-        return Err(ConfigError::new("native_payload", "Enabled payloads require successful startup activation"));
+        return Err(ConfigError::new(
+            "native_payload",
+            "Enabled payloads require successful startup activation",
+        ));
     }
     // This is the explicit publication inventory. Each entry binds native
     // SDK metadata and its callable handler to a target-policy identity.
@@ -234,5 +237,9 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             tool_router.add_route(route);
         }
     }
-    Ok(Registration { router: tool_router, tools, sudo_name })
+    Ok(Registration {
+        router: tool_router,
+        tools,
+        sudo_name,
+    })
 }

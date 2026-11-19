@@ -8,7 +8,6 @@ const MAX_LABEL_KEY_BYTES: usize = 64;
 const MAX_LABEL_VALUE_BYTES: usize = 256;
 const MAX_METADATA_BYTES: usize = 65_536;
 
-
 fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
     let authorities = value
         .as_table()
@@ -97,7 +96,9 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
         }
         if let Some(value) = r#become.get("executable") {
             let field = "automation.authorities.*.become.executable";
-            let path = value.as_str().ok_or_else(|| invalid(field, "must be a string"))?;
+            let path = value
+                .as_str()
+                .ok_or_else(|| invalid(field, "must be a string"))?;
             authority_path(path, field)?;
         }
         let mappings = authority
@@ -129,9 +130,12 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 "automation.authorities.*.targets.*.destination",
             )?;
             if let Some(python) = mapping.get("python") {
-                let python = python.as_str().ok_or_else(|| invalid(
-                    "automation.authorities.*.targets.*.python", "must be a string",
-                ))?;
+                let python = python.as_str().ok_or_else(|| {
+                    invalid(
+                        "automation.authorities.*.targets.*.python",
+                        "must be a string",
+                    )
+                })?;
                 authority_path(python, "automation.authorities.*.targets.*.python")?;
             }
         }
@@ -325,7 +329,12 @@ fn validate_profile(value: &toml::Value, field: &'static str) -> Result<(), Conf
 }
 
 fn validate_tool_selection(table: &toml::Table, field: &'static str) -> Result<(), ConfigError> {
-    for key in ["enabled_tools", "enabled_generic_tools", "disabled_tools", "tool_presets"] {
+    for key in [
+        "enabled_tools",
+        "enabled_generic_tools",
+        "disabled_tools",
+        "tool_presets",
+    ] {
         if let Some(value) = table.get(key) {
             let entries = value
                 .as_array()
@@ -696,10 +705,17 @@ pub(super) fn validate_bindings(
                 "automation targets require explicit automation authority",
             ));
         }
-        if binding.is_automation() && binding.targets.iter()
-            .any(|name| targets.get(name).is_none_or(|target| target.python.is_empty()))
+        if binding.is_automation()
+            && binding.targets.iter().any(|name| {
+                targets
+                    .get(name)
+                    .is_none_or(|target| target.python.is_empty())
+            })
         {
-            return Err(invalid("tools", "Ansible targets require an explicit Python interpreter"));
+            return Err(invalid(
+                "tools",
+                "Ansible targets require an explicit Python interpreter",
+            ));
         }
     }
     Ok(())
@@ -707,8 +723,10 @@ pub(super) fn validate_bindings(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{
+        automation_text, binding_definition, load_text, named_authority_text,
+    };
     use super::*;
-    use super::super::test_support::{load_text, named_authority_text, automation_text, binding_definition};
 
     #[test]
     fn named_authorities_require_complete_private_capabilities_and_bounded_count() {
@@ -738,7 +756,8 @@ mod tests {
             "become={method='sudo',user='root',executable='/run/wrappers/bin/sudo'}",
         );
         let config = load_text(&configured, &[]).unwrap();
-        let AutomationBecome::Sudo { executable, .. } = &config.automation.authorities["ops"].r#become;
+        let AutomationBecome::Sudo { executable, .. } =
+            &config.automation.authorities["ops"].r#become;
         assert_eq!(executable, "/run/wrappers/bin/sudo");
         for value in ["'sudo'", "''", "42", "\"/private\\u0000sudo\""] {
             let invalid_text = text.replace(
@@ -1209,5 +1228,4 @@ mod tests {
         }
         assert!(load_text("[targets.one]\nssh_host='ordinary'\n[targets.one.sudo]\nmode='same-account'\nprograms=['/opt/My Program/run']", &[]).is_ok());
     }
-
 }

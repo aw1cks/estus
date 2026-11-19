@@ -183,17 +183,28 @@ fn resolve_catalog_selection(
             "selected catalog tools require prepared reviewed definitions",
         ));
     }
-    let generic = |name: &str| document.tools.get(name)
-        .and_then(|definition| definition.get("execution"))
-        .and_then(|execution| execution.get("kind"))
-        .and_then(toml::Value::as_str) == Some("ansible_generic");
+    let generic = |name: &str| {
+        document
+            .tools
+            .get(name)
+            .and_then(|definition| definition.get("execution"))
+            .and_then(|execution| execution.get("kind"))
+            .and_then(toml::Value::as_str)
+            == Some("ansible_generic")
+    };
     if selected.iter().any(|name| generic(name)) {
-        return Err(invalid("enabled_generic_tools", "Generic tools require independent explicit selection"));
+        return Err(invalid(
+            "enabled_generic_tools",
+            "Generic tools require independent explicit selection",
+        ));
     }
     let mut seen = BTreeSet::new();
     for name in &document.enabled_generic_tools {
         if !generic(name) || !seen.insert(name) {
-            return Err(invalid("enabled_generic_tools", "Must name unique configured generic tools"));
+            return Err(invalid(
+                "enabled_generic_tools",
+                "Must name unique configured generic tools",
+            ));
         }
         if !document.disabled_tools.contains(name) {
             selected.insert(name.clone());
@@ -274,7 +285,6 @@ struct Ssh {
     config_file: Option<PathBuf>,
     executable: Option<PathBuf>,
 }
-
 
 impl Config {
     pub(crate) fn load(cli: Cli) -> Result<Self, ConfigError> {
@@ -550,8 +560,8 @@ fn resolve_ssh_executable(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{binding_definition, cli, load_text};
     use super::*;
-    use super::super::test_support::{cli, load_text, binding_definition};
 
     #[test]
     fn doctor_is_optional_and_accepts_repeated_explicit_targets() {
@@ -1050,7 +1060,6 @@ mod tests {
             "limits.max_file_bytes: must be a positive decimal integer"
         );
     }
-
 }
 
 #[cfg(test)]

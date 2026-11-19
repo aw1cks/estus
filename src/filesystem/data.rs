@@ -810,8 +810,8 @@ pub(crate) fn verify_script(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::metadata::metadata_data;
+    use super::*;
     use rmcp::model::RequestId;
     use serde_json::json;
 
