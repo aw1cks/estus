@@ -1730,72 +1730,57 @@ identity outside the disposable guest.
 derivation and `launcher.nix` using host-selected QEMU/tools. Default and lab
 launchers retain per-run private disks, EFI state and keys.
 
-### Explicit development preparation
+### Direct development MCP app
 
-From the checkout root (including checkouts whose path contains spaces):
-
-```sh
-nix run .#dev-prepare
-```
-
-The same `estus-dev-prepare` command is available in the default pinned devshell;
-`--project-root PATH` selects another Git checkout explicitly. Preparation builds
-the current native artifact into `nix/result/native/default`, then atomically
-publishes a private readiness record/config under `target/estus-dev/`. The config
-uses `actions-only`, no destinations, and a ten-second maximum operation timeout.
-A failed rebuild invalidates readiness rather than silently selecting the old
-result link. Source edits require another explicit preparation.
-
-This phase starts no MCP, SSH or fixture service. Use existing acceptance apps
-for their owned disposable fixtures; preparation does not create another fixture
-daemon or touch real hosts.
-
-### Immediate MCP launch
-
-After preparation, run:
+From the checkout root:
 
 ```sh
-./nix/scripts/estus-dev-launch.sh
+nix run --no-write-lock-file .#dev-mcp
 ```
 
-The launcher resolves its own checkout, reads the successful preparation record
-and immediately `exec`s that artifact. It works from another cwd when invoked by
-its absolute path. Normal stdout is MCP JSON only; EOF/signals retain the native
-process lifecycle. It never builds, installs dependencies, provisions fixtures,
-refreshes approvals or restarts itself.
+Nix builds the current native package when needed, then the app `exec`s it with
+the immutable `examples/dev-no-targets.toml` policy. No preparation command,
+readiness record or checkout-local launch script is required. The same
+`estus-dev-mcp` executable is available in the pinned default devshell.
 
-Default launch uses the prepared no-target policy and clears inherited Estus
-configuration/SSH/runtime/catalog overrides. Deliberately select an existing
-reviewed operator or disposable-fixture policy with `--config PATH`; it is never
-inferred from ambient `ESTUS_CONFIG`. Missing preparation/configuration fails
-closed with an actionable stderr diagnostic. Editing sources does not rebuild or
-change the prepared artifact: run preparation again explicitly.
+The policy uses `actions-only`, no destinations, and a ten-second maximum
+operation timeout. The app clears inherited Estus configuration, SSH, runtime
+and catalog overrides. It provisions no fixtures and never refreshes capability
+approvals. Old `target/estus-dev/` preparation records are ignored and left alone.
+
+Build diagnostics go to stderr; server stdout remains MCP JSON. After startup,
+EOF and signals use the server's normal process lifecycle. A cold launch can take
+longer while Nix builds or downloads dependencies; cached launches reuse the store
+artifact. New source changes take effect when the client starts the app again.
+Local Git flakes use tracked files, so add newly introduced source files before
+expecting Nix to include them.
+
+For another explicitly reviewed policy, use the ordinary app instead:
+
+```sh
+nix run --no-write-lock-file . -- --config /absolute/path/to/reviewed.toml
+```
 
 ### Opt-in OMP client
 
-The tracked `.omp/mcp.json` invokes only the immediate launcher and is disabled
-by default. Open OMP at the checkout root (or select it with `omp --cwd`), prepare
-first, then deliberately add `estus-dev` to the active profile's `enabledServers`
-list and reload MCP. Preserve the profile's other configuration. Its
-`disabledServers` denylist still wins. No user-level configuration is changed by
-this repository.
+The tracked `.omp/mcp.json` invokes `nix run --no-write-lock-file .#dev-mcp`
+from the checkout root and is disabled by default. Add `estus-dev` to the
+active profile's `enabledServers` list and reload MCP to opt in. The
+`disabledServers` denylist still wins. No user-level configuration is changed.
 
-The entry uses a schema-valid boolean rather than environment-string enablement.
-Its 30,000 ms request timeout leaves headroom above the prepared policy's ten-second
-maximum and owned cleanup. `OMP_MCP_TIMEOUT_MS` overrides the entry process-wide;
-review that value and the client timeout when selecting a longer-running custom
-policy.
+The entry allows 300,000 ms for MCP requests, including cold initialization.
+This does not raise the server policy's ten-second operation maximum.
+`OMP_MCP_TIMEOUT_MS` overrides the entry process-wide.
 
 OMP18.19.0 discards subprocess stderr and reports startup failure as generic EOF.
-For actionable setup/configuration diagnostics, run the launcher directly:
+For actionable build or configuration diagnostics, use the same app directly:
 
 ```sh
-./nix/scripts/estus-dev-launch.sh </dev/null
+nix run --no-write-lock-file .#dev-mcp </dev/null
 ```
 
-Normal MCP execution remains client-owned; no build, proxy, detached service or
-automatic approval refresh is added. Private generated configuration stays under
-the ignored runtime area rather than in `.omp/mcp.json`.
+MCP execution remains client-owned: no proxy, detached service, automatic restart,
+or mutable preparation state is added.
 
 ## CI coverage
 

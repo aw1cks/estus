@@ -3,24 +3,22 @@
   perSystem = { pkgs, estusBuild, ... }:
     let
       inherit (estusBuild) craneLib fuzzLib package;
-      devPrepare = pkgs.writeShellApplication {
-        name = "estus-dev-prepare";
-        runtimeInputs = [ pkgs.nix pkgs.git pkgs.coreutils ];
-        text = ''
-          safe_config=${../../examples/dev-no-targets.toml}
-        '' + builtins.readFile ../scripts/estus-dev-prepare.sh;
-      };
+      devMcp = pkgs.writeShellScriptBin "estus-dev-mcp" ''
+        unset ESTUS_CONFIG ESTUS_SSH_CONFIG ESTUS_SSH ESTUS_CATALOG_ROOT \
+          ESTUS_ANSIBLE_RUNTIME ESTUS_PYTHON_RUNTIME
+        exec ${package}/bin/estus --config ${../../examples/dev-no-targets.toml} "$@"
+      '';
     in
     {
-      apps.dev-prepare = {
+      apps.dev-mcp = {
         type = "app";
-        program = "${devPrepare}/bin/estus-dev-prepare";
+        program = "${devMcp}/bin/estus-dev-mcp";
       };
       devShells.default = craneLib.devShell {
         checks = { inherit package; };
         # crane supplies cargo, rustc, rustfmt, and clippy from its toolchain.
         packages = [
-          devPrepare
+          devMcp
           pkgs.openssh
           pkgs.coreutils
           pkgs.docker-client

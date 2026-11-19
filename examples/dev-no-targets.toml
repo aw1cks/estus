@@ -1,4 +1,4 @@
-# Native development preparation only: no configured destinations or fixtures.
+# Safe policy for the direct development MCP app: no destinations or fixtures.
 profile = "actions-only"
 destination_policy = "configured"
 

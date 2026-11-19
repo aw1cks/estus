@@ -4,10 +4,10 @@
     "estus-dev": {
       "type": "stdio",
       "enabled": false,
-      "command": "./nix/scripts/estus-dev-launch.sh",
-      "args": [],
+      "command": "nix",
+      "args": ["run", "--no-write-lock-file", ".#dev-mcp"],
       "cwd": ".",
-      "timeout": 30000
+      "timeout": 300000
     }
   }
 }
