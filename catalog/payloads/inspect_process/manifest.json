@@ -27,7 +27,15 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "errno",
+      "json",
+      "os",
+      "platform",
+      "re",
+      "signal",
+      "sys",
+      "time"
     ],
     "executables": [],
     "paths": []

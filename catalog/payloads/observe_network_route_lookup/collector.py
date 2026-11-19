@@ -27,7 +27,7 @@ def main():
             if proc.poll() is None: proc.kill()
             proc.wait()
     def ip(args):
-        rows = json.loads(run(['/usr/bin/ip','-j']+args)[0])
+        rows = json.loads(run([os.environ['ESTUS_EXEC_IP'],'-j']+args)[0])
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def destination():

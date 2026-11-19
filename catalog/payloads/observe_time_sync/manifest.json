@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "81b87d9180d198f5156bf7a1c4a38601b77b69005a1f3ef8214decd1d3eb3bb4",
+  "source_sha256": "a99e7d8104373bd2b9a522d3f0ac6ce90168b65c742f1b78a4247389f385247d",
   "max_source_bytes": 1048576,
   "argv": [],
   "requirements": {
@@ -12,10 +12,23 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "timedatectl": [
+        "/usr/bin/timedatectl",
+        "/bin/timedatectl"
+      ]
+    }
   },
   "contract": {
     "schema": {

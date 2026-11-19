@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "6ce1fbf4d45600209272d5ce6b052564d4e0994e00238e1249a148f643bb5d10",
+  "source_sha256": "e508c340c86224dc17992c3aa0e29bb4d93a68ece422e7819b15c6aca3323b85",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -36,10 +36,24 @@
       8
     ],
     "modules": [
-      "json"
+      "ipaddress",
+      "json",
+      "os",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "traceroute": [
+        "/usr/sbin/traceroute",
+        "/usr/bin/traceroute",
+        "/sbin/traceroute",
+        "/bin/traceroute"
+      ]
+    }
   },
   "contract": {
     "schema": {

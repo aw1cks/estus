@@ -68,7 +68,7 @@ def main():
     interface=sys.argv[1]
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',interface):raise ValueError('interface')
     if not os.path.isdir('/sys/class/net/'+interface):raise ValueError('interface absent')
-    rc,text,error=run(['/usr/bin/ethtool', '-c']+[interface])
+    rc,text,error=run([os.environ['ESTUS_EXEC_ETHTOOL'], '-c']+[interface])
     keys=['rx_usecs', 'rx_frames', 'rx_usecs_irq', 'rx_frames_irq', 'tx_usecs', 'tx_frames', 'tx_usecs_irq', 'tx_frames_irq', 'stats_block_usecs', 'pkt_rate_low', 'rx_usecs_low', 'rx_frames_low', 'tx_usecs_low', 'tx_frames_low', 'pkt_rate_high', 'rx_usecs_high', 'rx_frames_high', 'tx_usecs_high', 'tx_frames_high', 'sample_interval']
     values={}
     section=''

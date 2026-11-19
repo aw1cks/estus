@@ -26,7 +26,7 @@ def main():
             if proc.poll() is None: proc.kill()
             proc.wait()
     def ip(args):
-        rows = json.loads(run(['/usr/bin/ip','-j']+args)[0])
+        rows = json.loads(run([os.environ['ESTUS_EXEC_IP'],'-j']+args)[0])
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
@@ -55,7 +55,7 @@ def main():
     dev=interface()
     address=str(ipaddress.ip_interface(p['address']))
     if dev!=policy['interface'] or address not in policy['addresses']: raise ValueError('address mutation outside policy')
-    run(['/usr/bin/ip','address','add',address,'dev',dev])
+    run([os.environ['ESTUS_EXEC_IP'],'address','add',address,'dev',dev])
     a=ipaddress.ip_interface(address)
     found=any(x.get('local')==str(a.ip) and x.get('prefixlen')==a.network.prefixlen for r in ip(['address','show','dev',dev]) for x in r.get('addr_info',[]))
     if found!=True: raise ValueError('address readback mismatch')

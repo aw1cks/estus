@@ -57,7 +57,7 @@ def main():
         if os.path.exists(temporary): os.unlink(temporary)
     if read(path,1024)!=content.strip(): raise ValueError('persistent readback mismatch')
     # Apply exactly this file. Never --system or an unrelated all-settings reload.
-    run(['/usr/bin/sysctl','--load='+path],4096)
+    run([os.environ['ESTUS_EXEC_SYSCTL'],'--load='+path],4096)
 
     after=current()
     if after!=value: raise ValueError('runtime readback mismatch; operation may already have effects')

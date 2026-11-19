@@ -30,7 +30,7 @@ def main():
         if len(encoded.encode())>4096: raise ValueError('result bound')
         print(encoded)
 
-    usage=run(['/usr/bin/journalctl','--disk-usage','--no-pager'],4096).strip()
+    usage=run([os.environ['ESTUS_EXEC_JOURNALCTL'],'--disk-usage','--no-pager'],4096).strip()
     if len(usage)>1024: raise ValueError('usage bound')
     keys={'SystemMaxUse','SystemKeepFree','SystemMaxFileSize','RuntimeMaxUse','RuntimeKeepFree','RuntimeMaxFileSize','MaxRetentionSec','MaxFileSec','Storage'}
     paths=[]

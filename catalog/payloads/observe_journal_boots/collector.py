@@ -31,7 +31,7 @@ def main():
         print(encoded)
 
     limit=args[0]
-    text=run(['/usr/bin/journalctl','--list-boots','--no-pager','--quiet'],262144)
+    text=run([os.environ['ESTUS_EXEC_JOURNALCTL'],'--list-boots','--no-pager','--quiet'],262144)
     lines=text.splitlines()
     if len(lines)>2048: raise ValueError('boot source count bound')
     boots=[]

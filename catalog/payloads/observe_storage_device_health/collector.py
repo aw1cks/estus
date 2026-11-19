@@ -36,7 +36,7 @@ def main():
         raise ValueError('controller outside reviewed virtual device scope')
     controller_state = attribute('state')
     # nvme-cli raw SMART is the standard 512-byte log; no JSON numeric precision loss.
-    process = subprocess.Popen(['/usr/bin/nvme', 'smart-log', '/dev/nvme0', '--raw-binary'],
+    process = subprocess.Popen([os.environ['ESTUS_EXEC_NVME'], 'smart-log', '/dev/nvme0', '--raw-binary'],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                env={'PATH': '/usr/bin', 'LC_ALL': 'C'}, stdin=subprocess.DEVNULL)
     streams = selectors.DefaultSelector()

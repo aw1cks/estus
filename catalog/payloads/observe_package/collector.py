@@ -45,11 +45,11 @@ def main():
     request=json.loads(sys.argv[1])
     p = package(request['package'])
     if p.installed is None: raise ValueError('package not installed')
-    files = run(['/usr/bin/dpkg-query','--listfiles',p.name]).splitlines()
+    files = run([os.environ['ESTUS_EXEC_DPKG_QUERY'],'--listfiles',p.name]).splitlines()
     if len(files)>4096 or any(len(f)>1024 for f in files): raise ValueError('package file inventory exceeds bound')
     regular = next((f for f in files if os.path.isfile(f)), None)
     if regular is None: raise ValueError('no regular owned file available')
-    owner = run(['/usr/bin/dpkg-query','--search',regular]).strip()
+    owner = run([os.environ['ESTUS_EXEC_DPKG_QUERY'],'--search',regular]).strip()
     if len(owner)>2048 or not any(line.split(': ',1)[0] == p.name for line in owner.splitlines()): raise ValueError('ownership postcondition failed')
     r = p.installed.record
     maintainer=r.get('Maintainer','')

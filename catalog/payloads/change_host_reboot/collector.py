@@ -47,7 +47,7 @@ def main():
 
     result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 
-    mutation = run(['/usr/bin/systemd-run','--unit=estus-catalog-reboot','--on-active=5s','--timer-property=AccuracySec=1s','/usr/bin/systemctl','reboot'])
+    mutation = run([os.environ['ESTUS_EXEC_SYSTEMD_RUN'],'--unit=estus-catalog-reboot','--on-active=5s','--timer-property=AccuracySec=1s',os.environ['ESTUS_EXEC_SYSTEMCTL'],'reboot'])
     result.update({'outcome':'uncertain' if mutation['timed_out'] else ('scheduled' if mutation['returncode'] == 0 else 'rejected'),
         'command_returncode':mutation['returncode'],'reboot_confirmed':False,
         'reconciliation_required':'independent reconnect and changed boot_id; disconnection is not proof; never automatically replay',

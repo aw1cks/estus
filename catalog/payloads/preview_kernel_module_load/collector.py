@@ -84,7 +84,7 @@ def main():
         return name
 
     def metadata(name):
-        raw = checked(['/usr/bin/modinfo', '-0', name])
+        raw = checked([os.environ['ESTUS_EXEC_MODINFO'], '-0', name])
         values = {}
         records = raw.split('\x00')
         if len(records) > 512:
@@ -105,7 +105,7 @@ def main():
 
     name = approved()
     metadata(name)
-    plan = checked(['/usr/bin/modprobe','--show-depends','--dry-run','--verbose',name]).splitlines()
+    plan = checked([os.environ['ESTUS_EXEC_MODPROBE'],'--show-depends','--dry-run','--verbose',name]).splitlines()
     if len(plan) > 128:
         raise ValueError('load plan exceeds bound')
     result.update({'name':name,'plan':[text(v,4096) for v in plan], 'permission_granted':False,

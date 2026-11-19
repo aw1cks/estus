@@ -36,7 +36,12 @@
       8
     ],
     "modules": [
-      "json"
+      "ipaddress",
+      "json",
+      "os",
+      "socket",
+      "struct",
+      "sys"
     ],
     "executables": [],
     "paths": []

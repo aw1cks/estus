@@ -34,19 +34,19 @@ const PINNED_DYNAMIC_PAYLOADS: &[PinnedDynamicPayload] = &[
         name: "observe_cpu",
         toml_sha256: "dfaa4def61f1f3d2ae6383eaa2f6f6f09475910a35f306ced1294f5eac117200",
         source_sha256: "f8767fb99e075259f3b104f23e5cbff8478cf502f2c91308a9fd27b9117cef64",
-        manifest_sha256: "2157c089d17401766ea6984a01e13ec8979031563e9e82f8d1b0a5ab4ca65a69",
+        manifest_sha256: "6035fca16346ca8913557980e4f6925ff42fb3b271fb65a84a34fa80f8a7cbce",
     },
     PinnedDynamicPayload {
         name: "observe_memory",
         toml_sha256: "75e97867765313558ad6257716c903fdb4f08944bef9557734b820b6c936ff0e",
         source_sha256: "eae9433cc26d1bb5ae810b9b680ef35acd120da960fadb9db205087d90814b27",
-        manifest_sha256: "3b867cc3bc8acf63bab1f0b49fd3e0097e6caead19448fa4a1811b88b3367ea7",
+        manifest_sha256: "e88b7365b9c8afc9f8f2c4fba59b81fd4975a5e612e5291ab61623853d851811",
     },
     PinnedDynamicPayload {
         name: "observe_pressure",
         toml_sha256: "7751ea63a765e676e7cf9c250e8aeb4855773230016aa93174a40ff2aad81476",
         source_sha256: "bf1e7663c14cd92cdaa8cc5e603007adea8c668a359ce7e22f907c83f88bdf9e",
-        manifest_sha256: "b0d7672685c4a8630bc80e4d4c3a47e72118a07c07fd59778156373042dfce92",
+        manifest_sha256: "3c38e3ea311dc50792f6d10684c6b16df1d0200d28005fb202eb934b8b459868",
     },
 ];
 

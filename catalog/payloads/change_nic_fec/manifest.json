@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "reported_changed",
-  "source_sha256": "bfbf75ef2f8b671e7a94b409c2d0b7fba829cc112bd3455cc29694872b84087a",
+  "source_sha256": "70c2e61e97c445ab1a3fb45b88d3059c1770ecec34ac430fc19440cd5ea0525c",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -30,12 +30,23 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
-    "executables": [
-      "/usr/bin/ethtool"
-    ],
-    "paths": []
+    "executables": [],
+    "paths": [],
+    "executable_candidates": {
+      "ethtool": [
+        "/usr/sbin/ethtool",
+        "/usr/bin/ethtool",
+        "/sbin/ethtool"
+      ]
+    }
   },
   "contract": {
     "schema": {

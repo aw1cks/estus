@@ -8,7 +8,7 @@ def main():
     if scope == 'user':
         env['XDG_RUNTIME_DIR'] = '/run/user/' + str(os.getuid())
     collection_deadline = time.monotonic() + 20
-    base = ['/usr/bin/systemctl', '--' + scope, '--no-pager', '--no-ask-password']
+    base = [os.environ['ESTUS_EXEC_SYSTEMCTL'], '--' + scope, '--no-pager', '--no-ask-password']
     def run(args, accepted=(0,)):
         process = subprocess.Popen(base + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         streams = selectors.DefaultSelector()

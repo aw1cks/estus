@@ -71,7 +71,7 @@ def main():
     require_loader()
     ident = ''
     before = efi('LoaderEntryOneShot')
-    mutation = run(['/usr/bin/bootctl','set-oneshot',ident])
+    mutation = run([os.environ['ESTUS_EXEC_BOOTCTL'],'set-oneshot',ident])
     after = efi('LoaderEntryOneShot')
     verified = after is None if ident == '' else after == ident
     result.update({'entry_id':ident, 'selection_variable':'LoaderEntryOneShot', 'previous_selection':before if before is not None else 'unset',

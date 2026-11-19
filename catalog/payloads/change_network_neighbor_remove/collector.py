@@ -26,7 +26,7 @@ def main():
             if proc.poll() is None: proc.kill()
             proc.wait()
     def ip(args):
-        rows = json.loads(run(['/usr/bin/ip','-j']+args)[0])
+        rows = json.loads(run([os.environ['ESTUS_EXEC_IP'],'-j']+args)[0])
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
@@ -58,7 +58,7 @@ def main():
 
     dev=interface(); dest=destination()
     if dev!=policy['interface'] or dest not in policy['neighbors']: raise ValueError('neighbor mutation outside policy')
-    run(['/usr/bin/ip','neighbor','del',dest,'dev',dev])
+    run([os.environ['ESTUS_EXEC_IP'],'neighbor','del',dest,'dev',dev])
     if any(r.get('dst')==dest for r in ip(['neighbor','show','dev',dev])): raise ValueError('neighbor readback mismatch')
     emit({'interface':dev,'operation':'network_neighbor_remove','verified':True,'persistence':'runtime_only'})
 

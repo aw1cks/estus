@@ -27,7 +27,15 @@
       8
     ],
     "modules": [
-      "json"
+      "apt",
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "time"
     ],
     "executables": [],
     "paths": []

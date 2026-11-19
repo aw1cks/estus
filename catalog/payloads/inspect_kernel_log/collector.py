@@ -39,7 +39,7 @@ def main():
     boot=p['boot_id']
     if boot=='current': boot=read('/proc/sys/kernel/random/boot_id',128).replace('-','')
     if not re.fullmatch('[0-9a-f]{32}',boot): raise ValueError('invalid boot')
-    base=['/usr/bin/journalctl','--no-pager','--quiet','--output=json','--all']
+    base=[os.environ['ESTUS_EXEC_JOURNALCTL'],'--no-pager','--quiet','--output=json','--all']
     def records(argv):
         text=run(argv)
         lines=text.splitlines()

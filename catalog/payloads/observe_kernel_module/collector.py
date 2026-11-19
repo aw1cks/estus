@@ -84,7 +84,7 @@ def main():
         return name
 
     def metadata(name):
-        raw = checked(['/usr/bin/modinfo', '-0', name])
+        raw = checked([os.environ['ESTUS_EXEC_MODINFO'], '-0', name])
         values = {}
         records = raw.split('\x00')
         if len(records) > 512:

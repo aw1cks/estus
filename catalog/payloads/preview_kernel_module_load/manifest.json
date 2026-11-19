@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "ab65576d4d6f775783f8b14cff426dd1c30059d7d34c6b5f88c8a75d2ae71344",
+  "source_sha256": "c2c73cc243b1037bd8c86851fa3e749f51dfc0a50b8d7cccff45a6d499a420df",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -21,10 +21,32 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "platform",
+      "re",
+      "resource",
+      "signal",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "uuid"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "modinfo": [
+        "/usr/sbin/modinfo",
+        "/usr/bin/modinfo",
+        "/sbin/modinfo"
+      ],
+      "modprobe": [
+        "/usr/sbin/modprobe",
+        "/usr/bin/modprobe",
+        "/sbin/modprobe"
+      ]
+    }
   },
   "contract": {
     "schema": {

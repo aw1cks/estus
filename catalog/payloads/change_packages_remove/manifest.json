@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "reported_changed",
-  "source_sha256": "5329ddb02ddf53a65d278917267212f33edcf5e9a6b69874981444db2a714096",
+  "source_sha256": "c80cc5d8b7cba6db702a69476475ae481c7100d4a9bb6108be26f69cd926648b",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -27,10 +27,32 @@
       8
     ],
     "modules": [
-      "json"
+      "apt",
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "apt-get": [
+        "/usr/bin/apt-get",
+        "/bin/apt-get"
+      ],
+      "apt-mark": [
+        "/usr/bin/apt-mark",
+        "/bin/apt-mark"
+      ],
+      "dpkg-query": [
+        "/usr/bin/dpkg-query",
+        "/bin/dpkg-query"
+      ]
+    }
   },
   "contract": {
     "schema": {

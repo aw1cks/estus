@@ -26,7 +26,7 @@ def main():
             if proc.poll() is None: proc.kill()
             proc.wait()
     def ip(args):
-        rows = json.loads(run(['/usr/bin/ip','-j']+args)[0])
+        rows = json.loads(run([os.environ['ESTUS_EXEC_IP'],'-j']+args)[0])
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
@@ -54,7 +54,7 @@ def main():
 
     dev=interface()
     if dev!=policy['interface']: raise ValueError('mutation interface outside policy')
-    run(['/usr/bin/ip','link','set','dev',dev,'down'])
+    run([os.environ['ESTUS_EXEC_IP'],'link','set','dev',dev,'down'])
     flags=ip(['link','show','dev',dev])[0]['flags']
     if ('UP' in flags)!=False: raise ValueError('link readback mismatch')
     emit({'interface':dev,'operation':'network_link_down','verified':True,'persistence':'runtime_only'})

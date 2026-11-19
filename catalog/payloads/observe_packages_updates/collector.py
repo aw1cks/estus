@@ -45,7 +45,7 @@ def main():
     request=json.loads(sys.argv[1])
     c = cache()
     updates=[]
-    holds=set(run(['/usr/bin/apt-mark','showhold']).splitlines())
+    holds=set(run([os.environ['ESTUS_EXEC_APT_MARK'],'showhold']).splitlines())
     for name in approved_packages:
         if name in c:
             p=c[name]

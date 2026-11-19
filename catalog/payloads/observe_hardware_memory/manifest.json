@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "588b49e85ee262c421b8c4059b96d666c033990a1454d9d5a20fc31a83430d8d",
+  "source_sha256": "e0d2a8d3f7eb37b3fea92f7c13fc01357bd8fde2fafcb9174b108d4f1cb8e1f3",
   "max_source_bytes": 1048576,
   "argv": [],
   "requirements": {
@@ -12,10 +12,24 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "dmidecode": [
+        "/usr/sbin/dmidecode",
+        "/usr/bin/dmidecode",
+        "/sbin/dmidecode"
+      ]
+    }
   },
   "contract": {
     "schema": {

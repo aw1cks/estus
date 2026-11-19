@@ -64,7 +64,7 @@ def main():
 
     def run(args):
         proc = subprocess.Popen(
-            ['/usr/bin/ethtool'] + args,
+            [os.environ['ESTUS_EXEC_ETHTOOL']] + args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env={'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'},

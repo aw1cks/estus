@@ -68,7 +68,7 @@ def main():
     interface=sys.argv[1]
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',interface):raise ValueError('interface')
     if not os.path.isdir('/sys/class/net/'+interface):raise ValueError('interface absent')
-    rc,text,error=run(['/usr/bin/ethtool','-S',interface])
+    rc,text,error=run([os.environ['ESTUS_EXEC_ETHTOOL'],'-S',interface])
     counters=[]
     if rc==0:
         for line in text.splitlines():

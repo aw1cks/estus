@@ -134,7 +134,7 @@ def main():
     offset = p['offset']
     max_bytes = p['max_bytes']
 
-    base = ['/usr/bin/journalctl', '--no-pager', '--quiet', '--output=json', '--all']
+    base = [os.environ['ESTUS_EXEC_JOURNALCTL'], '--no-pager', '--quiet', '--output=json', '--all']
     probe = []
     try:
         text = run(base + ['--cursor=' + raw_cursor, '--lines=+1'])

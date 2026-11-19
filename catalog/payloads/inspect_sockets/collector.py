@@ -54,7 +54,7 @@ def main():
         print(raw)
 
     proto=p.get('protocol','tcp')
-    args=['/usr/bin/ss','-H','-n','-O','-a','-t' if proto=='tcp' else '-u']
+    args=[os.environ['ESTUS_EXEC_SS'],'-H','-n','-O','-a','-t' if proto=='tcp' else '-u']
     text,_=run(args)
     out=[]
     for line in text.splitlines():

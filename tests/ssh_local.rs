@@ -7638,3 +7638,156 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
     scenario?;
     cleanup
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH/coreutils, python3, and a non-root local account"]
+async fn ssh_native_payload_candidate_and_python_min_discovery_failures() -> Result<()> {
+    let python = support::find_program("python3")?;
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let marker = fixture.root.path().join("must_not_dispatch");
+        let payload_src = format!(
+            "import json, pathlib; pathlib.Path({:?}).write_text('ran'); print(json.dumps({{'ok': True}}))\n",
+            marker
+        );
+        let src_path = fixture.root.path().join("probe.py");
+        fs::write(&src_path, &payload_src)?;
+        let source_sha256 = hex::encode(Sha256::digest(payload_src.as_bytes()));
+
+        #[derive(serde::Serialize)]
+        struct Requirements {
+            python_min: [u16; 2],
+            interpreters: Vec<String>,
+            modules: Vec<String>,
+            executables: Vec<String>,
+            paths: Vec<String>,
+            #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+            executable_candidates: std::collections::BTreeMap<String, Vec<String>>,
+        }
+        #[derive(serde::Serialize)]
+        struct Approval {
+            overlay: Value,
+            result: Value,
+            authority: &'static str,
+            no_log: bool,
+            revision: &'static str,
+        }
+        let write_manifest = |snap_name: &str,
+                              python_min: [u16; 2],
+                              exec_cands: std::collections::BTreeMap<String, Vec<String>>|
+         -> Result<PathBuf> {
+            let snap = fixture.root.path().join(snap_name);
+            let input_schema = json!({"type":"object","additionalProperties":false,"required":[],"properties":{}});
+            let contract = json!({"schema":{"type":"object","additionalProperties":false,"required":["target_python"],"properties":{"target_python":{"type":"string","minLength":1,"maxLength":4096}}},"aliases":{"aliases":{},"properties":{"target_python":{"aliases":{},"properties":{}}}},"defaults":{},"review_required":[]});
+            let overlay = json!({"input_schema":input_schema,"fixed_args":{"target_python":python.to_string_lossy()},"input_map":{}});
+            let result = json!({"kind":"capability_projection","fields":{"ok":["mcp_result","ok"]},"schema":{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}},"max_bytes":1024,"max_items":16,"max_depth":3});
+            let argv: Vec<Value> = Vec::new();
+            let requirements = Requirements {
+                python_min,
+                interpreters: Vec::new(),
+                modules: vec!["json".to_owned()],
+                executables: Vec::new(),
+                paths: Vec::new(),
+                executable_candidates: exec_cands,
+            };
+            let approval = Approval {
+                overlay,
+                result,
+                authority: "automation",
+                no_log: false,
+                revision: "r1",
+            };
+            let digest_bytes = serde_json::to_vec(&(true, 1u32, 1u32, 1u32, "read_only", &source_sha256, 1_048_576usize, &argv, &requirements, &contract, &approval))?;
+            let manifest_sha256 = hex::encode(Sha256::digest(&digest_bytes));
+            fs::write(&snap, serde_json::to_vec_pretty(&json!({
+                "approved": true, "manifest_sha256": manifest_sha256,
+                "schema": 1, "protocol": 1, "adapter_version": 1, "change_policy": "read_only",
+                "source_sha256": source_sha256, "max_source_bytes": 1_048_576usize,
+                "argv": argv, "requirements": requirements, "contract": contract, "approval": approval
+            }))?)?;
+            Ok(snap)
+        };
+
+        let missing_exec = write_manifest(
+            "missing_exec.json",
+            [3, 8],
+            std::collections::BTreeMap::from([(
+                "missing-tool".to_owned(),
+                vec!["/usr/sbin/definitely-missing-estus-c17".to_owned()],
+            )]),
+        )?;
+        let high_py = write_manifest("high_py.json", [3, 99], Default::default())?;
+        let config_path = fixture.root.path().join("operator.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+mode = "headless"
+capabilities = {{ named = true }}
+enabled_tools = ["observe_missing_exec", "observe_high_py"]
+[ssh]
+config_file = {ssh_config:?}
+[targets.plain]
+ssh_host = "plain"
+[automation.targets.plain]
+destination = "plain"
+python = {python:?}
+[tools.observe_missing_exec]
+description = "Missing executable candidate"
+revision = "r1"
+targets = ["plain"]
+authority = "automation"
+effects = ["read"]
+execution = {{ kind = "native_payload", snapshot = {missing_exec:?}, source = {src_path:?}, no_log = false }}
+fixed_args = {{ target_python = {python:?} }}
+input_map = {{}}
+input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
+result = {{ kind = "capability_projection", fields = {{ ok = ["mcp_result", "ok"] }}, max_bytes = 1024, max_items = 16, max_depth = 3, schema = {{ type = "object", additionalProperties = false, required = ["ok"], properties = {{ ok = {{ type = "boolean" }} }} }} }}
+[tools.observe_high_py]
+description = "Higher python_min requirement"
+revision = "r1"
+targets = ["plain"]
+authority = "automation"
+effects = ["read"]
+execution = {{ kind = "native_payload", snapshot = {high_py:?}, source = {src_path:?}, no_log = false }}
+fixed_args = {{ target_python = {python:?} }}
+input_map = {{}}
+input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
+result = {{ kind = "capability_projection", fields = {{ ok = ["mcp_result", "ok"] }}, max_bytes = 1024, max_items = 16, max_depth = 3, schema = {{ type = "object", additionalProperties = false, required = ["ok"], properties = {{ ok = {{ type = "boolean" }} }} }} }}
+"#,
+                ssh_config = fixture.ssh_config,
+                python = python.to_string_lossy(),
+            ),
+        )?;
+        let mut server = WireServer::start(&config_path)?;
+        let cases = async {
+            server.initialize().await?;
+            for (id, tool) in [(2, "observe_missing_exec"), (3, "observe_high_py")] {
+                let reply = script_wire_call(&mut server, id, tool, json!({"host": "plain", "inputs": {}})).await?;
+                ensure!(
+                    reply["error"]["code"] == "discovery_failed",
+                    "{tool} did not fail with discovery_failed: {reply}"
+                );
+                ensure!(
+                    reply["data"]["status"] == "not_started",
+                    "{tool} started remote execution: {reply}"
+                );
+            }
+            ensure!(!marker.exists(), "payload executed despite failed discovery");
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let log = server.log.clone();
+        let owned = masters(&log);
+        let stopped = server.stop(None).await;
+        if let Err(err) = cases {
+            anyhow::bail!("{err}; stderr: {}", log.text());
+        }
+        let _ = stopped?;
+        assert_masters_gone(&owned?).await
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}

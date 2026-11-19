@@ -84,7 +84,7 @@ def main():
         return name
 
     def metadata(name):
-        raw = checked(['/usr/bin/modinfo', '-0', name])
+        raw = checked([os.environ['ESTUS_EXEC_MODINFO'], '-0', name])
         values = {}
         records = raw.split('\x00')
         if len(records) > 512:
@@ -112,7 +112,7 @@ def main():
     metadata(name)
     before = {v['name'] for v in modules()}
     taint_before = taint()
-    argv = ['/usr/bin/modprobe', '--remove', '--verbose', name]
+    argv = [os.environ['ESTUS_EXEC_MODPROBE'], '--remove', '--verbose', name]
     mutation = run(argv)
     after = {v['name'] for v in modules()}
     verified = (name in after) == False

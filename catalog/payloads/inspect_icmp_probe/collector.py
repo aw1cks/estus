@@ -49,7 +49,7 @@ def main():
         print(raw)
 
     dest=destination()
-    text,rc=run(['/usr/bin/ping','-n','-c',str(p['count']),'-w',str(p['deadline']),'-s','16',dest],timeout=p['deadline']+1,accepted=(0,1))
+    text,rc=run([os.environ['ESTUS_EXEC_PING'],'-n','-c',str(p['count']),'-w',str(p['deadline']),'-s','16',dest],timeout=p['deadline']+1,accepted=(0,1))
     m=re.search(r'(\d+) packets transmitted, (\d+) (?:packets )?received',text)
     if m is None: raise ValueError('unsupported ping statistics')
     sent,received=map(int,m.groups())

@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "61e9aafaf7842b092731de5dcbd7901feeb72de826dd250ac5544b0fab5a06c3",
+  "source_sha256": "a1ae7fad9e768db73db23f9b414313e0f1a47e74c67a85c0f8b813305f21d4a9",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -27,10 +27,24 @@
       8
     ],
     "modules": [
-      "json"
+      "apt",
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "dpkg-query": [
+        "/usr/bin/dpkg-query",
+        "/bin/dpkg-query"
+      ]
+    }
   },
   "contract": {
     "schema": {

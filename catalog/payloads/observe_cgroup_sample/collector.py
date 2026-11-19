@@ -50,7 +50,8 @@ def main():
     root=args.pop(0)
     if not re.fullmatch(r'/[A-Za-z0-9_.@:-]+(?:/[A-Za-z0-9_.@:-]+){0,30}',root) or any(x in ('.','..') for x in root.split('/')): raise ValueError('invalid operator-approved subtree')
     base='/sys/fs/cgroup'
-    if read(base+'/cgroup.controllers',4096) is None: raise ValueError('cgroup v2 required')
+    if not os.path.isfile(base+'/cgroup.controllers'): raise ValueError('cgroup v2 unified hierarchy required')
+    read(base+'/cgroup.controllers',4096)
     path=base+root
     if os.path.realpath(path)!=path or not os.path.isdir(path): raise ValueError('missing or aliased subtree')
     boot=read('/proc/sys/kernel/random/boot_id',128)

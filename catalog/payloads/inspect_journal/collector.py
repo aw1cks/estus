@@ -216,7 +216,7 @@ def main():
         raise ValueError('invalid unit')
     scope = 'approved_system_unit' if unit else 'system_journal'
 
-    base = ['/usr/bin/journalctl', '--no-pager', '--quiet', '--output=json', '--all']
+    base = [os.environ['ESTUS_EXEC_JOURNALCTL'], '--no-pager', '--quiet', '--output=json', '--all']
 
     def fetch_records(argv, max_lines):
         text = run(argv)

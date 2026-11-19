@@ -2,7 +2,7 @@ def main():
     import json, os, re, selectors, subprocess, sys, time
     p=json.loads(sys.argv[1]); policy=json.loads(sys.argv[2])
     def run(args):
-        proc=subprocess.Popen(['/usr/bin/ethtool']+args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'LC_ALL':'C','PATH':'/usr/bin:/bin'})
+        proc=subprocess.Popen([os.environ['ESTUS_EXEC_ETHTOOL']]+args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'LC_ALL':'C','PATH':'/usr/bin:/bin'})
         sel=selectors.DefaultSelector(); data={}
         for stream in (proc.stdout,proc.stderr): sel.register(stream,selectors.EVENT_READ); data[stream]=bytearray()
         end=time.monotonic()+6

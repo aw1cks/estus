@@ -1232,6 +1232,7 @@ mod tests {
                 modules: Vec::new(),
                 executables: Vec::new(),
                 paths: Vec::new(),
+                executable_candidates: Default::default(),
             },
             contract: json!({
                 "schema": {

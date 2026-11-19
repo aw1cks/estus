@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "d55b123da3010a6e7691431e5d0ece92b41b71ef21aea250fa8986b58e4da1c0",
+  "source_sha256": "790e9f58f2d22d0a2dfea598efe46c2ec1c932b9e56bcb7dd0526943e41906b8",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -30,10 +30,22 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "systemctl": [
+        "/usr/bin/systemctl",
+        "/bin/systemctl"
+      ]
+    }
   },
   "contract": {
     "schema": {

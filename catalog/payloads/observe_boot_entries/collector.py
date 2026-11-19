@@ -60,7 +60,7 @@ def main():
     result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 
     def entries():
-        data = json.loads(checked(['/usr/bin/bootctl', '--json=short', '--no-pager', 'list']))
+        data = json.loads(checked([os.environ['ESTUS_EXEC_BOOTCTL'], '--json=short', '--no-pager', 'list']))
         if not isinstance(data, list) or len(data) > 128:
             raise ValueError('boot entry count exceeds bound')
         selected = []

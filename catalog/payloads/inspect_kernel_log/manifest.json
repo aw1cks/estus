@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "78c2206155eddaadc9e8e80965ec09630a753f1e499e01ea40c396a262faf216",
+  "source_sha256": "9627990a3ae0868ed4e37c3e6028e0e13217a7a2020a3445039943b7e0980b79",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -50,10 +50,24 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "signal",
+      "stat",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "journalctl": [
+        "/usr/bin/journalctl",
+        "/bin/journalctl"
+      ]
+    }
   },
   "contract": {
     "schema": {

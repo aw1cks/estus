@@ -21,7 +21,13 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "platform",
+      "stat",
+      "sys",
+      "uuid"
     ],
     "executables": [],
     "paths": []

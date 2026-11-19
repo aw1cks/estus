@@ -49,7 +49,7 @@ def main():
         print(raw)
 
     dest=destination()
-    text,_=run(['/usr/bin/traceroute','-n','-I','-q','1','-m',str(p['max_hops']),'-w','1',dest,'32'],timeout=p['deadline'],accepted=(0,1))
+    text,_=run([os.environ['ESTUS_EXEC_TRACEROUTE'],'-n','-I','-q','1','-m',str(p['max_hops']),'-w','1',dest,'32'],timeout=p['deadline'],accepted=(0,1))
     hops=[]
     for line in text.splitlines():
         cells=line.split()

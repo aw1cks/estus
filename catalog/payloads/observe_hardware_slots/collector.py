@@ -65,7 +65,7 @@ def main():
         finally:
             if p.poll() is None:p.kill()
             p.wait();sel.close();p.stdout.close();p.stderr.close()
-    rc,text,error=run(['/usr/bin/dmidecode','--type','9'])
+    rc,text,error=run([os.environ['ESTUS_EXEC_DMIDECODE'],'--type','9'])
     if rc!=0:raise ValueError('firmware inventory unavailable; provision dmidecode and approved firmware access')
     keys={'Designation': 'designation', 'Type': 'type', 'Current Usage': 'current_usage', 'Length': 'length', 'ID': 'slot_id', 'Bus Address': 'bus_address', 'Data Bus Width': 'data_bus_width'}
     records=[];current=None;selected=False

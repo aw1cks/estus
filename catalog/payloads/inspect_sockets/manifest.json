@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "aa0f934b56518b9b8bdc69a798afdd343f7150738ce753bb9be7dc570192bedf",
+  "source_sha256": "8221541c2274dcdfad554037844b5cf762ebfaa9287989e4f3c073f4aabb2347",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -44,10 +44,23 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "ss": [
+        "/usr/sbin/ss",
+        "/usr/bin/ss",
+        "/sbin/ss",
+        "/bin/ss"
+      ]
+    }
   },
   "contract": {
     "schema": {

@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "reboot_scheduled",
-  "source_sha256": "d29e2619747ba8927193dd704d5e7ae4dede263e9eb7c46a7f1f42bbde77818b",
+  "source_sha256": "b717f1411e89f268d980e0e7a85786bd3873a358cc57acd0b541fb2f49342ef3",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -17,10 +17,28 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "platform",
+      "resource",
+      "signal",
+      "subprocess",
+      "tempfile",
+      "uuid"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "systemctl": [
+        "/usr/bin/systemctl",
+        "/bin/systemctl"
+      ],
+      "systemd-run": [
+        "/usr/bin/systemd-run",
+        "/bin/systemd-run"
+      ]
+    }
   },
   "contract": {
     "schema": {

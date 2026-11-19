@@ -23,6 +23,8 @@ pub(crate) struct Requirements {
     pub modules: Vec<String>,
     pub executables: Vec<String>,
     pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub executable_candidates: std::collections::BTreeMap<String, Vec<String>>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -242,6 +244,51 @@ fn validate_manifest(m: &Manifest) -> Result<(), ConfigError> {
             .all(|b| b.is_ascii_alphanumeric() || b"._".contains(&b))
     }) {
         return Err(invalid());
+    }
+    if m.requirements.executable_candidates.len() > 64 {
+        return Err(invalid());
+    }
+    let mut normalized_execs = std::collections::BTreeSet::new();
+    for (name, candidates) in &m.requirements.executable_candidates {
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(invalid());
+        }
+        let normalized = name.to_ascii_uppercase().replace('-', "_");
+        if !normalized_execs.insert(normalized) {
+            return Err(invalid());
+        }
+        if candidates.is_empty() || candidates.len() > 8 {
+            return Err(invalid());
+        }
+        for candidate in candidates {
+            if !candidate.starts_with('/')
+                || candidate.len() > 4096
+                || candidate.contains('\0')
+                || Path::new(candidate).components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+                || Path::new(candidate).file_name().is_none()
+                || !Path::new(candidate)
+                    .parent()
+                    .and_then(Path::to_str)
+                    .is_some_and(|dir| {
+                        matches!(
+                            dir,
+                            "/usr/sbin" | "/usr/bin" | "/sbin" | "/bin" | "/usr/lib/systemd"
+                        )
+                    })
+            {
+                return Err(invalid());
+            }
+        }
     }
     for arg in &m.argv {
         match arg {
@@ -469,6 +516,56 @@ mod tests {
             adapt(&adapter, &json!({"x":{"literal":"{{ x }};\n☃"}})).unwrap(),
             vec!["{\"literal\":\"{{ x }};\\n☃\"}", ""]
         );
+    }
+
+    #[test]
+    fn executable_candidates_validate_allowed_dirs_and_normalization_collisions() {
+        let mut manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "approved": true,
+            "manifest_sha256": "",
+            "schema": 1,
+            "protocol": 1,
+            "adapter_version": 1,
+            "change_policy": "read_only",
+            "source_sha256": "0".repeat(64),
+            "max_source_bytes": 1024,
+            "argv": [],
+            "requirements": {
+                "python_min": [3, 8],
+                "modules": ["json"],
+                "executables": [],
+                "paths": [],
+                "executable_candidates": {
+                    "apt-get": ["/usr/bin/apt-get", "/bin/apt-get"]
+                }
+            },
+            "contract": {"schema":{"type":"object","properties":{"target_python":{"type":"string"}},"required":["target_python"],"additionalProperties":false},"aliases":{"aliases":{},"properties":{"target_python":{"aliases":{},"properties":{}}}},"defaults":{},"review_required":[]},
+            "approval": {"overlay":{"input_schema":{"type":"object","properties":{},"additionalProperties":false,"required":[]},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}},"result":{"kind":"capability_projection","fields":{"ok":["mcp_result","ok"]},"max_bytes":128,"max_items":4,"max_depth":2,"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}},"authority":"ordinary","revision":"1","no_log":false}
+        })).unwrap();
+        assert!(validate_manifest(&manifest).is_ok());
+
+        // Disallowed directory (/tmp) fails closed.
+        manifest
+            .requirements
+            .executable_candidates
+            .insert("bad".into(), vec!["/tmp/evil".into()]);
+        assert!(validate_manifest(&manifest).is_err());
+        manifest.requirements.executable_candidates.remove("bad");
+
+        // Traversal (..) fails closed.
+        manifest
+            .requirements
+            .executable_candidates
+            .insert("bad".into(), vec!["/usr/bin/../sbin/ip".into()]);
+        assert!(validate_manifest(&manifest).is_err());
+        manifest.requirements.executable_candidates.remove("bad");
+
+        // Normalization collision (apt-get vs apt_get) fails closed.
+        manifest
+            .requirements
+            .executable_candidates
+            .insert("apt_get".into(), vec!["/usr/bin/apt-get".into()]);
+        assert!(validate_manifest(&manifest).is_err());
     }
 }
 

@@ -84,7 +84,7 @@ def main():
         return name
 
     def metadata(name):
-        raw = checked(['/usr/bin/modinfo', '-0', name])
+        raw = checked([os.environ['ESTUS_EXEC_MODINFO'], '-0', name])
         values = {}
         records = raw.split('\x00')
         if len(records) > 512:
@@ -119,14 +119,14 @@ def main():
         raise ValueError('unapproved typed load parameters')
     if name in before and parameters:
         raise ValueError('cannot apply load parameters to already loaded module')
-    argv = ['/usr/bin/modprobe', '--verbose', name] + [k + '=' + str(v) for k,v in sorted(parameters.items())]
+    argv = [os.environ['ESTUS_EXEC_MODPROBE'], '--verbose', name] + [k + '=' + str(v) for k,v in sorted(parameters.items())]
     mutation = run(argv)
     after = {v['name'] for v in modules()}
     verified = (name in after) == True
     if name == 'dummy' and 'numdummies' in parameters:
         # numdummies is load-only (permission 0), so sysfs cannot read it back.
         # Its positive postcondition is the actual count of dummy link devices.
-        links = json.loads(checked(['/usr/bin/ip','--json','link','show','type','dummy']))
+        links = json.loads(checked([os.environ['ESTUS_EXEC_IP'],'--json','link','show','type','dummy']))
         if not isinstance(links, list) or len(links) > 128:
             raise ValueError('dummy link observation exceeds bound')
         verified = verified and len(links) == parameters['numdummies']

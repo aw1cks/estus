@@ -26,7 +26,7 @@ def main():
             if proc.poll() is None: proc.kill()
             proc.wait()
     def ip(args):
-        rows = json.loads(run(['/usr/bin/ip','-j']+args)[0])
+        rows = json.loads(run([os.environ['ESTUS_EXEC_IP'],'-j']+args)[0])
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
@@ -55,7 +55,7 @@ def main():
     dev=interface()
     net=str(ipaddress.ip_network(p['destination']))
     if dev!=policy['interface'] or net not in policy['routes']: raise ValueError('route mutation outside policy')
-    run(['/usr/bin/ip','route','add',net,'dev',dev,'table','254'])
+    run([os.environ['ESTUS_EXEC_IP'],'route','add',net,'dev',dev,'table','254'])
     found=any(r.get('dst')==net and r.get('dev')==dev for r in ip(['route','show','table','254','exact',net]))
     if found!=True: raise ValueError('route readback mismatch')
     emit({'interface':dev,'operation':'network_route_add','verified':True,'persistence':'runtime_only'})

@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "3266fe42e577e5591b229213baaaafc5c18d16e51be2c653c4cc95e3262697c6",
+  "source_sha256": "9e520050b4298bf34822ab0f42a2dbe8c76c955b9a5b005148339c2a7ae316d6",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -25,7 +25,10 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "re",
+      "sys"
     ],
     "executables": [],
     "paths": []

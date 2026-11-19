@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "boot_selection",
-  "source_sha256": "a6c7393435669d365694479b57b077a6eb89ce3f946116da2d858392a16106d8",
+  "source_sha256": "9b3a0dd2d39412c8fd1f69bc0733bd90dd8df8e5ecf828cb8800a31b1a45f371",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -21,10 +21,25 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "platform",
+      "resource",
+      "signal",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "uuid"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "bootctl": [
+        "/usr/bin/bootctl",
+        "/bin/bootctl"
+      ]
+    }
   },
   "contract": {
     "schema": {

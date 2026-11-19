@@ -65,7 +65,7 @@ def main():
         finally:
             if p.poll() is None:p.kill()
             p.wait();sel.close();p.stdout.close();p.stderr.close()
-    rc,text,error=run(['/usr/bin/timedatectl','show','--property=NTPSynchronized','--property=NTP','--property=CanNTP','--property=Timezone','--property=LocalRTC'])
+    rc,text,error=run([os.environ['ESTUS_EXEC_TIMEDATECTL'],'show','--property=NTPSynchronized','--property=NTP','--property=CanNTP','--property=Timezone','--property=LocalRTC'])
     values={}
     if rc==0:
         for line in text.splitlines():
@@ -82,7 +82,7 @@ def main():
     else:unavailable.append('timezone')
     # Query only the manager-owned timesync daemon when available. No network
     # probing or service activation; other daemons remain explicitly unknown.
-    trc,ttext,terror=run(['/usr/bin/timedatectl','timesync-status','--no-pager'])
+    trc,ttext,terror=run([os.environ['ESTUS_EXEC_TIMEDATECTL'],'timesync-status','--no-pager'])
     labels={'Server':'synchronization_source','Offset':'offset','Leap':'leap','Stratum':'stratum','Root distance':'root_distance','Delay':'delay','Jitter':'jitter','Packet count':'packet_count','Frequency':'frequency'}
     if trc==0:
         for line in ttext.splitlines():

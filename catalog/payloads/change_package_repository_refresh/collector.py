@@ -13,8 +13,9 @@ def main(evidence):
             end = time.monotonic() + timeout
             while proc.poll() is None:
                 if time.monotonic() > end or os.fstat(out.fileno()).st_size > 262144:
-                    proc.kill(); proc.wait()
-                    raise ValueError('command timed out/oversized; mutation may be uncertain; never replay automatically')
+                    evidence['changed'] = None
+                    evidence['uncertain'] = True
+                    raise ValueError('command timed out/oversized; transaction state uncertain; never replay automatically')
                 time.sleep(.02)
             if os.fstat(out.fileno()).st_size > 262144:
                 raise ValueError('command output exceeds bound')
@@ -46,7 +47,7 @@ def main(evidence):
             return {'state':'unknown'}
     request=json.loads(sys.argv[1])
     evidence['changed'] = None
-    run(['/usr/bin/apt-get','-o','APT::Update::Error-Mode=any','-o','Acquire::Retries=0','-o','Acquire::http::Timeout=5','-o','Acquire::https::Timeout=5','-o','DPkg::Lock::Timeout=0','update'],25)
+    run([os.environ['ESTUS_EXEC_APT_GET'],'-o','APT::Update::Error-Mode=any','-o','Acquire::Retries=0','-o','Acquire::http::Timeout=5','-o','Acquire::https::Timeout=5','-o','DPkg::Lock::Timeout=0','update'],25)
     c = cache()
     # Only publish freshness after apt has authenticated every configured source.
     os.makedirs('/var/lib/apt/periodic',exist_ok=True)

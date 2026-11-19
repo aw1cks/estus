@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "3268bdf7ad7a8a07d20c25c6f73ef94306babd3cd042e54dc73499517a79ab75",
+  "source_sha256": "c147049eedc11c1c1562ff2999ea36da4f69a320c5bb875e203fd72a7f48a8d3",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -36,10 +36,25 @@
       8
     ],
     "modules": [
-      "json"
+      "ipaddress",
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "ping": [
+        "/usr/bin/ping",
+        "/bin/ping",
+        "/usr/sbin/ping",
+        "/sbin/ping"
+      ]
+    }
   },
   "contract": {
     "schema": {

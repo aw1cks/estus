@@ -68,7 +68,7 @@ def main():
     interface=sys.argv[1]
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',interface):raise ValueError('interface')
     if not os.path.isdir('/sys/class/net/'+interface):raise ValueError('interface absent')
-    rc,text,error=run(['/usr/bin/ethtool', '-g']+[interface])
+    rc,text,error=run([os.environ['ESTUS_EXEC_ETHTOOL'], '-g']+[interface])
     keys=['maximum_rx', 'maximum_rx_mini', 'maximum_rx_jumbo', 'maximum_tx', 'maximum_rx_buf_len', 'maximum_cqe_size', 'current_rx', 'current_rx_mini', 'current_rx_jumbo', 'current_tx', 'current_rx_buf_len', 'current_cqe_size']
     values={}
     section=''

@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "f6cd7f5f896d05e9c60f0af4f278e074f03de3e2b8c9614ce4c77f3c4e78c0e0",
+  "source_sha256": "877f1b1d59c2a8c299cf7a612abbdeb9ca65d13a443b57f336db5711cbdc1424",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -36,10 +36,22 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "re",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "systemctl": [
+        "/usr/bin/systemctl",
+        "/bin/systemctl"
+      ]
+    }
   },
   "contract": {
     "schema": {

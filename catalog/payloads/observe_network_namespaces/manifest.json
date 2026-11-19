@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "b60a8805b91bf781a922d2ec67301c4a0e99dcfcb8c7ed047733cf25da497a98",
+  "source_sha256": "8dcfd3b80f79db74be3ab9cf78025a4a72d9ff20da888c4e2f536fcae7d0e62e",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -28,10 +28,23 @@
       8
     ],
     "modules": [
-      "json"
+      "json",
+      "os",
+      "selectors",
+      "subprocess",
+      "sys",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "ip": [
+        "/usr/sbin/ip",
+        "/usr/bin/ip",
+        "/sbin/ip",
+        "/bin/ip"
+      ]
+    }
   },
   "contract": {
     "schema": {

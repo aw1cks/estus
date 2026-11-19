@@ -551,3 +551,65 @@ fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fa
     .unwrap();
     assert!(Catalog::load(Some(&bad_root)).is_err());
 }
+
+#[test]
+fn all_payload_manifests_pin_modules_executable_candidates_and_python_min() {
+    use sha2::{Digest, Sha256};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+    let catalog = canonical_catalog();
+    let py310 = [
+        "observe_nic_eee",
+        "change_nic_eee",
+        "observe_nic_fec",
+        "observe_nic_transceiver",
+    ];
+    let apt_tools = [
+        "change_package_repository",
+        "change_package_repository_refresh",
+        "change_packages_install",
+        "change_packages_remove",
+        "change_packages_upgrade",
+        "observe_package",
+        "observe_packages_updates",
+    ];
+    for (name, template) in &catalog.manifest().tools {
+        let assets::Executor::NativePayload { path } = &template.executor else {
+            continue;
+        };
+        let dir = root.join(path);
+        let source = fs::read(dir.join("collector.py")).unwrap();
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(
+            manifest["source_sha256"].as_str().unwrap(),
+            hex::encode(Sha256::digest(&source)),
+            "{name}: source_sha256 drift"
+        );
+        let req = &manifest["requirements"];
+        let expected_py = if py310.contains(&name.as_str()) {
+            serde_json::json!([3, 10])
+        } else {
+            serde_json::json!([3, 8])
+        };
+        assert_eq!(req["python_min"], expected_py, "{name}: python_min");
+        assert_eq!(
+            req["executables"],
+            serde_json::json!([]),
+            "{name}: legacy PATH executables must be empty"
+        );
+        let modules = req["modules"].as_array().unwrap();
+        assert!(!modules.is_empty(), "{name}: missing modules");
+        if apt_tools.contains(&name.as_str()) {
+            assert!(
+                modules.contains(&serde_json::json!("apt")),
+                "{name}: missing apt module requirement"
+            );
+        }
+        if name == "change_packages_install" {
+            let cands = req["executable_candidates"].as_object().unwrap();
+            for key in ["dpkg-query", "apt-mark", "apt-get"] {
+                assert!(cands.contains_key(key), "{name}: missing {key} candidates");
+            }
+        }
+    }
+}

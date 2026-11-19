@@ -12,7 +12,11 @@
       8
     ],
     "modules": [
-      "json"
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "sys"
     ],
     "executables": [],
     "paths": []

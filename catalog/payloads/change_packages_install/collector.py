@@ -14,8 +14,9 @@ def main(evidence):
             end = time.monotonic() + timeout
             while proc.poll() is None:
                 if time.monotonic() > end or os.fstat(out.fileno()).st_size > 262144:
-                    proc.kill(); proc.wait()
-                    raise ValueError('command timed out/oversized; mutation may be uncertain; never replay automatically')
+                    evidence['changed'] = None
+                    evidence['uncertain'] = True
+                    raise ValueError('command timed out/oversized; transaction state uncertain; never replay automatically')
                 time.sleep(.02)
             if os.fstat(out.fileno()).st_size > 262144:
                 raise ValueError('command output exceeds bound')
@@ -46,21 +47,21 @@ def main(evidence):
         except FileNotFoundError:
             return {'state':'unknown', 'age_seconds':None}
     def package_records(name):
-        records = run(['/usr/bin/dpkg-query', '--show', '--showformat=${Package}\t${Status}\t${Version}\n'])
+        records = run([os.environ['ESTUS_EXEC_DPKG_QUERY'], '--show', '--showformat=${Package}\t${Status}\t${Version}\n'])
         return [line for line in records.splitlines() if line.split('\t', 1)[0] == name]
 
     request=json.loads(sys.argv[1])
     name=request['package']
     p=package(name)
     before=p.installed.version if p.installed else None
-    holds=run(['/usr/bin/apt-mark','showhold']).splitlines()
+    holds=run([os.environ['ESTUS_EXEC_APT_MARK'],'showhold']).splitlines()
     if name in holds and before!=request['version']: raise ValueError('held package; no change attempted')
     version=request['version']
     if not re.fullmatch(r'[0-9A-Za-z.+:~_-]{1,96}',version): raise ValueError('invalid version')
     if before!=version and not any(v.version==version for v in p.versions): raise ValueError('requested version unavailable')
     if before is not None and before!=version: raise ValueError('use upgrade for an installed package with another version')
     args=['install','--no-install-recommends',name+'='+version]
-    base=['/usr/bin/apt-get','-o','DPkg::Lock::Timeout=0','-o','Acquire::Retries=0','-o','Acquire::http::Timeout=5','-o','Acquire::https::Timeout=5','--assume-yes']
+    base=[os.environ['ESTUS_EXEC_APT_GET'],'-o','DPkg::Lock::Timeout=0','-o','Acquire::Retries=0','-o','Acquire::http::Timeout=5','-o','Acquire::https::Timeout=5','--assume-yes']
     if before!=version:
         plan=run(base+['--simulate']+args)
         # Fail closed if apt proposes any effect outside this exact package.
@@ -78,7 +79,7 @@ def main(evidence):
                     evidence['changed'] = True
             except Exception:
                 pass  # Missing readback cannot prove unchanged; never replay.
-    records=run(['/usr/bin/dpkg-query','--show','--showformat=${Package}\t${db:Status-Abbrev}\t${Version}\n']).splitlines()
+    records=run([os.environ['ESTUS_EXEC_DPKG_QUERY'],'--show','--showformat=${Package}\t${db:Status-Abbrev}\t${Version}\n']).splitlines()
     installed=[line.split('\t')[2] for line in records if len(line.split('\t'))==3 and line.split('\t')[0]==name and line.split('\t')[1].startswith('ii')]
     after=installed[0] if len(installed)==1 else None
     if after!=version: raise ValueError('independent dpkg state postcondition failed; never replay')

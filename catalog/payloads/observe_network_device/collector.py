@@ -68,7 +68,7 @@ def main():
     interface=sys.argv[1]
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',interface):raise ValueError('interface')
     if not os.path.isdir('/sys/class/net/'+interface):raise ValueError('interface absent')
-    rc,text,error=run(['/usr/bin/ethtool', '-i']+[interface])
+    rc,text,error=run([os.environ['ESTUS_EXEC_ETHTOOL'], '-i']+[interface])
     keys=['driver', 'version', 'firmware_version', 'expansion_rom_version', 'bus_info', 'supports_statistics', 'supports_test', 'supports_eeprom_access', 'supports_register_dump', 'supports_priv_flags']
     values={}
     section=''

@@ -72,7 +72,7 @@ def main():
         return value if value is not None else 'unknown'
 
     def entries():
-        data = json.loads(checked(['/usr/bin/bootctl', '--json=short', '--no-pager', 'list']))
+        data = json.loads(checked([os.environ['ESTUS_EXEC_BOOTCTL'], '--json=short', '--no-pager', 'list']))
         if not isinstance(data, list) or len(data) > 128:
             raise ValueError('boot entry count exceeds bound')
         selected = []
@@ -115,7 +115,7 @@ def main():
     v,e = selected_entry()
     ident = v['entry_id']
     before = efi('LoaderEntryOneShot')
-    mutation = run(['/usr/bin/bootctl','set-oneshot',ident])
+    mutation = run([os.environ['ESTUS_EXEC_BOOTCTL'],'set-oneshot',ident])
     after = efi('LoaderEntryOneShot')
     verified = after is None if ident == '' else after == ident
     result.update({'entry_id':ident, 'selection_variable':'LoaderEntryOneShot', 'previous_selection':before if before is not None else 'unset',

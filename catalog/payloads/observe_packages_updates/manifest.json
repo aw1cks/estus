@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "43d1e1843ab5b9446b660d84a3f5393b8b7dec490767506b32638985d43afbe8",
+  "source_sha256": "7a2c01a2876f7d3ac9320ba93cc74e3fe39454604353e9065afbcb6c1bba3e03",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -23,10 +23,24 @@
       8
     ],
     "modules": [
-      "json"
+      "apt",
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "time"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {
+      "apt-mark": [
+        "/usr/bin/apt-mark",
+        "/bin/apt-mark"
+      ]
+    }
   },
   "contract": {
     "schema": {

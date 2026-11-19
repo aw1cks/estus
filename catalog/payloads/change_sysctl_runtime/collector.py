@@ -39,7 +39,7 @@ def main():
         return int(text)
     before=current()
 
-    run(['/usr/bin/sysctl','--write',key+'='+str(value)],4096)
+    run([os.environ['ESTUS_EXEC_SYSCTL'],'--write',key+'='+str(value)],4096)
 
     after=current()
     if after!=value: raise ValueError('runtime readback mismatch; operation may already have effects')
