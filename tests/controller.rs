@@ -1467,3 +1467,59 @@ async fn controller_output_prefix_quota_disabled_storage_failure_and_expiry() ->
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sequential_readonly_subdirs_repair_and_sigterm_exits_promptly() -> Result<()> {
+    let mkdir = support::find_program("mkdir")?;
+    let chmod = support::find_program("chmod")?;
+    let script = format!(
+        r#"
+set -eu
+{mkdir} -p sub/nested
+printf 'locked' > sub/nested/data
+{chmod} 0555 sub/nested
+{chmod} 0555 sub
+printf 'REPAIRED\n'
+"#,
+        mkdir = support::quote(mkdir.to_str().context("UTF-8 mkdir")?),
+        chmod = support::quote(chmod.to_str().context("UTF-8 chmod")?),
+    );
+    let fixture = Fixture::new(&script, 8192, 15)?;
+    let mut server = Server::start(&fixture).await?;
+    let scenario = async {
+        for id in 2..=18_u64 {
+            server.call(id, arguments()).await?;
+            let frame = server.response(id).await?;
+            let result = envelope(&frame)?;
+            ensure!(
+                result["error"].is_null(),
+                "call #{id} failed after 0555 repair: {result}"
+            );
+            ensure!(result["data"]["stdout"] == "REPAIRED\n");
+            cleaned(&result["data"])?;
+            fixture.clean().await?;
+        }
+        server
+            .send(json!({"jsonrpc":"2.0","id":19,"method":"tools/call",
+                "params":{"name":"ssh_targets","arguments":{}}}))
+            .await?;
+        let discovery = server.response(19).await?;
+        ensure!(
+            discovery["result"]["structuredContent"]["data"]["cleanup_quarantine"]
+                == json!({"capacity": 16, "child_reap": 0, "workspace_remove": 0}),
+            "unexpected quarantine counts: {discovery}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let shutdown_started = std::time::Instant::now();
+    let stopped = server.stop(true).await;
+    let elapsed = shutdown_started.elapsed();
+    scenario?;
+    let _audit = stopped?;
+    ensure!(
+        elapsed < Duration::from_secs(3),
+        "SIGTERM shutdown took {elapsed:?} (>= 3s)"
+    );
+    fixture.clean().await
+}

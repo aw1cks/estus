@@ -197,7 +197,9 @@ impl Estus {
             }
         };
         let audit = Audit::start(metadata, started);
-        let reply = ToolReply::success(self.state.config.targets(&self.state.tools));
+        let mut discovery = self.state.config.targets(&self.state.tools);
+        discovery.cleanup_quarantine = self.state.cleanup_quarantine.snapshot();
+        let reply = ToolReply::success(discovery);
         audit.finish(None, None);
         budget.result(reply)
     }

@@ -3,24 +3,34 @@
 //! Process groups are not containment: descendants may escape with setsid/setpgid.
 //! Completion certifies the final anchored-group signal and direct-child reaping,
 //! not descendant disappearance, rollback, or bounded shutdown on a broken OS.
+use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
+use nix::dir::Dir;
+use nix::errno::Errno;
+use nix::fcntl::{AtFlags, OFlag, openat};
+use nix::sys::stat::{Mode, SFlag, fchmod, fstat, fstatat};
+use nix::unistd::{UnlinkatFlags, unlinkat};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{ChildStderr, ChildStdout};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::audit;
 use crate::bindings::{ControllerPlan, PreparedController};
 use crate::capture::{Capture, drain};
+use crate::config::CleanupDiagnostics;
 use crate::process::Children;
 use crate::progress::{Reporter, Stage};
 use crate::reply::{
@@ -29,7 +39,133 @@ use crate::reply::{
 
 const GRACE: Duration = Duration::from_millis(250);
 const POLL: Duration = Duration::from_millis(10);
+pub(crate) const QUARANTINE_CAPACITY: usize = 16;
+const REPAIR_DEPTH_LIMIT: usize = 64;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuarantinePhase {
+    ChildReap,
+    WorkspaceRemove,
+}
+
+#[derive(Default)]
+struct QuarantineCounts {
+    reserved: usize,
+    child_reap: usize,
+    workspace_remove: usize,
+}
+
+pub(crate) struct CleanupQuarantine {
+    counts: Mutex<QuarantineCounts>,
+}
+
+impl Default for CleanupQuarantine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn lock_quarantine(mutex: &Mutex<QuarantineCounts>) -> MutexGuard<'_, QuarantineCounts> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl CleanupQuarantine {
+    pub(crate) fn new() -> Self {
+        Self {
+            counts: Mutex::new(QuarantineCounts::default()),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> CleanupDiagnostics {
+        let counts = lock_quarantine(&self.counts);
+        CleanupDiagnostics {
+            capacity: QUARANTINE_CAPACITY,
+            child_reap: counts.child_reap,
+            workspace_remove: counts.workspace_remove,
+        }
+    }
+
+    pub(crate) fn try_reserve(self: &Arc<Self>) -> Option<CleanupReservation> {
+        let mut counts = lock_quarantine(&self.counts);
+        if counts.reserved >= QUARANTINE_CAPACITY {
+            return None;
+        }
+        counts.reserved += 1;
+        Some(CleanupReservation {
+            quarantine: Arc::clone(self),
+            phase: None,
+        })
+    }
+}
+
+pub(crate) struct CleanupReservation {
+    quarantine: Arc<CleanupQuarantine>,
+    phase: Option<QuarantinePhase>,
+}
+
+impl CleanupReservation {
+    fn enter_child_reap(&mut self) {
+        let emit = {
+            let mut counts = lock_quarantine(&self.quarantine.counts);
+            if self.phase == Some(QuarantinePhase::ChildReap) {
+                None
+            } else {
+                if self.phase == Some(QuarantinePhase::WorkspaceRemove) {
+                    counts.workspace_remove -= 1;
+                }
+                self.phase = Some(QuarantinePhase::ChildReap);
+                counts.child_reap += 1;
+                Some((counts.child_reap, counts.workspace_remove))
+            }
+        };
+        if let Some((child_reap, workspace_remove)) = emit {
+            audit::cleanup_quarantine(
+                "child_reap",
+                child_reap,
+                workspace_remove,
+                QUARANTINE_CAPACITY,
+            );
+        }
+    }
+
+    fn enter_workspace_remove(&mut self) {
+        let emit = {
+            let mut counts = lock_quarantine(&self.quarantine.counts);
+            if self.phase == Some(QuarantinePhase::WorkspaceRemove) {
+                None
+            } else {
+                if self.phase == Some(QuarantinePhase::ChildReap) {
+                    counts.child_reap -= 1;
+                }
+                self.phase = Some(QuarantinePhase::WorkspaceRemove);
+                counts.workspace_remove += 1;
+                Some((counts.child_reap, counts.workspace_remove))
+            }
+        };
+        if let Some((child_reap, workspace_remove)) = emit {
+            audit::cleanup_quarantine(
+                "workspace_remove",
+                child_reap,
+                workspace_remove,
+                QUARANTINE_CAPACITY,
+            );
+        }
+    }
+}
+
+impl Drop for CleanupReservation {
+    fn drop(&mut self) {
+        let mut counts = lock_quarantine(&self.quarantine.counts);
+        counts.reserved -= 1;
+        match self.phase {
+            Some(QuarantinePhase::ChildReap) => counts.child_reap -= 1,
+            Some(QuarantinePhase::WorkspaceRemove) => counts.workspace_remove -= 1,
+            None => {}
+        }
+    }
+}
 /// Concrete child protocols; native controller scripts retain their existing mode.
 #[derive(Debug)]
 pub(crate) enum ControllerSupervision {
@@ -60,6 +196,7 @@ pub(crate) struct ControllerRun {
 
 struct Setup {
     workspace: Option<PathBuf>,
+    root_identity: Option<(nix::libc::dev_t, nix::libc::ino_t)>,
     ready: bool,
 }
 
@@ -163,10 +300,11 @@ impl CliLease {
 pub(crate) struct PendingCleanup {
     setup: Option<JoinHandle<Setup>>,
     workspace: Option<PathBuf>,
+    root_identity: Option<(nix::libc::dev_t, nix::libc::ino_t)>,
     cleanup: Option<JoinHandle<io::Result<()>>>,
     children: Children,
     control: Option<ChildStdin>,
-    scratch: Option<JoinHandle<io::Result<bool>>>,
+    scratch: Option<JoinHandle<io::Result<ScratchStatus>>>,
     lease: Option<CliLease>,
 }
 
@@ -175,6 +313,7 @@ impl PendingCleanup {
         Self {
             setup: None,
             workspace: None,
+            root_identity: None,
             cleanup: None,
             children: Children::default(),
             control: None,
@@ -188,56 +327,231 @@ impl PendingCleanup {
             && let Some(path) = self.workspace.as_ref()
         {
             let path = path.clone();
-            self.cleanup = Some(tokio::task::spawn_blocking(
-                move || match fs::remove_dir_all(path) {
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                    result => result,
-                },
-            ));
+            let identity = self.root_identity;
+            self.cleanup = Some(tokio::task::spawn_blocking(move || {
+                remove_workspace(&path, identity)
+            }));
         }
     }
 
     /// An unkillable direct child or persistently failing filesystem can keep
     /// this owner alive indefinitely. No numeric process-group polling occurs.
-    pub(crate) async fn finish(mut self) {
+    pub(crate) async fn finish(self) {
+        self.finish_with(None, None).await;
+    }
+
+    pub(crate) async fn finish_with(
+        mut self,
+        mut permit: Option<OwnedSemaphorePermit>,
+        mut slot: Option<CleanupReservation>,
+    ) {
         if let Some(setup) = self.setup.take()
             && let Ok(setup) = setup.await
         {
             self.workspace = setup.workspace;
+            self.root_identity = setup.root_identity;
         }
         self.control.take();
         self.children.signal_final();
         if let Some(scratch) = self.scratch.take() {
             let _ = scratch.await;
         }
-        while !self.children.reap() {
-            tokio::time::sleep(POLL).await;
+        let mut reaped = self.children.reap();
+        let mut lease_active = self.lease.as_mut().is_some_and(|lease| {
+            let _ = lease.poll();
+            lease.active()
+        });
+        if (!reaped || lease_active)
+            && let Some(reservation) = slot.as_mut()
+        {
+            reservation.enter_child_reap();
         }
-        loop {
-            if let Some(lease) = self.lease.as_mut() {
+        while !reaped {
+            tokio::time::sleep(POLL).await;
+            reaped = self.children.reap();
+        }
+        while lease_active {
+            tokio::time::sleep(POLL).await;
+            lease_active = self.lease.as_mut().is_some_and(|lease| {
                 let _ = lease.poll();
-                if lease.active() {
-                    tokio::time::sleep(POLL).await;
-                    continue;
-                }
-            }
-            break;
+                lease.active()
+            });
         }
         while self.workspace.is_some() {
             self.start_workspace_cleanup();
             if let Some(cleanup) = self.cleanup.take() {
                 if matches!(cleanup.await, Ok(Ok(()))) {
                     self.workspace = None;
-                } else {
-                    tokio::time::sleep(GRACE).await;
+                    break;
                 }
+                if let Some(reservation) = slot.as_mut() {
+                    reservation.enter_workspace_remove();
+                }
+                // Release the normal operation permit only after reaping and
+                // only once the separate quarantine slot owns the workspace.
+                if slot.is_some() {
+                    permit.take();
+                }
+                tokio::time::sleep(GRACE).await;
             }
         }
+        drop(permit);
+        drop(slot);
+    }
+}
+
+fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
+    openat(
+        nix::fcntl::AT_FDCWD,
+        path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+fn clean_dir_fd(dir_fd: std::os::fd::BorrowedFd<'_>, uid: u32, depth: usize) -> io::Result<()> {
+    if depth > REPAIR_DEPTH_LIMIT {
+        return Err(io::Error::other("controller workspace repair depth limit"));
+    }
+    let dir_stat = fstat(dir_fd).map_err(io::Error::from)?;
+    if !SFlag::from_bits_truncate(dir_stat.st_mode).contains(SFlag::S_IFDIR)
+        || dir_stat.st_uid != uid
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "controller workspace directory is not owned",
+        ));
+    }
+    if !Mode::from_bits_truncate(dir_stat.st_mode).contains(Mode::S_IRWXU) {
+        fchmod(dir_fd, Mode::S_IRWXU).map_err(io::Error::from)?;
+    }
+    let mut stream = Dir::openat(
+        dir_fd,
+        c".",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let mut names: Vec<CString> = Vec::new();
+    for entry in stream.iter() {
+        let entry = entry.map_err(io::Error::from)?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        names.push(entry.file_name().to_owned());
+    }
+    drop(stream);
+    for name in names {
+        clean_entry(dir_fd, name.as_c_str(), uid, depth)?;
+    }
+    Ok(())
+}
+
+fn clean_entry(
+    dir_fd: std::os::fd::BorrowedFd<'_>,
+    name: &CStr,
+    uid: u32,
+    depth: usize,
+) -> io::Result<()> {
+    let entry_stat = match fstatat(dir_fd, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(Errno::ENOENT) => return Ok(()),
+        Err(error) => return Err(io::Error::from(error)),
+    };
+    if SFlag::from_bits_truncate(entry_stat.st_mode).contains(SFlag::S_IFDIR) {
+        if entry_stat.st_uid != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "controller subdirectory is not owned",
+            ));
+        }
+        let child_fd = match openat(
+            dir_fd,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::ENOENT) => return Ok(()),
+            Err(error) => return Err(io::Error::from(error)),
+        };
+        let opened_stat = fstat(&child_fd).map_err(io::Error::from)?;
+        if !SFlag::from_bits_truncate(opened_stat.st_mode).contains(SFlag::S_IFDIR)
+            || opened_stat.st_uid != uid
+            || opened_stat.st_dev != entry_stat.st_dev
+            || opened_stat.st_ino != entry_stat.st_ino
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "controller subdirectory identity changed",
+            ));
+        }
+        clean_dir_fd(child_fd.as_fd(), uid, depth + 1)?;
+        drop(child_fd);
+        match unlinkat(dir_fd, name, UnlinkatFlags::RemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => Ok(()),
+            Err(error) => Err(io::Error::from(error)),
+        }
+    } else {
+        match unlinkat(dir_fd, name, UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => Ok(()),
+            Err(error) => Err(io::Error::from(error)),
+        }
+    }
+}
+
+fn repair_and_remove_workspace(
+    root: &Path,
+    root_identity: Option<(nix::libc::dev_t, nix::libc::ino_t)>,
+) -> io::Result<()> {
+    let root_fd = match open_dir_nofollow(root) {
+        Ok(fd) => fd,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let uid = nix::unistd::geteuid().as_raw();
+    let st = fstat(&root_fd).map_err(io::Error::from)?;
+    if !SFlag::from_bits_truncate(st.st_mode).contains(SFlag::S_IFDIR) || st.st_uid != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "controller workspace root ownership mismatch",
+        ));
+    }
+    if let Some((dev, ino)) = root_identity
+        && (st.st_dev != dev || st.st_ino != ino)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "controller workspace root identity changed",
+        ));
+    }
+    clean_dir_fd(root_fd.as_fd(), uid, 0)?;
+    drop(root_fd);
+    match fs::remove_dir_all(root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn remove_workspace(
+    root: &Path,
+    root_identity: Option<(nix::libc::dev_t, nix::libc::ino_t)>,
+) -> io::Result<()> {
+    match fs::remove_dir_all(root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            repair_and_remove_workspace(root, root_identity)
+        }
+        Err(error) => Err(error),
     }
 }
 
 fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>, automation: bool) -> Setup {
     let mut workspace = None;
+    let mut root_identity = None;
     // The path owner is outside the unwind boundary so partial private files
     // survive a setup panic as an explicitly owned cleanup obligation.
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
@@ -250,6 +564,9 @@ fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>, automation: bool
             .as_ref()
             .ok_or_else(|| io::Error::other("controller setup failed"))?;
         fs::set_permissions(path, Permissions::from_mode(0o700))?;
+        let root_fd = open_dir_nofollow(path)?;
+        let root_stat = fstat(&root_fd).map_err(io::Error::from)?;
+        root_identity = Some((root_stat.st_dev, root_stat.st_ino));
         for (name, bytes) in [
             ("source", plan.source.as_bytes()),
             ("input.json", input.as_slice()),
@@ -273,6 +590,7 @@ fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>, automation: bool
     }));
     Setup {
         workspace,
+        root_identity,
         ready: matches!(result, Ok(Ok(()))),
     }
 }
@@ -348,6 +666,7 @@ enum Outcome {
     Setup,
     Protocol,
     Resource,
+    UnsupportedWorkspaceEntry,
 }
 
 async fn read_pipe<R: AsyncRead + Unpin>(
@@ -365,25 +684,38 @@ struct Monitoring {
     scratch: Option<(u64, usize)>,
 }
 
-fn scratch_within_limit(root: &Path, mut bytes: u64, mut files: usize) -> io::Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScratchStatus {
+    Ok,
+    LimitExceeded,
+    UnsupportedEntry,
+}
+
+fn scratch_within_limit(
+    root: &Path,
+    mut bytes: u64,
+    mut files: usize,
+) -> io::Result<ScratchStatus> {
     fn visit(
         path: &Path,
         depth: usize,
         temporary: bool,
         bytes: &mut u64,
         files: &mut usize,
-    ) -> io::Result<bool> {
+    ) -> io::Result<ScratchStatus> {
         if depth > 16 {
-            return Ok(false);
+            return Ok(ScratchStatus::LimitExceeded);
         }
         let entries = match fs::read_dir(path) {
-            Err(error) if depth > 0 && error.kind() == io::ErrorKind::NotFound => return Ok(true),
+            Err(error) if depth > 0 && error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ScratchStatus::Ok);
+            }
             result => result?,
         };
         for entry in entries {
             let entry = entry?;
             if *files == 0 {
-                return Ok(false);
+                return Ok(ScratchStatus::LimitExceeded);
             }
             *files -= 1;
             let metadata = match entry.path().symlink_metadata() {
@@ -392,12 +724,13 @@ fn scratch_within_limit(root: &Path, mut bytes: u64, mut files: usize) -> io::Re
             };
             if metadata.is_dir() {
                 let temporary = temporary || (depth == 0 && entry.file_name() == "tmp");
-                if !visit(&entry.path(), depth + 1, temporary, bytes, files)? {
-                    return Ok(false);
+                match visit(&entry.path(), depth + 1, temporary, bytes, files)? {
+                    ScratchStatus::Ok => {}
+                    status => return Ok(status),
                 }
             } else if metadata.is_file() {
                 if metadata.len() > *bytes {
-                    return Ok(false);
+                    return Ok(ScratchStatus::LimitExceeded);
                 }
                 *bytes -= metadata.len();
             } else if !((depth == 0
@@ -408,10 +741,10 @@ fn scratch_within_limit(root: &Path, mut bytes: u64, mut files: usize) -> io::Re
                     && metadata.file_type().is_socket()
                     && metadata.uid() == nix::unistd::getuid().as_raw()))
             {
-                return Ok(false);
+                return Ok(ScratchStatus::UnsupportedEntry);
             }
         }
-        Ok(true)
+        Ok(ScratchStatus::Ok)
     }
     visit(root, 0, false, &mut bytes, &mut files)
 }
@@ -449,8 +782,11 @@ async fn monitor(
                     return Outcome::Io;
                 };
                 match scan.await {
-                    Ok(Ok(true)) => {}
-                    Ok(Ok(false)) => return Outcome::Resource,
+                    Ok(Ok(ScratchStatus::Ok)) => {}
+                    Ok(Ok(ScratchStatus::LimitExceeded)) => return Outcome::Resource,
+                    Ok(Ok(ScratchStatus::UnsupportedEntry)) => {
+                        return Outcome::UnsupportedWorkspaceEntry;
+                    }
                     _ => return Outcome::Io,
                 }
             }
@@ -650,6 +986,7 @@ pub(crate) async fn run(
             Err(_) => return Outcome::Setup,
         };
         owner.workspace = setup.workspace;
+        owner.root_identity = setup.root_identity;
         if !setup.ready {
             return Outcome::Setup;
         }
@@ -723,12 +1060,16 @@ pub(crate) async fn run(
     let mut cleanup_ok = true;
     if let Some(scan) = owner.scratch.as_mut() {
         match tokio::time::timeout_at(cleanup_deadline, scan).await {
-            Ok(Ok(Ok(true))) => {
+            Ok(Ok(Ok(ScratchStatus::Ok))) => {
                 owner.scratch.take();
             }
-            Ok(Ok(Ok(false))) => {
+            Ok(Ok(Ok(ScratchStatus::LimitExceeded))) => {
                 owner.scratch.take();
                 outcome = Outcome::Resource;
+            }
+            Ok(Ok(Ok(ScratchStatus::UnsupportedEntry))) => {
+                owner.scratch.take();
+                outcome = Outcome::UnsupportedWorkspaceEntry;
             }
             Ok(_) => {
                 owner.scratch.take();
@@ -809,6 +1150,15 @@ pub(crate) async fn run(
             Some(error(
                 "resource_limit",
                 "Controller workspace or protocol limit exceeded",
+            )),
+        ),
+        Outcome::UnsupportedWorkspaceEntry => (
+            None,
+            None,
+            ControllerTermination::IoError,
+            Some(error(
+                "unsupported_workspace_entry",
+                "Controller workspace contained a prohibited symlink or special file",
             )),
         ),
         Outcome::Io => (
@@ -904,14 +1254,137 @@ mod tests {
         let temporary = root.path().join("tmp").join("worker");
         fs::create_dir_all(&temporary).unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(temporary.join("ipc")).unwrap();
-        assert!(scratch_within_limit(root.path(), 1024, 3).unwrap());
-        assert!(!scratch_within_limit(root.path(), 1024, 2).unwrap());
+        assert_eq!(
+            scratch_within_limit(root.path(), 1024, 3).unwrap(),
+            ScratchStatus::Ok
+        );
+        assert_eq!(
+            scratch_within_limit(root.path(), 1024, 2).unwrap(),
+            ScratchStatus::LimitExceeded
+        );
         let outside = root.path().join("outside");
         let _outside = std::os::unix::net::UnixListener::bind(&outside).unwrap();
-        assert!(!scratch_within_limit(root.path(), 1024, 4).unwrap());
+        assert_eq!(
+            scratch_within_limit(root.path(), 1024, 4).unwrap(),
+            ScratchStatus::UnsupportedEntry
+        );
         fs::remove_file(outside).unwrap();
         std::os::unix::fs::symlink(&temporary, root.path().join("link")).unwrap();
-        assert!(!scratch_within_limit(root.path(), 1024, 4).unwrap());
+        assert_eq!(
+            scratch_within_limit(root.path(), 1024, 4).unwrap(),
+            ScratchStatus::UnsupportedEntry
+        );
+    }
+
+    #[test]
+    fn repair_removes_private_0555_workspace_without_following_symlinks() {
+        let base = tempfile::tempdir().unwrap();
+        let external = base.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("keep"), b"untouched").unwrap();
+        fs::set_permissions(&external, Permissions::from_mode(0o555)).unwrap();
+
+        let workspace = base.path().join("controller-ws");
+        fs::create_dir(&workspace).unwrap();
+        fs::set_permissions(&workspace, Permissions::from_mode(0o700)).unwrap();
+        let root_stat = fstat(open_dir_nofollow(&workspace).unwrap()).unwrap();
+        let sub = workspace.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let nested = sub.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("data"), b"bytes").unwrap();
+        std::os::unix::fs::symlink(&external, sub.join("link")).unwrap();
+        fs::set_permissions(&nested, Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&sub, Permissions::from_mode(0o555)).unwrap();
+
+        remove_workspace(&workspace, Some((root_stat.st_dev, root_stat.st_ino))).unwrap();
+        assert!(!workspace.exists());
+        assert_eq!(
+            fs::metadata(&external).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(fs::read(external.join("keep")).unwrap(), b"untouched");
+        fs::set_permissions(&external, Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn quarantine_tracks_phases_and_saturates_at_capacity() {
+        let quarantine = Arc::new(CleanupQuarantine::new());
+        let mut slots = Vec::new();
+        for _ in 0..QUARANTINE_CAPACITY {
+            slots.push(quarantine.try_reserve().unwrap());
+        }
+        assert!(quarantine.try_reserve().is_none());
+        slots[0].enter_child_reap();
+        slots[1].enter_workspace_remove();
+        slots[0].enter_workspace_remove();
+        let snap = quarantine.snapshot();
+        assert_eq!(snap.capacity, QUARANTINE_CAPACITY);
+        assert_eq!(snap.child_reap, 0);
+        assert_eq!(snap.workspace_remove, 2);
+        slots.pop();
+        assert!(quarantine.try_reserve().is_some());
+    }
+
+    #[tokio::test]
+    async fn automation_prohibited_symlink_returns_unsupported_workspace_entry() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
+        let find = |name: &str, fallback: &str| {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .map(|dir| dir.join(name))
+                .find(|candidate| candidate.is_file())
+                .unwrap_or_else(|| PathBuf::from(fallback))
+        };
+        let sh_path = find("sh", "/bin/sh");
+        let ln_path = find("ln", "/bin/ln");
+        let sleep_path = find("sleep", "/bin/sleep");
+        let source = format!(
+            "{} -s /tmp escape-link\n{} 0.2\n",
+            ln_path.display(),
+            sleep_path.display()
+        );
+        let prepared = PreparedController {
+            plan: Arc::new(ControllerPlan {
+                source: std::borrow::Cow::Owned(source),
+                interpreter: sh_path.to_string_lossy().into_owned(),
+                interpreter_argv: Vec::new(),
+                cwd: None,
+                environment: std::collections::BTreeMap::new(),
+                workspace_root: Arc::from(root.path()),
+            }),
+            input_json: b"{}".to_vec(),
+            duration: Duration::from_secs(5),
+            max_output_bytes: 4096,
+            supervision: ControllerSupervision::Automation {
+                invocation_id: "test-inv".into(),
+                mode: crate::automation::protocol::ExecutionMode::Module,
+                scratch_bytes: 65536,
+                scratch_files: 64,
+            },
+        };
+        let ct = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let run = run(
+            prepared,
+            ControllerContext {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                ct: &ct,
+                shutdown: &shutdown,
+                started: Instant::now(),
+                capture_limit: 4096,
+                retention: None,
+                progress: Reporter::default(),
+            },
+        )
+        .await;
+        assert_eq!(
+            run.reply.error.as_ref().map(|e| e.code),
+            Some("unsupported_workspace_entry")
+        );
+        if let Some(pending) = run.pending {
+            pending.finish().await;
+        }
     }
 
     #[test]

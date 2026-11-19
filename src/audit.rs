@@ -195,6 +195,38 @@ pub(crate) fn emit(record: &impl Serialize) {
     }
 }
 
+#[derive(Serialize)]
+struct QuarantineRecord {
+    event: &'static str,
+    timestamp_ms: u64,
+    phase: &'static str,
+    child_reap: usize,
+    workspace_remove: usize,
+    quarantined: usize,
+    capacity: usize,
+}
+
+pub(crate) fn cleanup_quarantine(
+    phase: &'static str,
+    child_reap: usize,
+    workspace_remove: usize,
+    capacity: usize,
+) {
+    emit(&QuarantineRecord {
+        event: "cleanup_quarantine",
+        timestamp_ms: millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(),
+        ),
+        phase,
+        child_reap,
+        workspace_remove,
+        quarantined: child_reap + workspace_remove,
+        capacity,
+    });
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Metadata<'a> {
     pub(crate) request_id: &'a RequestId,

@@ -4,12 +4,20 @@ use crate::{command::MAX_COMMAND_BYTES, wire::MAX_RESPONSE_BYTES};
 
 use super::*;
 
+#[derive(Clone, Copy, Default, Serialize, schemars::JsonSchema)]
+pub(crate) struct CleanupDiagnostics {
+    pub capacity: usize,
+    pub child_reap: usize,
+    pub workspace_remove: usize,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct TargetDiscovery<'a> {
     mode: TargetMode,
     #[schemars(with = "Vec<TargetSummary<'a>>")]
     targets: TargetSummaries<'a>,
     limits: DiscoveryLimits,
+    pub(crate) cleanup_quarantine: CleanupDiagnostics,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -165,6 +173,11 @@ impl Config {
                     crate::filesystem::data::DIRECTORY_CURSORS_PER_TARGET,
                 directory_cursor_idle_timeout_secs: self.directory.idle_timeout_secs,
                 max_directory_page_bytes: crate::filesystem::data::DIRECTORY_PAGE_BYTES,
+            },
+            cleanup_quarantine: CleanupDiagnostics {
+                capacity: crate::controller::QUARANTINE_CAPACITY,
+                child_reap: 0,
+                workspace_remove: 0,
             },
         }
     }

@@ -42,6 +42,7 @@ struct State {
     automation: Arc<Semaphore>,
     automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
     payload: Arc<crate::native_payload::Engine>,
+    cleanup_quarantine: Arc<crate::controller::CleanupQuarantine>,
 }
 
 impl Estus {
@@ -81,6 +82,7 @@ impl Estus {
                 local_tasks: TaskTracker::new(),
                 outputs,
                 directories,
+                cleanup_quarantine: Arc::new(crate::controller::CleanupQuarantine::new()),
                 progress: crate::progress::Registry::default(),
             }),
         })

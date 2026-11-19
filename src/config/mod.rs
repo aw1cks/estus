@@ -19,7 +19,7 @@ mod loading;
 mod policy;
 mod validation;
 
-pub(crate) use discovery::TargetDiscovery;
+pub(crate) use discovery::{CleanupDiagnostics, TargetDiscovery};
 pub(crate) use loading::{Cli, CliCommand, DoctorArgs, RuntimeKind};
 pub(crate) use validation::{account_name, destination};
 

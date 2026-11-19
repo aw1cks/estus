@@ -180,6 +180,14 @@ impl Estus {
                 return Err(error);
             }
         };
+        let Some(cleanup_slot) = self.state.cleanup_quarantine.try_reserve() else {
+            let error = ControllerError::new(
+                "resource_limit",
+                "Controller cleanup quarantine limit reached",
+            );
+            metadata.reject_controller(started, &error);
+            return budget.controller_result(ControllerReply::failure(error));
+        };
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -192,7 +200,7 @@ impl Estus {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
             // Receiver cancellation cannot drop admission, files, or child ownership.
-            let _permit = permit;
+            let permit = permit;
             let metadata = state.controller_metadata(id, &context.id);
             let prepared = (|| {
                 if state.shutdown.is_cancelled() || context.ct.is_cancelled() {
@@ -243,7 +251,7 @@ impl Estus {
             audit.finish_controller(&run.reply);
             let _ = sender.send(run.reply);
             if let Some(pending) = run.pending {
-                pending.finish().await;
+                pending.finish_with(Some(permit), Some(cleanup_slot)).await;
             }
         });
         match receiver.await {
