@@ -8,13 +8,10 @@ use crate::{
     config::ToolId,
     filesystem::{
         data::{
-            ListData, ListRequest, MkdirData, MkdirRequest, ReadData, ReadRequest,
-            RemoveDirectoryData, RemoveDirectoryRequest, RemoveFileData, RemoveFileRequest,
-            RenameData, RenameRequest, ReplaceData, ReplaceRequest, StatRequest, WriteData,
-            WriteRequest,
+            ListData, ListRequest, MkdirRequest, ReadRequest, RemoveDirectoryRequest,
+            RemoveFileRequest, RenameRequest, ReplaceRequest, StatRequest, WriteRequest,
         },
-        metadata::StatData,
-        operations::{self, FileContext},
+        operations::{self, FileContext, FileOutcome},
     },
     reply::{ToolError, ToolReply},
     ssh::MasterHealth,
@@ -27,15 +24,30 @@ use super::{
 };
 
 impl Estus {
-    pub(super) async fn read_file(
+    async fn dispatch_file_op<T, V, F, Fut>(
         &self,
-        request: ReadRequest,
+        host: String,
+        tool: ToolId,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+        validate: impl FnOnce(&str, ReplyBudget) -> Result<(V, Option<u64>), ToolError>,
+        run: F,
+    ) -> Result<CallToolResult, ErrorData>
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(
+            Arc<State>,
+            String,
+            V,
+            RequestContext<RoleServer>,
+            Instant,
+            tokio::time::Instant,
+            ReplyBudget,
+        ) -> Fut,
+        Fut: Future<Output = ToolReply<T>> + Send + 'static,
+    {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::ReadFile, &self.state, &context.id);
-        if let Err(error) = (|| {
+        let (validated, deadline) = match (|| {
             if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
                 return Err(ToolError::new(
                     "cancelled",
@@ -43,397 +55,38 @@ impl Estus {
                     false,
                 ));
             }
-            request.validate(self.state.config.limits().max_file_bytes, budget)?;
-            self.state.config.resolve(&request.host, ToolId::ReadFile)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<ReadData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<ReadData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state.read_file(request, context, started, budget).await
-        })
-        .await
-    }
-
-    pub(super) async fn stat_file(
-        &self,
-        request: StatRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::Stat, &self.state, &context.id);
-        if let Err(error) = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            request.validate(budget)?;
-            self.state.config.resolve(&request.host, ToolId::Stat)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<StatData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<StatData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state.stat_file(request, context, started, budget).await
-        })
-        .await
-    }
-
-    pub(super) async fn list_directory(
-        &self,
-        request: ListRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(
-            &request.host,
-            ToolId::ListDirectory,
-            &self.state,
-            &context.id,
-        );
-        if let Err(error) = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            request.validate(budget)?;
-            self.state
-                .config
-                .resolve(&request.host, ToolId::ListDirectory)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<ListData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<ListData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state
-                .list_directory(request, context, started, budget)
-                .await
-        })
-        .await
-    }
-
-    pub(super) async fn write_file(
-        &self,
-        mut request: WriteRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let (path, content, overwrite, deadline) = match (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            let (path, content, overwrite, timeout_secs) =
-                request.take_validated(self.state.config.limits().max_file_bytes, budget)?;
-            self.state
-                .config
-                .resolve(&request.host, ToolId::WriteFile)?;
+            let (validated, timeout_secs) = validate(&host, budget)?;
+            self.state.config.resolve(&host, tool)?;
             let deadline = request_deadline(started, self.state.config.timeout(timeout_secs)?)?;
-            Ok((path, content, overwrite, deadline))
+            Ok((validated, deadline))
         })() {
-            Ok(validated) => validated,
+            Ok(pair) => pair,
             Err(error) => {
-                file_metadata(&request.host, ToolId::WriteFile, &self.state, &context.id)
-                    .reject(started, &error);
-                return budget.result(ToolReply::<WriteData>::failure(error));
+                file_metadata(&host, tool, &self.state, &context.id).reject(started, &error);
+                return budget.result(ToolReply::<T>::failure(error));
             }
         };
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                file_metadata(&request.host, ToolId::WriteFile, &self.state, &context.id)
-                    .reject(started, &error);
-                return budget.result(ToolReply::<WriteData>::failure(error));
+                file_metadata(&host, tool, &self.state, &context.id).reject(started, &error);
+                return budget.result(ToolReply::<T>::failure(error));
             }
         };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state
-                .write_file(
-                    request.host,
-                    path,
-                    content,
-                    overwrite,
-                    deadline,
-                    context,
-                    started,
-                )
-                .await
-        })
-        .await
-    }
-
-    pub(super) async fn mkdir(
-        &self,
-        request: MkdirRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::Mkdir, &self.state, &context.id);
-        if let Err(error) = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            request.validate(budget)?;
-            self.state.config.resolve(&request.host, ToolId::Mkdir)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<MkdirData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<MkdirData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state.mkdir(request, context, started, budget).await
-        })
-        .await
-    }
-
-    pub(super) async fn rename(
-        &self,
-        request: RenameRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::Rename, &self.state, &context.id);
-        if let Err(error) = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            request.validate(budget)?;
-            self.state.config.resolve(&request.host, ToolId::Rename)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<RenameData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<RenameData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state.rename(request, context, started, budget).await
-        })
-        .await
-    }
-
-    pub(super) async fn remove_file(
-        &self,
-        request: RemoveFileRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::RemoveFile, &self.state, &context.id);
-        if let Err(error) = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            request.validate(budget)?;
-            self.state
-                .config
-                .resolve(&request.host, ToolId::RemoveFile)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<RemoveFileData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<RemoveFileData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state.remove_file(request, context, started, budget).await
-        })
-        .await
-    }
-
-    pub(super) async fn remove_directory(
-        &self,
-        request: RemoveDirectoryRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(
-            &request.host,
-            ToolId::RemoveDirectory,
-            &self.state,
-            &context.id,
+        let fut = run(
+            Arc::clone(&self.state),
+            host,
+            validated,
+            context,
+            started,
+            deadline,
+            budget,
         );
-        if let Err(error) = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            request.validate(budget)?;
-            self.state
-                .config
-                .resolve(&request.host, ToolId::RemoveDirectory)?;
-            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
-            Ok(())
-        })() {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<RemoveDirectoryData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<RemoveDirectoryData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state
-                .remove_directory(request, context, started, budget)
-                .await
-        })
-        .await
-    }
-
-    pub(super) async fn replace_file(
-        &self,
-        mut request: ReplaceRequest,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let budget = ReplyBudget::new(&context.id)?;
-        let (path, content, deadline) = match (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
-                    "Request cancelled before dispatch",
-                    false,
-                ));
-            }
-            let (path, content, timeout_secs) =
-                request.take_validated(self.state.config.limits().max_file_bytes, budget)?;
-            self.state
-                .config
-                .resolve(&request.host, ToolId::ReplaceFile)?;
-            let deadline = request_deadline(started, self.state.config.timeout(timeout_secs)?)?;
-            Ok((path, content, deadline))
-        })() {
-            Ok(validated) => validated,
-            Err(error) => {
-                file_metadata(&request.host, ToolId::ReplaceFile, &self.state, &context.id)
-                    .reject(started, &error);
-                return budget.result(ToolReply::<ReplaceData>::failure(error));
-            }
-        };
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                file_metadata(&request.host, ToolId::ReplaceFile, &self.state, &context.id)
-                    .reject(started, &error);
-                return budget.result(ToolReply::<ReplaceData>::failure(error));
-            }
-        };
-        let state = Arc::clone(&self.state);
-        self.file_result(budget, permit, async move {
-            state
-                .replace_file(request.host, path, content, deadline, context, started)
-                .await
-        })
-        .await
-    }
-    async fn file_result<T: Serialize + Send + 'static>(
-        &self,
-        budget: ReplyBudget,
-        permit: tokio::sync::OwnedSemaphorePermit,
-        operation: impl Future<Output = ToolReply<T>> + Send + 'static,
-    ) -> Result<CallToolResult, ErrorData> {
-        // A dropped RMCP request never drops the bounded SFTP cleanup owner.
-        let task = self
-            .state
-            .tasks
-            .spawn(async move { (permit, operation.await) });
+        let task = self.state.tasks.spawn(async move {
+            let reply = fut.await;
+            (permit, reply)
+        });
         match task.await {
             Ok((_permit, reply)) => budget.result(reply),
             Err(_) => budget.result(ToolReply::<T>::failure(ToolError::new(
@@ -443,150 +96,407 @@ impl Estus {
             ))),
         }
     }
-}
 
-impl State {
     pub(super) async fn read_file(
         &self,
-        request: ReadRequest,
+        mut request: ReadRequest,
         context: RequestContext<RoleServer>,
-        started: Instant,
-        budget: ReplyBudget,
-    ) -> ToolReply<ReadData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::ReadFile, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request
-            .validate(self.config.limits().max_file_bytes, budget)
-            .and_then(|spec| {
-                let target = self.config.resolve(&request.host, ToolId::ReadFile)?;
-                let deadline =
-                    request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-                Ok((spec, target, deadline))
-            });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::read(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        let max_file_bytes = self.state.config.limits().max_file_bytes;
+        self.dispatch_file_op(
+            host,
+            ToolId::ReadFile,
+            context,
+            |_, budget| {
+                request.validate(max_file_bytes, budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::ReadFile, &context, started, deadline)
+                    .await
                 {
-                    lease.invalidate();
+                    Ok((audit, lease, file_ctx)) => {
+                        let spec = request
+                            .validate(state.config.limits().max_file_bytes, budget)
+                            .expect("read request already validated");
+                        let outcome = operations::read(lease.session(), spec, file_ctx).await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
                 }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
+            },
+        )
+        .await
     }
 
     pub(super) async fn stat_file(
         &self,
-        request: StatRequest,
+        mut request: StatRequest,
         context: RequestContext<RoleServer>,
-        started: Instant,
-        budget: ReplyBudget,
-    ) -> ToolReply<StatData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::Stat, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host, ToolId::Stat)?;
-            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-            Ok((spec, target, deadline))
-        });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::stat(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        self.dispatch_file_op(
+            host,
+            ToolId::Stat,
+            context,
+            |_, budget| {
+                request.validate(budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::Stat, &context, started, deadline)
+                    .await
                 {
-                    lease.invalidate();
+                    Ok((audit, lease, file_ctx)) => {
+                        let spec = request
+                            .validate(budget)
+                            .expect("stat request already validated");
+                        let outcome = operations::stat(lease.session(), spec, file_ctx).await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
                 }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
+            },
+        )
+        .await
     }
 
     pub(super) async fn list_directory(
         &self,
+        mut request: ListRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        self.dispatch_file_op(
+            host,
+            ToolId::ListDirectory,
+            context,
+            |_, budget| {
+                request.validate(budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                state
+                    .list_directory(&host, request, context, started, deadline, budget)
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn write_file(
+        &self,
+        mut request: WriteRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        let max_file_bytes = self.state.config.limits().max_file_bytes;
+        self.dispatch_file_op(
+            host,
+            ToolId::WriteFile,
+            context,
+            |_, budget| {
+                let (path, content, overwrite, timeout_secs) =
+                    request.take_validated(max_file_bytes, budget)?;
+                Ok(((path, content, overwrite), timeout_secs))
+            },
+            |state, host, (path, content, overwrite), context, started, deadline, _| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::WriteFile, &context, started, deadline)
+                    .await
+                {
+                    Ok((audit, lease, file_ctx)) => {
+                        let outcome = operations::write(
+                            lease.session(),
+                            crate::filesystem::data::WriteSpec {
+                                path: &path,
+                                content: std::borrow::Cow::Borrowed(&content),
+                                overwrite,
+                            },
+                            file_ctx,
+                        )
+                        .await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn mkdir(
+        &self,
+        mut request: MkdirRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        self.dispatch_file_op(
+            host,
+            ToolId::Mkdir,
+            context,
+            |_, budget| {
+                request.validate(budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::Mkdir, &context, started, deadline)
+                    .await
+                {
+                    Ok((audit, lease, file_ctx)) => {
+                        let spec = request
+                            .validate(budget)
+                            .expect("mkdir request already validated");
+                        let outcome = operations::mkdir(lease.session(), spec, file_ctx).await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn rename(
+        &self,
+        mut request: RenameRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        self.dispatch_file_op(
+            host,
+            ToolId::Rename,
+            context,
+            |_, budget| {
+                request.validate(budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::Rename, &context, started, deadline)
+                    .await
+                {
+                    Ok((audit, lease, file_ctx)) => {
+                        let spec = request
+                            .validate(budget)
+                            .expect("rename request already validated");
+                        let outcome = operations::rename(lease.session(), spec, file_ctx).await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn remove_file(
+        &self,
+        mut request: RemoveFileRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        self.dispatch_file_op(
+            host,
+            ToolId::RemoveFile,
+            context,
+            |_, budget| {
+                request.validate(budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::RemoveFile, &context, started, deadline)
+                    .await
+                {
+                    Ok((audit, lease, file_ctx)) => {
+                        let spec = request
+                            .validate(budget)
+                            .expect("remove_file request already validated");
+                        let outcome =
+                            operations::remove_file(lease.session(), spec, file_ctx).await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn remove_directory(
+        &self,
+        mut request: RemoveDirectoryRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        self.dispatch_file_op(
+            host,
+            ToolId::RemoveDirectory,
+            context,
+            |_, budget| {
+                request.validate(budget)?;
+                let timeout_secs = request.timeout_secs;
+                Ok((request, timeout_secs))
+            },
+            |state, host, request, context, started, deadline, budget| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::RemoveDirectory, &context, started, deadline)
+                    .await
+                {
+                    Ok((audit, lease, file_ctx)) => {
+                        let spec = request
+                            .validate(budget)
+                            .expect("remove_directory request already validated");
+                        let outcome =
+                            operations::remove_directory(lease.session(), spec, file_ctx).await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn replace_file(
+        &self,
+        mut request: ReplaceRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = std::mem::take(&mut request.host);
+        let max_file_bytes = self.state.config.limits().max_file_bytes;
+        self.dispatch_file_op(
+            host,
+            ToolId::ReplaceFile,
+            context,
+            |_, budget| {
+                let (path, content, timeout_secs) =
+                    request.take_validated(max_file_bytes, budget)?;
+                Ok(((path, content), timeout_secs))
+            },
+            |state, host, (path, content), context, started, deadline, _| async move {
+                match state
+                    .acquire_sftp(&host, ToolId::ReplaceFile, &context, started, deadline)
+                    .await
+                {
+                    Ok((audit, lease, file_ctx)) => {
+                        let outcome = operations::replace_file(
+                            lease.session(),
+                            crate::filesystem::data::ReplaceSpec {
+                                path: &path,
+                                content: std::borrow::Cow::Borrowed(&content),
+                            },
+                            file_ctx,
+                        )
+                        .await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
+            },
+        )
+        .await
+    }
+}
+
+impl State {
+    async fn acquire_sftp<'a, T>(
+        &'a self,
+        host: &'a str,
+        tool: ToolId,
+        context: &'a RequestContext<RoleServer>,
+        started: Instant,
+        deadline: tokio::time::Instant,
+    ) -> Result<(Audit<'a>, crate::ssh::Lease, FileContext<'a>), ToolReply<T>> {
+        let progress = crate::progress::Reporter::from_context(context);
+        let metadata = file_metadata(host, tool, self, &context.id);
+        if self.shutdown.is_cancelled() || context.ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return Err(ToolReply::failure(error));
+        }
+        let target = match self.config.resolve(host, tool) {
+            Ok(target) => target,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return Err(ToolReply::failure(error));
+            }
+        };
+        let audit = Audit::start(metadata, started);
+        let lease = match self
+            .pool
+            .acquire(
+                target.name,
+                target.destination,
+                target.role,
+                deadline,
+                &context.ct,
+            )
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                audit.finish(None, Some(&error));
+                return Err(ToolReply::failure(error));
+            }
+        };
+        Ok((
+            audit,
+            lease,
+            FileContext {
+                deadline,
+                ct: &context.ct,
+                shutdown: &self.shutdown,
+                progress,
+            },
+        ))
+    }
+
+    async fn finish_sftp<T>(
+        audit: Audit<'_>,
+        lease: crate::ssh::Lease,
+        outcome: FileOutcome<T>,
+    ) -> ToolReply<T> {
+        if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost) {
+            lease.invalidate();
+        }
+        audit.finish(None, outcome.reply.error.as_ref());
+        outcome.reply
+    }
+
+    async fn list_directory(
+        &self,
+        host: &str,
         request: ListRequest,
         context: RequestContext<RoleServer>,
         started: Instant,
+        deadline: tokio::time::Instant,
         budget: ReplyBudget,
     ) -> ToolReply<ListData> {
         let progress = crate::progress::Reporter::from_context(&context);
         let request_id = context.id;
         let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::ListDirectory, self, &request_id);
+        let metadata = file_metadata(host, ToolId::ListDirectory, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
             let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
             metadata.reject(started, &error);
             return ToolReply::failure(error);
         }
-        let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host, ToolId::ListDirectory)?;
-            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-            Ok((spec, target, deadline))
-        });
-        let (spec, target, deadline) = match validated {
+        let (spec, target) = match request
+            .validate(budget)
+            .and_then(|spec| Ok((spec, self.config.resolve(host, ToolId::ListDirectory)?)))
+        {
             Ok(validated) => validated,
             Err(error) => {
                 metadata.reject(started, &error);
@@ -611,343 +521,6 @@ impl State {
                 },
             )
             .await;
-        audit.finish(None, reply.error.as_ref());
-        reply
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn write_file(
-        &self,
-        host: String,
-        path: String,
-        content: Vec<u8>,
-        overwrite: bool,
-        deadline: tokio::time::Instant,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-    ) -> ToolReply<WriteData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&host, ToolId::WriteFile, self, &request_id);
-        let target = self
-            .config
-            .resolve(&host, ToolId::WriteFile)
-            .expect("write target already authorized");
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::write(
-                    lease.session(),
-                    crate::filesystem::data::WriteSpec {
-                        path: &path,
-                        content: std::borrow::Cow::Borrowed(&content),
-                        overwrite,
-                    },
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
-    }
-
-    pub(super) async fn mkdir(
-        &self,
-        request: MkdirRequest,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-        budget: ReplyBudget,
-    ) -> ToolReply<MkdirData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::Mkdir, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host, ToolId::Mkdir)?;
-            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-            Ok((spec, target, deadline))
-        });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::mkdir(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
-    }
-
-    pub(super) async fn rename(
-        &self,
-        request: RenameRequest,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-        budget: ReplyBudget,
-    ) -> ToolReply<RenameData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::Rename, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host, ToolId::Rename)?;
-            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-            Ok((spec, target, deadline))
-        });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::rename(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
-    }
-
-    pub(super) async fn remove_file(
-        &self,
-        request: RemoveFileRequest,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-        budget: ReplyBudget,
-    ) -> ToolReply<RemoveFileData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::RemoveFile, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request.validate(budget).and_then(|spec| {
-            let target = self.config.resolve(&request.host, ToolId::RemoveFile)?;
-            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-            Ok((spec, target, deadline))
-        });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::remove_file(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
-    }
-
-    pub(super) async fn remove_directory(
-        &self,
-        request: RemoveDirectoryRequest,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-        budget: ReplyBudget,
-    ) -> ToolReply<RemoveDirectoryData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::RemoveDirectory, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request.validate(budget).and_then(|spec| {
-            let target = self
-                .config
-                .resolve(&request.host, ToolId::RemoveDirectory)?;
-            let deadline = request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-            Ok((spec, target, deadline))
-        });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::remove_directory(
-                    lease.session(),
-                    spec,
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
-        audit.finish(None, reply.error.as_ref());
-        reply
-    }
-
-    pub(super) async fn replace_file(
-        &self,
-        host: String,
-        path: String,
-        content: Vec<u8>,
-        deadline: tokio::time::Instant,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-    ) -> ToolReply<ReplaceData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(&host, ToolId::ReplaceFile, self, &request_id);
-        let target = self
-            .config
-            .resolve(&host, ToolId::ReplaceFile)
-            .expect("replace target already authorized");
-        let audit = Audit::start(metadata, started);
-        let reply = match self
-            .pool
-            .acquire(target.name, target.destination, target.role, deadline, &ct)
-            .await
-        {
-            Ok(lease) => {
-                let outcome = operations::replace_file(
-                    lease.session(),
-                    crate::filesystem::data::ReplaceSpec {
-                        path: &path,
-                        content: std::borrow::Cow::Borrowed(&content),
-                    },
-                    FileContext {
-                        deadline,
-                        ct: &ct,
-                        shutdown: &self.shutdown,
-                        progress,
-                    },
-                )
-                .await;
-                if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost)
-                {
-                    lease.invalidate();
-                }
-                outcome.reply
-            }
-            Err(error) => ToolReply::failure(error),
-        };
         audit.finish(None, reply.error.as_ref());
         reply
     }
