@@ -216,6 +216,14 @@ impl Guest {
         Binding::install(&self.config, name, overrides).await
     }
 
+    pub fn authority_ssh_config(&self) -> PathBuf {
+        self.root.path().join("authority_ssh_config")
+    }
+
+    pub fn ssh_executable(&self) -> &Path {
+        &self.ssh
+    }
+
     pub async fn stop(mut self) -> Result<()> {
         if self.child.try_wait()?.is_none() {
             timeout(Duration::from_secs(10), self.child.kill())

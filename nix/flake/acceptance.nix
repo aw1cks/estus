@@ -184,6 +184,25 @@
             exec ${files}/bin/workflow-files-acceptance "$@"
           '';
         in { inherit catalog files all; };
+      moduleSpikeAcceptance = native: harness:
+        let
+          runner = runExactTest {
+            name = "module-spike-acceptance";
+            harness = "${harness}/libexec/module_spike";
+            scenario = "benchmark_runner_and_immutable_runtime_costs";
+          };
+        in
+        pkgs.runCommand "estus-module-spike-acceptance" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p "$out/bin"
+          makeWrapper ${runner} "$out/bin/module-spike-acceptance" \
+            --set ESTUS_TEST_BINARY ${native}/bin/estus \
+            --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+            --set ESTUS_TEST_CATALOG_VM ${catalogVm}/bin/catalog-guest \
+            --prefix PATH : ${pkgs.lib.makeBinPath ([ pkgs.openssh pkgs.coreutils pkgs.bash ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ])}
+        '';
     in
     {
       packages = {
@@ -195,6 +214,8 @@
         runner-acceptance-msrv = runnerAcceptance msrvBuild.package msrvBuild.acceptance;
         workflow-acceptance = (workflowAcceptance package acceptance).all;
         workflow-acceptance-msrv = (workflowAcceptance msrvBuild.package msrvBuild.acceptance).all;
+        module-spike-acceptance = moduleSpikeAcceptance package acceptance;
+        module-spike-acceptance-msrv = moduleSpikeAcceptance msrvBuild.package msrvBuild.acceptance;
       };
       apps.catalog-acceptance = {
         type = "app";
@@ -243,6 +264,14 @@
       apps.runner-acceptance-msrv = {
         type = "app";
         program = "${runnerAcceptance msrvBuild.package msrvBuild.acceptance}/bin/runner-acceptance";
+      };
+      apps.module-spike-acceptance = {
+        type = "app";
+        program = "${moduleSpikeAcceptance package acceptance}/bin/module-spike-acceptance";
+      };
+      apps.module-spike-acceptance-msrv = {
+        type = "app";
+        program = "${moduleSpikeAcceptance msrvBuild.package msrvBuild.acceptance}/bin/module-spike-acceptance";
       };
       apps.projection-acceptance = {
         type = "app";
