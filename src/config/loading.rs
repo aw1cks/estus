@@ -85,6 +85,7 @@ impl RawCapabilities {
 struct Document {
     mode: Mode,
     capabilities: Option<RawCapabilities>,
+    disclose_sudo_policy: bool,
     destination_policy: Option<TargetMode>,
     ssh: Ssh,
     limits: Limits,
@@ -107,6 +108,7 @@ impl Default for Document {
         Self {
             mode: Mode::Headless,
             capabilities: None,
+            disclose_sudo_policy: false,
             destination_policy: None,
             ssh: Ssh::default(),
             limits: Limits::default(),
@@ -559,6 +561,7 @@ impl Config {
         Ok(Self {
             mode: document.mode,
             capabilities,
+            disclose_sudo_policy: document.disclose_sudo_policy,
             ssh_config,
             ssh_executable,
             limits: document.limits,

@@ -296,7 +296,7 @@ class Projection:
             if result == {}:
                 return dict(status="unavailable")
             keys(self.plan, ("fields", "schema", "max_bytes", "max_items", "max_depth"))
-            for name, minimum, maximum in (("max_bytes", 64, 4096), ("max_items", 1, 256),
+            for name, minimum, maximum in (("max_bytes", 64, 65536), ("max_items", 1, 1024),
                                             ("max_depth", 1, 8)):
                 require(type(self.plan[name]) is int and minimum <= self.plan[name] <= maximum)
             fields = self.plan["fields"]

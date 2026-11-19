@@ -436,6 +436,7 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
         &[
             "mode",
             "capabilities",
+            "disclose_sudo_policy",
             "destination_policy",
             "ssh",
             "limits",
@@ -470,6 +471,11 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     }
     if let Some(value) = root.get("capabilities") {
         validate_capabilities(value, "capabilities")?;
+    }
+    if let Some(value) = root.get("disclose_sudo_policy")
+        && !value.is_bool()
+    {
+        return Err(invalid("disclose_sudo_policy", "must be a boolean"));
     }
     if let Some(value) = root.get("rules") {
         validate_rules_schema(value)?;

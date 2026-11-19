@@ -15,6 +15,7 @@ mod admission;
 mod command_execution;
 mod file_execution;
 mod generic_execution;
+mod guidance;
 mod handlers;
 mod local_execution;
 mod payload_execution;

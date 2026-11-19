@@ -918,3 +918,145 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
     ensure!(omitted.iter().any(|t| t["reason"] == "laboratory_only"));
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn journal_and_record_prepare_publish_expanded_schemas_and_reject_exhausted_budget()
+-> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command as AsyncCommand;
+    let root = tempfile::tempdir()?;
+    let export = root.path().join("export");
+    let exported = invoke(&[
+        "export".as_ref(),
+        "--tool".as_ref(),
+        "inspect_journal".as_ref(),
+        "--tool".as_ref(),
+        "inspect_journal_record".as_ref(),
+        "--output".as_ref(),
+        export.as_os_str(),
+    ])?;
+    ensure!(
+        exported.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let binary = std::fs::canonicalize(test_binary())?;
+    let ssh_conf = root.path().join("ssh.conf");
+    let auth_conf = root.path().join("auth.conf");
+    std::fs::write(&ssh_conf, "")?;
+    std::fs::write(&auth_conf, "")?;
+    let site = root.path().join("site.toml");
+    std::fs::write(
+        &site,
+        format!(
+            "mode = 'headless'\ncapabilities = {{ named = true }}\n[ssh]\nexecutable = {binary:?}\nconfig_file = {ssh_conf:?}\n[targets.server]\nssh_host = 'ordinary-host'\n[automation.targets.server]\ndestination = 'ordinary-host'\npython = '/usr/bin/python3'\n[automation.authorities.catalog]\nssh_config_file = {auth_conf:?}\nbecome = {{ method = 'sudo', user = 'root' }}\n[automation.authorities.catalog.targets.server]\ndestination = 'catalog-host'\npython = '/usr/bin/python3'\n"
+        ),
+    )?;
+    let prepared = root.path().join("prepared");
+    let prep = Command::new(&binary)
+        .args(["catalog", "--root"])
+        .arg(assets())
+        .args(["prepare", "--site"])
+        .arg(&site)
+        .args(["--definitions"])
+        .arg(export.join("tools.toml"))
+        .args(["--output"])
+        .arg(&prepared)
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_SSH")
+        .env_remove("ESTUS_SSH_CONFIG")
+        .output()?;
+    ensure!(
+        prep.status.success(),
+        "prepare failed: {}",
+        String::from_utf8_lossy(&prep.stderr)
+    );
+
+    let mut child = AsyncCommand::new(&binary)
+        .args(["--config"])
+        .arg(prepared.join("estus.toml"))
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_SSH")
+        .env_remove("ESTUS_SSH_CONFIG")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().context("stdin")?;
+    let mut stdout = BufReader::new(child.stdout.take().context("stdout")?);
+
+    async fn send(stdin: &mut tokio::process::ChildStdin, v: serde_json::Value) -> Result<()> {
+        let mut bytes = serde_json::to_vec(&v)?;
+        bytes.push(b'\n');
+        stdin.write_all(&bytes).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+    let mut line = String::new();
+
+    send(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}
+        }),
+    )
+    .await?;
+    line.clear();
+    stdout.read_line(&mut line).await?;
+    send(
+        &mut stdin,
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await?;
+
+    send(
+        &mut stdin,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    )
+    .await?;
+    line.clear();
+    stdout.read_line(&mut line).await?;
+    let listed: serde_json::Value = serde_json::from_str(&line)?;
+    let tools = listed["result"]["tools"].as_array().context("tools")?;
+    let journal = tools
+        .iter()
+        .find(|t| t["name"] == "inspect_journal")
+        .context("inspect_journal")?;
+    let inputs = &journal["inputSchema"]["properties"]["inputs"];
+    ensure!(inputs["properties"]["limit"]["maximum"] == 50);
+    ensure!(
+        inputs["properties"]["direction"]["enum"] == serde_json::json!(["backward", "forward"])
+    );
+    ensure!(inputs["properties"]["contains"]["maxLength"] == 128);
+    ensure!(
+        !inputs["required"]
+            .as_array()
+            .context("required")?
+            .iter()
+            .any(|f| f == "unit")
+    );
+    ensure!(tools.iter().any(|t| t["name"] == "inspect_journal_record"));
+
+    // RequestId leaving < 32768*3 bytes rejects pre-dispatch with -32602.
+    let huge_id = "x".repeat(16_777_216 - 50_000);
+    send(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc":"2.0","id":huge_id,"method":"tools/call",
+            "params":{"name":"inspect_journal","arguments":{"host":"server","inputs":{
+                "boot_id":"current","since":0,"until":4102444800_u64,"priority":7,"limit":10
+            }}}
+        }),
+    )
+    .await?;
+    line.clear();
+    stdout.read_line(&mut line).await?;
+    let rejected: serde_json::Value = serde_json::from_str(&line)?;
+    ensure!(rejected["error"]["code"] == -32602);
+
+    drop(stdin);
+    ensure!(child.wait().await?.success());
+    Ok(())
+}

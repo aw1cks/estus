@@ -6,8 +6,8 @@ use crate::reply::{
     ToolReply,
 };
 
-const FRAME_LIMIT: usize = 8192;
-const STREAM_LIMIT: usize = 65_536;
+const FRAME_LIMIT: usize = 131_072;
+const STREAM_LIMIT: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExecutionMode {

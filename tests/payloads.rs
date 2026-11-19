@@ -572,3 +572,165 @@ print(json.dumps({'violations': violations, 'error': error}))
     }
     Ok(())
 }
+
+#[test]
+fn inspect_journal_record_reconstructs_8kib_multiline_utf8_splits_and_rotated_cursors() -> Result<()>
+{
+    use base64::Engine;
+    let boot = "0123456789abcdef0123456789abcdef";
+    let cursor =
+        "s=0123456789abcdef0123456789abcdef;i=1;b=0123456789abcdef0123456789abcdef;m=1;t=1;x=1";
+    // 8 KiB multiline message containing multi-byte UTF-8 codepoints across chunk boundaries.
+    let multiline = format!(
+        "HEADER_LINE\n{}\nTAIL_LINE_é🙂_END",
+        "é🙂line-content-\n".repeat(480)
+    );
+    assert!(multiline.len() > 8192);
+    let record = json!({
+        "__CURSOR": cursor,
+        "_BOOT_ID": boot,
+        "MESSAGE": multiline,
+    });
+
+    let mut offset = 0u64;
+    let mut reconstructed = Vec::new();
+    let mut chunks = 0usize;
+    loop {
+        let page = parsed(
+            "inspect_journal_record",
+            "read_journal_record_from_records",
+            json!([[record], boot, cursor, offset, 1021]),
+        )?;
+        assert_eq!(page["status"], "available");
+        assert_eq!(page["offset"], offset);
+        assert_eq!(page["incomplete"], true);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(page["data_base64"].as_str().context("data_base64")?)?;
+        reconstructed.extend_from_slice(&bytes);
+        chunks += 1;
+        if page["eof"] == true {
+            assert_eq!(page["total_bytes"], multiline.len() as u64);
+            assert_eq!(page["next_offset"], multiline.len() as u64);
+            break;
+        }
+        offset = page["next_offset"].as_u64().context("next_offset")?;
+        assert!(chunks < 32);
+    }
+    assert!(chunks >= 8);
+    assert_eq!(String::from_utf8(reconstructed)?, multiline);
+
+    // Rotated / missing cursor or boot mismatch returns cursor_unavailable.
+    let empty = parsed(
+        "inspect_journal_record",
+        "read_journal_record_from_records",
+        json!([[], boot, cursor, 0, 128]),
+    )?;
+    assert_eq!(empty["status"], "cursor_unavailable");
+    assert_eq!(empty["eof"], true);
+    assert_eq!(empty["data_base64"], "");
+
+    let wrong_boot = parsed(
+        "inspect_journal_record",
+        "read_journal_record_from_records",
+        json!([[record], "fedcba9876543210fedcba9876543210", cursor, 0, 128]),
+    )?;
+    assert_eq!(wrong_boot["status"], "cursor_unavailable");
+    Ok(())
+}
+
+#[test]
+fn inspect_journal_filters_literally_binds_direction_and_packs_within_32768_bytes() -> Result<()> {
+    let boot = "0123456789abcdef0123456789abcdef";
+    let mut records = Vec::new();
+    for i in 0..50usize {
+        let cursor = format!(
+            "s=0123456789abcdef0123456789abcdef;i={i:x};b={boot};m={};t={};x=1",
+            1000 + i,
+            2000 + i
+        );
+        let msg = if i % 2 == 0 {
+            format!("[err.*] match #{i} {}", "a".repeat(900))
+        } else {
+            format!("noise #{i} {}", "b".repeat(900))
+        };
+        records.push(json!({
+            "__CURSOR": cursor,
+            "_BOOT_ID": boot,
+            "__REALTIME_TIMESTAMP": (1_700_000_000_000_000u64 + i as u64).to_string(),
+            "__MONOTONIC_TIMESTAMP": (100_000u64 + i as u64).to_string(),
+            "MESSAGE": msg,
+            "PRIORITY": "3",
+            "_SYSTEMD_UNIT": "estus-fixture.service",
+            "_TRANSPORT": "journal"
+        }));
+    }
+
+    let filtered = parsed(
+        "inspect_journal",
+        "select_journal_records",
+        json!([
+            records,
+            boot,
+            50,
+            0,
+            4102444800_u64,
+            7,
+            "system_journal",
+            "available",
+            "[err.*]",
+            "backward",
+            "",
+            "",
+            32768
+        ]),
+    )?;
+    assert_eq!(filtered["scope"], "system_journal");
+    assert_eq!(filtered["status"], "available");
+    let items = filtered["records"].as_array().context("records")?;
+    assert_eq!(items.len(), 25);
+    assert!(items.iter().all(|r| {
+        r["message"].as_str().unwrap().starts_with("[err.*]") && r["message_truncated"] == true
+    }));
+    let cont = filtered["continuation_cursor"].as_str().context("cont")?;
+    assert!(cont.starts_with("backward:"));
+
+    // Direction mismatch on continuation cursor is rejected.
+    rejected(
+        "inspect_journal",
+        "parse_cursor_arg",
+        json!([cont, "forward"]),
+        "ValueError",
+    )?;
+    let parsed_raw = parsed(
+        "inspect_journal",
+        "parse_cursor_arg",
+        json!([cont, "backward"]),
+    )?;
+    assert_eq!(parsed_raw, items.last().unwrap()["cursor"]);
+
+    // Verify 32768-byte packing sets truncated=true when byte budget clips before limit.
+    let packed = parsed(
+        "inspect_journal",
+        "select_journal_records",
+        json!([
+            records,
+            boot,
+            50,
+            0,
+            4102444800_u64,
+            7,
+            "system_journal",
+            "available",
+            "",
+            "forward",
+            "",
+            "",
+            2048
+        ]),
+    )?;
+    assert_eq!(packed["truncated"], true);
+    let packed_items = packed["records"].as_array().context("packed records")?;
+    assert!(!packed_items.is_empty() && packed_items.len() < 50);
+    assert!(serde_json::to_vec(&packed)?.len() <= 2048);
+    Ok(())
+}

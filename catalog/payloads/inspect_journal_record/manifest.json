@@ -1,0 +1,262 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "9368a10101772aae44c708acd12ede1f6b41915898c1ab01617612e1bfe2c882",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "argument",
+      "name": "boot_id",
+      "format": "json",
+      "omit_if_absent": false
+    },
+    {
+      "kind": "argument",
+      "name": "cursor",
+      "format": "json",
+      "omit_if_absent": false
+    },
+    {
+      "kind": "argument",
+      "name": "offset",
+      "default": 0,
+      "format": "json",
+      "omit_if_absent": false
+    },
+    {
+      "kind": "argument",
+      "name": "max_bytes",
+      "default": 4096,
+      "format": "json",
+      "omit_if_absent": false
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json",
+      "base64"
+    ],
+    "executables": [],
+    "paths": []
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "boot_id": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "max_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_python",
+        "boot_id",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "boot_id": {
+          "aliases": {},
+          "properties": {}
+        },
+        "cursor": {
+          "aliases": {},
+          "properties": {}
+        },
+        "offset": {
+          "aliases": {},
+          "properties": {}
+        },
+        "max_bytes": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract for bounded UTF-8 byte-slice inspection of one retained journal record."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          }
+        },
+        "required": [
+          "boot_id",
+          "cursor"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "boot_id": "boot_id",
+        "cursor": "cursor",
+        "offset": "offset",
+        "max_bytes": "max_bytes"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "boot_id": [
+          "mcp_result",
+          "boot_id"
+        ],
+        "cursor": [
+          "mcp_result",
+          "cursor"
+        ],
+        "status": [
+          "mcp_result",
+          "status"
+        ],
+        "data_base64": [
+          "mcp_result",
+          "data_base64"
+        ],
+        "offset": [
+          "mcp_result",
+          "offset"
+        ],
+        "next_offset": [
+          "mcp_result",
+          "next_offset"
+        ],
+        "total_bytes": [
+          "mcp_result",
+          "total_bytes"
+        ],
+        "eof": [
+          "mcp_result",
+          "eof"
+        ],
+        "incomplete": [
+          "mcp_result",
+          "incomplete"
+        ],
+        "incomplete_reason": [
+          "mcp_result",
+          "incomplete_reason"
+        ]
+      },
+      "max_bytes": 8192,
+      "max_items": 64,
+      "max_depth": 4,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "boot_id": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 32,
+            "enum": [
+              "available",
+              "cursor_unavailable"
+            ]
+          },
+          "data_base64": {
+            "type": "string",
+            "maxLength": 5464
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "next_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "total_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "eof": {
+            "type": "boolean"
+          },
+          "incomplete": {
+            "type": "boolean",
+            "const": true
+          },
+          "incomplete_reason": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "boot_id",
+          "cursor",
+          "status",
+          "data_base64",
+          "offset",
+          "next_offset",
+          "total_bytes",
+          "eof",
+          "incomplete",
+          "incomplete_reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation:catalog",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

@@ -160,7 +160,7 @@ impl ReplyBudget {
             "error":{"code":"invalid_argument","message":"x".repeat(256),"remote_state_unknown":false}
         });
         let projection_bytes = if let Some(limit) = max_projection_bytes {
-            if !(64..=4096).contains(&limit) {
+            if !(64..=65536).contains(&limit) {
                 return Err(exceeded());
             }
             reservation["data"]["projection"] =
@@ -411,6 +411,20 @@ mod tests {
         assert!(
             budget.result(reply).is_err(),
             "both result representations exceed the remaining frame"
+        );
+    }
+
+    #[test]
+    fn projection_reservation_accepts_65536_and_rejects_65537() {
+        let normal = ReplyBudget::new(&RequestId::Number(1)).unwrap();
+        assert!(normal.automation_reserve("logical", Some(65536)).is_ok());
+        assert!(normal.automation_reserve("logical", Some(65537)).is_err());
+        let tight = RequestId::String("x".repeat(MAX_RESPONSE_BYTES - 150_000).into());
+        let tight_budget = ReplyBudget::new(&tight).unwrap();
+        assert!(
+            tight_budget
+                .automation_reserve("logical", Some(65536))
+                .is_err()
         );
     }
 

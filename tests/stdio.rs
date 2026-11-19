@@ -134,7 +134,10 @@ impl Server {
         let initialized = self.response(1).await?;
         ensure!(initialized["result"]["protocolVersion"] == "2025-11-25");
         ensure!(initialized["result"]["capabilities"]["tools"].is_object());
-        for unsupported in ["prompts", "resources", "tasks", "logging"] {
+        ensure!(initialized["result"]["capabilities"]["prompts"].is_object());
+        ensure!(initialized["result"]["capabilities"]["resources"].is_object());
+        ensure!(initialized["result"]["instructions"].is_string());
+        for unsupported in ["tasks", "logging"] {
             ensure!(
                 initialized["result"]["capabilities"]
                     .get(unsupported)
@@ -1362,7 +1365,9 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         ensure!(versions.contains(&json!("2025-11-25")));
         let capabilities = &discovered["result"]["capabilities"];
         ensure!(capabilities["tools"].is_object());
-        for unsupported in ["prompts", "resources", "tasks", "logging"] {
+        ensure!(capabilities["prompts"].is_object());
+        ensure!(capabilities["resources"].is_object());
+        for unsupported in ["tasks", "logging"] {
             ensure!(capabilities.get(unsupported).is_none());
         }
 
@@ -6733,5 +6738,127 @@ enum = ["/etc/hosts"]
         );
     }
     ensure!(!probe.exists(), "rule denial probed SSH");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guidance_prompts_resources_and_sudo_redaction_work_without_ssh() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("operator.toml");
+    let base_toml = r#"
+mode = "headless"
+capabilities = { named = true, file_read = true, sudo = true }
+[ssh]
+config_file = "replacement.conf"
+[targets.prod-web]
+ssh_host = "private-ssh-target.invalid"
+description = "Production web node"
+[targets.prod-web.sudo]
+mode = "same-account"
+users = ["PRIVATE_SUDO_USER"]
+programs = ["/usr/local/bin/PRIVATE_SUDO_PROG"]
+[rules."prod-*"]
+deny_tiers = ["exec", "change"]
+allow_tools = ["observe_stat", "inspect_file"]
+[rules."*-web".constraints.inspect_file.path]
+enum = ["/etc/hosts"]
+"#;
+    std::fs::write(directory.path().join("replacement.conf"), "")?;
+    std::fs::write(&config_path, base_toml)?;
+    let mut server = Server::start(&["--config", config_path.to_str().context("config")?])?;
+    let scenario = async {
+        server.initialize().await?;
+
+        server.send(json!({"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}})).await?;
+        let prompts = server.response(2).await?;
+        let prompt_names: Vec<_> = prompts["result"]["prompts"]
+            .as_array()
+            .context("prompts")?
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        ensure!(prompt_names == ["triage_host", "diagnose_service", "safe_change", "network_triage"]);
+
+        server.send(json!({
+            "jsonrpc":"2.0","id":3,"method":"prompts/get",
+            "params":{"name":"diagnose_service","arguments":{"host":"prod-web","unit":"nginx.service"}}
+        })).await?;
+        let prompt = server.response(3).await?;
+        let text = prompt["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .context("prompt text")?;
+        ensure!(text.contains("prod-web") && text.contains("nginx.service"));
+        ensure!(text.contains("deny_tiers") && text.contains("/etc/hosts"));
+        ensure!(!text.contains("private-ssh-target.invalid"));
+        ensure!(!text.contains("PRIVATE_SUDO_USER") && !text.contains("PRIVATE_SUDO_PROG"));
+
+        server.send(json!({"jsonrpc":"2.0","id":4,"method":"resources/list","params":{}})).await?;
+        let resources = server.response(4).await?;
+        let uris: Vec<_> = resources["result"]["resources"]
+            .as_array()
+            .context("resources")?
+            .iter()
+            .filter_map(|r| r["uri"].as_str())
+            .collect();
+        for expected in [
+            "estus://guides/systemd",
+            "estus://guides/linux-memory",
+            "estus://guides/networking",
+            "estus://guides/uncertainty-reconciliation",
+            "estus://targets/prod-web/policy",
+        ] {
+            ensure!(uris.contains(&expected), "missing resource {expected}");
+        }
+
+        server.send(json!({"jsonrpc":"2.0","id":5,"method":"resources/templates/list","params":{}})).await?;
+        let templates = server.response(5).await?;
+        ensure!(templates["result"]["resourceTemplates"][0]["uriTemplate"] == "estus://targets/{host}/policy");
+
+        server.send(json!({"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"estus://targets/prod-web/policy"}})).await?;
+        let policy_res = server.response(6).await?;
+        let policy_text = policy_res["result"]["contents"][0]["text"]
+            .as_str()
+            .context("policy resource text")?;
+        let policy: Value = serde_json::from_str(policy_text)?;
+        ensure!(policy["sudo_policy"] == "redacted");
+        ensure!(policy.get("sudo_users").is_none() && policy.get("sudo_programs").is_none());
+        ensure!(!policy_text.contains("private-ssh-target.invalid"));
+        ensure!(!policy_text.contains("PRIVATE_SUDO_USER"));
+
+        server.send(json!({"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"estus://guides/uncertainty-reconciliation"}})).await?;
+        let guide = server.response(7).await?;
+        ensure!(guide["result"]["contents"][0]["text"].as_str().unwrap().contains("change_target_quarantine_clear"));
+
+        server.send(json!({"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"estus://targets/unknown-host/policy"}})).await?;
+        ensure!(server.response(8).await?["error"]["code"] == -32002);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, _) = finished?;
+    ensure!(status.success());
+
+    // When disclose_sudo_policy = true, sudo allowlist is published while ssh_host remains private.
+    std::fs::write(
+        &config_path,
+        format!("disclose_sudo_policy = true\n{base_toml}"),
+    )?;
+    let mut disclosed_server =
+        Server::start(&["--config", config_path.to_str().context("config")?])?;
+    let disclosed_res = async {
+        disclosed_server.initialize().await?;
+        disclosed_server.send(json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"estus://targets/prod-web/policy"}})).await?;
+        let reply = disclosed_server.response(2).await?;
+        let policy: Value = serde_json::from_str(reply["result"]["contents"][0]["text"].as_str().unwrap())?;
+        ensure!(policy["sudo_policy"] == "disclosed");
+        ensure!(policy["sudo_users"] == json!(["PRIVATE_SUDO_USER"]));
+        ensure!(policy["sudo_programs"] == json!(["/usr/local/bin/PRIVATE_SUDO_PROG"]));
+        ensure!(!reply.to_string().contains("private-ssh-target.invalid"));
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    let fin = disclosed_server.finish().await;
+    disclosed_res?;
+    ensure!(fin?.0.success());
     Ok(())
 }

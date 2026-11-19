@@ -132,6 +132,20 @@ impl TargetAdmission {
             .gates
             .contains_key(host)
     }
+    pub(super) fn quarantine_info(
+        &self,
+        host: &str,
+    ) -> Option<(String, &'static str, &'static str)> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let gate = state.gates.get(host)?;
+        let q = gate
+            .gate
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        q.as_ref()
+            .map(|item| (item.authority.clone(), item.executor, item.cause))
+    }
 
     pub(super) async fn acquire(
         &self,

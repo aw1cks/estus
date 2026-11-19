@@ -97,6 +97,7 @@ mod tools {
     mod inspect_hardware_identifiers;
     mod inspect_icmp_probe;
     mod inspect_journal;
+    mod inspect_journal_record;
     mod inspect_kernel_log;
     mod inspect_network_path_probe;
     mod inspect_process;

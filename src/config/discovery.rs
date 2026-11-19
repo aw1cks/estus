@@ -197,6 +197,154 @@ impl Config {
             },
         }
     }
+    pub(crate) fn configured_target_names(&self) -> Vec<&str> {
+        self.targets
+            .as_ref()
+            .map(|targets| targets.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn target_policy_summary(
+        &self,
+        host: &str,
+        tools: &ToolCatalog,
+        quarantine: Option<(String, &'static str, &'static str)>,
+    ) -> Option<serde_json::Value> {
+        let (configured, effective_caps, sudo_ref, selection, description, labels) =
+            match self.targets.as_ref() {
+                Some(targets) => {
+                    let target = targets.get(host)?;
+                    (
+                        true,
+                        self.capabilities.intersect(target.capabilities.into()),
+                        Some(&target.sudo),
+                        target.selected_bindings.as_ref(),
+                        target.description.as_deref(),
+                        &target.labels,
+                    )
+                }
+                None => {
+                    if !self.allows_dynamic_hosts() || destination(host, "host").is_err() {
+                        return None;
+                    }
+                    static EMPTY_LABELS: BTreeMap<String, String> = BTreeMap::new();
+                    (false, self.capabilities, None, None, None, &EMPTY_LABELS)
+                }
+            };
+        let permitted = PermittedOperations {
+            tools,
+            bindings: &self.bindings,
+            rules: &self.rules,
+            target_name: host,
+            sudo: sudo_ref.unwrap_or(&Sudo::Disabled),
+            effective_capabilities: effective_caps,
+            selection,
+        };
+        let matching_rules: Vec<serde_json::Value> = self
+            .rules
+            .iter()
+            .filter(|rule| rules::wildcard_match(&rule.pattern, host))
+            .map(|rule| {
+                let constraints: BTreeMap<&str, BTreeMap<&str, serde_json::Value>> = rule
+                    .constraints
+                    .iter()
+                    .map(|(tool, params)| {
+                        let map = params
+                            .iter()
+                            .map(|(param, c)| {
+                                let mut obj = serde_json::Map::new();
+                                if let Some(values) = &c.allowed_values {
+                                    obj.insert(
+                                        "enum".into(),
+                                        serde_json::to_value(values)
+                                            .unwrap_or(serde_json::Value::Null),
+                                    );
+                                }
+                                if let Some(val) = &c.exact_value {
+                                    obj.insert(
+                                        "const".into(),
+                                        serde_json::to_value(val)
+                                            .unwrap_or(serde_json::Value::Null),
+                                    );
+                                }
+                                if let Some(n) = c.min_length {
+                                    obj.insert("min_length".into(), n.into());
+                                }
+                                if let Some(n) = c.max_length {
+                                    obj.insert("max_length".into(), n.into());
+                                }
+                                if let Some(n) = c.minimum {
+                                    obj.insert("minimum".into(), n.into());
+                                }
+                                if let Some(n) = c.maximum {
+                                    obj.insert("maximum".into(), n.into());
+                                }
+                                (param.as_str(), serde_json::Value::Object(obj))
+                            })
+                            .collect();
+                        (tool.as_str(), map)
+                    })
+                    .collect();
+                serde_json::json!({
+                    "pattern": rule.pattern,
+                    "deny_tiers": rule.deny_tiers,
+                    "allow_tools": rule.allow_tools,
+                    "constraints": constraints,
+                })
+            })
+            .collect();
+        let sudo_mode = sudo_ref.map_or(SudoMode::Disabled, Sudo::mode);
+        let mut summary = serde_json::json!({
+            "host": host,
+            "mode": self.mode,
+            "configured": configured,
+            "description": description,
+            "labels": labels,
+            "capabilities": {
+                "named": effective_caps.named,
+                "file_read": effective_caps.file_read,
+                "file_write": effective_caps.file_write,
+                "exec": effective_caps.exec,
+                "sudo": effective_caps.sudo,
+            },
+            "sudo_mode": sudo_mode,
+            "matching_rules": matching_rules,
+            "permitted_operations": permitted,
+            "quarantine": match quarantine {
+                Some((authority, executor, cause)) => serde_json::json!({
+                    "quarantined": true,
+                    "authority": authority,
+                    "executor": executor,
+                    "cause": cause,
+                }),
+                None => serde_json::json!({"quarantined": false}),
+            }
+        });
+        if let Some(obj) = summary.as_object_mut() {
+            match (self.disclose_sudo_policy, sudo_ref) {
+                (_, None | Some(Sudo::Disabled)) => {
+                    obj.insert("sudo_policy".into(), serde_json::json!("disabled"));
+                }
+                (false, Some(Sudo::SameAccount { .. } | Sudo::SeparateIdentity { .. })) => {
+                    obj.insert("sudo_policy".into(), serde_json::json!("redacted"));
+                }
+                (
+                    true,
+                    Some(
+                        Sudo::SameAccount { users, programs }
+                        | Sudo::SeparateIdentity {
+                            users, programs, ..
+                        },
+                    ),
+                ) => {
+                    obj.insert("sudo_policy".into(), serde_json::json!("disclosed"));
+                    obj.insert("sudo_users".into(), serde_json::json!(users));
+                    obj.insert("sudo_programs".into(), serde_json::json!(programs));
+                }
+            }
+        }
+        Some(summary)
+    }
 }
 
 #[cfg(test)]

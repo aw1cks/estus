@@ -1,99 +1,293 @@
+def slice_message_text(raw):
+    if isinstance(raw, list) and all(type(x) is int and 0 <= x <= 255 for x in raw):
+        return bytes(raw).decode('utf-8', 'replace')
+    if isinstance(raw, str):
+        return raw
+    raise ValueError('unsupported journal message encoding')
+
+
+def build_journal_item(r, boot, max_int=9007199254740991):
+    import re
+    def integer(key):
+        v = r[key]
+        if not isinstance(v, str) or not re.fullmatch('[0-9]{1,16}', v):
+            raise ValueError('invalid journal integer')
+        n = int(v)
+        if n > max_int:
+            raise ValueError('journal integer bound')
+        return n
+    msg = slice_message_text(r.get('MESSAGE', ''))
+    item = {
+        'cursor': r['__CURSOR'],
+        'boot_id': r['_BOOT_ID'],
+        'realtime_usec': integer('__REALTIME_TIMESTAMP'),
+        'monotonic_usec': integer('__MONOTONIC_TIMESTAMP'),
+        'message': msg[:256],
+        'message_truncated': len(msg) > 256,
+    }
+    if len(item['cursor']) > 256 or item['boot_id'] != boot:
+        raise ValueError('unexpected journal identity')
+    for src, dst, bound in [('_SYSTEMD_UNIT', 'unit', 256), ('_TRANSPORT', 'transport', 32)]:
+        if src in r:
+            if not isinstance(r[src], str) or len(r[src]) > bound:
+                raise ValueError('journal field bound')
+            item[dst] = r[src]
+    if 'PRIORITY' in r:
+        item['priority'] = integer('PRIORITY')
+        if item['priority'] > 7:
+            raise ValueError('priority bound')
+    return item, msg
+
+
+def select_journal_records(
+    raw_records,
+    boot,
+    limit,
+    since,
+    until,
+    priority,
+    scope,
+    status='available',
+    contains='',
+    direction='backward',
+    cursor_arg='',
+    skip_cursor='',
+    max_bytes=32768,
+):
+    import json
+    if direction not in ('backward', 'forward'):
+        raise ValueError('invalid direction')
+    if '\x00' in contains or len(contains) > 128:
+        raise ValueError('invalid contains filter')
+
+    incomplete_reason = 'retained accessible journal only; history may expire; concurrent writes are not atomic'
+    base_payload = {
+        'boot_id': boot,
+        'scope': scope,
+        'status': status,
+        'records': [],
+        'continuation_cursor': cursor_arg,
+        'truncated': False,
+        'incomplete': True,
+        'incomplete_reason': incomplete_reason,
+        'since': since,
+        'until': until,
+        'priority_max': priority,
+    }
+    if status != 'available':
+        return base_payload
+
+    seen_anchor = not bool(skip_cursor and direction == 'backward')
+    result = []
+    truncated = False
+    for r in raw_records:
+        if not seen_anchor:
+            if r.get('__CURSOR') == skip_cursor:
+                seen_anchor = True
+            continue
+        if skip_cursor and r.get('__CURSOR') == skip_cursor:
+            continue
+        item, full_msg = build_journal_item(r, boot)
+        if contains and contains not in full_msg:
+            continue
+        if len(result) >= limit:
+            truncated = True
+            break
+        candidate_records = result + [item]
+        candidate_payload = dict(base_payload)
+        candidate_payload['records'] = candidate_records
+        candidate_payload['continuation_cursor'] = f"{direction}:{candidate_records[-1]['cursor']}"
+        candidate_payload['truncated'] = True
+        encoded_len = len(json.dumps(candidate_payload, separators=(',', ':'), allow_nan=False).encode())
+        if encoded_len > max_bytes:
+            truncated = True
+            break
+        result = candidate_records
+
+    payload = dict(base_payload)
+    payload['records'] = result
+    payload['continuation_cursor'] = f"{direction}:{result[-1]['cursor']}" if result else cursor_arg
+    payload['truncated'] = truncated
+    return payload
+
+
+def parse_cursor_arg(cursor_arg, direction):
+    import re
+    if not cursor_arg:
+        return ''
+    if cursor_arg.startswith('backward:'):
+        if direction != 'backward':
+            raise ValueError('cursor direction mismatch')
+        raw = cursor_arg[len('backward:'):]
+    elif cursor_arg.startswith('forward:'):
+        if direction != 'forward':
+            raise ValueError('cursor direction mismatch')
+        raw = cursor_arg[len('forward:'):]
+    else:
+        raw = cursor_arg
+    if not raw or not re.fullmatch(r'[A-Za-z0-9=;_-]{1,256}', raw):
+        raise ValueError('invalid bounded cursor syntax')
+    return raw
+
+
 def main():
-    import os, sys, json, re, time, selectors, subprocess, signal, stat
-    MAX=9007199254740991
-    args=[json.loads(x) for x in sys.argv[1:]]
+    import os, sys, json, re, time, selectors, subprocess, signal
+    args = [json.loads(x) for x in sys.argv[1:]]
+
     def read(path, bound=65536):
-        with open(path,'rb') as f: data=f.read(bound+1)
-        if len(data)>bound: raise ValueError('source exceeds bound')
-        return data.decode('utf-8',errors='strict').strip()
+        with open(path, 'rb') as f:
+            data = f.read(bound + 1)
+        if len(data) > bound:
+            raise ValueError('source exceeds bound')
+        return data.decode('utf-8', errors='strict').strip()
+
     class UtilityError(ValueError):
         pass
-    def run(argv, bound=1048576):
-        p=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'PATH':'/usr/bin:/bin','LC_ALL':'C','SYSTEMD_COLORS':'0'},start_new_session=True)
-        streams=selectors.DefaultSelector(); streams.register(p.stdout,selectors.EVENT_READ); streams.register(p.stderr,selectors.EVENT_READ)
-        out={p.stdout:bytearray(),p.stderr:bytearray()}; deadline=time.monotonic()+10
+
+    def run(argv, bound=8388608):
+        p = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'SYSTEMD_COLORS': '0'},
+            start_new_session=True,
+        )
+        streams = selectors.DefaultSelector()
+        streams.register(p.stdout, selectors.EVENT_READ)
+        streams.register(p.stderr, selectors.EVENT_READ)
+        out = {p.stdout: bytearray(), p.stderr: bytearray()}
+        deadline = time.monotonic() + 20
         try:
             while streams.get_map():
-                if time.monotonic()>deadline: raise ValueError('subprocess deadline')
-                for key,_ in streams.select(.1):
-                    data=os.read(key.fileobj.fileno(),8192)
-                    if not data: streams.unregister(key.fileobj); continue
+                if time.monotonic() > deadline:
+                    raise ValueError('subprocess deadline')
+                for key, _ in streams.select(.1):
+                    data = os.read(key.fileobj.fileno(), 8192)
+                    if not data:
+                        streams.unregister(key.fileobj)
+                        continue
                     out[key.fileobj].extend(data)
-                    if sum(map(len,out.values()))>bound: raise ValueError('subprocess output bound')
-            rc=p.wait(timeout=1)
-            if rc: raise UtilityError('fixed utility failed: '+str(rc)+': '+bytes(out[p.stderr])[:512].decode('utf-8','replace'))
-            return bytes(out[p.stdout]).decode('utf-8','strict')
+                    if sum(map(len, out.values())) > bound:
+                        raise ValueError('subprocess output bound')
+            rc = p.wait(timeout=1)
+            if rc:
+                raise UtilityError(
+                    'fixed utility failed: '
+                    + str(rc)
+                    + ': '
+                    + bytes(out[p.stderr])[:512].decode('utf-8', 'replace')
+                )
+            return bytes(out[p.stdout]).decode('utf-8', 'strict')
         finally:
             streams.close()
-            if p.poll() is None: os.killpg(p.pid,signal.SIGKILL)
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
             p.wait()
+
     def publish(value):
-        encoded=json.dumps(value,separators=(',',':'),allow_nan=False)
-        if len(encoded.encode())>4096: raise ValueError('result bound')
+        encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
+        if len(encoded.encode()) > 32768:
+            raise ValueError('result bound')
         print(encoded)
 
-    p=dict(zip(['unit', 'boot_id', 'since', 'until', 'priority', 'cursor', 'limit'],args))
+    p = dict(
+        zip(
+            ['unit', 'boot_id', 'since', 'until', 'priority', 'cursor', 'limit', 'contains', 'direction'],
+            args,
+        )
+    )
 
-    if p['since']>p['until']: raise ValueError('inverted time interval')
-    if not re.fullmatch(r'[A-Za-z0-9=;_-]{0,256}',p['cursor']): raise ValueError('invalid bounded cursor syntax')
-    boot=p['boot_id']
-    if boot=='current': boot=read('/proc/sys/kernel/random/boot_id',128).replace('-','')
-    if not re.fullmatch('[0-9a-f]{32}',boot): raise ValueError('invalid boot')
-    base=['/usr/bin/journalctl','--no-pager','--quiet','--output=json','--all']
-    def records(argv):
-        text=run(argv)
-        lines=text.splitlines()
-        if len(lines)>101: raise ValueError('record count exceeds bound')
+    if p['since'] > p['until']:
+        raise ValueError('inverted time interval')
+    if not (1 <= p['limit'] <= 50):
+        raise ValueError('limit out of bounds')
+    direction = p['direction'] or 'backward'
+    contains = p['contains'] or ''
+    raw_cursor = parse_cursor_arg(p['cursor'] or '', direction)
+
+    boot = p['boot_id']
+    if boot == 'current':
+        boot = read('/proc/sys/kernel/random/boot_id', 128).replace('-', '')
+    if not re.fullmatch('[0-9a-f]{32}', boot):
+        raise ValueError('invalid boot')
+
+    unit = p['unit']
+    if unit is not None and (not isinstance(unit, str) or not unit or len(unit) > 128 or '\x00' in unit):
+        raise ValueError('invalid unit')
+    scope = 'approved_system_unit' if unit else 'system_journal'
+
+    base = ['/usr/bin/journalctl', '--no-pager', '--quiet', '--output=json', '--all']
+
+    def fetch_records(argv, max_lines):
+        text = run(argv)
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            raise ValueError('record count exceeds bound')
         return [json.loads(line) for line in lines]
-    status='available'; selected=[]
-    # Test the exact cursor globally, before applying a filter that might legitimately match nothing.
-    if p['cursor']:
+
+    status = 'available'
+    raw_records = []
+    probe_usec = None
+    if raw_cursor:
         try:
-            probe=records(base+['--cursor='+p['cursor'],'--lines=+1'])
-            if not probe or probe[0].get('__CURSOR')!=p['cursor']: status='cursor_unavailable'
-            elif probe[0].get('_BOOT_ID')!=boot or not p['since']*1000000<=int(probe[0]['__REALTIME_TIMESTAMP'])<=p['until']*1000000:
-                raise ValueError('cursor outside requested boot/time scope')
+            probe = fetch_records(base + ['--cursor=' + raw_cursor, '--lines=+1'], 1)
+            if not probe or probe[0].get('__CURSOR') != raw_cursor:
+                status = 'cursor_unavailable'
+            else:
+                probe_usec = int(probe[0]['__REALTIME_TIMESTAMP'])
+                if probe[0].get('_BOOT_ID') != boot or not (p['since'] * 1000000 <= probe_usec <= p['until'] * 1000000):
+                    raise ValueError('cursor outside requested boot/time scope')
         except UtilityError as error:
-            if 'Failed to seek to cursor' not in str(error): raise
-            status='cursor_unavailable'
-    if status=='available':
-        query=base+['--boot='+boot,'--until=@'+str(p['until']),'--priority=0..'+str(p['priority']),'--lines='+('+' if p['cursor'] else '')+str(p['limit']+1)]
-        # journalctl rejects --since combined with --after-cursor. The exact
-        # cursor probe above must already lie inside the requested boot/time
-        # range; forward iteration preserves that lower bound without --since.
-        # --until and the approved unit/priority filters still apply.
-        if not p['cursor']: query+=['--since=@'+str(p['since'])]
-        query+=['_SYSTEMD_UNIT='+p['unit']]
+            if 'Failed to seek to cursor' not in str(error):
+                raise
+            status = 'cursor_unavailable'
 
-        # Forward continuation, not a repeated last-N poll. Initial selection returns the latest bounded records.
-        if p['cursor']: query+=['--after-cursor='+p['cursor']]
-        selected=records(query)
-    truncated=len(selected)>p['limit']
-    if p['cursor']: selected=selected[:p['limit']]
-    else: selected=selected[-p['limit']:]
-    result=[]
-    for r in selected:
-        def integer(key):
-            v=r[key]
-            if not isinstance(v,str) or not re.fullmatch('[0-9]{1,16}',v): raise ValueError('invalid journal integer')
-            n=int(v)
-            if n>MAX: raise ValueError('journal integer bound')
-            return n
-        msg=r.get('MESSAGE','')
-        if isinstance(msg,list) and all(type(x) is int and 0<=x<=255 for x in msg): msg=bytes(msg).decode('utf-8','replace')
-        if not isinstance(msg,str): raise ValueError('unsupported journal message encoding')
-        item={'cursor':r['__CURSOR'],'boot_id':r['_BOOT_ID'],'realtime_usec':integer('__REALTIME_TIMESTAMP'),'monotonic_usec':integer('__MONOTONIC_TIMESTAMP'),'message':msg[:256],'message_truncated':len(msg)>256}
-        if len(item['cursor'])>256 or item['boot_id']!=boot: raise ValueError('unexpected journal identity')
-        for src,dst,bound in [('_SYSTEMD_UNIT','unit',256),('_TRANSPORT','transport',32)]:
-            if src in r:
-                if not isinstance(r[src],str) or len(r[src])>bound: raise ValueError('journal field bound')
-                item[dst]=r[src]
-        if 'PRIORITY' in r:
-            item['priority']=integer('PRIORITY')
-            if item['priority']>7: raise ValueError('priority bound')
-        result.append(item)
-    publish({'boot_id':boot,'scope':'approved_system_unit','status':status,'records':result,'continuation_cursor':result[-1]['cursor'] if result else p['cursor'],'truncated':truncated,'incomplete':True,'incomplete_reason':'retained accessible journal only; history may expire; concurrent writes are not atomic','since':p['since'],'until':p['until'],'priority_max':p['priority']})
+    if status == 'available':
+        if contains:
+            fetch_limit = 2000
+        elif direction == 'backward' and raw_cursor:
+            fetch_limit = max(p['limit'] + 64, 512)
+        else:
+            fetch_limit = p['limit'] + 1
+
+        query = base + ['--boot=' + boot, '--priority=0..' + str(p['priority'])]
+        if direction == 'forward':
+            query += ['--until=@' + str(p['until']), '--lines=+' + str(fetch_limit)]
+            if raw_cursor:
+                query += ['--after-cursor=' + raw_cursor]
+            else:
+                query += ['--since=@' + str(p['since'])]
+        else:
+            upper_sec = p['until']
+            if probe_usec is not None:
+                upper_sec = min(upper_sec, probe_usec // 1000000 + 1)
+            query += [
+                '--since=@' + str(p['since']),
+                '--until=@' + str(upper_sec),
+                '--reverse',
+                '--lines=' + str(fetch_limit),
+            ]
+        if unit:
+            query += ['_SYSTEMD_UNIT=' + unit]
+        raw_records = fetch_records(query, fetch_limit + 1)
+
+    payload = select_journal_records(
+        raw_records,
+        boot=boot,
+        limit=p['limit'],
+        since=p['since'],
+        until=p['until'],
+        priority=p['priority'],
+        scope=scope,
+        status=status,
+        contains=contains,
+        direction=direction,
+        cursor_arg=p['cursor'] or '',
+        skip_cursor=raw_cursor,
+        max_bytes=32768,
+    )
+    publish(payload)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

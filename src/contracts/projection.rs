@@ -45,8 +45,8 @@ fn source_key(value: &str) -> bool {
 
 pub(crate) fn compile(config: Value) -> Result<Plan, &'static str> {
     let plan: Plan = serde_json::from_value(config).map_err(|_| INVALID)?;
-    if !(64..=4096).contains(&plan.max_bytes)
-        || !(1..=256).contains(&plan.max_items)
+    if !(64..=65536).contains(&plan.max_bytes)
+        || !(1..=1024).contains(&plan.max_items)
         || !(1..=8).contains(&plan.max_depth)
         || plan.fields.is_empty()
         || plan.fields.len() > 16
@@ -98,7 +98,7 @@ fn check_node(
         && schema
             .get("maxLength")
             .and_then(Value::as_u64)
-            .is_none_or(|n| n > 4096)
+            .is_none_or(|n| n > 65536)
     {
         return Err(INVALID);
     }

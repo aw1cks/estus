@@ -1,0 +1,36 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/inspect_journal_record/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["inspect_journal_record"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+# Separate reviewed root automation identity; independent of native sudo allowlists.
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.inspect_journal_record]
+description = "Read a bounded UTF-8 byte slice (base64-encoded) of one retained journal record by exact boot_id and cursor. Returns cursor_unavailable if the journal rotated or the cursor no longer matches; a changed record is not a retained immutable artifact."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read", "sensitive_read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_journal_record.payload.json", source = "/etc/estus/payloads/inspect_journal_record/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+input_map = { "boot_id" = "boot_id", "cursor" = "cursor", "offset" = "offset", "max_bytes" = "max_bytes" }
+limits = { timeout_secs = 40 }
+input_schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "maxLength" = 32 }, "cursor" = { "type" = "string", "minLength" = 1, "maxLength" = 256 }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "max_bytes" = { "type" = "integer", "minimum" = 1, "maximum" = 4096 } }, "required" = ["boot_id", "cursor"], "additionalProperties" = false }
+[tools.inspect_journal_record.result]
+kind = "capability_projection"
+fields = { "boot_id" = ["mcp_result", "boot_id"], "cursor" = ["mcp_result", "cursor"], "status" = ["mcp_result", "status"], "data_base64" = ["mcp_result", "data_base64"], "offset" = ["mcp_result", "offset"], "next_offset" = ["mcp_result", "next_offset"], "total_bytes" = ["mcp_result", "total_bytes"], "eof" = ["mcp_result", "eof"], "incomplete" = ["mcp_result", "incomplete"], "incomplete_reason" = ["mcp_result", "incomplete_reason"] }
+max_bytes = 8192
+max_items = 64
+max_depth = 4
+schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "maxLength" = 32 }, "cursor" = { "type" = "string", "maxLength" = 256 }, "status" = { "type" = "string", "maxLength" = 32, "enum" = ["available", "cursor_unavailable"] }, "data_base64" = { "type" = "string", "maxLength" = 5464 }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "next_offset" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "total_bytes" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "eof" = { "type" = "boolean" }, "incomplete" = { "type" = "boolean", "const" = true }, "incomplete_reason" = { "type" = "string", "maxLength" = 256 } }, "required" = ["boot_id", "cursor", "status", "data_base64", "offset", "next_offset", "total_bytes", "eof", "incomplete", "incomplete_reason"], "additionalProperties" = false }

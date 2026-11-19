@@ -479,7 +479,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
 #[test]
 fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail() {
     let catalog = canonical_catalog();
-    assert_eq!(catalog.manifest().tools.len(), 118);
+    assert_eq!(catalog.manifest().tools.len(), 119);
     for name in catalog.manifest().tools.keys() {
         let definition = catalog.definition(name).unwrap();
         let effects = definition["tools"][name]["effects"]

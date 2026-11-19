@@ -306,6 +306,7 @@ fn invalid(field: &'static str, reason: &'static str) -> ConfigError {
 pub(crate) struct Config {
     mode: Mode,
     capabilities: Capabilities,
+    disclose_sudo_policy: bool,
     ssh_config: Option<PathBuf>,
     ssh_executable: PathBuf,
     limits: Limits,

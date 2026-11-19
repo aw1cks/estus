@@ -3,12 +3,13 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "1aec5b6e48a1c375da54289b2ee7486a6a1f4b42927b68dc7d7d3347525233b5",
+  "source_sha256": "15b33a0a2a22b0110bb141832d4a23ba185dd52aea5e182a6757d4856461f80a",
   "max_source_bytes": 1048576,
   "argv": [
     {
       "kind": "argument",
       "name": "unit",
+      "default": null,
       "format": "json",
       "omit_if_absent": false
     },
@@ -46,6 +47,20 @@
     {
       "kind": "argument",
       "name": "limit",
+      "format": "json",
+      "omit_if_absent": false
+    },
+    {
+      "kind": "argument",
+      "name": "contains",
+      "default": "",
+      "format": "json",
+      "omit_if_absent": false
+    },
+    {
+      "kind": "argument",
+      "name": "direction",
+      "default": "backward",
       "format": "json",
       "omit_if_absent": false
     }
@@ -88,11 +103,16 @@
         },
         "limit": {
           "type": "integer"
+        },
+        "contains": {
+          "type": "string"
+        },
+        "direction": {
+          "type": "string"
         }
       },
       "required": [
         "target_python",
-        "unit",
         "boot_id",
         "since",
         "journal_until",
@@ -133,6 +153,14 @@
           "properties": {}
         },
         "limit": {
+          "aliases": {},
+          "properties": {}
+        },
+        "contains": {
+          "aliases": {},
+          "properties": {}
+        },
+        "direction": {
           "aliases": {},
           "properties": {}
         }
@@ -176,12 +204,24 @@
           },
           "cursor": {
             "type": "string",
-            "maxLength": 256
+            "maxLength": 280
           },
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 4
+            "maximum": 50
+          },
+          "contains": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "direction": {
+            "type": "string",
+            "maxLength": 16,
+            "enum": [
+              "backward",
+              "forward"
+            ]
           }
         },
         "required": [
@@ -189,8 +229,7 @@
           "since",
           "until",
           "priority",
-          "limit",
-          "unit"
+          "limit"
         ],
         "additionalProperties": false
       },
@@ -204,7 +243,9 @@
         "journal_until": "until",
         "priority": "priority",
         "cursor": "cursor",
-        "limit": "limit"
+        "limit": "limit",
+        "contains": "contains",
+        "direction": "direction"
       }
     },
     "result": {
@@ -255,8 +296,8 @@
           "priority_max"
         ]
       },
-      "max_bytes": 4096,
-      "max_items": 256,
+      "max_bytes": 32768,
+      "max_items": 1024,
       "max_depth": 8,
       "schema": {
         "type": "object",
@@ -331,11 +372,11 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 4
+            "maxItems": 50
           },
           "continuation_cursor": {
             "type": "string",
-            "maxLength": 256
+            "maxLength": 280
           },
           "truncated": {
             "type": "boolean"
@@ -381,7 +422,7 @@
       }
     },
     "authority": "automation:catalog",
-    "revision": "1_native1",
+    "revision": "2_native1",
     "no_log": false
   }
 }

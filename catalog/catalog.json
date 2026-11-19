@@ -28,7 +28,8 @@
       "inspect_process_fds",
       "inspect_sockets",
       "inspect_journal",
-      "inspect_kernel_log"
+      "inspect_kernel_log",
+      "inspect_journal_record"
     ]
   },
   "tools": {
@@ -721,6 +722,21 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_journal"
+      }
+    },
+    "inspect_journal_record": {
+      "definition": "inspect_journal_record.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "systemd",
+        "journald"
+      ],
+      "executor": {
+        "kind": "native_payload",
+        "path": "payloads/inspect_journal_record"
       }
     },
     "inspect_kernel_log": {
