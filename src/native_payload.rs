@@ -423,23 +423,13 @@ impl PayloadPlan {
     }
     pub(crate) fn arguments(&self, inputs: &Value) -> Result<Vec<String>, ToolError> {
         let args = self.binding.prepare(inputs).map_err(|_| {
-            ToolError::new(
-                "invalid_argument",
-                "Payload inputs violate reviewed contract",
-                false,
-            )
+            ToolError::invalid_argument("Payload inputs violate reviewed contract", false)
         })?;
         adapt(&self.manifest.argv, &args)
     }
 }
 fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<String>, ToolError> {
-    let invalid = || {
-        ToolError::new(
-            "invalid_argument",
-            "Payload argv violates reviewed adapter",
-            false,
-        )
-    };
+    let invalid = || ToolError::invalid_argument("Payload argv violates reviewed adapter", false);
     let mut output = Vec::with_capacity(adapter.len());
     let mut bytes = 0usize;
     for arg in adapter {

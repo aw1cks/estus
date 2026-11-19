@@ -646,8 +646,7 @@ pub fn reduce(
     let (status, mut error) = if resource || local_error == Some("resource_limit") {
         (
             AutomationStatus::ResourceLimit,
-            Some(ToolError::new(
-                "resource_limit",
+            Some(ToolError::resource_limit(
                 "Automation scratch or protocol budget exceeded",
                 unknown,
             )),
@@ -656,8 +655,7 @@ pub fn reduce(
         if local_error == Some("timeout") {
             (
                 AutomationStatus::Timeout,
-                Some(ToolError::new(
-                    "timeout",
+                Some(ToolError::timeout(
                     "Automation deadline exceeded; remote work may continue",
                     unknown,
                 )),
@@ -665,8 +663,7 @@ pub fn reduce(
         } else {
             (
                 AutomationStatus::Cancelled,
-                Some(ToolError::new(
-                    "cancelled",
+                Some(ToolError::cancelled(
                     "Automation cancelled; remote work may continue",
                     unknown,
                 )),
@@ -675,8 +672,7 @@ pub fn reduce(
     } else if invalid {
         (
             AutomationStatus::InvalidResult,
-            Some(ToolError::new(
-                "invalid_result",
+            Some(ToolError::invalid_result(
                 "Automation adapter contract was violated",
                 unknown,
             )),
@@ -686,34 +682,24 @@ pub fn reduce(
             AutomationStatus::Successful => local_error
                 .filter(|code| !preserve || !matches!(*code, "timeout" | "cancelled"))
                 .map(|_| {
-                    ToolError::new(
-                        "cleanup_incomplete",
-                        "Automation local cleanup is incomplete",
-                        false,
-                    )
+                    ToolError::cleanup_incomplete("Automation local cleanup is incomplete", false)
                 }),
-            AutomationStatus::Failed | AutomationStatus::Unreachable => Some(ToolError::new(
-                "automation_failed",
-                "Automation failed or was unreachable",
-                unknown,
-            )),
-            AutomationStatus::Cancelled => Some(ToolError::new(
-                "cancelled",
+            AutomationStatus::Failed | AutomationStatus::Unreachable => Some(
+                ToolError::automation_failed("Automation failed or was unreachable", unknown),
+            ),
+            AutomationStatus::Cancelled => Some(ToolError::cancelled(
                 "Automation cancelled; remote work may continue",
                 unknown,
             )),
-            AutomationStatus::Timeout => Some(ToolError::new(
-                "timeout",
+            AutomationStatus::Timeout => Some(ToolError::timeout(
                 "Automation deadline exceeded; remote work may continue",
                 unknown,
             )),
-            AutomationStatus::ResourceLimit => Some(ToolError::new(
-                "resource_limit",
+            AutomationStatus::ResourceLimit => Some(ToolError::resource_limit(
                 "Automation scratch budget exceeded",
                 unknown,
             )),
-            _ => Some(ToolError::new(
-                "invalid_result",
+            _ => Some(ToolError::invalid_result(
                 "Automation did not establish a valid result",
                 unknown,
             )),
@@ -722,8 +708,7 @@ pub fn reduce(
     } else if !started_child {
         (
             AutomationStatus::NotStarted,
-            Some(ToolError::new(
-                "unsupported",
+            Some(ToolError::unsupported(
                 "Automation runtime could not start",
                 false,
             )),
@@ -731,8 +716,7 @@ pub fn reduce(
     } else {
         (
             AutomationStatus::WorkerLost,
-            Some(ToolError::new(
-                "invalid_result",
+            Some(ToolError::invalid_result(
                 "Automation worker exited without terminal evidence",
                 true,
             )),
@@ -751,8 +735,7 @@ pub fn reduce(
         None => (None, false),
     };
     if projection_issue && error.is_none() {
-        error = Some(ToolError::new(
-            "invalid_result",
+        error = Some(ToolError::invalid_result(
             "Selected automation output is unavailable or violates its reviewed projection contract",
             unknown,
         ));
@@ -779,10 +762,7 @@ pub fn reduce(
         owned_group_cleanup: local.group_cleanup,
         projection,
     };
-    ToolReply {
-        data: Some(data),
-        error,
-    }
+    ToolReply::with_optional_error(data, error)
 }
 
 #[cfg(test)]
@@ -1244,11 +1224,11 @@ mod role_evidence {
                     group_cleanup: GroupCleanup::SignalledAndReaped,
                 },
             );
-            let data = reply.data.unwrap();
+            let data = reply.data().unwrap();
             assert_eq!(data.status, AutomationStatus::Timeout);
             assert!(!data.complete);
             assert_eq!(data.changed, changed.filter(|value| *value));
-            assert!(reply.error.unwrap().remote_state_unknown);
+            assert!(reply.error().unwrap().remote_state_unknown);
         }
     }
 
@@ -1278,12 +1258,12 @@ mod role_evidence {
                     group_cleanup: GroupCleanup::SignalledAndReaped,
                 },
             );
-            let data = reply.data.unwrap();
+            let data = reply.data().unwrap();
             assert_eq!(data.status, AutomationStatus::Failed);
             assert!(data.complete);
             assert_eq!(data.changed, changed);
-            let error = reply.error.unwrap();
-            assert_eq!(error.code, "automation_failed");
+            let error = reply.error().unwrap();
+            assert_eq!(error.code(), "automation_failed");
             assert!(!error.remote_state_unknown);
         }
     }
@@ -1477,13 +1457,13 @@ mod module_evidence {
                     group_cleanup: GroupCleanup::SignalledAndReaped,
                 },
             );
-            let data = reply.data.unwrap();
+            let data = reply.data().unwrap();
             assert!(data.complete);
             assert_eq!(data.status, AutomationStatus::Failed);
             assert_eq!(data.runner_rc, Some(2));
             assert_eq!(data.changed, expected);
             assert_eq!(data.censored, censored);
-            assert_eq!(reply.error.unwrap().code, "automation_failed");
+            assert_eq!(reply.error().unwrap().code(), "automation_failed");
         }
     }
 
@@ -1523,7 +1503,7 @@ mod module_evidence {
                 group_cleanup: GroupCleanup::SignalledAndReaped,
             },
         );
-        let data = reply.data.unwrap();
+        let data = reply.data().unwrap();
         assert!(data.complete);
         assert_eq!(data.status, AutomationStatus::Successful);
         assert_eq!(data.runner_rc, Some(0));
@@ -1532,8 +1512,8 @@ mod module_evidence {
             data.projection,
             Some(ModuleProjection::Unavailable)
         ));
-        let err = reply.error.unwrap();
-        assert_eq!(err.code, "invalid_result");
+        let err = reply.error().unwrap();
+        assert_eq!(err.code(), "invalid_result");
         assert!(!err.remote_state_unknown);
     }
 }

@@ -149,10 +149,10 @@ impl MkdirRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(MkdirData { created: true }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+            .remaining(&ToolReply::partial(
+                MkdirData { created: true },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| {
                 invalid("Request leaves insufficient response budget for directory creation")
             })?;
@@ -199,10 +199,10 @@ impl RenameRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(RenameData { renamed: true }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+            .remaining(&ToolReply::partial(
+                RenameData { renamed: true },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| invalid("Request leaves insufficient response budget for rename"))?;
         Ok(RenameSpec {
             source: &self.source,
@@ -241,10 +241,10 @@ impl RemoveFileRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(RemoveFileData { removed: true }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+            .remaining(&ToolReply::partial(
+                RemoveFileData { removed: true },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| invalid("Request leaves insufficient response budget for file removal"))?;
         Ok(RemoveFileSpec { path: &self.path })
     }
@@ -282,10 +282,10 @@ impl RemoveDirectoryRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(RemoveDirectoryData { removed: true }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+            .remaining(&ToolReply::partial(
+                RemoveDirectoryData { removed: true },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| {
                 invalid("Request leaves insufficient response budget for directory removal")
             })?;
@@ -358,12 +358,12 @@ impl ReplaceRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(ReplaceData {
+            .remaining(&ToolReply::partial(
+                ReplaceData {
                     bytes_written: u64::MAX,
-                }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+                },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| invalid("Request leaves insufficient response budget for replacement"))?;
         let content = decode_content_owned(
             std::mem::take(&mut self.content),
@@ -527,12 +527,12 @@ impl WriteRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(WriteData {
+            .remaining(&ToolReply::partial(
+                WriteData {
                     bytes_written: u64::MAX,
-                }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+                },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| {
                 invalid("Request leaves insufficient response budget for a write result")
             })?;
@@ -556,12 +556,12 @@ impl WriteRequest {
             return Err(invalid("timeout_secs must be positive"));
         }
         budget
-            .remaining(&ToolReply {
-                data: Some(WriteData {
+            .remaining(&ToolReply::partial(
+                WriteData {
                     bytes_written: u64::MAX,
-                }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            })
+                },
+                ToolError::SSH_CONNECT_FAILED,
+            ))
             .map_err(|_| {
                 invalid("Request leaves insufficient response budget for a write result")
             })?;
@@ -636,11 +636,7 @@ fn decode_base64(input: &[u8], max_file_bytes: u64) -> Result<Vec<u8>, ToolError
 }
 
 fn invalid_base64() -> ToolError {
-    ToolError::new(
-        "invalid_encoding",
-        "content must be canonical padded standard base64",
-        false,
-    )
+    ToolError::invalid_encoding("content must be canonical padded standard base64", false)
 }
 
 impl StatRequest {
@@ -654,17 +650,17 @@ impl StatRequest {
         // Reserve both complete envelopes conservatively before opening SSH.
         // The longest kind and widest nullable scalar values dominate all
         // metadata replies; the fixed connection error dominates typed failures.
-        let reservation = ToolReply {
-            data: Some(StatData {
+        let reservation = ToolReply::partial(
+            StatData {
                 kind: FileKind::Directory,
                 size: Some(u64::MAX),
                 permissions: Some(u32::MAX),
                 uid: Some(u32::MAX),
                 gid: Some(u32::MAX),
                 modified_unix_secs: Some(u64::MAX),
-            }),
-            error: Some(ToolError::SSH_CONNECT_FAILED),
-        };
+            },
+            ToolError::SSH_CONNECT_FAILED,
+        );
         budget.remaining(&reservation).map_err(|_| {
             invalid("Request leaves insufficient response budget for file metadata")
         })?;
@@ -676,7 +672,7 @@ impl StatRequest {
 }
 
 fn invalid(message: &'static str) -> ToolError {
-    ToolError::new("invalid_argument", message, false)
+    ToolError::invalid_argument(message, false)
 }
 
 impl ReadRequest {
@@ -729,17 +725,17 @@ pub(crate) fn validate_read_range(
         ));
     }
     // Reserve the complete duplicated reply, actual request ID included.
-    let reservation = ToolReply {
-        data: Some(ReadData {
+    let reservation = ToolReply::partial(
+        ReadData {
             content: String::new(),
             content_sha256: String::new(),
             encoding,
             bytes_read: u64::MAX,
             next_offset: u64::MAX,
             eof: false,
-        }),
-        error: Some(ToolError::SSH_CONNECT_FAILED),
-    };
+        },
+        ToolError::SSH_CONNECT_FAILED,
+    );
     // The empty string reserves the digest property and its quotes. Its 64
     // ASCII hex characters appear twice and require no JSON escaping.
     let remaining = budget
@@ -795,8 +791,7 @@ pub(crate) fn encode_range(
     raw.bytes.truncate(max_bytes);
     let digest: [u8; 32] = Sha256::digest(&raw.bytes).into();
     if expected_content_sha256.is_some_and(|expected| expected != digest) {
-        return Err(ToolError::new(
-            "checksum_mismatch",
+        return Err(ToolError::checksum_mismatch(
             "Returned bytes do not match expected_content_sha256",
             false,
         ));
@@ -806,8 +801,7 @@ pub(crate) fn encode_range(
         .checked_add(bytes_read)
         .ok_or_else(|| invalid("Returned file offset cannot be represented"))?;
     let content = match encoding {
-        Encoding::Utf8 => String::from_utf8(raw.bytes.into()).map_err(|_| ToolError::new(
-            "invalid_encoding",
+        Encoding::Utf8 => String::from_utf8(raw.bytes.into()).map_err(|_| ToolError::invalid_encoding(
             "Returned bytes are not complete UTF-8; use encoding base64 for lossless byte ranges",
             false,
         ))?,
@@ -830,34 +824,26 @@ pub(crate) fn verify_script(
     max_bytes: usize,
 ) -> Result<String, ToolError> {
     if !eof || bytes.len() > max_bytes {
-        return Err(ToolError::new(
-            "resource_limit",
+        return Err(ToolError::resource_limit(
             "Script source exceeds its complete byte bound",
             false,
         ));
     }
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
     if digest != *expected_content_sha256 {
-        return Err(ToolError::new(
-            "checksum_mismatch",
+        return Err(ToolError::checksum_mismatch(
             "Script source does not match its reviewed content_sha256",
             false,
         ));
     }
     if bytes.contains(&0) {
-        return Err(ToolError::new(
-            "invalid_encoding",
+        return Err(ToolError::invalid_encoding(
             "Script source must be NUL-free UTF-8",
             false,
         ));
     }
-    String::from_utf8(bytes).map_err(|_| {
-        ToolError::new(
-            "invalid_encoding",
-            "Script source must be NUL-free UTF-8",
-            false,
-        )
-    })
+    String::from_utf8(bytes)
+        .map_err(|_| ToolError::invalid_encoding("Script source must be NUL-free UTF-8", false))
 }
 
 #[cfg(test)]
@@ -886,13 +872,13 @@ mod tests {
             (b"abd".as_slice(), true, 3, "checksum_mismatch"),
         ] {
             let error = verify_script(bytes.to_vec(), eof, &digest, limit).unwrap_err();
-            assert_eq!(error.code, code);
+            assert_eq!(error.code(), code);
             assert!(!error.remote_state_unknown);
         }
         for bytes in [b"\xff".as_slice(), b"abc\0"] {
             let digest = Sha256::digest(bytes).into();
             let error = verify_script(bytes.to_vec(), true, &digest, bytes.len()).unwrap_err();
-            assert_eq!(error.code, "invalid_encoding");
+            assert_eq!(error.code(), "invalid_encoding");
         }
     }
 
@@ -932,7 +918,7 @@ mod tests {
                 let error = request
                     .validate(raw.len() as u64 - 1, budget())
                     .unwrap_err();
-                assert_eq!(error.code, "invalid_argument", "encoded: {encoded}");
+                assert_eq!(error.code(), "invalid_argument", "encoded: {encoded}");
                 assert!(!error.remote_state_unknown);
             }
         }
@@ -942,7 +928,7 @@ mod tests {
             "é\0雪".as_bytes()
         );
         assert_eq!(
-            request.validate(5, budget()).unwrap_err().code,
+            request.validate(5, budget()).unwrap_err().code(),
             "invalid_argument"
         );
     }
@@ -955,7 +941,7 @@ mod tests {
             let error = write_request(content, "base64")
                 .validate(100, budget())
                 .unwrap_err();
-            assert_eq!(error.code, "invalid_encoding", "content: {content:?}");
+            assert_eq!(error.code(), "invalid_encoding", "content: {content:?}");
             assert!(!error.remote_state_unknown);
         }
         // Same encoded length as a one-byte payload, but without padding this
@@ -964,19 +950,19 @@ mod tests {
             write_request("AAAA", "base64")
                 .validate(1, budget())
                 .unwrap_err()
-                .code,
+                .code(),
             "invalid_argument",
         );
     }
 
     #[test]
     fn write_reserves_success_and_uncertain_failure_before_decoding() {
-        let reservation = ToolReply {
-            data: Some(WriteData {
+        let reservation = ToolReply::partial(
+            WriteData {
                 bytes_written: u64::MAX,
-            }),
-            error: Some(ToolError::SSH_CONNECT_FAILED),
-        };
+            },
+            ToolError::SSH_CONNECT_FAILED,
+        );
         let available = ReplyBudget::new(&RequestId::String("".into()))
             .unwrap()
             .remaining(&reservation)
@@ -1002,7 +988,7 @@ mod tests {
         let error = write_request("Zg==", "base64")
             .validate(1, ReplyBudget::new(&id).unwrap())
             .unwrap_err();
-        assert_eq!(error.code, "invalid_argument");
+        assert_eq!(error.code(), "invalid_argument");
         assert!(!error.remote_state_unknown);
     }
 
@@ -1083,13 +1069,13 @@ mod tests {
         for path in ["", "a\0b"] {
             request.path = path.into();
             let error = request.validate(budget()).unwrap_err();
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             assert!(!error.remote_state_unknown);
         }
         request.path = "file".into();
         request.timeout_secs = Some(0);
         assert_eq!(
-            request.validate(budget()).unwrap_err().code,
+            request.validate(budget()).unwrap_err().code(),
             "invalid_argument"
         );
         for value in [
@@ -1113,10 +1099,7 @@ mod tests {
             gid: Some(u32::MAX),
             modified_unix_secs: Some(u64::MAX),
         };
-        let reservation = ToolReply {
-            data: Some(widest),
-            error: Some(ToolError::SSH_CONNECT_FAILED),
-        };
+        let reservation = ToolReply::partial(widest, ToolError::SSH_CONNECT_FAILED);
         let empty_id = RequestId::String("".into());
         let remaining = ReplyBudget::new(&empty_id)
             .unwrap()
@@ -1137,7 +1120,7 @@ mod tests {
         let error = request
             .validate(ReplyBudget::new(&id).unwrap())
             .unwrap_err();
-        assert_eq!(error.code, "invalid_argument");
+        assert_eq!(error.code(), "invalid_argument");
         assert!(!error.remote_state_unknown);
     }
 
@@ -1237,7 +1220,7 @@ mod tests {
             let mut request = request();
             request.expected_content_sha256 = Some(value);
             let error = request.validate(100, budget()).unwrap_err();
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             assert!(!error.remote_state_unknown);
         }
     }
@@ -1247,21 +1230,21 @@ mod tests {
         let id = RequestId::String("consumer-id".repeat(50).into());
         let budget = ReplyBudget::new(&id).unwrap();
         for encoding in [Encoding::Utf8, Encoding::Base64] {
-            let mut reservation = ToolReply {
-                data: Some(ReadData {
+            let mut reservation = ToolReply::partial(
+                ReadData {
                     content: String::new(),
                     content_sha256: ABC_SHA256.into(),
                     encoding,
                     bytes_read: u64::MAX,
                     next_offset: u64::MAX,
                     eof: false,
-                }),
-                error: Some(ToolError::SSH_CONNECT_FAILED),
-            };
+                },
+                ToolError::SSH_CONNECT_FAILED,
+            );
             let remaining = budget.remaining(&reservation).unwrap();
-            reservation.data.as_mut().unwrap().content_sha256.clear();
+            reservation.data_mut().unwrap().content_sha256.clear();
             assert_eq!(budget.remaining(&reservation).unwrap(), remaining + 128);
-            reservation.data.as_mut().unwrap().content_sha256 = ABC_SHA256.into();
+            reservation.data_mut().unwrap().content_sha256 = ABC_SHA256.into();
             let (max_bytes, content) = match encoding {
                 Encoding::Utf8 => {
                     let count = remaining / 13;
@@ -1278,16 +1261,15 @@ mod tests {
             assert!(request.validate(u64::MAX, budget).is_ok());
             request.max_bytes = Some(max_bytes as u64 + 1);
             assert_eq!(
-                request.validate(u64::MAX, budget).unwrap_err().code,
+                request.validate(u64::MAX, budget).unwrap_err().code(),
                 "invalid_argument"
             );
-            reservation.data.as_mut().unwrap().content = content;
+            reservation.data_mut().unwrap().content = content;
             assert!(budget.remaining(&reservation).is_ok());
             // One additional raw byte costs a full base64 group, or thirteen
             // bytes for this UTF-8 control character, across both wire copies.
             reservation
-                .data
-                .as_mut()
+                .data_mut()
                 .unwrap()
                 .content
                 .push_str(match encoding {
@@ -1315,7 +1297,7 @@ mod tests {
             let mut request = request();
             request.path = path.into();
             assert_eq!(
-                request.validate(100, budget()).unwrap_err().code,
+                request.validate(100, budget()).unwrap_err().code(),
                 "invalid_argument"
             );
         }
@@ -1323,7 +1305,7 @@ mod tests {
             let mut request = request();
             request.max_bytes = Some(count);
             assert_eq!(
-                request.validate(100, budget()).unwrap_err().code,
+                request.validate(100, budget()).unwrap_err().code(),
                 "invalid_argument"
             );
         }
@@ -1398,7 +1380,7 @@ mod tests {
             let error = encoded(bytes, bytes.len(), 0, Encoding::Utf8, true)
                 .err()
                 .unwrap();
-            assert_eq!(error.code, "invalid_encoding");
+            assert_eq!(error.code(), "invalid_encoding");
             assert!(!error.remote_state_unknown);
         }
         // Even when lookahead completes a codepoint, the requested range must

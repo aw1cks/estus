@@ -190,7 +190,7 @@ impl ReplyBudget {
     }
 
     fn tool_reply_size<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
-        self.value_size(reply, reply.error.is_some())
+        self.value_size(reply, reply.error().is_some())
     }
 
     pub fn remaining<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
@@ -198,7 +198,7 @@ impl ReplyBudget {
     }
 
     pub fn result<T: Serialize>(&self, reply: ToolReply<T>) -> Result<CallToolResult, ErrorData> {
-        self.serialized_result(&reply, reply.error.is_some())
+        self.serialized_result(&reply, reply.error().is_some())
     }
 
     fn serialized_result(
@@ -221,8 +221,8 @@ impl ReplyBudget {
         // Reserve the longest current error code/message and conservative scalar
         // widths before dispatch. A health failure without command data is smaller.
         // false is wider than true; i32::MIN/u64::MAX reserve every numeric width.
-        let reservation = ToolReply {
-            data: Some(CommandData {
+        let reservation = ToolReply::partial(
+            CommandData {
                 stdout: String::new(),
                 stderr: String::new(),
                 stdout_truncated: false,
@@ -234,9 +234,9 @@ impl ReplyBudget {
                 duration_ms: u64::MAX,
                 remote_may_still_be_running: false,
                 output: None,
-            }),
-            error: Some(ToolError::SSH_CONNECT_FAILED),
-        };
+            },
+            ToolError::SSH_CONNECT_FAILED,
+        );
         // Even unescaped UTF-8 appears twice. No stream can contribute more raw
         // bytes than this, regardless of the operator's capture cap. Lossy
         // replacement and escaping are budgeted after decoding, before copying.
@@ -251,11 +251,16 @@ impl ReplyBudget {
         &self,
         mut reply: ToolReply<CommandData>,
     ) -> Result<CallToolResult, ErrorData> {
-        if let Some(data) = &mut reply.data {
-            let mut stdout = std::mem::take(&mut data.stdout);
-            let mut stderr = std::mem::take(&mut data.stderr);
+        if reply.data().is_some() {
+            let (mut stdout, mut stderr) = {
+                let data = reply.data_mut().expect("checked data");
+                (
+                    std::mem::take(&mut data.stdout),
+                    std::mem::take(&mut data.stderr),
+                )
+            };
             let remaining = MAX_RESPONSE_BYTES - self.tool_reply_size(&reply)?;
-            if let Some(data) = &mut reply.data {
+            if let Some(data) = reply.data_mut() {
                 trim_streams(
                     &mut stdout,
                     &mut stderr,
@@ -271,8 +276,8 @@ impl ReplyBudget {
     }
 
     pub(crate) fn controller_capture_limit(&self, retain_output: bool) -> Result<u64, ErrorData> {
-        let reservation = ControllerReply {
-            data: Some(ControllerData {
+        let reservation = ControllerReply::partial(
+            ControllerData {
                 stdout: String::new(),
                 stderr: String::new(),
                 stdout_truncated: false,
@@ -285,12 +290,11 @@ impl ReplyBudget {
                 duration_ms: u64::MAX,
                 owned_group_cleanup: GroupCleanup::SignalledAndReaped,
                 output: None,
-            }),
-            error: Some(ControllerError::new(
-                "controller_resource_limit",
+            },
+            ControllerError::controller_resource_limit(
                 "Controller execution could not complete within the configured resource limits",
-            )),
-        };
+            ),
+        );
         // Raw capture is bounded before decoding. Exact escaping and actual
         // error metadata are accounted for again before duplicated allocation.
         Ok(((MAX_RESPONSE_BYTES - self.value_size(&reservation, true)?)
@@ -303,11 +307,17 @@ impl ReplyBudget {
         &self,
         mut reply: ControllerReply,
     ) -> Result<CallToolResult, ErrorData> {
-        if let Some(data) = &mut reply.data {
-            let mut stdout = std::mem::take(&mut data.stdout);
-            let mut stderr = std::mem::take(&mut data.stderr);
-            let remaining = MAX_RESPONSE_BYTES - self.value_size(&reply, reply.error.is_some())?;
-            if let Some(data) = &mut reply.data {
+        if reply.data().is_some() {
+            let (mut stdout, mut stderr) = {
+                let data = reply.data_mut().expect("checked data");
+                (
+                    std::mem::take(&mut data.stdout),
+                    std::mem::take(&mut data.stderr),
+                )
+            };
+            let remaining =
+                MAX_RESPONSE_BYTES - self.value_size(&reply, reply.error().is_some())?;
+            if let Some(data) = reply.data_mut() {
                 trim_streams(
                     &mut stdout,
                     &mut stderr,
@@ -319,7 +329,7 @@ impl ReplyBudget {
                 data.stderr = stderr;
             }
         }
-        self.serialized_result(&reply, reply.error.is_some())
+        self.serialized_result(&reply, reply.error().is_some())
     }
 }
 
@@ -463,7 +473,9 @@ mod tests {
             for text in ["", controls.as_str(), "é🙂\u{fffd}\"\\\n"] {
                 for error in [None, Some(ToolError::SSH_CONNECT_FAILED)] {
                     let mut reply = command(text, text);
-                    reply.error = error;
+                    if let Some(error) = error {
+                        reply.set_error(error);
+                    }
                     let budget = ReplyBudget::new(&id).unwrap();
                     let predicted = budget.tool_reply_size(&reply).unwrap();
                     let result = budget.result(reply).unwrap();
@@ -491,14 +503,14 @@ mod tests {
             base = budget.tool_reply_size(&reply).unwrap();
         }
         let count = (MAX_RESPONSE_BYTES - base) / 2;
-        reply.data.as_mut().unwrap().stdout = "x".repeat(count);
+        reply.data_mut().unwrap().stdout = "x".repeat(count);
         assert_eq!(budget.tool_reply_size(&reply).unwrap(), MAX_RESPONSE_BYTES);
         let result = budget.result(reply).unwrap();
         assert_eq!(actual_frame_size(id, &result), MAX_RESPONSE_BYTES);
         drop(result);
 
         let mut excess = command("", "");
-        excess.data.as_mut().unwrap().stdout = "x".repeat(count + 1);
+        excess.data_mut().unwrap().stdout = "x".repeat(count + 1);
         assert!(budget.tool_reply_size(&excess).is_err());
         let result = budget.command_result(excess).unwrap();
         let data = &result.structured_content.unwrap()["data"];
@@ -537,13 +549,12 @@ mod tests {
             id_bytes: MAX_RESPONSE_BYTES - 2048,
         };
         let mut reply = command(&"\u{fffd}\0".repeat(1024), &"é🙂".repeat(1024));
-        let data = reply.data.as_mut().unwrap();
+        let data = reply.data_mut().unwrap();
         data.stdout_lossy = true;
         data.exit_code = None;
         data.termination = Termination::ConnectionLost;
         data.remote_may_still_be_running = true;
-        reply.error = Some(ToolError::new(
-            "connection_lost",
+        reply.set_error(ToolError::connection_lost(
             "SSH command channel was lost; remote execution state is unknown",
             true,
         ));
@@ -603,8 +614,8 @@ mod tests {
     }
 
     fn controller(stdout: String, stderr: String) -> ControllerReply {
-        ControllerReply {
-            data: Some(ControllerData {
+        ControllerReply::partial(
+            ControllerData {
                 stdout,
                 stderr,
                 stdout_truncated: false,
@@ -617,12 +628,9 @@ mod tests {
                 duration_ms: 42,
                 owned_group_cleanup: GroupCleanup::Incomplete,
                 output: None,
-            }),
-            error: Some(ControllerError::new(
-                "controller_timeout",
-                "Controller execution timed out",
-            )),
-        }
+            },
+            ControllerError::controller_timeout("Controller execution timed out"),
+        )
     }
 
     #[test]

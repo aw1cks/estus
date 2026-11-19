@@ -36,26 +36,26 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn error(code: &'static str, message: &'static str, unknown: bool) -> ToolError {
-    ToolError::new(code, message, unknown)
-}
-
 #[derive(Clone, Copy)]
 struct Failure {
-    code: &'static str,
+    make: fn(&'static str, bool) -> ToolError,
     message: &'static str,
     unknown: bool,
 }
 
 impl Failure {
     fn tool(self) -> ToolError {
-        error(self.code, self.message, self.unknown)
+        (self.make)(self.message, self.unknown)
     }
 }
 
-fn failed(code: &'static str, message: &'static str, unknown: bool) -> Failure {
+fn failed(
+    make: fn(&'static str, bool) -> ToolError,
+    message: &'static str,
+    unknown: bool,
+) -> Failure {
     Failure {
-        code,
+        make,
         message,
         unknown,
     }
@@ -85,7 +85,7 @@ impl Drop for ProbeCompletion {
         let mut result = lock(&self.0.result);
         if result.is_none() {
             *result = Some(Err(failed(
-                "discovery_failed",
+                ToolError::discovery_failed,
                 "Discovery owner was lost",
                 false,
             )));
@@ -146,14 +146,13 @@ impl Engine {
             "become": target.r#become,
             "python": target.target.python,
         }))
-        .map_err(|_| error("invalid_argument", "Invalid transport identity", false))?;
+        .map_err(|_| ToolError::invalid_argument("Invalid transport identity", false))?;
         let mut pools = lock(&self.pools);
         if let Some(pool) = pools.get(&key) {
             return Ok((key, Arc::clone(pool)));
         }
         if pools.len() >= 16 {
-            return Err(error(
-                "resource_limit",
+            return Err(ToolError::resource_limit(
                 "Native authority pool limit reached",
                 false,
             ));
@@ -185,8 +184,7 @@ impl Engine {
             probes.retain(|_, probe| probe.owners.load(Ordering::Acquire) > 0);
         }
         if probes.len() >= 128 {
-            return Err(error(
-                "resource_limit",
+            return Err(ToolError::resource_limit(
                 "Native discovery cache limit reached",
                 false,
             ));
@@ -216,7 +214,7 @@ impl Engine {
         } = request;
         let generation = lease.generation();
         let requirement_bytes = serde_json::to_vec(&requirements)
-            .map_err(|_| error("invalid_argument", "Invalid requirements", false))?;
+            .map_err(|_| ToolError::invalid_argument("Invalid requirements", false))?;
         let key = format!(
             "{}:{}:{}:{}",
             key,
@@ -268,14 +266,14 @@ impl Engine {
         }
         tokio::select! {
             biased;
-            _ = ct.cancelled() => Err(error("cancelled", "Request cancelled before payload dispatch", false)),
-            _ = self.shutdown.cancelled() => Err(error("cancelled", "Server shutting down", false)),
-            _ = sleep_until(deadline) => Err(error("timeout", "Payload request deadline expired before dispatch", false)),
+            _ = ct.cancelled() => Err(ToolError::cancelled("Request cancelled before payload dispatch", false)),
+            _ = self.shutdown.cancelled() => Err(ToolError::cancelled("Server shutting down", false)),
+            _ = sleep_until(deadline) => Err(ToolError::timeout("Payload request deadline expired before dispatch", false)),
             _ = probe.ready.cancelled() => {
                 match lock(&probe.result).as_ref() {
                     Some(Ok(value)) => Ok((value.clone(), key, generation)),
                     Some(Err(error)) => Err(error.tool()),
-                    None => Err(error("discovery_failed", "Discovery evidence unavailable", false)),
+                    None => Err(ToolError::discovery_failed("Discovery evidence unavailable", false)),
                 }
             }
         }
@@ -304,7 +302,7 @@ impl Engine {
                 crate::config::IdentityRole::Ordinary
             };
             let requirements = serde_json::to_value(&plan.manifest.requirements)
-                .map_err(|_| error("invalid_argument", "Invalid requirements", false))?;
+                .map_err(|_| ToolError::invalid_argument("Invalid requirements", false))?;
             let mut discovered = None;
             for python in candidates {
                 let probe_lease = pool
@@ -328,7 +326,7 @@ impl Engine {
                     }
                     Err(error)
                         if matches!(
-                            error.code,
+                            error.code(),
                             "discovery_failed" | "io_error" | "connection_lost"
                         ) =>
                     {
@@ -339,8 +337,7 @@ impl Engine {
             }
             let (python, identity, cache_key, discovery_generation) =
                 discovered.ok_or_else(|| {
-                    error(
-                        "discovery_failed",
+                    ToolError::discovery_failed(
                         "Approved target interpreters or requirements are unavailable",
                         false,
                     )
@@ -349,8 +346,7 @@ impl Engine {
                 .acquire(host, &target.target.destination, role, deadline, ct)
                 .await?;
             if lease.generation() != discovery_generation {
-                return Err(error(
-                    "discovery_failed",
+                return Err(ToolError::discovery_failed(
                     "SSH generation changed before dispatch",
                     false,
                 ));
@@ -360,8 +356,7 @@ impl Engine {
                 .saturating_duration_since(Instant::now())
                 .as_secs_f64();
             if remaining <= 0.0 {
-                return Err(error(
-                    "timeout",
+                return Err(ToolError::timeout(
                     "Payload deadline expired before dispatch",
                     false,
                 ));
@@ -389,7 +384,7 @@ impl Engine {
             if decoded
                 .as_ref()
                 .err()
-                .is_some_and(|error| error.code == "payload_rejected")
+                .is_some_and(|error| error.code() == "payload_rejected")
             {
                 // A requirements lookup can fail before identity comparison is possible.
                 lock(&self.probes).remove(&cache_key);
@@ -400,7 +395,7 @@ impl Engine {
 
         match operation {
             Err(error) => {
-                let status = match error.code {
+                let status = match error.code() {
                     "cancelled" => AutomationStatus::Cancelled,
                     "timeout" => AutomationStatus::Timeout,
                     "invalid_result" => AutomationStatus::InvalidResult,
@@ -419,10 +414,7 @@ impl Engine {
                     owned_group_cleanup: GroupCleanup::NotApplicable,
                     projection: None,
                 };
-                ToolReply {
-                    data: Some(data),
-                    error: Some(error),
-                }
+                ToolReply::partial(data, error)
             }
             Ok((rc, value, output_status)) => complete_reply(
                 host,
@@ -465,8 +457,7 @@ impl Engine {
         } else if target.dynamic_python {
             "python3"
         } else {
-            return Err(error(
-                "preview_required",
+            return Err(ToolError::preview_required(
                 "Independent pre-state probe interpreter is unavailable",
                 false,
             ));
@@ -475,7 +466,7 @@ impl Engine {
             "module": module,
             "arguments": arguments,
         }))
-        .map_err(|_| error("preview_required", "Invalid pre-state request", false))?;
+        .map_err(|_| ToolError::preview_required("Invalid pre-state request", false))?;
         let r#become = target.r#become;
         let shutdown = &self.shutdown;
         let operation = async {
@@ -492,29 +483,16 @@ impl Engine {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             let mut child = command.spawn().await.map_err(|_| {
-                error(
-                    "preview_required",
-                    "Independent pre-state probe could not spawn",
-                    false,
-                )
+                ToolError::preview_required("Independent pre-state probe could not spawn", false)
             })?;
             let mut stdin = child.stdin().take().ok_or_else(|| {
-                error(
-                    "preview_required",
-                    "Independent pre-state probe pipe unavailable",
-                    false,
-                )
+                ToolError::preview_required("Independent pre-state probe pipe unavailable", false)
             })?;
             let stdout = child.stdout().take().ok_or_else(|| {
-                error(
-                    "preview_required",
-                    "Independent pre-state probe output unavailable",
-                    false,
-                )
+                ToolError::preview_required("Independent pre-state probe output unavailable", false)
             })?;
             let stderr = child.stderr().take().ok_or_else(|| {
-                error(
-                    "preview_required",
+                ToolError::preview_required(
                     "Independent pre-state probe error pipe unavailable",
                     false,
                 )
@@ -528,30 +506,17 @@ impl Engine {
                 }
             );
             let (stdout, overflow) = out.map_err(|_| {
-                error(
-                    "preview_required",
-                    "Independent pre-state probe read failed",
-                    false,
-                )
+                ToolError::preview_required("Independent pre-state probe read failed", false)
             })?;
             let _ = err;
             write.map_err(|_| {
-                error(
-                    "preview_required",
-                    "Independent pre-state probe input failed",
-                    false,
-                )
+                ToolError::preview_required("Independent pre-state probe input failed", false)
             })?;
             let status = child.wait().await.map_err(|_| {
-                error(
-                    "preview_required",
-                    "Independent pre-state probe exit failed",
-                    false,
-                )
+                ToolError::preview_required("Independent pre-state probe exit failed", false)
             })?;
             if !status.success() || overflow || parse(&stdout).is_err() {
-                return Err(error(
-                    "preview_required",
+                return Err(ToolError::preview_required(
                     "Independent pre-state digest could not be obtained",
                     false,
                 ));
@@ -560,9 +525,9 @@ impl Engine {
         };
         tokio::select! {
             biased;
-            _ = ct.cancelled() => Err(error("cancelled", "Request cancelled before preview pre-state probe", false)),
-            _ = shutdown.cancelled() => Err(error("cancelled", "Server shutting down", false)),
-            _ = sleep_until(deadline) => Err(error("timeout", "Request deadline exceeded during preview pre-state probe", false)),
+            _ = ct.cancelled() => Err(ToolError::cancelled("Request cancelled before preview pre-state probe", false)),
+            _ = shutdown.cancelled() => Err(ToolError::cancelled("Server shutting down", false)),
+            _ = sleep_until(deadline) => Err(ToolError::timeout("Request deadline exceeded during preview pre-state probe", false)),
             result = operation => result,
         }
     }
@@ -575,8 +540,7 @@ fn interpreters<'a>(
 ) -> Result<Vec<&'a str>, ToolError> {
     if !configured.is_empty() {
         if !configured.starts_with('/') || configured.contains('\0') {
-            return Err(error(
-                "discovery_failed",
+            return Err(ToolError::discovery_failed(
                 "An approved absolute target interpreter is required",
                 false,
             ));
@@ -592,11 +556,7 @@ fn interpreters<'a>(
     let mut candidates: Vec<&str> = Vec::new();
     if let Some(fixed) = fixed {
         let fixed = fixed.as_str().ok_or_else(|| {
-            error(
-                "discovery_failed",
-                "Invalid approved collector interpreter",
-                false,
-            )
+            ToolError::discovery_failed("Invalid approved collector interpreter", false)
         })?;
         candidates.push(fixed);
     }
@@ -626,8 +586,7 @@ fn interpreters<'a>(
                 || (!path.starts_with('/') && !(dynamic_python && *path == "python3"))
         })
     {
-        return Err(error(
-            "discovery_failed",
+        return Err(ToolError::discovery_failed(
             "An approved absolute target interpreter is required",
             false,
         ));
@@ -638,19 +597,24 @@ fn interpreters<'a>(
 fn discovery_identity(out: Output, id: &str) -> Result<Value, Failure> {
     if out.rc != 0 || out.overflow {
         return Err(failed(
-            "discovery_failed",
+            ToolError::discovery_failed,
             "Target requirements are unavailable",
             false,
         ));
     }
-    let value = parse(&out.stdout)
-        .map_err(|_| failed("discovery_failed", "Invalid discovery evidence", false))?;
+    let value = parse(&out.stdout).map_err(|_| {
+        failed(
+            ToolError::discovery_failed,
+            "Invalid discovery evidence",
+            false,
+        )
+    })?;
     if value.get("schema").and_then(Value::as_u64) != Some(1)
         || value.get("id").and_then(Value::as_str) != Some(id)
         || value.get("phase").and_then(Value::as_str) != Some("discovered")
     {
         return Err(failed(
-            "discovery_failed",
+            ToolError::discovery_failed,
             "Invalid discovery evidence",
             false,
         ));
@@ -659,7 +623,13 @@ fn discovery_identity(out: Output, id: &str) -> Result<Value, Failure> {
         .get("identity")
         .filter(|value| value.is_object())
         .cloned()
-        .ok_or_else(|| failed("discovery_failed", "Missing discovery identity", false))
+        .ok_or_else(|| {
+            failed(
+                ToolError::discovery_failed,
+                "Missing discovery identity",
+                false,
+            )
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -680,13 +650,8 @@ fn complete_reply(
     output_status: OutputStatus,
     started: std::time::Instant,
 ) -> ToolReply<AutomationData> {
-    let mut error = (rc != 0).then(|| {
-        error(
-            "payload_failed",
-            "Payload operation completed with failure",
-            false,
-        )
-    });
+    let mut error = (rc != 0)
+        .then(|| ToolError::payload_failed("Payload operation completed with failure", false));
     // Censor before domain parsing/publication, including changed evidence.
     let domain = if !no_log && output_status == OutputStatus::Complete {
         value
@@ -704,15 +669,13 @@ fn complete_reply(
     if !no_log && error.is_none() {
         match output_status {
             OutputStatus::Overflow => {
-                error = Some(crate::reply::ToolError::new(
-                    "resource_limit",
+                error = Some(crate::reply::ToolError::resource_limit(
                     "Payload output exceeded retention limit",
                     false,
                 ));
             }
             OutputStatus::InvalidUtf8 => {
-                error = Some(crate::reply::ToolError::new(
-                    "invalid_projection",
+                error = Some(crate::reply::ToolError::invalid_projection(
                     "Payload output was not valid UTF-8",
                     false,
                 ));
@@ -738,8 +701,7 @@ fn complete_reply(
                     Some(value) => ModuleProjection::Complete { value },
                     None => {
                         if error.is_none() {
-                            error = Some(crate::reply::ToolError::new(
-                                "invalid_projection",
+                            error = Some(crate::reply::ToolError::invalid_projection(
                                 "Payload output violates approved projection",
                                 false,
                             ));
@@ -770,17 +732,13 @@ fn complete_reply(
         owned_group_cleanup: GroupCleanup::NotApplicable,
         projection,
     };
-    ToolReply {
-        data: Some(data),
-        error,
-    }
+    ToolReply::with_optional_error(data, error)
 }
 
 /// A bootstrap terminal record and its SSH exit status must agree independently.
 fn terminal(out: Output, id: &str) -> Result<(i32, Value, OutputStatus), ToolError> {
     let invalid = || {
-        error(
-            "invalid_result",
+        ToolError::invalid_result(
             "Payload terminal evidence is invalid; remote state is unknown",
             true,
         )
@@ -794,22 +752,19 @@ fn terminal(out: Output, id: &str) -> Result<(i32, Value, OutputStatus), ToolErr
     }
     match (value.get("phase").and_then(Value::as_str), out.rc) {
         (Some("rejected"), 70) => {
-            return Err(error(
-                "payload_rejected",
+            return Err(ToolError::payload_rejected(
                 "Payload rejected before execution; identity or requirements changed",
                 false,
             ));
         }
         (Some("timeout"), 124) => {
-            return Err(error(
-                "timeout",
+            return Err(ToolError::timeout(
                 "Payload deadline exceeded; remote descendants may continue",
                 true,
             ));
         }
         (Some("cancelled"), 125) => {
-            return Err(error(
-                "cancelled",
+            return Err(ToolError::cancelled(
                 "Payload cancelled; remote descendants may continue",
                 true,
             ));
@@ -874,10 +829,10 @@ struct Frame<'a> {
 
 fn frame<'a>(spec: &Value, source: &'a [u8]) -> Result<Frame<'a>, Failure> {
     let data = serde_json::to_vec(spec)
-        .map_err(|_| failed("invalid_argument", "Invalid payload frame", false))?;
+        .map_err(|_| failed(ToolError::invalid_argument, "Invalid payload frame", false))?;
     if data.len() > MAX_INPUT || source.len() > super::MAX_SOURCE {
         return Err(failed(
-            "resource_limit",
+            ToolError::resource_limit,
             "Payload frame exceeds bounds",
             false,
         ));
@@ -986,7 +941,7 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             .stderr(Stdio::piped());
         let mut child = command.spawn().await.map_err(|_| {
             failed(
-                "connection_lost",
+                ToolError::connection_lost,
                 "Payload channel failed; remote state is unknown",
                 true,
             )
@@ -994,15 +949,15 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
         let mut stdin = child
             .stdin()
             .take()
-            .ok_or_else(|| failed("io_error", "Missing payload input pipe", true))?;
+            .ok_or_else(|| failed(ToolError::io_error, "Missing payload input pipe", true))?;
         let stdout = child
             .stdout()
             .take()
-            .ok_or_else(|| failed("io_error", "Missing payload output pipe", true))?;
+            .ok_or_else(|| failed(ToolError::io_error, "Missing payload output pipe", true))?;
         let stderr = child
             .stderr()
             .take()
-            .ok_or_else(|| failed("io_error", "Missing payload error pipe", true))?;
+            .ok_or_else(|| failed(ToolError::io_error, "Missing payload error pipe", true))?;
         let (out, err, write) =
             tokio::join!(bounded(stdout, limit), bounded(stderr, 0), async move {
                 stdin.write_all(&input.header).await?;
@@ -1011,35 +966,35 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             },);
         let (stdout, overflow) = out.map_err(|_| {
             failed(
-                "io_error",
+                ToolError::io_error,
                 "Payload output failed; remote state is unknown",
                 true,
             )
         })?;
         err.map_err(|_| {
             failed(
-                "io_error",
+                ToolError::io_error,
                 "Payload error stream failed; remote state is unknown",
                 true,
             )
         })?;
         write.map_err(|_| {
             failed(
-                "io_error",
+                ToolError::io_error,
                 "Payload input failed; remote state is unknown",
                 true,
             )
         })?;
         let status = child.wait().await.map_err(|_| {
             failed(
-                "connection_lost",
+                ToolError::connection_lost,
                 "Payload channel lost; remote state is unknown",
                 true,
             )
         })?;
         let rc = status.code().ok_or_else(|| {
             failed(
-                "connection_lost",
+                ToolError::connection_lost,
                 "Payload exit unavailable; remote state is unknown",
                 true,
             )
@@ -1052,9 +1007,9 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
     };
     tokio::select! {
         biased;
-        _ = ct.cancelled() => Err(failed("cancelled", "Payload cancelled; remote execution may continue", true)),
-        _ = shutdown.cancelled() => Err(failed("cancelled", "Server stopped; remote execution may continue", true)),
-        _ = sleep_until(deadline) => Err(failed("timeout", "Payload deadline exceeded; remote execution may continue", true)),
+        _ = ct.cancelled() => Err(failed(ToolError::cancelled, "Payload cancelled; remote execution may continue", true)),
+        _ = shutdown.cancelled() => Err(failed(ToolError::cancelled, "Server stopped; remote execution may continue", true)),
+        _ = sleep_until(deadline) => Err(failed(ToolError::timeout, "Payload deadline exceeded; remote execution may continue", true)),
         result = operation => result,
     }
 }
@@ -1125,7 +1080,11 @@ mod tests {
             .unwrap();
         assert!(launch);
         assert!(!Arc::ptr_eq(&first, &different));
-        *lock(&different.result) = Some(Err(failed("discovery_failed", "Unavailable", false)));
+        *lock(&different.result) = Some(Err(failed(
+            ToolError::discovery_failed,
+            "Unavailable",
+            false,
+        )));
         different.ready.cancel();
         drop(Interest(different.clone()));
         let (retry, launch) = engine
@@ -1218,7 +1177,7 @@ mod tests {
                 "owned",
             )
             .unwrap_err();
-            assert_eq!(error.code, code);
+            assert_eq!(error.code(), code);
             assert!(error.remote_state_unknown);
             let error = terminal(
                 Output {
@@ -1229,7 +1188,7 @@ mod tests {
                 "owned",
             )
             .unwrap_err();
-            assert_eq!(error.code, "invalid_result");
+            assert_eq!(error.code(), "invalid_result");
         }
     }
     #[test]
@@ -1295,16 +1254,16 @@ mod tests {
                     parsed_status,
                     std::time::Instant::now(),
                 );
-                let data = reply.data.unwrap();
+                let data = reply.data().unwrap();
                 assert!(data.complete);
                 assert_eq!(data.runner_rc, Some(rc));
                 assert_eq!(data.changed, None);
                 let proj_json = serde_json::to_value(&data.projection).unwrap();
                 assert_eq!(proj_json["status"], expected_proj);
-                let err = reply.error.unwrap();
+                let err = reply.error().unwrap();
                 assert!(!err.remote_state_unknown);
                 assert_eq!(
-                    err.code,
+                    err.code(),
                     if rc == 0 {
                         expected_code
                     } else {
@@ -1323,8 +1282,8 @@ mod tests {
             OutputStatus::Overflow,
             std::time::Instant::now(),
         );
-        assert!(censored.error.is_none());
-        let censored_data = censored.data.unwrap();
+        assert!(censored.error().is_none());
+        let censored_data = censored.data().unwrap();
         assert!(censored_data.complete);
         assert_eq!(censored_data.runner_rc, Some(0));
         assert_eq!(censored_data.changed, None);
@@ -1352,7 +1311,7 @@ mod tests {
                 "owned",
             )
             .unwrap_err();
-            assert_eq!(err.code, "invalid_result");
+            assert_eq!(err.code(), "invalid_result");
         }
     }
 

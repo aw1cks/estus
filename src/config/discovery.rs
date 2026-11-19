@@ -494,7 +494,7 @@ programs=['/private/program']
                     .resolve_sudo(name, "private_user", "/private/program")
                     .err()
                     .unwrap()
-                    .code,
+                    .code(),
                 "policy_denied"
             );
         }

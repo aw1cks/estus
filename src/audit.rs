@@ -322,7 +322,7 @@ impl<'a> Metadata<'a> {
             event,
             duration_ms,
             exit_code,
-            error.map(|error| error.code),
+            error.map(ToolError::code),
             duration_ms.map(|_| error.is_some_and(|error| error.remote_state_unknown)),
             None,
         ));
@@ -384,7 +384,7 @@ impl<'a> Metadata<'a> {
             "reject",
             Some(millis(started.elapsed())),
             None,
-            Some(error.code),
+            Some(error.code()),
             None,
             None,
         ));
@@ -425,10 +425,10 @@ impl<'a> Audit<'a> {
         emit(&self.metadata.record(
             "finish",
             Some(millis(self.started.elapsed())),
-            reply.data.as_ref().and_then(|data| data.exit_code),
-            reply.error.as_ref().map(|error| error.code),
+            reply.data().and_then(|data| data.exit_code),
+            reply.error().map(ControllerError::code),
             None,
-            reply.data.as_ref().map(|data| data.owned_group_cleanup),
+            reply.data().map(|data| data.owned_group_cleanup),
         ));
         self.finished = true;
     }
@@ -440,18 +440,17 @@ impl<'a> Audit<'a> {
         let mut record = self.metadata.record(
             "finish",
             Some(millis(self.started.elapsed())),
-            reply.data.as_ref().and_then(|data| data.runner_rc),
-            reply.error.as_ref().map(|error| error.code),
+            reply.data().and_then(|data| data.runner_rc),
+            reply.error().map(ToolError::code),
             Some(
                 reply
-                    .error
-                    .as_ref()
+                    .error()
                     .is_some_and(|error| error.remote_state_unknown),
             ),
-            reply.data.as_ref().map(|data| data.owned_group_cleanup),
+            reply.data().map(|data| data.owned_group_cleanup),
         );
-        record.status = reply.data.as_ref().map(|data| data.status);
-        record.complete = reply.data.as_ref().map(|data| data.complete);
+        record.status = reply.data().map(|data| data.status);
+        record.complete = reply.data().map(|data| data.complete);
         emit(&record);
         self.finished = true;
     }
@@ -464,11 +463,7 @@ impl Drop for Audit<'_> {
                 "finish",
                 Some(millis(self.started.elapsed())),
                 None,
-                Some(&ToolError::new(
-                    "cancelled",
-                    "Request cleanup interrupted",
-                    true,
-                )),
+                Some(&ToolError::cancelled("Request cleanup interrupted", true)),
             );
         }
     }

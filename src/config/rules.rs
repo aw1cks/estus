@@ -391,7 +391,7 @@ pub(crate) fn check_host_tool(
     tool: &str,
     tier: RiskTier,
 ) -> Result<(), ToolError> {
-    let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+    let denied = || ToolError::policy_denied("Operation is not authorized", false);
     for rule in rules {
         if !wildcard_match(&rule.pattern, host) {
             continue;
@@ -416,7 +416,7 @@ pub(crate) fn check_host_params(
     params: &serde_json::Map<String, JsonValue>,
 ) -> Result<(), ToolError> {
     check_host_tool(rules, host, tool, tier)?;
-    let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+    let denied = || ToolError::policy_denied("Operation is not authorized", false);
     let nested_inputs = params.get("inputs").and_then(JsonValue::as_object);
     for rule in rules {
         if !wildcard_match(&rule.pattern, host) {

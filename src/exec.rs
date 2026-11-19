@@ -203,17 +203,9 @@ pub(crate) async fn run(
     let (exit_code, termination, error, unknown) = match outcome {
         Outcome::Completed(completion) => {
             let error = if completion.io_failed {
-                Some(ToolError::new(
-                    "io_error",
-                    "Command stream I/O failed",
-                    false,
-                ))
+                Some(ToolError::io_error("Command stream I/O failed", false))
             } else if completion.exit_code != 0 {
-                Some(ToolError::new(
-                    "command_failed",
-                    "Remote command failed",
-                    false,
-                ))
+                Some(ToolError::command_failed("Remote command failed", false))
             } else {
                 None
             };
@@ -227,8 +219,7 @@ pub(crate) async fn run(
         Outcome::Timeout => (
             None,
             Termination::Timeout,
-            Some(ToolError::new(
-                "timeout",
+            Some(ToolError::timeout(
                 "Command deadline exceeded; remote execution may continue",
                 true,
             )),
@@ -237,8 +228,7 @@ pub(crate) async fn run(
         Outcome::Cancelled => (
             None,
             Termination::Cancelled,
-            Some(ToolError::new(
-                "cancelled",
+            Some(ToolError::cancelled(
                 "Command cancelled; remote execution may continue",
                 true,
             )),
@@ -247,14 +237,12 @@ pub(crate) async fn run(
         Outcome::Backend(error) => {
             let lost = connection_lost(&error);
             let error = if lost {
-                ToolError::new(
-                    "connection_lost",
+                ToolError::connection_lost(
                     "SSH command channel was lost; remote execution state is unknown",
                     true,
                 )
             } else {
-                ToolError::new(
-                    "io_error",
+                ToolError::io_error(
                     "SSH command channel failed; remote execution state is unknown",
                     true,
                 )
@@ -301,10 +289,7 @@ pub(crate) async fn run(
         remote_may_still_be_running: unknown,
         output,
     };
-    ToolReply {
-        data: Some(data),
-        error,
-    }
+    ToolReply::with_optional_error(data, error)
 }
 
 fn connection_lost(error: &openssh::Error) -> bool {

@@ -156,7 +156,7 @@ fn write_case(request: Value, limit: u64, repeat: usize) -> Option<()> {
         Err(error) => {
             known(&error);
             assert!(matches!(
-                error.code,
+                error.code(),
                 "invalid_argument" | "invalid_encoding"
             ));
             let failed = wire_reply(budget, id, ToolReply::<WriteData>::failure(error));
@@ -175,13 +175,13 @@ fn write_case(request: Value, limit: u64, repeat: usize) -> Option<()> {
                 let error = request
                     .validate(bytes.len() as u64 - 1, budget)
                     .unwrap_err();
-                assert_eq!(error.code, "invalid_argument");
+                assert_eq!(error.code(), "invalid_argument");
                 known(&error);
             }
         }
         None => {
             let error = request.validate(u64::MAX, budget).unwrap_err();
-            assert_eq!(error.code, "invalid_encoding");
+            assert_eq!(error.code(), "invalid_encoding");
             known(&error);
         }
     }
@@ -229,7 +229,7 @@ fn read_case(
         Ok(spec) => spec,
         Err(error) => {
             known(&error);
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             return Some(());
         }
     };
@@ -283,7 +283,7 @@ fn read_case(
                 assert!(invalid_utf8);
                 "invalid_encoding"
             };
-            assert_eq!(error.code, expected_code);
+            assert_eq!(error.code(), expected_code);
             let reply = wire_reply(budget, id, ToolReply::<ReadData>::failure(error));
             assert!(reply["data"].is_null());
             assert!(reply["error"].get("content").is_none());

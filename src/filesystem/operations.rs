@@ -73,15 +73,14 @@ struct Failure {
 impl Failure {
     fn io() -> Self {
         Self {
-            error: ToolError::new("io_error", "SFTP file operation failed", false),
+            error: ToolError::io_error("SFTP file operation failed", false),
             check_master: false,
         }
     }
 
     fn cleanup() -> Self {
         Self {
-            error: ToolError::new(
-                "io_error",
+            error: ToolError::io_error(
                 "SFTP channel cleanup did not complete within its deadline",
                 true,
             ),
@@ -91,42 +90,53 @@ impl Failure {
 }
 
 fn io_failure(error: &io::Error) -> Failure {
-    let (code, message, check_master) = match error.kind() {
-        io::ErrorKind::NotFound => ("not_found", "Remote file was not found", false),
-        io::ErrorKind::AlreadyExists => {
-            ("already_exists", "Remote destination already exists", false)
-        }
-        io::ErrorKind::PermissionDenied => {
-            ("permission_denied", "Remote file access was denied", false)
-        }
-        io::ErrorKind::Unsupported => ("unsupported", "SFTP operation is not supported", false),
+    let (error, check_master) = match error.kind() {
+        io::ErrorKind::NotFound => (
+            ToolError::not_found("Remote file was not found", false),
+            false,
+        ),
+        io::ErrorKind::AlreadyExists => (
+            ToolError::already_exists("Remote destination already exists", false),
+            false,
+        ),
+        io::ErrorKind::PermissionDenied => (
+            ToolError::permission_denied("Remote file access was denied", false),
+            false,
+        ),
+        io::ErrorKind::Unsupported => (
+            ToolError::unsupported("SFTP operation is not supported", false),
+            false,
+        ),
         io::ErrorKind::BrokenPipe
         | io::ErrorKind::UnexpectedEof
         | io::ErrorKind::ConnectionReset
         | io::ErrorKind::ConnectionAborted
         | io::ErrorKind::ConnectionRefused
-        | io::ErrorKind::NotConnected => {
-            ("connection_lost", "SFTP channel connection was lost", true)
-        }
+        | io::ErrorKind::NotConnected => (
+            ToolError::connection_lost("SFTP channel connection was lost", false),
+            true,
+        ),
         _ => return Failure::io(),
     };
     Failure {
-        error: ToolError::new(code, message, false),
+        error,
         check_master,
     }
 }
 
 fn sftp_failure(error: SftpError) -> Failure {
-    let (code, message) = match error {
+    let error = match error {
         SftpError::SftpError(SftpErrorKind::NoSuchFile, _) => {
-            ("not_found", "Remote file was not found")
+            ToolError::not_found("Remote file was not found", false)
         }
         SftpError::SftpError(SftpErrorKind::PermDenied, _) => {
-            ("permission_denied", "Remote file access was denied")
+            ToolError::permission_denied("Remote file access was denied", false)
         }
         SftpError::SftpError(SftpErrorKind::OpUnsupported, _)
         | SftpError::UnsupportedSftpProtocol { .. }
-        | SftpError::UnsupportedExtension(_) => ("unsupported", "SFTP operation is not supported"),
+        | SftpError::UnsupportedExtension(_) => {
+            ToolError::unsupported("SFTP operation is not supported", false)
+        }
         SftpError::IOError(error) => return io_failure(&error),
         SftpError::RecursiveErrors(errors) => {
             let mut original = sftp_failure(errors.original_error);
@@ -141,22 +151,20 @@ fn sftp_failure(error: SftpError) -> Failure {
         }
         SftpError::AwaitableError(_) | SftpError::BackgroundTaskFailure(_) => {
             return Failure {
-                error: ToolError::new("connection_lost", "SFTP channel connection was lost", false),
+                error: ToolError::connection_lost("SFTP channel connection was lost", false),
                 check_master: true,
             };
         }
         _ => return Failure::io(),
     };
     Failure {
-        error: ToolError::new(code, message, false),
+        error,
         check_master: false,
     }
 }
 
 fn ssh_failure(error: openssh::Error) -> Failure {
     match error {
-        // openssh maps a subsystem process's exit 127 to Remote(NotFound).
-        // That is not an SFTP file-status response and must not blame the path.
         openssh::Error::Remote(error) if error.kind() == io::ErrorKind::NotFound => Failure::io(),
         openssh::Error::Remote(error) | openssh::Error::ChildIo(error) => io_failure(&error),
         openssh::Error::Master(_)
@@ -164,8 +172,7 @@ fn ssh_failure(error: openssh::Error) -> Failure {
         | openssh::Error::SshMux(_)
         | openssh::Error::Disconnected
         | openssh::Error::RemoteProcessTerminated => Failure {
-            error: ToolError::new(
-                "connection_lost",
+            error: ToolError::connection_lost(
                 "SFTP channel could not be opened or was lost",
                 false,
             ),
@@ -346,8 +353,7 @@ async fn write_sftp(
             match metadata {
                 Ok(_) => {
                     return Err(Failure {
-                        error: ToolError::new(
-                            "already_exists",
+                        error: ToolError::already_exists(
                             "Remote destination already exists",
                             false,
                         ),
@@ -433,8 +439,7 @@ async fn replace_sftp(
         // OPEN, chmod, WRITE or any other filesystem mutation.
         if !sftp.support_posix_rename() {
             return Err(Failure {
-                error: ToolError::new(
-                    "unsupported",
+                error: ToolError::unsupported(
                     "Atomic overwrite rename requires the SFTP POSIX-rename extension",
                     false,
                 ),
@@ -513,11 +518,7 @@ async fn mkdir_sftp(
         match fs.symlink_metadata(spec.path).await {
             Ok(_) => {
                 return Err(Failure {
-                    error: ToolError::new(
-                        "already_exists",
-                        "Remote destination already exists",
-                        false,
-                    ),
+                    error: ToolError::already_exists("Remote destination already exists", false),
                     check_master: false,
                 });
             }
@@ -547,8 +548,7 @@ async fn rename_sftp(
         // equivalent: OpenSSH can fall back to a racy stat-then-rename.
         if !spec.overwrite {
             return Err(Failure {
-                error: ToolError::new(
-                    "unsupported",
+                error: ToolError::unsupported(
                     "Atomic no-overwrite rename is unavailable on this SFTP backend",
                     false,
                 ),
@@ -559,8 +559,7 @@ async fn rename_sftp(
         // extension; reject before mutation rather than weaken atomicity.
         if !sftp.support_posix_rename() {
             return Err(Failure {
-                error: ToolError::new(
-                    "unsupported",
+                error: ToolError::unsupported(
                     "Atomic overwrite rename requires the SFTP POSIX-rename extension",
                     false,
                 ),
@@ -674,16 +673,7 @@ pub(crate) async fn read(
 ) -> FileOutcome<ReadData> {
     let outcome = run_sftp(session, context, |sftp| read_sftp(sftp, &spec)).await;
     FileOutcome {
-        reply: match outcome.reply.data {
-            Some(raw) => match encode(raw, &spec) {
-                Ok(data) => ToolReply::success(data),
-                Err(error) => ToolReply::failure(error),
-            },
-            None => ToolReply {
-                data: None,
-                error: outcome.reply.error,
-            },
-        },
+        reply: outcome.reply.map_ok(|raw| encode(raw, &spec)),
         check_master: outcome.check_master,
     }
 }
@@ -698,7 +688,7 @@ pub(crate) async fn write(
         write_sftp(sftp, &spec, &mut mutation_started)
     })
     .await;
-    if let Some(error) = &mut outcome.reply.error {
+    if let Some(error) = outcome.reply.error_mut() {
         // Unlike reads, write uncertainty is specifically about file effects.
         // Handshake/preflight failures cannot have dispatched a mutating OPEN.
         error.remote_state_unknown = mutation_started;
@@ -716,7 +706,7 @@ pub(crate) async fn replace_file(
         replace_sftp(sftp, &spec, &mut phase)
     })
     .await;
-    if let Some(error) = &mut outcome.reply.error {
+    if let Some(error) = outcome.reply.error_mut() {
         // All failures after polling mutating OPEN remain uncertain, including
         // acknowledged pre-rename cleanup or a later local channel-close error.
         error.remote_state_unknown = !matches!(phase, ReplacePhase::NotStarted);
@@ -734,7 +724,7 @@ pub(crate) async fn mkdir(
         mkdir_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
-    if let Some(error) = &mut outcome.reply.error {
+    if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
     outcome
@@ -750,7 +740,7 @@ pub(crate) async fn rename(
         rename_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
-    if let Some(error) = &mut outcome.reply.error {
+    if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
     outcome
@@ -766,7 +756,7 @@ pub(crate) async fn remove_file(
         remove_file_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
-    if let Some(error) = &mut outcome.reply.error {
+    if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
     outcome
@@ -782,7 +772,7 @@ pub(crate) async fn remove_directory(
         remove_directory_sftp(sftp, spec, &mut mutation_started)
     })
     .await;
-    if let Some(error) = &mut outcome.reply.error {
+    if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
     outcome
@@ -848,14 +838,14 @@ fn directory_lock(shared: &DirectoryShared) -> MutexGuard<'_, DirectoryRegistry>
 }
 
 fn directory_missing() -> ToolError {
-    ToolError::new("not_found", "Directory continuation was not found", false)
+    ToolError::not_found("Directory continuation was not found", false)
 }
 
 fn directory_control(code: &'static str) -> Failure {
     Failure {
         error: match code {
-            "timeout" => ToolError::new("timeout", "SFTP file operation deadline exceeded", false),
-            _ => ToolError::new("cancelled", "SFTP file operation cancelled", false),
+            "timeout" => ToolError::timeout("SFTP file operation deadline exceeded", false),
+            _ => ToolError::cancelled("SFTP file operation cancelled", false),
         },
         check_master: false,
     }
@@ -926,8 +916,7 @@ impl DirectoryStore {
                     || owner.role != target.role
                     || owner.path != spec.path
                 {
-                    return ToolReply::failure(ToolError::new(
-                        "invalid_argument",
+                    return ToolReply::failure(ToolError::invalid_argument(
                         "Directory continuation identity does not match",
                         false,
                     ));
@@ -1013,8 +1002,7 @@ impl DirectoryStore {
             });
         }
         response.await.unwrap_or_else(|_| {
-            ToolReply::failure(ToolError::new(
-                "io_error",
+            ToolReply::failure(ToolError::io_error(
                 "Directory owner cleanup was interrupted",
                 true,
             ))
@@ -1159,8 +1147,7 @@ impl DirectoryChannel {
                         .is_none_or(|cost| cost > super::data::DIRECTORY_PAGE_BYTES)
                 {
                     return Err(Failure {
-                        error: ToolError::new(
-                            "resource_limit",
+                        error: ToolError::resource_limit(
                             "Directory entry exceeds the page payload limit",
                             false,
                         ),
@@ -1257,7 +1244,7 @@ fn publish_directory(shared: &DirectoryShared, id: &str) -> Result<String, Failu
             .count();
         if total >= shared.limits.max_cursors || target >= DIRECTORY_CURSORS_PER_TARGET {
             return Err(Failure {
-                error: ToolError::new("resource_limit", "Directory cursor limit reached", false),
+                error: ToolError::resource_limit("Directory cursor limit reached", false),
                 check_master: false,
             });
         }
@@ -1319,7 +1306,7 @@ async fn directory_owner(
         };
         let result = if channel.closed.is_cancelled() && result.is_ok() {
             Err(Failure {
-                error: ToolError::new("connection_lost", "SFTP channel connection was lost", false),
+                error: ToolError::connection_lost("SFTP channel connection was lost", false),
                 check_master: true,
             })
         } else {
@@ -1373,8 +1360,7 @@ async fn directory_owner(
             None => {
                 terminal = if channel.closed.is_cancelled() {
                     Err(Failure {
-                        error: ToolError::new(
-                            "connection_lost",
+                        error: ToolError::connection_lost(
                             "SFTP channel connection was lost",
                             false,
                         ),
@@ -1401,7 +1387,7 @@ async fn directory_owner(
         Err(mut failure) => {
             if channel.dispatched
                 && matches!(
-                    failure.error.code,
+                    failure.error.code(),
                     "timeout" | "cancelled" | "connection_lost"
                 )
             {
@@ -1420,11 +1406,11 @@ async fn directory_owner(
     directory_lock(&shared).owners.remove(&id);
     done.cancel();
     if final_reply.is_none()
-        && let Some(error) = reply.as_ref().and_then(|reply| reply.error.as_ref())
+        && let Some(error) = reply.as_ref().and_then(|reply| reply.error())
     {
         crate::audit::emit(&serde_json::json!({
             "event":"directory_cursor_error",
-            "error_code":error.code,
+            "error_code":error.code(),
             "remote_state_unknown":error.remote_state_unknown,
         }));
     }
@@ -1534,15 +1520,15 @@ where
         tokio::select! {
             biased;
             () = context.ct.cancelled() => Err(Failure {
-                error: ToolError::new("cancelled", "SFTP file operation cancelled", false),
+                error: ToolError::cancelled("SFTP file operation cancelled", false),
                 check_master: false,
             }),
             () = context.shutdown.cancelled() => Err(Failure {
-                error: ToolError::new("cancelled", "SFTP file operation cancelled", false),
+                error: ToolError::cancelled("SFTP file operation cancelled", false),
                 check_master: false,
             }),
             () = tokio::time::sleep_until(context.deadline) => Err(Failure {
-                error: ToolError::new("timeout", "SFTP file operation deadline exceeded", false),
+                error: ToolError::timeout("SFTP file operation deadline exceeded", false),
                 check_master: false,
             }),
             result = operation => result,
@@ -1567,7 +1553,7 @@ where
             if cleanup_timed_out
                 || (dispatched
                     && matches!(
-                        failure.error.code,
+                        failure.error.code(),
                         "timeout" | "cancelled" | "connection_lost"
                     ))
             {
@@ -1588,7 +1574,7 @@ mod tests {
     #[test]
     fn missing_subsystem_executable_is_not_a_missing_remote_file() {
         let failure = ssh_failure(openssh::Error::Remote(io::ErrorKind::NotFound.into()));
-        assert_eq!(failure.error.code, "io_error");
+        assert_eq!(failure.error.code(), "io_error");
         assert!(!failure.check_master);
     }
 }

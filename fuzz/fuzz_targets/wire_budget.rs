@@ -127,34 +127,37 @@ impl Fixture {
     }
 
     fn reply(&self, stdout: String, stderr: String) -> ToolReply<CommandData> {
-        ToolReply {
-            data: (!self.no_data).then_some(CommandData {
-                stdout,
-                stderr,
-                stdout_truncated: self.stdout_truncated,
-                stderr_truncated: self.stderr_truncated,
-                stdout_lossy: self.stdout_lossy,
-                stderr_lossy: self.stderr_lossy,
-                exit_code: self.exit_code,
-                termination: match self.termination % 4 {
-                    0 => Termination::Exited,
-                    1 => Termination::Timeout,
-                    2 => Termination::Cancelled,
-                    _ => Termination::ConnectionLost,
-                },
-                duration_ms: self.duration_ms,
-                remote_may_still_be_running: self.remote_may_still_be_running,
-                output: None,
-            }),
-            error: match self.error % 3 {
-                0 => None,
-                1 => Some(ToolError::SSH_CONNECT_FAILED),
-                _ => Some(ToolError::new(
-                    "connection_lost",
-                    "SSH command channel was lost; remote execution state is unknown",
-                    self.remote_state_unknown,
-                )),
+        let data = (!self.no_data).then_some(CommandData {
+            stdout,
+            stderr,
+            stdout_truncated: self.stdout_truncated,
+            stderr_truncated: self.stderr_truncated,
+            stdout_lossy: self.stdout_lossy,
+            stderr_lossy: self.stderr_lossy,
+            exit_code: self.exit_code,
+            termination: match self.termination % 4 {
+                0 => Termination::Exited,
+                1 => Termination::Timeout,
+                2 => Termination::Cancelled,
+                _ => Termination::ConnectionLost,
             },
+            duration_ms: self.duration_ms,
+            remote_may_still_be_running: self.remote_may_still_be_running,
+            output: None,
+        });
+        let error = match self.error % 3 {
+            0 if data.is_some() => None,
+            1 => Some(ToolError::SSH_CONNECT_FAILED),
+            _ => Some(ToolError::connection_lost(
+                "SSH command channel was lost; remote execution state is unknown",
+                self.remote_state_unknown,
+            )),
+        };
+        match (data, error) {
+            (Some(data), Some(error)) => ToolReply::partial(data, error),
+            (Some(data), None) => ToolReply::success(data),
+            (None, Some(error)) => ToolReply::failure(error),
+            (None, None) => unreachable!("error is always Some when data is None"),
         }
     }
 }

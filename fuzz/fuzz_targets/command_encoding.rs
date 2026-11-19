@@ -132,7 +132,7 @@ fn check_accounting(invocation: Invocation<'_>, expected: usize) {
         }
         Err(error) => {
             assert!(expected > MAX_COMMAND_BYTES);
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             assert!(!error.remote_state_unknown);
         }
     }
@@ -143,7 +143,7 @@ fn check_validation(result: Result<(), reply::ToolError>, valid: bool, encoded_b
     match result {
         Ok(()) => assert!(encoded_bytes <= MAX_COMMAND_BYTES),
         Err(error) => {
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             assert!(!error.remote_state_unknown);
         }
     }

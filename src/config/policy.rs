@@ -107,8 +107,7 @@ impl Sudo {
         program: &str,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         if !self.permits(user, program) {
-            return Err(ToolError::new(
-                "policy_denied",
+            return Err(ToolError::policy_denied(
                 "Elevated target, user, or program is not authorized",
                 false,
             ));
@@ -349,8 +348,7 @@ impl Config {
         params: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), ToolError> {
         let Some(binding) = self.bindings.get(id) else {
-            return Err(ToolError::new(
-                "policy_denied",
+            return Err(ToolError::policy_denied(
                 "Operation is not authorized",
                 false,
             ));
@@ -369,7 +367,7 @@ impl Config {
         id: BindingId,
         host: &str,
     ) -> Result<ResolvedAutomation<'_>, ToolError> {
-        let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        let denied = || ToolError::policy_denied("Operation is not authorized", false);
         let binding = self.bindings.get(id).ok_or_else(denied)?;
         if !self.binding_enabled(id) || binding.automation_authority().is_none() {
             return Err(denied());
@@ -385,11 +383,7 @@ impl Config {
                 return Err(denied());
             }
             destination(host, "host").map_err(|_| {
-                ToolError::new(
-                    "invalid_argument",
-                    "Host must be a safe nonempty SSH destination",
-                    false,
-                )
+                ToolError::invalid_argument("Host must be a safe nonempty SSH destination", false)
             })?;
             if let Some(target) = self.targets.as_ref().and_then(|targets| targets.get(host))
                 && !target.permits_binding(&binding.name)
@@ -546,7 +540,7 @@ impl Config {
         host: &'a str,
         id: BindingId,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
-        let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        let denied = || ToolError::policy_denied("Operation is not authorized", false);
         let binding = self.bindings.get(id).ok_or_else(denied)?;
         if binding.is_controller()
             || !self.binding_enabled(id)
@@ -577,8 +571,7 @@ impl Config {
             RiskTier::Change | RiskTier::Exec
         ) && self.requires_preview(host)
         {
-            return Err(ToolError::new(
-                "preview_required",
+            return Err(ToolError::preview_required(
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -610,7 +603,7 @@ impl Config {
         host: &'a str,
         tool: ToolId,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
-        let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
+        let denied = || ToolError::policy_denied("Operation is not authorized", false);
         match tool {
             ToolId::Targets | ToolId::ReadOutput | ToolId::ClearTargetQuarantine | ToolId::Sudo => {
                 return Err(denied());
@@ -650,8 +643,7 @@ impl Config {
             RiskTier::Change | RiskTier::Exec
         ) && self.requires_preview(host)
         {
-            return Err(ToolError::new(
-                "preview_required",
+            return Err(ToolError::preview_required(
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -670,11 +662,7 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(|| {
-                ToolError::new(
-                    "policy_denied",
-                    "Host is not a configured logical target",
-                    false,
-                )
+                ToolError::policy_denied("Host is not a configured logical target", false)
             })?;
         Ok(ResolvedTarget {
             name: host,
@@ -689,16 +677,11 @@ impl Config {
                 .get(host)
                 .map(|target| target.ssh_host.as_str())
                 .ok_or_else(|| {
-                    ToolError::new(
-                        "policy_denied",
-                        "Host is not a configured logical target",
-                        false,
-                    )
+                    ToolError::policy_denied("Host is not a configured logical target", false)
                 })?,
             None => {
                 destination(host, "host").map_err(|_| {
-                    ToolError::new(
-                        "invalid_argument",
+                    ToolError::invalid_argument(
                         "Host must be a safe nonempty SSH destination",
                         false,
                     )
@@ -720,11 +703,7 @@ impl Config {
         program: &str,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         let denied = || {
-            ToolError::new(
-                "policy_denied",
-                "Elevated target, user, or program is not authorized",
-                false,
-            )
+            ToolError::policy_denied("Elevated target, user, or program is not authorized", false)
         };
         if !self.capabilities.permits(ToolId::Sudo) {
             return Err(denied());
@@ -745,8 +724,7 @@ impl Config {
         )?;
         let resolved = target.sudo.resolve(host, &target.ssh_host, user, program)?;
         if self.requires_preview(host) {
-            return Err(ToolError::new(
-                "preview_required",
+            return Err(ToolError::preview_required(
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -757,8 +735,7 @@ impl Config {
     pub(crate) fn timeout(&self, seconds: Option<u64>) -> Result<std::time::Duration, ToolError> {
         let seconds = seconds.unwrap_or(self.limits.operation_timeout_secs);
         if seconds == 0 || seconds > self.limits.max_timeout_secs {
-            return Err(ToolError::new(
-                "invalid_argument",
+            return Err(ToolError::invalid_argument(
                 "timeout_secs must be positive and not exceed the configured maximum",
                 false,
             ));
@@ -917,7 +894,7 @@ mod tests {
                 "untrusted-secret-host",
             ] {
                 let error = config.automation_target(BindingId(0), host).err().unwrap();
-                assert_eq!(error.code, "policy_denied");
+                assert_eq!(error.code(), "policy_denied");
             }
             let tools = ToolCatalog::new(Vec::new()).unwrap();
             let discovery = serde_json::to_string(&config.targets(&tools)).unwrap();
@@ -978,7 +955,7 @@ mod tests {
                 "user@host",
             ] {
                 let error = config.doctor_target(host).err().unwrap();
-                assert_eq!(error.code, "policy_denied");
+                assert_eq!(error.code(), "policy_denied");
                 assert!(!error.remote_state_unknown);
                 let encoded = serde_json::to_string(&error).unwrap();
                 for secret in [
@@ -1114,7 +1091,7 @@ mod tests {
                         assert_eq!(resolved.role, IdentityRole::Ordinary);
                     } else {
                         let error = result.err().unwrap();
-                        assert_eq!(error.code, "policy_denied");
+                        assert_eq!(error.code(), "policy_denied");
                         assert!(!error.remote_state_unknown);
                     }
                     for host in ["two", "ordinary-private", "elevated-private", "unknown"] {
@@ -1219,7 +1196,7 @@ mod tests {
                                 assert_eq!((resolved.destination, resolved.role), expected);
                             } else {
                                 let error = result.err().unwrap();
-                                assert_eq!(error.code, "policy_denied");
+                                assert_eq!(error.code(), "policy_denied");
                                 assert!(!error.remote_state_unknown);
                             }
                             for host in ["two", "ordinary-private", "elevated-private", "unknown"] {
@@ -1354,7 +1331,11 @@ mod tests {
                 for entry in catalog().entries {
                     if builtin(entry.id) != ToolId::Targets {
                         assert_eq!(
-                            config.resolve("one", builtin(entry.id)).err().unwrap().code,
+                            config
+                                .resolve("one", builtin(entry.id))
+                                .err()
+                                .unwrap()
+                                .code(),
                             "policy_denied"
                         );
                     }
@@ -1451,7 +1432,7 @@ mod tests {
                     assert_eq!(result.unwrap().destination, "private-alias", "{profile}");
                 } else {
                     let error = result.err().unwrap();
-                    assert_eq!(error.code, "policy_denied", "{profile}/{:?}", entry.id);
+                    assert_eq!(error.code(), "policy_denied", "{profile}/{:?}", entry.id);
                     assert!(!error.remote_state_unknown);
                     assert!(!format!("{error:?}").contains("private"));
                     assert!(!format!("{error:?}").contains(profile));
@@ -1462,7 +1443,7 @@ mod tests {
                     .resolve_sudo("one", "root", "/bin/sh")
                     .err()
                     .unwrap()
-                    .code,
+                    .code(),
                 "policy_denied"
             );
             // Even an unfiltered catalogue cannot advertise a profile-disabled operation.
@@ -1550,7 +1531,7 @@ mod tests {
         assert!(config.tool_enabled(ToolId::Sudo));
         for name in ["reader", "files", "actions", "disabled", "empty"] {
             let error = config.resolve_sudo(name, "root", "/bin/sh").err().unwrap();
-            assert_eq!(error.code, "policy_denied");
+            assert_eq!(error.code(), "policy_denied");
             assert!(!error.remote_state_unknown);
         }
         for name in ["reader", "files", "actions"] {
@@ -1585,14 +1566,14 @@ mod tests {
             open.resolve("-option", ToolId::ReadFile)
                 .err()
                 .unwrap()
-                .code,
+                .code(),
             "invalid_argument"
         );
         assert_eq!(
             open.resolve("user@example", ToolId::WriteFile)
                 .err()
                 .unwrap()
-                .code,
+                .code(),
             "policy_denied"
         );
         let closed = load_text(
@@ -1629,7 +1610,7 @@ mod tests {
         assert!(!baseline_empty.tool_enabled(ToolId::Sudo));
         for tool in [ToolId::Targets, ToolId::Sudo] {
             assert_eq!(
-                closed.resolve("logical", tool).err().unwrap().code,
+                closed.resolve("logical", tool).err().unwrap().code(),
                 "policy_denied"
             );
             assert_eq!(
@@ -1638,7 +1619,7 @@ mod tests {
                     .resolve("host", tool)
                     .err()
                     .unwrap()
-                    .code,
+                    .code(),
                 "policy_denied"
             );
         }
@@ -1720,7 +1701,7 @@ result={{kind="controller_command"}}
                     .resolve("user@example", ToolId::Exec)
                     .err()
                     .unwrap()
-                    .code,
+                    .code(),
                 "policy_denied",
                 "{source}"
             );
@@ -1812,13 +1793,17 @@ result={{kind="controller_command"}}
         );
         for host in ["ordinary-alias", "unknown", ""] {
             assert_eq!(
-                config.resolve(host, ToolId::Exec).err().unwrap().code,
+                config.resolve(host, ToolId::Exec).err().unwrap().code(),
                 "policy_denied"
             );
         }
         let empty = load_text("[targets]", &[]).unwrap();
         assert_eq!(
-            empty.resolve("anything", ToolId::Exec).err().unwrap().code,
+            empty
+                .resolve("anything", ToolId::Exec)
+                .err()
+                .unwrap()
+                .code(),
             "policy_denied"
         );
         let open = load_text(
@@ -1836,7 +1821,7 @@ result={{kind="controller_command"}}
         );
         for host in ["", "-option", "host name", "host\0name"] {
             assert_eq!(
-                open.resolve(host, ToolId::Exec).err().unwrap().code,
+                open.resolve(host, ToolId::Exec).err().unwrap().code(),
                 "invalid_argument"
             );
         }
@@ -1845,7 +1830,7 @@ result={{kind="controller_command"}}
             open.resolve_sudo("user@example", "root", "/bin/id")
                 .err()
                 .unwrap()
-                .code,
+                .code(),
             "policy_denied"
         );
     }
@@ -1910,7 +1895,11 @@ mode = "same-account"
             ("empty", "root", "/usr/bin/id"),
         ] {
             assert_eq!(
-                config.resolve_sudo(host, user, program).err().unwrap().code,
+                config
+                    .resolve_sudo(host, user, program)
+                    .err()
+                    .unwrap()
+                    .code(),
                 "policy_denied",
                 "{host}/{user}/{program}"
             );
@@ -1928,7 +1917,7 @@ mode = "same-account"
         );
         for seconds in [0, 601] {
             assert_eq!(
-                config.timeout(Some(seconds)).err().unwrap().code,
+                config.timeout(Some(seconds)).err().unwrap().code(),
                 "invalid_argument"
             );
         }

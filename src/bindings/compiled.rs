@@ -159,7 +159,7 @@ fn invalid(reason: &'static str) -> ConfigError {
     ConfigError::new("tools", reason)
 }
 fn bound(reason: &'static str) -> ToolError {
-    ToolError::new("invalid_argument", reason, false)
+    ToolError::invalid_argument(reason, false)
 }
 fn shape() -> ErrorData {
     ErrorData::invalid_params("Invalid named tool argument shape", None)
@@ -288,14 +288,10 @@ impl Input {
                 .then_some("invalid_enum")
         });
         if let Some(constraint) = constraint {
-            return Err(ToolError::with_owned_message(
-                "invalid_argument",
-                format!(
-                    "Named tool input '{}' violates {constraint} constraint",
-                    self.name
-                ),
-                false,
-            ));
+            return Err(ToolError::invalid_argument_owned(format!(
+                "Named tool input '{}' violates {constraint} constraint",
+                self.name
+            )));
         }
         Ok(())
     }

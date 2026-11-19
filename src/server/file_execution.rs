@@ -49,8 +49,7 @@ impl Estus {
         let budget = ReplyBudget::new(&context.id)?;
         let (validated, deadline) = match (|| {
             if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::new(
-                    "cancelled",
+                return Err(ToolError::cancelled(
                     "Request cancelled before dispatch",
                     false,
                 ));
@@ -69,7 +68,7 @@ impl Estus {
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                let error = ToolError::resource_limit("Tool operation limit reached", false);
                 file_metadata(&host, tool, &self.state, &context.id).reject(started, &error);
                 return budget.result(ToolReply::<T>::failure(error));
             }
@@ -89,8 +88,7 @@ impl Estus {
         });
         match task.await {
             Ok((_permit, reply)) => budget.result(reply),
-            Err(_) => budget.result(ToolReply::<T>::failure(ToolError::new(
-                "io_error",
+            Err(_) => budget.result(ToolReply::<T>::failure(ToolError::io_error(
                 "File operation task could not complete; remote state is unknown",
                 true,
             ))),
@@ -422,7 +420,7 @@ impl State {
         let progress = crate::progress::Reporter::from_context(context);
         let metadata = file_metadata(host, tool, self, &context.id);
         if self.shutdown.is_cancelled() || context.ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            let error = ToolError::cancelled("Request cancelled before dispatch", false);
             metadata.reject(started, &error);
             return Err(ToolReply::failure(error));
         }
@@ -471,7 +469,7 @@ impl State {
         if outcome.check_master && matches!(lease.check_health().await, MasterHealth::Lost) {
             lease.invalidate();
         }
-        audit.finish(None, outcome.reply.error.as_ref());
+        audit.finish(None, outcome.reply.error());
         outcome.reply
     }
 
@@ -489,7 +487,7 @@ impl State {
         let ct = context.ct;
         let metadata = file_metadata(host, ToolId::ListDirectory, self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            let error = ToolError::cancelled("Request cancelled before dispatch", false);
             metadata.reject(started, &error);
             return ToolReply::failure(error);
         }
@@ -521,7 +519,7 @@ impl State {
                 },
             )
             .await;
-        audit.finish(None, reply.error.as_ref());
+        audit.finish(None, reply.error());
         reply
     }
 }

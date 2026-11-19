@@ -35,11 +35,10 @@ pub(crate) async fn run(
 ) -> AutomationRun {
     let started = context.started;
     let run = controller::run(prepared.controller, context).await;
-    let error = run.reply.error.as_ref().map(|e| e.code);
+    let error = run.reply.error().map(crate::reply::ControllerError::code);
     let group_cleanup = run
         .reply
-        .data
-        .as_ref()
+        .data()
         .map(|d| d.owned_group_cleanup)
         .unwrap_or(GroupCleanup::NotStarted);
     let local = Completion {
@@ -117,10 +116,13 @@ mod spawn_failures {
         if let Some(pending) = run.pending {
             pending.finish().await;
         }
-        let error = run.reply.error.unwrap();
-        assert_eq!(error.code, "unsupported");
+        let error = run.reply.error().unwrap();
+        assert_eq!(error.code(), "unsupported");
         assert!(!error.remote_state_unknown);
-        assert_eq!(run.reply.data.unwrap().status, AutomationStatus::NotStarted);
+        assert_eq!(
+            run.reply.data().unwrap().status,
+            AutomationStatus::NotStarted
+        );
         assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
     }
 }

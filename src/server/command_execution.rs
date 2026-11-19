@@ -30,13 +30,13 @@ impl Estus {
             Err(error) => {
                 metadata.reject(
                     started,
-                    &ToolError::new("invalid_argument", "Insufficient response budget", false),
+                    &ToolError::invalid_argument("Insufficient response budget", false),
                 );
                 return Err(error);
             }
         };
         if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            let error = ToolError::cancelled("Request cancelled before dispatch", false);
             metadata.reject(started, &error);
             return budget.result(ToolReply::<CommandData>::failure(error));
         }
@@ -50,7 +50,7 @@ impl Estus {
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
+                let error = ToolError::resource_limit("Tool operation limit reached", false);
                 metadata.reject(started, &error);
                 return budget.result(ToolReply::<CommandData>::failure(error));
             }
@@ -66,8 +66,7 @@ impl Estus {
         });
         match task.await {
             Ok((_permit, reply)) => budget.command_result(reply),
-            Err(_) => budget.result(ToolReply::<CommandData>::failure(ToolError::new(
-                "io_error",
+            Err(_) => budget.result(ToolReply::<CommandData>::failure(ToolError::io_error(
                 "Command task could not complete; remote state is unknown",
                 true,
             ))),
@@ -88,7 +87,7 @@ impl State {
         let ct = context.ct;
         let metadata = request.metadata(self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            let error = ToolError::cancelled("Request cancelled before dispatch", false);
             metadata.reject(started, &error);
             return ToolReply::failure(error);
         }
@@ -143,7 +142,7 @@ impl State {
                 )
                 .await;
                 if matches!(
-                    reply.data.as_ref().map(|data| &data.termination),
+                    reply.data().map(|data| &data.termination),
                     Some(Termination::ConnectionLost)
                 ) && matches!(lease.check_health().await, MasterHealth::Lost)
                 {
@@ -153,10 +152,7 @@ impl State {
             }
             Err(error) => ToolReply::failure(error),
         };
-        audit.finish(
-            reply.data.as_ref().and_then(|data| data.exit_code),
-            reply.error.as_ref(),
-        );
+        audit.finish(reply.data().and_then(|data| data.exit_code), reply.error());
         reply
     }
 }

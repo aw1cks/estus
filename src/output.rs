@@ -308,9 +308,9 @@ impl Store {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            return ToolReply::failure(local_error(
-                "invalid_argument",
+            return ToolReply::failure(ToolError::invalid_argument(
                 "handle must contain 32 lowercase hexadecimal characters",
+                false,
             ));
         }
         self.inner.expire();
@@ -336,9 +336,9 @@ impl Store {
             // each reading at most one per_stream_bytes artifact. A full
             // storage reservation must not make its own artifacts unreadable.
             if usage.readers >= self.inner.limits.max_handles {
-                return ToolReply::failure(local_error(
-                    "resource_limit",
+                return ToolReply::failure(ToolError::resource_limit(
                     "Output read resource limit reached",
+                    false,
                 ));
             }
             usage.readers += 1;
@@ -356,7 +356,7 @@ impl Store {
             let _quota = quota;
             let _artifact = artifact;
             if worker_cancel.is_cancelled() {
-                return Err(local_error("shutdown", "Output read cancelled"));
+                return Err(ToolError::shutdown("Output read cancelled", false));
             }
             let mut bytes = BytesMut::zeroed(count as usize);
             if count != 0 {
@@ -367,7 +367,7 @@ impl Store {
                 file.read_exact(&mut bytes).map_err(|_| io_error())?;
             }
             if worker_cancel.is_cancelled() {
-                return Err(local_error("shutdown", "Output read cancelled"));
+                return Err(ToolError::shutdown("Output read cancelled", false));
             }
             data::encode_range(
                 RawRead {
@@ -382,12 +382,12 @@ impl Store {
         });
         tokio::select! {
             biased;
-            _ = self.inner.stop.cancelled() => ToolReply::failure(local_error("shutdown", "Output read cancelled")),
+            _ = self.inner.stop.cancelled() => ToolReply::failure(ToolError::shutdown("Output read cancelled", false)),
             result = tokio::time::timeout(READ_GRACE, worker) => match result {
                 Ok(Ok(Ok(data))) => ToolReply::success(data),
                 Ok(Ok(Err(error))) => ToolReply::failure(error),
                 Ok(Err(_)) => ToolReply::failure(io_error()),
-                Err(_) => ToolReply::failure(local_error("timeout", "Output read timed out")),
+                Err(_) => ToolReply::failure(ToolError::timeout("Output read timed out", false)),
             }
         }
     }
@@ -566,14 +566,11 @@ fn write_artifact(
 fn unavailable(reason: &'static str) -> OutputReceipt {
     OutputReceipt::Unavailable { reason }
 }
-fn local_error(code: &'static str, message: &'static str) -> ToolError {
-    ToolError::new(code, message, false)
-}
 fn io_error() -> ToolError {
-    local_error("io_error", "Unable to read retained output")
+    ToolError::io_error("Unable to read retained output", false)
 }
 fn not_found() -> ToolError {
-    local_error("not_found", "Retained output not found")
+    ToolError::not_found("Retained output not found", false)
 }
 
 #[cfg(test)]
@@ -726,8 +723,8 @@ mod tests {
                 budget,
             )
             .await;
-        assert!(reply.error.is_none());
-        let data = reply.data.unwrap();
+        assert!(reply.error().is_none());
+        let data = reply.data().unwrap();
         assert_eq!(data.content, "0123456789abcdef");
         assert!(data.eof);
         assert_eq!(lock(&store.inner.usage).bytes, 32);
@@ -759,15 +756,17 @@ mod tests {
             max_bytes: Some(2),
             encoding: Encoding::Base64,
         };
-        let error = foreign.read(request(), 16, budget).await.error.unwrap();
-        assert_eq!(error.code, "not_found");
+        let foreign_reply = foreign.read(request(), 16, budget).await;
+        let error = foreign_reply.error().unwrap();
+        assert_eq!(error.code(), "not_found");
         assert!(!error.remote_state_unknown);
-        let data = store.read(request(), 16, budget).await.data.unwrap();
+        let ok_reply = store.read(request(), 16, budget).await;
+        let data = ok_reply.data().unwrap();
         assert_eq!(data.content, "AP8=");
         assert_eq!(data.bytes_read, 2);
         assert_eq!(data.next_offset, 3);
         assert!(!data.eof);
-        let error = store
+        let bad_reply = store
             .read(
                 ReadOutputRequest {
                     encoding: Encoding::Utf8,
@@ -776,10 +775,9 @@ mod tests {
                 16,
                 budget,
             )
-            .await
-            .error
-            .unwrap();
-        assert_eq!(error.code, "invalid_encoding");
+            .await;
+        let error = bad_reply.error().unwrap();
+        assert_eq!(error.code(), "invalid_encoding");
         store.shutdown().await;
     }
 

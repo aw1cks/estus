@@ -121,7 +121,7 @@ fn root_user() -> String {
 }
 
 fn invalid(message: &'static str) -> ToolError {
-    ToolError::new("invalid_argument", message, false)
+    ToolError::invalid_argument(message, false)
 }
 
 impl ExecRequest {
@@ -503,7 +503,7 @@ mod bound_argv_tests {
                 );
             }
             let error = bound.encoded_len().unwrap_err();
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             assert!(!error.remote_state_unknown);
         }
     }
@@ -669,7 +669,7 @@ mod tests {
             );
             request.validate(0).unwrap();
             request.command.push('x');
-            assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+            assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
         }
         let mut request = sudo(vec![String::new(); 21_837]);
         request.argv[0] = "/bin/x".into();
@@ -695,9 +695,9 @@ mod tests {
         };
         assert_eq!(bound_size(&request.argv).unwrap(), MAX_COMMAND_BYTES);
         request.argv.push(String::new());
-        assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+        assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
         let error = bound_size(&request.argv).unwrap_err();
-        assert_eq!(error.code, "invalid_argument");
+        assert_eq!(error.code(), "invalid_argument");
         assert!(!error.remote_state_unknown);
     }
 
@@ -709,7 +709,7 @@ mod tests {
         );
         for (bytes, extra) in [(MAX_COMMAND_BYTES, 1), (usize::MAX, 1)] {
             let error = checked_size(bytes, extra).unwrap_err();
-            assert_eq!(error.code, "invalid_argument");
+            assert_eq!(error.code(), "invalid_argument");
             assert!(!error.remote_state_unknown);
         }
     }
@@ -719,7 +719,7 @@ mod tests {
         assert!(exec("é".repeat(32_761)).validate(0).is_ok());
         for command in [String::new(), "echo\0bad".into(), "é".repeat(32_762)] {
             assert_eq!(
-                exec(command).validate(0).unwrap_err().code,
+                exec(command).validate(0).unwrap_err().code(),
                 "invalid_argument"
             );
         }
@@ -838,7 +838,7 @@ mod tests {
             );
             request.validate(0).unwrap();
             request.argv.last_mut().unwrap().push('x');
-            assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+            assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
         }
         // Empty arguments have no raw payload, but their quotes and separators count.
         let mut request = run(vec!["xx".into()]);
@@ -860,12 +860,15 @@ mod tests {
             vec!["bad\0program".into()],
             vec!["printf".into(), "bad\0argument".into()],
         ] {
-            assert_eq!(run(argv).validate(0).unwrap_err().code, "invalid_argument");
+            assert_eq!(
+                run(argv).validate(0).unwrap_err().code(),
+                "invalid_argument"
+            );
         }
         let mut request = run(vec!["cat".into()]);
         for cwd in ["", "relative", "/bad\0path"] {
             request.cwd = Some(cwd.into());
-            assert_eq!(request.validate(0).unwrap_err().code, "invalid_argument");
+            assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
         }
         request.cwd = Some("/with ' quote\nand newline".into());
         request.stdin = Some("é\0".into());

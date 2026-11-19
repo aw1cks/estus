@@ -47,8 +47,7 @@ impl Estus {
             budget.result(ToolReply::<AutomationData>::failure(error))
         };
         if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-            return reject(ToolError::new(
-                "cancelled",
+            return reject(ToolError::cancelled(
                 "Request cancelled before dispatch",
                 false,
             ));
@@ -73,8 +72,7 @@ impl Estus {
             crate::config::RiskTier::Change | crate::config::RiskTier::Exec
         ) && self.state.config.requires_preview(&request.host)
         {
-            return reject(ToolError::new(
-                "preview_required",
+            return reject(ToolError::preview_required(
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -84,15 +82,13 @@ impl Estus {
         let argv = prepared.argv;
         let output_limit = prepared.output_limit;
         let Ok(operation) = Arc::clone(&self.state.operations).try_acquire_owned() else {
-            return reject(ToolError::new(
-                "resource_limit",
+            return reject(ToolError::resource_limit(
                 "Tool operation limit reached",
                 false,
             ));
         };
         let Ok(runtime) = Arc::clone(&self.state.automation).try_acquire_owned() else {
-            return reject(ToolError::new(
-                "resource_limit",
+            return reject(ToolError::resource_limit(
                 "Automation operation limit reached",
                 false,
             ));
@@ -155,15 +151,14 @@ impl Estus {
                 })
                 .await;
             target_lease.finish(
-                reply.error.as_ref().is_some_and(|e| e.remote_state_unknown),
-                reply.error.as_ref().map_or("unknown", |e| e.code),
+                reply.error().is_some_and(|e| e.remote_state_unknown),
+                reply.error().map_or("unknown", ToolError::code),
             );
             audit.finish_automation(&reply);
             let _ = sender.send(reply);
         });
         let reply = receiver.await.unwrap_or_else(|_| {
-            ToolReply::failure(ToolError::new(
-                "io_error",
+            ToolReply::failure(ToolError::io_error(
                 "Native payload worker lost; remote state is unknown",
                 true,
             ))

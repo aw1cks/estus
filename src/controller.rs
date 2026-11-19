@@ -909,10 +909,6 @@ async fn cooperative_finish(
     }
 }
 
-fn error(code: &'static str, message: &'static str) -> ControllerError {
-    ControllerError::new(code, message)
-}
-
 pub(crate) async fn run(
     prepared: PreparedController,
     mut context: ControllerContext<'_>,
@@ -1123,33 +1119,36 @@ pub(crate) async fn run(
             if status.success() {
                 None
             } else {
-                Some(error("command_failed", "Controller command failed"))
+                Some(ControllerError::command_failed("Controller command failed"))
             },
         ),
         Outcome::Timeout => (
             None,
             None,
             ControllerTermination::Timeout,
-            Some(error("timeout", "Controller command deadline exceeded")),
+            Some(ControllerError::timeout(
+                "Controller command deadline exceeded",
+            )),
         ),
         Outcome::Cancelled => (
             None,
             None,
             ControllerTermination::Cancelled,
-            Some(error("cancelled", "Controller command cancelled")),
+            Some(ControllerError::cancelled("Controller command cancelled")),
         ),
         Outcome::Protocol => (
             None,
             None,
             ControllerTermination::IoError,
-            Some(error("invalid_result", "Controller protocol was invalid")),
+            Some(ControllerError::invalid_result(
+                "Controller protocol was invalid",
+            )),
         ),
         Outcome::Resource => (
             None,
             None,
             ControllerTermination::IoError,
-            Some(error(
-                "resource_limit",
+            Some(ControllerError::resource_limit(
                 "Controller workspace or protocol limit exceeded",
             )),
         ),
@@ -1157,8 +1156,7 @@ pub(crate) async fn run(
             None,
             None,
             ControllerTermination::IoError,
-            Some(error(
-                "unsupported_workspace_entry",
+            Some(ControllerError::unsupported_workspace_entry(
                 "Controller workspace contained a prohibited symlink or special file",
             )),
         ),
@@ -1166,20 +1164,21 @@ pub(crate) async fn run(
             None,
             None,
             ControllerTermination::IoError,
-            Some(error("io_error", "Controller command I/O failed")),
+            Some(ControllerError::io_error("Controller command I/O failed")),
         ),
         Outcome::Spawn => (
             None,
             None,
             ControllerTermination::IoError,
-            Some(error("spawn_failed", "Controller command could not start")),
+            Some(ControllerError::spawn_failed(
+                "Controller command could not start",
+            )),
         ),
         Outcome::Setup => (
             None,
             None,
             ControllerTermination::IoError,
-            Some(error(
-                "resource_unavailable",
+            Some(ControllerError::resource_unavailable(
                 "Controller private workspace preparation failed",
             )),
         ),
@@ -1187,8 +1186,7 @@ pub(crate) async fn run(
     if failure.is_none()
         && (!cleanup_ok || (started && !owner.children.clean()) || !out_complete || !err_complete)
     {
-        failure = Some(error(
-            "cleanup_incomplete",
+        failure = Some(ControllerError::cleanup_incomplete(
             "Controller cleanup is incomplete",
         ));
     }
@@ -1238,13 +1236,7 @@ pub(crate) async fn run(
         None
     };
     ControllerRun {
-        reply: match failure {
-            Some(error) => ControllerReply {
-                data: Some(data),
-                error: Some(error),
-            },
-            None => ControllerReply::success(data),
-        },
+        reply: ControllerReply::with_optional_error(data, failure),
         pending,
         automation: monitoring.automation,
     }
@@ -1386,7 +1378,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            run.reply.error.as_ref().map(|e| e.code),
+            run.reply.error().map(ControllerError::code),
             Some("unsupported_workspace_entry")
         );
         if let Some(pending) = run.pending {

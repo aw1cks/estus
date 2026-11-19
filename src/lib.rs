@@ -261,7 +261,7 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
         let duration = match config.timeout(None) {
             Ok(duration) => duration,
             Err(error) => {
-                return fail_phase(error.code, "runtime_verification", "limits.timeout_secs");
+                return fail_phase(error.code(), "runtime_verification", "limits.timeout_secs");
             }
         };
         let Some(deadline) = tokio::time::Instant::now().checked_add(duration) else {

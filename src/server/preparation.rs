@@ -209,11 +209,7 @@ pub(super) fn request_deadline(
     tokio::time::Instant::from_std(started)
         .checked_add(duration)
         .ok_or_else(|| {
-            ToolError::new(
-                "invalid_argument",
-                "timeout_secs exceeds the supported clock range",
-                false,
-            )
+            ToolError::invalid_argument("timeout_secs exceeds the supported clock range", false)
         })
 }
 

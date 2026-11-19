@@ -721,7 +721,8 @@ fn report(stdout: &str, source: &Source) -> RuntimeCheck {
 }
 
 fn observed_stdout(reply: ControllerReply) -> Result<String, &'static str> {
-    let Some(data) = reply.data else {
+    let (data, error) = reply.into_parts();
+    let Some(data) = data else {
         return Err("runtime_check_failed");
     };
     match data.termination {
@@ -730,14 +731,13 @@ fn observed_stdout(reply: ControllerReply) -> Result<String, &'static str> {
         _ => {}
     }
     if data.owned_group_cleanup == GroupCleanup::Incomplete
-        || reply
-            .error
+        || error
             .as_ref()
-            .is_some_and(|error| error.code == "cleanup_incomplete")
+            .is_some_and(|error| error.code() == "cleanup_incomplete")
     {
         return Err("runtime_cleanup_failed");
     }
-    if reply.error.is_some()
+    if error.is_some()
         || data.termination != ControllerTermination::Exited
         || data.exit_code != Some(0)
         || data.signal.is_some()

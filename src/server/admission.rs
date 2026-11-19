@@ -181,7 +181,7 @@ impl TargetAdmission {
             Arc::clone(&gate.reads).acquire_owned(),
         )
         .await?
-        .map_err(|_| ToolError::new("cancelled", "Target gate closed before dispatch", false))?;
+        .map_err(|_| ToolError::cancelled("Target gate closed before dispatch", false))?;
         let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).read_owned()).await?;
         Ok(ReadLease {
             _guard: guard,
@@ -199,8 +199,7 @@ impl TargetAdmission {
         let gate = self.gate(host)?;
         let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).write_owned()).await?;
         if gate.is_quarantined() {
-            return Err(ToolError::new(
-                "target_quarantined",
+            return Err(ToolError::target_quarantined(
                 "Target is quarantined after an uncertain remote mutation; inspect target state and run change_target_quarantine_clear after independent reconciliation",
                 false,
             ));
@@ -229,8 +228,7 @@ impl TargetAdmission {
             return Ok(Arc::clone(&entry.gate));
         }
         if !self.dynamic_hosts {
-            return Err(ToolError::new(
-                "policy_denied",
+            return Err(ToolError::policy_denied(
                 "Operation is not authorized",
                 false,
             ));
@@ -248,8 +246,7 @@ impl TargetAdmission {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(name, _)| name.clone());
             let Some(victim) = victim else {
-                return Err(ToolError::new(
-                    "resource_limit",
+                return Err(ToolError::resource_limit(
                     "Dynamic target gate capacity reached",
                     false,
                 ));
@@ -278,33 +275,28 @@ where
     F: Future,
 {
     if ct.is_cancelled() || shutdown.is_cancelled() {
-        return Err(ToolError::new(
-            "cancelled",
+        return Err(ToolError::cancelled(
             "Request cancelled before dispatch",
             false,
         ));
     }
     if Instant::now() >= deadline {
-        return Err(ToolError::new(
-            "timeout",
+        return Err(ToolError::timeout(
             "Operation deadline expired waiting for target gate",
             false,
         ));
     }
     tokio::select! {
         biased;
-        _ = ct.cancelled() => Err(ToolError::new(
-            "cancelled",
+        _ = ct.cancelled() => Err(ToolError::cancelled(
             "Request cancelled before dispatch",
             false,
         )),
-        _ = shutdown.cancelled() => Err(ToolError::new(
-            "cancelled",
+        _ = shutdown.cancelled() => Err(ToolError::cancelled(
             "Server shutting down before dispatch",
             false,
         )),
-        _ = sleep_until(deadline) => Err(ToolError::new(
-            "timeout",
+        _ = sleep_until(deadline) => Err(ToolError::timeout(
             "Operation deadline expired waiting for target gate",
             false,
         )),
@@ -497,7 +489,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.code, "cancelled");
+        assert_eq!(err.code(), "cancelled");
         assert!(!err.remote_state_unknown);
 
         drop((r1, r2, r3, r4));
@@ -518,7 +510,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.code, "cancelled");
+        assert_eq!(err.code(), "cancelled");
         assert!(!err.remote_state_unknown);
 
         // Partial read_permit MUST have been released when rw.read_owned cancelled.
@@ -533,7 +525,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.code, "cancelled");
+        assert_eq!(err.code(), "cancelled");
         assert!(!err.remote_state_unknown);
 
         w.finish(false, "ok");
@@ -578,7 +570,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked.code, "target_quarantined");
+        assert_eq!(blocked.code(), "target_quarantined");
         assert!(!blocked.remote_state_unknown);
 
         // Reads still succeed while quarantined.
@@ -607,7 +599,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked.code, "target_quarantined");
+        assert_eq!(blocked.code(), "target_quarantined");
         let cleared = admission.clear_quarantine("alpha").unwrap();
         assert_eq!(cleared.cause, "worker_lost");
     }
@@ -636,7 +628,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(overflow.code, "resource_limit");
+        assert_eq!(overflow.code(), "resource_limit");
 
         // Quarantine host-000, drop its active lease, and verify it cannot be evicted.
         let first_read = active_reads.remove(0);
@@ -654,7 +646,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked_evict.code, "resource_limit");
+        assert_eq!(blocked_evict.code(), "resource_limit");
 
         // Drop idle non-quarantined host-001: now 257th host succeeds by evicting host-001 while host-000 stays quarantined.
         let second_read = active_reads.remove(0);

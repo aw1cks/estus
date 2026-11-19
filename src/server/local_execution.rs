@@ -50,13 +50,15 @@ impl Estus {
             binding_revision: Some(&binding.revision),
             executor: Some(executor),
         };
-        let reject = |code, message| {
-            let error = ToolError::new(code, message, false);
+        let reject = |error: ToolError| {
             metadata.reject(started, &error);
             budget.result(ToolReply::<AutomationData>::failure(error))
         };
         if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-            return reject("cancelled", "Request cancelled before dispatch");
+            return reject(ToolError::cancelled(
+                "Request cancelled before dispatch",
+                false,
+            ));
         }
         let target = match self.state.config.automation_target(id, &request.host) {
             Ok(target) => target,
@@ -75,7 +77,10 @@ impl Estus {
         let authority_identity = if is_preview || requires_preview {
             let Ok(digest) = super::preview::authority_identity_digest(&authority_label, &target)
             else {
-                return reject("preview_required", "Invalid preview authority identity");
+                return reject(ToolError::preview_required(
+                    "Invalid preview authority identity",
+                    false,
+                ));
             };
             Some(digest)
         } else {
@@ -105,10 +110,10 @@ impl Estus {
                 .as_deref()
                 .is_some_and(super::preview::is_qualified_module)
         {
-            return reject(
-                "preview_required",
+            return reject(ToolError::preview_required(
                 "Operation has no qualified preview path under require_preview policy",
-            );
+                false,
+            ));
         }
         let deadline = match request_deadline(started, prepared.controller.duration) {
             Ok(deadline) => deadline,
@@ -124,19 +129,25 @@ impl Estus {
                 activated.reviewed_module(),
                 authority_identity,
             ) else {
-                return reject(
-                    "preview_required",
+                return reject(ToolError::preview_required(
                     "Operation has no qualified preview path under require_preview policy",
-                );
+                    false,
+                ));
             };
             let Ok(catalog_revision) = super::preview::catalog_revision_digest(
                 self.state.config.catalog_version(),
                 reviewed,
             ) else {
-                return reject("preview_required", "Invalid preview catalog revision");
+                return reject(ToolError::preview_required(
+                    "Invalid preview catalog revision",
+                    false,
+                ));
             };
             let Ok(canonical_arguments) = super::preview::canonical_json_sha256(&args) else {
-                return reject("preview_required", "Invalid preview arguments");
+                return reject(ToolError::preview_required(
+                    "Invalid preview arguments",
+                    false,
+                ));
             };
             Some((
                 module_name,
@@ -151,10 +162,16 @@ impl Estus {
         };
         let shared_read = binding.is_shared_read();
         let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
-            return reject("resource_limit", "Tool operation limit reached");
+            return reject(ToolError::resource_limit(
+                "Tool operation limit reached",
+                false,
+            ));
         };
         let Ok(runtime) = self.state.automation.clone().try_acquire_owned() else {
-            return reject("resource_limit", "Automation operation limit reached");
+            return reject(ToolError::resource_limit(
+                "Automation operation limit reached",
+                false,
+            ));
         };
         let state = self.state.clone();
         let revision = binding.revision.clone();
@@ -200,8 +217,7 @@ impl Estus {
                     canonical_arguments,
                 )) = preview_meta
                 else {
-                    let error = ToolError::new(
-                        "preview_required",
+                    let error = ToolError::preview_required(
                         "Operation has no qualified preview path under require_preview policy",
                         false,
                     );
@@ -231,16 +247,15 @@ impl Estus {
                 {
                     Ok(digest) => digest,
                     Err(error) => {
-                        let error = if error.code == "cancelled" || error.code == "timeout" {
+                        let error = if matches!(error.code(), "cancelled" | "timeout") {
                             error
                         } else {
-                            ToolError::new(
-                                "preview_required",
+                            ToolError::preview_required(
                                 "Independent pre-state digest could not be obtained",
                                 false,
                             )
                         };
-                        target_lease.finish(false, error.code);
+                        target_lease.finish(false, error.code());
                         metadata.reject(started, &error);
                         let _ = sender.send(ToolReply::failure(error));
                         return;
@@ -255,12 +270,11 @@ impl Estus {
                     pre_state_digest,
                 };
                 if !state.previews.consume(&key) {
-                    let error = ToolError::new(
-                        "preview_required",
+                    let error = ToolError::preview_required(
                         "A matching non-expired preview is required before apply",
                         false,
                     );
-                    target_lease.finish(false, error.code);
+                    target_lease.finish(false, error.code());
                     metadata.reject(started, &error);
                     let _ = sender.send(ToolReply::failure(error));
                     return;
@@ -282,8 +296,8 @@ impl Estus {
             )
             .await;
             if is_preview {
-                let valid_observation = run.reply.error.is_none()
-                    && run.reply.data.as_ref().is_some_and(|d| {
+                let valid_observation = run.reply.error().is_none()
+                    && run.reply.data().is_some_and(|d| {
                         d.complete
                             && d.status == crate::reply::AutomationStatus::Successful
                             && d.tasks.ok == 1
@@ -331,22 +345,18 @@ impl Estus {
                             });
                         }
                     }
-                } else if run.reply.error.is_none()
-                    && run.reply.data.as_ref().is_some_and(|d| d.tasks.skipped > 0)
+                } else if run.reply.error().is_none()
+                    && run.reply.data().is_some_and(|d| d.tasks.skipped > 0)
                 {
-                    run.reply.error = Some(ToolError::new(
-                        "invalid_result",
+                    run.reply.set_error(ToolError::invalid_result(
                         "Preview was skipped; no target observation was produced",
                         false,
                     ));
                 }
             }
             target_lease.finish(
-                run.reply
-                    .error
-                    .as_ref()
-                    .is_some_and(|e| e.remote_state_unknown),
-                run.reply.error.as_ref().map_or("unknown", |e| e.code),
+                run.reply.error().is_some_and(|e| e.remote_state_unknown),
+                run.reply.error().map_or("unknown", ToolError::code),
             );
             audit.finish_automation(&run.reply);
             let _ = sender.send(run.reply);
@@ -355,8 +365,7 @@ impl Estus {
             }
         });
         let reply = receiver.await.unwrap_or_else(|_| {
-            ToolReply::failure(ToolError::new(
-                "io_error",
+            ToolReply::failure(ToolError::io_error(
                 "Automation operation could not complete; remote state is unknown",
                 true,
             ))
@@ -379,24 +388,19 @@ impl Estus {
             Err(error) => {
                 metadata.reject_controller(
                     started,
-                    &ControllerError::new(
-                        "invalid_argument",
-                        "Insufficient controller response budget",
-                    ),
+                    &ControllerError::invalid_argument("Insufficient controller response budget"),
                 );
                 return Err(error);
             }
         };
         let prepared = (|| {
-            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ControllerError::new(
-                    "cancelled",
+            if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
+                return Err(ControllerError::cancelled(
                     "Controller request cancelled before dispatch",
                 ));
             }
             if !self.state.config.controller_enabled(id) {
-                return Err(ControllerError::new(
-                    "policy_denied",
+                return Err(ControllerError::policy_denied(
                     "Controller operation is not authorized",
                 ));
             }
@@ -411,8 +415,8 @@ impl Estus {
                 &request,
                 self.state.config.limits(),
             )?;
-            let deadline = request_deadline(started, prepared.duration).map_err(|error| {
-                ControllerError::new(error.code, "Controller request deadline expired")
+            let deadline = request_deadline(started, prepared.duration).map_err(|_| {
+                ControllerError::invalid_argument("Controller request deadline expired")
             })?;
             Ok((prepared, deadline))
         })();
@@ -424,17 +428,15 @@ impl Estus {
             }
         };
         let Some(cleanup_slot) = self.state.cleanup_quarantine.try_reserve() else {
-            let error = ControllerError::new(
-                "resource_limit",
-                "Controller cleanup quarantine limit reached",
-            );
+            let error =
+                ControllerError::resource_limit("Controller cleanup quarantine limit reached");
             metadata.reject_controller(started, &error);
             return budget.controller_result(ControllerReply::failure(error));
         };
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                let error = ControllerError::new("resource_limit", "Tool operation limit reached");
+                let error = ControllerError::resource_limit("Tool operation limit reached");
                 metadata.reject_controller(started, &error);
                 return budget.controller_result(ControllerReply::failure(error));
             }
@@ -468,10 +470,11 @@ impl Estus {
         });
         match receiver.await {
             Ok(reply) => budget.controller_result(reply),
-            Err(_) => budget.controller_result(ControllerReply::failure(ControllerError::new(
-                "io_error",
-                "Controller operation could not complete; effects may be incomplete",
-            ))),
+            Err(_) => {
+                budget.controller_result(ControllerReply::failure(ControllerError::io_error(
+                    "Controller operation could not complete; effects may be incomplete",
+                )))
+            }
         }
     }
 }

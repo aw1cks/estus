@@ -1232,11 +1232,15 @@ enabled_tools = ["other"]
         assert!(!config.binding_enabled(disabled));
         assert!(config.resolve_binding("one", id).is_ok());
         assert_eq!(
-            config.resolve_binding("two", id).err().unwrap().code,
+            config.resolve_binding("two", id).err().unwrap().code(),
             "policy_denied"
         );
         assert_eq!(
-            config.resolve_binding("two", disabled).err().unwrap().code,
+            config
+                .resolve_binding("two", disabled)
+                .err()
+                .unwrap()
+                .code(),
             "policy_denied"
         );
         let tools = ToolCatalog::new(
