@@ -40,6 +40,7 @@
       };
       inherit (defaultBuild) cargoArtifacts package acceptance;
       automationRuntime = import ../packages/automation-runtime.nix { inherit pkgs sourceRoot; };
+      directModuleBundle = import ../packages/direct-module-bundle.nix { inherit pkgs sourceRoot automationRuntime; };
       wheel = import ../packages/wheel.nix { inherit pkgs sourceRoot; craneLib = msrvLib; };
       cargoVendor = msrvLib.vendorCargoDeps commonArgs;
       withAutomation = native: pkgs.runCommand "estus-automation-${native.version}" {
@@ -58,7 +59,7 @@
     {
       _module.args.estusBuild = {
         inherit craneLib fuzzLib commonArgs msrvBuild msrvToolchain cargoVendor cargoArtifacts
-          package acceptance automationRuntime wheel automation automationMsrv catalogVm
+          package acceptance automationRuntime directModuleBundle wheel automation automationMsrv catalogVm
           catalogLabVm;
       };
       packages = {
@@ -67,6 +68,7 @@
         ssh-acceptance = acceptance;
         ssh-acceptance-msrv = msrvBuild.acceptance;
         automation-runtime = automationRuntime;
+        direct-module-bundle = directModuleBundle;
         inherit automation wheel;
         automation-msrv = automationMsrv;
         catalog-vm = catalogVm;

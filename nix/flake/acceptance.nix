@@ -3,7 +3,7 @@
   perSystem = { pkgs, estusBuild, ... }:
     let
       inherit (estusBuild) package acceptance msrvBuild msrvToolchain cargoVendor automationRuntime
-        wheel automation automationMsrv commonArgs catalogVm catalogLabVm;
+        directModuleBundle wheel automation automationMsrv commonArgs catalogVm catalogLabVm;
       inherit (import ../tests/libtest.nix { inherit pkgs; }) mkTestScript;
       runExactTest = { name, harness, scenario, extraFlags ? [ "--nocapture" ], extraSetup ? "" }:
         mkTestScript {
@@ -203,6 +203,27 @@
             --prefix PATH : ${pkgs.lib.makeBinPath ([ pkgs.openssh pkgs.coreutils pkgs.bash ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ])}
         '';
+      spikeDockerfiles = ../../nix/tests/module_spike;
+      directSpikeAcceptance = native: harness:
+        let
+          runner = runExactTest {
+            name = "direct-spike-acceptance";
+            harness = "${harness}/libexec/direct_module_spike";
+            scenario = "qualify_direct_ansible_module_execution";
+          };
+        in
+        pkgs.runCommand "estus-direct-spike-acceptance" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p "$out/bin"
+          makeWrapper ${runner} "$out/bin/direct-spike-acceptance" \
+            --set ESTUS_TEST_BINARY ${native}/bin/estus \
+            --set ESTUS_TEST_ANSIBLE_RUNTIME ${automationRuntime} \
+            --set ESTUS_TEST_DIRECT_BUNDLE ${directModuleBundle} \
+            --set ESTUS_TEST_SPIKE_DOCKERFILES ${spikeDockerfiles} \
+            --prefix PATH : ${pkgs.lib.makeBinPath ([ pkgs.openssh pkgs.docker-client pkgs.coreutils pkgs.bash ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ])}
+        '';
     in
     {
       packages = {
@@ -216,6 +237,8 @@
         workflow-acceptance-msrv = (workflowAcceptance msrvBuild.package msrvBuild.acceptance).all;
         module-spike-acceptance = moduleSpikeAcceptance package acceptance;
         module-spike-acceptance-msrv = moduleSpikeAcceptance msrvBuild.package msrvBuild.acceptance;
+        direct-spike-acceptance = directSpikeAcceptance package acceptance;
+        direct-spike-acceptance-msrv = directSpikeAcceptance msrvBuild.package msrvBuild.acceptance;
       };
       apps.catalog-acceptance = {
         type = "app";
@@ -272,6 +295,14 @@
       apps.module-spike-acceptance-msrv = {
         type = "app";
         program = "${moduleSpikeAcceptance msrvBuild.package msrvBuild.acceptance}/bin/module-spike-acceptance";
+      };
+      apps.direct-spike-acceptance = {
+        type = "app";
+        program = "${directSpikeAcceptance package acceptance}/bin/direct-spike-acceptance";
+      };
+      apps.direct-spike-acceptance-msrv = {
+        type = "app";
+        program = "${directSpikeAcceptance msrvBuild.package msrvBuild.acceptance}/bin/direct-spike-acceptance";
       };
       apps.projection-acceptance = {
         type = "app";
