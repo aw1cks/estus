@@ -9,14 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[path = "../../src/filesystem/data.rs"]
-mod data;
-#[path = "../../src/filesystem/metadata.rs"]
-mod metadata;
-#[path = "../../src/reply.rs"]
-mod reply;
-#[path = "../../src/wire.rs"]
-mod wire;
+use estus::internal::{
+    filesystem_data as data,
+    reply,
+    wire,
+};
 
 use data::{Encoding, RawRead, ReadData, ReadRequest, WriteData, WriteRequest, encode};
 use reply::{ToolError, ToolReply};

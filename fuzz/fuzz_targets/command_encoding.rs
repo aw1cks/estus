@@ -6,10 +6,7 @@ use std::borrow::Cow;
 use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 
-#[path = "../../src/command.rs"]
-mod command;
-#[path = "../../src/reply.rs"]
-mod reply;
+use estus::internal::{command, reply};
 
 use command::{ExecRequest, Invocation, MAX_COMMAND_BYTES, RunRequest, Shell, SudoRequest};
 

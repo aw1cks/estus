@@ -55,18 +55,18 @@ pub(crate) fn pinned_dynamic_payload_names() -> impl Iterator<Item = &'static st
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Manifest {
-    pub(crate) schema: u32,
-    pub(crate) version: String,
+pub struct Manifest {
+    pub schema: u32,
+    pub version: String,
     #[serde(deserialize_with = "unique_map")]
-    pub(crate) presets: BTreeMap<String, Vec<String>>,
+    pub presets: BTreeMap<String, Vec<String>>,
     #[serde(deserialize_with = "unique_map")]
-    pub(crate) tools: BTreeMap<String, Template>,
+    pub tools: BTreeMap<String, Template>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Qualification {
+pub enum Qualification {
     Unqualified,
     SitePolicyTemplate,
     LaboratoryOnly,
@@ -75,17 +75,17 @@ pub(crate) enum Qualification {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Template {
-    pub(crate) definition: String,
-    pub(crate) executor: Executor,
-    pub(crate) policy_required: bool,
-    pub(crate) requires: Vec<String>,
-    pub(crate) qualification: Qualification,
+pub struct Template {
+    pub definition: String,
+    pub executor: Executor,
+    pub policy_required: bool,
+    pub requires: Vec<String>,
+    pub qualification: Qualification,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Executor {
+pub enum Executor {
     AnsibleRole { path: String },
     NativePayload { path: String },
     AnsibleModule { module: String },
@@ -115,7 +115,7 @@ where
     deserializer.deserialize_map(Unique(std::marker::PhantomData))
 }
 
-pub(crate) struct Catalog {
+pub struct Catalog {
     root: PathBuf,
     directory: File,
     manifest: Manifest,
@@ -213,7 +213,7 @@ fn bounded_read(file: File, limit: u64) -> Result<Vec<u8>, &'static str> {
 }
 
 impl Catalog {
-    pub(crate) fn load(root: Option<&Path>) -> Result<Self, &'static str> {
+    pub fn load(root: Option<&Path>) -> Result<Self, &'static str> {
         let root = match root {
             Some(root) => root.to_path_buf(),
             None => PathBuf::from(std::env::var_os("ESTUS_CATALOG_ROOT").ok_or(ERROR)?),
@@ -296,7 +296,7 @@ impl Catalog {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
-    pub(crate) fn manifest(&self) -> &Manifest {
+    pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
 
@@ -338,7 +338,7 @@ impl Catalog {
         Ok(table)
     }
 
-    pub(crate) fn definition(&self, name: &str) -> Result<toml::Table, &'static str> {
+    pub fn definition(&self, name: &str) -> Result<toml::Table, &'static str> {
         let template = self
             .manifest
             .tools
@@ -403,7 +403,7 @@ impl Catalog {
         }
         Ok((tool_def, source_bytes, manifest_bytes))
     }
-    pub(crate) fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
+    pub fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
         let template = self
             .manifest
             .tools

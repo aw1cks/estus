@@ -32,7 +32,7 @@ fn retention_overhead(requested: bool) -> Result<usize, ErrorData> {
     Ok(if requested { *COST } else { 0 })
 }
 
-pub(crate) const MAX_RESPONSE_BYTES: usize = 16_777_216;
+pub const MAX_RESPONSE_BYTES: usize = 16_777_216;
 
 fn exceeded() -> ErrorData {
     ErrorData::invalid_params("Request leaves insufficient response budget", None)
@@ -132,12 +132,12 @@ fn tool_overhead(failed: bool) -> usize {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ReplyBudget {
+pub struct ReplyBudget {
     id_bytes: usize,
 }
 
 impl ReplyBudget {
-    pub(crate) fn new(id: &RequestId) -> Result<Self, ErrorData> {
+    pub fn new(id: &RequestId) -> Result<Self, ErrorData> {
         Ok(Self {
             id_bytes: serialized_size(id)?,
         })
@@ -193,14 +193,11 @@ impl ReplyBudget {
         self.value_size(reply, reply.error.is_some())
     }
 
-    pub(crate) fn remaining<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
+    pub fn remaining<T: Serialize>(&self, reply: &ToolReply<T>) -> Result<usize, ErrorData> {
         Ok(MAX_RESPONSE_BYTES - self.tool_reply_size(reply)?)
     }
 
-    pub(crate) fn result<T: Serialize>(
-        &self,
-        reply: ToolReply<T>,
-    ) -> Result<CallToolResult, ErrorData> {
+    pub fn result<T: Serialize>(&self, reply: ToolReply<T>) -> Result<CallToolResult, ErrorData> {
         self.serialized_result(&reply, reply.error.is_some())
     }
 
@@ -220,7 +217,7 @@ impl ReplyBudget {
         })
     }
 
-    pub(crate) fn command_capture_limit(&self, retain_output: bool) -> Result<u64, ErrorData> {
+    pub fn command_capture_limit(&self, retain_output: bool) -> Result<u64, ErrorData> {
         // Reserve the longest current error code/message and conservative scalar
         // widths before dispatch. A health failure without command data is smaller.
         // false is wider than true; i32::MIN/u64::MAX reserve every numeric width.
@@ -250,7 +247,7 @@ impl ReplyBudget {
             / 2) as u64)
     }
 
-    pub(crate) fn command_result(
+    pub fn command_result(
         &self,
         mut reply: ToolReply<CommandData>,
     ) -> Result<CallToolResult, ErrorData> {

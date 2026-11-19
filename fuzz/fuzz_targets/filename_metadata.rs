@@ -16,8 +16,7 @@ use openssh_sftp_protocol::{
 use serde::Deserialize;
 use serde_json::json;
 
-#[path = "../../src/filesystem/metadata.rs"]
-mod metadata;
+use estus::internal::filesystem_metadata as metadata;
 
 use metadata::{FileKind, ListEntry, StatData, metadata_data};
 

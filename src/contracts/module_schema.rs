@@ -87,7 +87,7 @@ pub(crate) fn valid_fqcn(value: &str) -> bool {
 
 // Limit numbers to binary64's exact integer magnitude range so bounds and
 // JSON Schema numeric equality cannot collapse distinct integer values.
-pub(crate) fn bounded(value: &Value) -> bool {
+pub fn bounded(value: &Value) -> bool {
     fn walk(value: &Value, depth: usize, nodes: &mut usize, bytes: &mut usize) -> bool {
         *nodes += 1;
         if depth > DEPTH || *nodes > NODES {
@@ -140,7 +140,7 @@ struct Contract {
 
 /// Import the single entry returned by public `ansible-doc --json`.
 /// Only option semantics with an exact JSON representation are accepted.
-pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
+pub fn import_document(document: &Value) -> Result<Value, &'static str> {
     if !bounded(document) {
         return Err(INVALID);
     }
@@ -230,7 +230,7 @@ pub(crate) fn import_document(document: &Value) -> Result<Value, &'static str> {
 
 /// Build the same contract for a reviewed, explicitly typed closed schema.
 /// Conditional predicates remain the existing schema checker's responsibility.
-pub(crate) fn import_explicit_schema(schema: &Value) -> Result<Value, &'static str> {
+pub fn import_explicit_schema(schema: &Value) -> Result<Value, &'static str> {
     check_schema(schema, true)?;
     let result = serde_json::to_value(Contract {
         schema: schema.clone(),
@@ -671,7 +671,7 @@ fn equal(left: &Value, right: &Value) -> bool {
 }
 
 /// Protocol shape only. Value bounds, choices and conditional assertions remain policy errors.
-pub(crate) fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), &'static str> {
+pub fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), &'static str> {
     if let Some(kind) = schema.get("type").and_then(Value::as_str) {
         let valid = match kind {
             "object" => input.is_object(),
@@ -718,7 +718,7 @@ pub(crate) fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
+pub fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
     let object = schema.as_object().ok_or(INPUT)?;
     if let Some(kind) = object.get("type").and_then(Value::as_str) {
         let valid = match kind {
@@ -947,7 +947,7 @@ struct Overlay {
 }
 
 /// Validate configuration shape without reading a reviewed snapshot or runtime.
-pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
+pub fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
     if !bounded(overlay) {
         return Err(SCHEMA);
     }
@@ -1012,14 +1012,14 @@ pub(crate) fn validate_setup_overlay(module: &str, overlay: &Value) -> Result<()
     Ok(())
 }
 
-pub(crate) struct CapabilityBinding {
+pub struct CapabilityBinding {
     contract: Contract,
     input_schema: Value,
     fixed_args: Map<String, Value>,
     input_map: BTreeMap<String, String>,
 }
 
-pub(crate) fn compile_binding(
+pub fn compile_binding(
     contract: &Value,
     overlay: &Value,
 ) -> Result<CapabilityBinding, &'static str> {
@@ -1267,7 +1267,7 @@ fn compatible(input: &Value, backend: &Value, aliases: &Aliases) -> Result<(), &
 }
 
 impl CapabilityBinding {
-    pub(crate) fn prepare(&self, input: &Value) -> Result<Value, &'static str> {
+    pub fn prepare(&self, input: &Value) -> Result<Value, &'static str> {
         if !bounded(input) {
             return Err(INPUT);
         }

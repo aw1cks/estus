@@ -5,13 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[path = "../../src/contracts"]
-mod contracts {
-    pub(crate) mod module_schema;
-}
-use contracts::module_schema;
-#[path = "../../src/strict_json.rs"]
-mod strict_json;
+use estus::internal::{contracts::module_schema, strict_json};
 
 const RAW_LIMIT: usize = 16 * 1024;
 const JSON_LIMIT: usize = 256 * 1024;

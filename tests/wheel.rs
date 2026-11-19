@@ -4,9 +4,7 @@
 #[allow(dead_code)]
 mod support;
 
-#[allow(dead_code)]
-#[path = "../src/catalog/assets.rs"]
-mod assets;
+use estus::internal::catalog_assets as assets;
 
 use anyhow::{Context, Result, ensure};
 use nix::sys::signal::Signal;

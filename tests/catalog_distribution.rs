@@ -1,8 +1,6 @@
 #![cfg(unix)]
 
-#[allow(dead_code)]
-#[path = "../src/catalog/assets.rs"]
-mod assets;
+use estus::internal::catalog_assets as assets;
 
 use assets::Catalog;
 use serde_json::Value;

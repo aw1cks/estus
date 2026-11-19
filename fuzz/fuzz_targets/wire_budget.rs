@@ -1,10 +1,7 @@
 #![no_main]
 #![allow(dead_code)]
 
-#[path = "../../src/reply.rs"]
-mod reply;
-#[path = "../../src/wire.rs"]
-mod wire;
+use estus::internal::{reply, wire};
 
 use std::io::{self, Write};
 

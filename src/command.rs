@@ -5,14 +5,14 @@ use serde::Deserialize;
 
 use crate::reply::ToolError;
 
-pub(crate) const MAX_COMMAND_BYTES: usize = 65_536;
+pub const MAX_COMMAND_BYTES: usize = 65_536;
 const CWD_PREFIX: &str = "cd '";
 const CWD_SUFFIX: &str = "' || exit\n";
 const CWD_QUOTE: &str = "'\\''";
 
 #[derive(Clone, Copy, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Shell {
+pub enum Shell {
     #[default]
     Sh,
     Bash,
@@ -29,7 +29,7 @@ impl Shell {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExecRequest {
+pub struct ExecRequest {
     pub host: String,
     #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub command: String,
@@ -46,7 +46,7 @@ pub(crate) struct ExecRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RunRequest {
+pub struct RunRequest {
     pub host: String,
     #[schemars(
         length(min = 1),
@@ -65,7 +65,7 @@ pub(crate) struct RunRequest {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SudoRequest {
+pub struct SudoRequest {
     pub host: String,
     #[schemars(
         length(min = 1),
@@ -125,7 +125,7 @@ fn invalid(message: &'static str) -> ToolError {
 }
 
 impl ExecRequest {
-    pub(crate) fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
+    pub fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
         if self.command.is_empty()
             || self.command.contains('\0')
             || self.command.len() > MAX_COMMAND_BYTES
@@ -147,7 +147,7 @@ impl ExecRequest {
 }
 
 impl RunRequest {
-    pub(crate) fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
+    pub fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
         if self.argv.first().is_none_or(String::is_empty) {
             return Err(invalid("argv must contain a nonempty executable"));
         }
@@ -164,7 +164,7 @@ impl RunRequest {
 }
 
 impl SudoRequest {
-    pub(crate) fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
+    pub fn validate(&self, max_stdin_bytes: u64) -> Result<(), ToolError> {
         let Some(program) = self.argv.first() else {
             return Err(invalid("argv must contain an absolute executable path"));
         };
@@ -228,7 +228,7 @@ fn validate_common(
     Ok(())
 }
 
-pub(crate) enum Invocation<'a> {
+pub enum Invocation<'a> {
     Shell {
         command: &'a str,
         shell: Shell,
@@ -351,7 +351,7 @@ fn sudo_encoded_len<'a>(
 }
 
 impl Invocation<'_> {
-    pub(crate) fn encoded_len(&self) -> Result<usize, ToolError> {
+    pub fn encoded_len(&self) -> Result<usize, ToolError> {
         match self {
             Self::Shell {
                 command,
@@ -399,7 +399,7 @@ impl Invocation<'_> {
     }
 }
 
-pub(crate) fn shell_script<'a>(command: &'a str, cwd: Option<&str>) -> Cow<'a, str> {
+pub fn shell_script<'a>(command: &'a str, cwd: Option<&str>) -> Cow<'a, str> {
     let Some(cwd) = cwd else {
         return Cow::Borrowed(command);
     };

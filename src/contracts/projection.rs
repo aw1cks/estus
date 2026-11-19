@@ -9,7 +9,7 @@ const MAX_PLAN_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Plan {
+pub struct Plan {
     pub fields: BTreeMap<String, Vec<String>>,
     pub schema: Value,
     pub max_bytes: usize,
@@ -43,7 +43,7 @@ fn source_key(value: &str, allow_diff: bool) -> bool {
         && (allow_diff || value != "diff")
 }
 
-pub(crate) fn compile(config: Value) -> Result<Plan, &'static str> {
+pub fn compile(config: Value) -> Result<Plan, &'static str> {
     compile_with_diff(config, false)
 }
 

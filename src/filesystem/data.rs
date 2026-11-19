@@ -50,7 +50,7 @@ impl DirectoryLimits {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Encoding {
+pub enum Encoding {
     #[default]
     Utf8,
     Base64,
@@ -58,66 +58,66 @@ pub(crate) enum Encoding {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ReadRequest {
-    pub(crate) host: String,
+pub struct ReadRequest {
+    pub host: String,
     #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
-    pub(crate) path: String,
+    pub path: String,
     #[serde(default)]
-    pub(crate) offset: u64,
+    pub offset: u64,
     #[schemars(range(min = 1))]
-    pub(crate) max_bytes: Option<u64>,
+    pub max_bytes: Option<u64>,
     #[serde(default)]
-    pub(crate) encoding: Encoding,
+    pub encoding: Encoding,
     #[schemars(length(equal = 64), pattern(r"^[0-9A-Fa-f]{64}$"))]
-    pub(crate) expected_content_sha256: Option<String>,
+    pub expected_content_sha256: Option<String>,
     #[schemars(range(min = 1))]
-    pub(crate) timeout_secs: Option<u64>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug)]
-pub(crate) struct ReadSpec<'a> {
-    pub(crate) path: &'a str,
-    pub(crate) offset: u64,
-    pub(crate) max_bytes: usize,
-    pub(crate) encoding: Encoding,
-    pub(crate) expected_content_sha256: Option<[u8; 32]>,
+pub struct ReadSpec<'a> {
+    pub path: &'a str,
+    pub offset: u64,
+    pub max_bytes: usize,
+    pub encoding: Encoding,
+    pub expected_content_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct ReadData {
-    pub(crate) content: String,
-    pub(crate) content_sha256: String,
-    pub(crate) encoding: Encoding,
-    pub(crate) bytes_read: u64,
-    pub(crate) next_offset: u64,
-    pub(crate) eof: bool,
+pub struct ReadData {
+    pub content: String,
+    pub content_sha256: String,
+    pub encoding: Encoding,
+    pub bytes_read: u64,
+    pub next_offset: u64,
+    pub eof: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct WriteRequest {
-    pub(crate) host: String,
+pub struct WriteRequest {
+    pub host: String,
     #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
-    pub(crate) path: String,
-    pub(crate) content: String,
+    pub path: String,
+    pub content: String,
     #[serde(default)]
-    pub(crate) encoding: Encoding,
+    pub encoding: Encoding,
     #[serde(default)]
-    pub(crate) overwrite: bool,
+    pub overwrite: bool,
     #[schemars(range(min = 1))]
-    pub(crate) timeout_secs: Option<u64>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug)]
-pub(crate) struct WriteSpec<'a> {
-    pub(crate) path: &'a str,
-    pub(crate) content: Cow<'a, [u8]>,
-    pub(crate) overwrite: bool,
+pub struct WriteSpec<'a> {
+    pub path: &'a str,
+    pub content: Cow<'a, [u8]>,
+    pub overwrite: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct WriteData {
-    pub(crate) bytes_written: u64,
+pub struct WriteData {
+    pub bytes_written: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -515,8 +515,7 @@ impl ListRequest {
 }
 
 impl WriteRequest {
-    #[cfg(test)]
-    pub(crate) fn validate(
+    pub fn validate(
         &self,
         max_file_bytes: u64,
         budget: ReplyBudget,
@@ -580,7 +579,6 @@ impl WriteRequest {
     }
 }
 
-#[cfg(test)]
 fn decode_content(
     content: &str,
     encoding: Encoding,
@@ -682,7 +680,7 @@ fn invalid(message: &'static str) -> ToolError {
 }
 
 impl ReadRequest {
-    pub(crate) fn validate(
+    pub fn validate(
         &self,
         max_file_bytes: u64,
         budget: ReplyBudget,
@@ -772,12 +770,12 @@ fn wire_content_cost(bytes: usize, encoding: Encoding) -> Option<usize> {
     }
 }
 
-pub(crate) struct RawRead {
-    pub(crate) bytes: BytesMut,
-    pub(crate) eof: bool,
+pub struct RawRead {
+    pub bytes: BytesMut,
+    pub eof: bool,
 }
 
-pub(crate) fn encode(raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> {
+pub fn encode(raw: RawRead, spec: &ReadSpec<'_>) -> Result<ReadData, ToolError> {
     encode_range(
         raw,
         spec.offset,

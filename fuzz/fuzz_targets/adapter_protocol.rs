@@ -1,18 +1,11 @@
 #![no_main]
 #![allow(dead_code)]
 
-#[path = "../../src/automation/protocol.rs"]
-mod protocol;
-#[path = "../../src/contracts"]
-mod contracts {
-    pub(crate) mod module_schema;
-    pub(crate) mod projection;
-}
-#[path = "../../src/reply.rs"]
-mod reply;
-#[path = "../../src/strict_json.rs"]
-mod strict_json;
-
+use estus::internal::{
+    automation_protocol as protocol,
+    contracts,
+    reply,
+};
 use contracts::projection;
 use protocol::{Completion, Evidence, ExecutionMode, Observations};
 use libfuzzer_sys::fuzz_target;

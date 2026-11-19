@@ -10,7 +10,7 @@ const FRAME_LIMIT: usize = 131_072;
 const STREAM_LIMIT: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExecutionMode {
+pub enum ExecutionMode {
     Module,
     Role,
     Playbook,
@@ -175,13 +175,13 @@ struct Terminal {
 }
 
 #[derive(Default)]
-pub(crate) struct Observations {
+pub struct Observations {
     pub ready: bool,
     pub tasks: u32,
     pub terminal: bool,
 }
 
-pub(crate) struct Evidence {
+pub struct Evidence {
     id: String,
     mode: ExecutionMode,
     role_observations: u32,
@@ -199,7 +199,7 @@ pub(crate) struct Evidence {
 }
 
 impl Evidence {
-    pub(crate) fn new(id: String, mode: ExecutionMode) -> Self {
+    pub fn new(id: String, mode: ExecutionMode) -> Self {
         Self {
             id,
             mode,
@@ -238,17 +238,17 @@ impl Evidence {
                 .is_some_and(|terminal| !terminal.complete)
     }
 
-    pub(crate) fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.completed_before_stop = self.terminal.as_ref().is_some_and(|t| t.complete);
     }
 
-    pub(crate) fn finish(&mut self) {
+    pub fn finish(&mut self) {
         if !self.line.is_empty() {
             self.invalid = true;
         }
     }
 
-    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Observations {
+    pub fn feed(&mut self, bytes: &[u8]) -> Observations {
         let mut observations = Observations::default();
         if self.failed() {
             return observations;
@@ -611,14 +611,14 @@ fn finish_projection(
     (value, false)
 }
 
-pub(crate) struct Completion {
+pub struct Completion {
     pub started_child: bool,
     pub error: Option<&'static str>,
     pub duration_ms: u64,
     pub group_cleanup: GroupCleanup,
 }
 
-pub(crate) fn reduce(
+pub fn reduce(
     mut evidence: Option<Evidence>,
     host: String,
     projection: Option<&crate::contracts::projection::Plan>,

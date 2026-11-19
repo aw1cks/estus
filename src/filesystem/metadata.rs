@@ -6,14 +6,14 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct ListEntry {
-    pub(crate) name: Option<String>,
-    pub(crate) name_base64: String,
-    pub(crate) metadata: StatData,
+pub struct ListEntry {
+    pub name: Option<String>,
+    pub name_base64: String,
+    pub metadata: StatData,
 }
 
 impl ListEntry {
-    pub(crate) fn from_filename(filename: &OsStr, metadata: MetaData) -> Self {
+    pub fn from_filename(filename: &OsStr, metadata: MetaData) -> Self {
         let bytes = filename.as_bytes();
         Self {
             name: std::str::from_utf8(bytes).ok().map(str::to_owned),
@@ -25,7 +25,7 @@ impl ListEntry {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum FileKind {
+pub enum FileKind {
     File,
     Directory,
     Symlink,
@@ -34,16 +34,16 @@ pub(crate) enum FileKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
-pub(crate) struct StatData {
-    pub(crate) kind: FileKind,
-    pub(crate) size: Option<u64>,
-    pub(crate) permissions: Option<u32>,
-    pub(crate) uid: Option<u32>,
-    pub(crate) gid: Option<u32>,
-    pub(crate) modified_unix_secs: Option<u64>,
+pub struct StatData {
+    pub kind: FileKind,
+    pub size: Option<u64>,
+    pub permissions: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub modified_unix_secs: Option<u64>,
 }
 
-pub(crate) fn metadata_data(metadata: MetaData) -> StatData {
+pub fn metadata_data(metadata: MetaData) -> StatData {
     let kind = match metadata.file_type() {
         Some(kind) if kind.is_file() => FileKind::File,
         Some(kind) if kind.is_dir() => FileKind::Directory,

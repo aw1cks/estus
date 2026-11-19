@@ -4,19 +4,19 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct ToolReply<T> {
-    pub(crate) data: Option<T>,
-    pub(crate) error: Option<ToolError>,
+pub struct ToolReply<T> {
+    pub data: Option<T>,
+    pub error: Option<ToolError>,
 }
 
 impl<T> ToolReply<T> {
-    pub(crate) fn success(data: T) -> Self {
+    pub fn success(data: T) -> Self {
         Self {
             data: Some(data),
             error: None,
         }
     }
-    pub(crate) fn failure(error: ToolError) -> Self {
+    pub fn failure(error: ToolError) -> Self {
         Self {
             data: None,
             error: Some(error),
@@ -25,20 +25,20 @@ impl<T> ToolReply<T> {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub(crate) struct ToolError {
-    pub(crate) code: &'static str,
-    pub(crate) message: Cow<'static, str>,
-    pub(crate) remote_state_unknown: bool,
+pub struct ToolError {
+    pub code: &'static str,
+    pub message: Cow<'static, str>,
+    pub remote_state_unknown: bool,
 }
 
 impl ToolError {
-    pub(crate) const SSH_CONNECT_FAILED: Self = Self::new(
+    pub const SSH_CONNECT_FAILED: Self = Self::new(
         "ssh_connect_failed",
         "SSH connection failed; run `estus doctor --target <host>` outside MCP to diagnose alias, authentication and known hosts",
         false,
     );
 
-    pub(crate) const fn new(
+    pub const fn new(
         code: &'static str,
         message: &'static str,
         remote_state_unknown: bool,
@@ -65,7 +65,7 @@ impl ToolError {
 
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Termination {
+pub enum Termination {
     Exited,
     Timeout,
     Cancelled,
@@ -74,7 +74,7 @@ pub(crate) enum Termination {
 
 #[derive(Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum OutputReceipt {
+pub enum OutputReceipt {
     Ready {
         handle: String,
         expires_in_secs: u64,
@@ -87,14 +87,14 @@ pub(crate) enum OutputReceipt {
 }
 
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct StreamInfo {
+pub struct StreamInfo {
     pub bytes_retained: u64,
     pub total_bytes: u64,
     pub truncated: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct CommandData {
+pub struct CommandData {
     pub stdout: String,
     pub stderr: String,
     pub stdout_truncated: bool,
@@ -160,7 +160,7 @@ pub(crate) enum ControllerTermination {
 /// rollback of effects, or reaping of descendants not directly owned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GroupCleanup {
+pub enum GroupCleanup {
     /// This executor creates no per-request controller process group.
     NotApplicable,
     NotStarted,
@@ -192,7 +192,7 @@ pub(crate) struct ControllerData {
 
 /// Bounded execution evidence and optional explicitly selected module data.
 #[derive(Serialize, JsonSchema)]
-pub(crate) struct AutomationData {
+pub struct AutomationData {
     pub host: String,
     pub status: AutomationStatus,
     pub runner_rc: Option<i32>,
@@ -208,7 +208,7 @@ pub(crate) struct AutomationData {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AutomationStatus {
+pub enum AutomationStatus {
     NotStarted,
     Successful,
     Failed,
@@ -222,7 +222,7 @@ pub(crate) enum AutomationStatus {
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, serde::Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AutomationTasks {
+pub struct AutomationTasks {
     pub ok: u32,
     pub failed: u32,
     pub unreachable: u32,
@@ -240,7 +240,7 @@ fn zero_count(value: &u32) -> bool {
 /// Projection availability is independent of authoritative workflow completion.
 #[derive(Debug, Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ModuleProjection {
+pub enum ModuleProjection {
     Complete { value: serde_json::Value },
     Truncated { value: serde_json::Value },
     Censored,

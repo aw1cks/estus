@@ -2,7 +2,7 @@
 use serde::{Deserialize, de};
 use serde_json::Value;
 
-pub(crate) fn parse(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+pub fn parse(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     serde_json::from_slice::<Unique>(bytes).map(|value| value.0)
 }
 
