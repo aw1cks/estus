@@ -1,23 +1,27 @@
 //! Operator-only ordinary SSH/SFTP negotiation; never a model-callable capability.
 //! Only checks with a cause include a fixed phase; successful and unattempted checks
 //! without a cause keep their existing shape. Backend diagnostics remain private.
-use std::io::{self, Write};
-use std::time::Duration;
-
-use serde::Serialize;
-use tokio::io::AsyncWriteExt;
-use tokio_util::sync::CancellationToken;
-
+//! Effective SSH policy inspection runs `ssh -G -- <destination>`, which can evaluate
+//! `Match exec` stanzas from the configured or user SSH config.
 use crate::automation::{self, RuntimeCheck, RuntimeContext};
 use crate::{
     config::{Config, DoctorArgs, IdentityRole},
     filesystem::operations::{self, FileContext},
     ssh::Pool,
 };
+use serde::Serialize;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 const MAX_TARGETS: usize = 32;
 const MAX_REPORT_BYTES: usize = 65_536;
 const OUTPUT_GRACE: Duration = Duration::from_secs(1);
+const POLICY_BYTES: usize = 65_536;
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,13 +65,26 @@ impl Check {
 }
 
 #[derive(Serialize)]
+struct SshEffectivePolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict_host_key_checking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_host_keys: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_mode: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
 struct TargetReport {
     target: String,
     ssh: Check,
     sftp: Check,
     sudo: Check,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_ssh_policy: Option<SshEffectivePolicy>,
 }
-
 #[derive(Serialize)]
 struct RuntimeReport {
     #[serde(flatten)]
@@ -79,6 +96,8 @@ struct RuntimeReport {
 #[derive(Serialize)]
 pub(crate) struct Report {
     ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_executable: Option<PathBuf>,
     targets: Vec<TargetReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<RuntimeReport>,
@@ -94,6 +113,7 @@ impl Report {
     fn invalid(code: &'static str) -> Self {
         Self {
             ok: false,
+            ssh_executable: None,
             targets: Vec::new(),
             runtime: None,
             error_code: Some(code),
@@ -101,7 +121,6 @@ impl Report {
             exit: 2,
         }
     }
-
     fn encode(&self) -> (Vec<u8>, u8) {
         struct Limited(Vec<u8>);
         impl Write for Limited {
@@ -161,6 +180,87 @@ fn stopped(shutdown: &CancellationToken, deadline: tokio::time::Instant) -> Opti
     } else {
         None
     }
+}
+async fn effective_ssh_policy(
+    executable: &Path,
+    config: Option<&Path>,
+    destination: &str,
+    deadline: tokio::time::Instant,
+    shutdown: &CancellationToken,
+) -> Option<SshEffectivePolicy> {
+    if shutdown.is_cancelled() || tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    let mut command = Command::new(executable);
+    command.arg("-G");
+    if let Some(config) = config {
+        command.arg("-F").arg(config);
+    }
+    command
+        .arg("--")
+        .arg(destination)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let read = async {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let n = stdout.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            let take = n.min(POLICY_BYTES.saturating_sub(buffer.len()));
+            buffer.extend_from_slice(&chunk[..take]);
+            if buffer.len() >= POLICY_BYTES {
+                break;
+            }
+        }
+        let status = child.wait().await.ok()?;
+        status.success().then_some(buffer)
+    };
+    let bytes = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return None,
+        _ = tokio::time::sleep_until(deadline) => return None,
+        bytes = read => bytes?,
+    };
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let mut strict_host_key_checking = None;
+    let mut update_host_keys = None;
+    let mut batch_mode = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() || value.len() > 64 || value.bytes().any(|b| b.is_ascii_control()) {
+            continue;
+        }
+        if key.eq_ignore_ascii_case("stricthostkeychecking") {
+            strict_host_key_checking = Some(value.to_ascii_lowercase());
+        } else if key.eq_ignore_ascii_case("updatehostkeys") {
+            update_host_keys = Some(value.to_ascii_lowercase());
+        } else if key.eq_ignore_ascii_case("batchmode") {
+            batch_mode = Some(value.to_ascii_lowercase());
+        }
+    }
+    let mut warnings = Vec::new();
+    if matches!(
+        strict_host_key_checking.as_deref(),
+        Some("no" | "off" | "false")
+    ) {
+        warnings.push("strict_host_key_checking_disabled");
+    }
+    Some(SshEffectivePolicy {
+        strict_host_key_checking,
+        update_host_keys,
+        batch_mode,
+        warnings,
+    })
 }
 
 pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: CancellationToken) -> Report {
@@ -223,6 +323,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
                 ssh: Check::untested(Some(code), "ssh_connect"),
                 sftp: Check::untested(Some(code), "sftp_probe"),
                 sudo: Check::untested(None, "sudo_probe"),
+                effective_ssh_policy: None,
             });
             continue;
         }
@@ -276,15 +377,25 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
             }
         };
         pool.shutdown().await;
+        let effective_ssh_policy = effective_ssh_policy(
+            config.ssh_executable(),
+            config.ssh_config(),
+            target.destination,
+            deadline,
+            &shutdown,
+        )
+        .await;
         targets.push(TargetReport {
             target: name,
             ssh,
             sftp,
             sudo: Check::untested(None, "sudo_probe"),
+            effective_ssh_policy,
         });
     }
     Report {
         ok,
+        ssh_executable: Some(config.ssh_executable().to_path_buf()),
         targets,
         runtime,
         error_code: None,
@@ -301,6 +412,7 @@ mod tests {
     fn diagnostic_report_bound_includes_json_escaping_and_newline() {
         let mut report = Report {
             ok: true,
+            ssh_executable: None,
             error_code: None,
             phase: None,
             runtime: None,
@@ -310,6 +422,7 @@ mod tests {
                 ssh: Check::passed(),
                 sftp: Check::passed(),
                 sudo: Check::untested(None, "sudo_probe"),
+                effective_ssh_policy: None,
             }],
         };
         let base = serde_json::to_vec(&report).unwrap().len() + 1;

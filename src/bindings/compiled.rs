@@ -201,22 +201,44 @@ impl Input {
         }
     }
     fn validate(&self, value: &Value) -> Result<(), ToolError> {
-        let valid = match self.domain {
-            Domain::String { minimum, maximum } => value.as_str().is_some_and(|v| {
-                !v.contains('\0') && (minimum..=maximum).contains(&(v.chars().count() as u64))
-            }),
-            Domain::Integer { minimum, maximum } => value
-                .as_i64()
-                .is_some_and(|v| (minimum..=maximum).contains(&v)),
-            Domain::Boolean => value.is_boolean(),
-        };
-        if !valid
-            || self
-                .choices
+        let constraint = match self.domain {
+            Domain::String { minimum, maximum } => match value.as_str() {
+                None => Some("invalid_type"),
+                Some(v) if v.contains('\0') => Some("pattern_mismatch"),
+                Some(v) => {
+                    let count = v.chars().count() as u64;
+                    if count < minimum {
+                        Some("too_short")
+                    } else if count > maximum {
+                        Some("too_long")
+                    } else {
+                        None
+                    }
+                }
+            },
+            Domain::Integer { minimum, maximum } => match value.as_i64() {
+                None => Some("invalid_type"),
+                Some(v) if v < minimum => Some("below_minimum"),
+                Some(v) if v > maximum => Some("above_maximum"),
+                Some(_) => None,
+            },
+            Domain::Boolean => (!value.is_boolean()).then_some("invalid_type"),
+        }
+        .or_else(|| {
+            self.choices
                 .as_ref()
                 .is_some_and(|choices| !choices.contains(value))
-        {
-            return Err(bound("Named tool input violates its declared bounds"));
+                .then_some("invalid_enum")
+        });
+        if let Some(constraint) = constraint {
+            return Err(ToolError::with_owned_message(
+                "invalid_argument",
+                format!(
+                    "Named tool input '{}' violates {constraint} constraint",
+                    self.name
+                ),
+                false,
+            ));
         }
         Ok(())
     }
@@ -1081,9 +1103,14 @@ impl CompiledBinding {
     pub(crate) fn effects(&self) -> &[Effect] {
         &self.effects
     }
-    pub(crate) fn parse_request(
+    #[cfg(test)]
+    pub(crate) fn parse_request(&self, arguments: JsonObject) -> Result<BindingCall, ErrorData> {
+        self.parse_request_ref(&arguments)
+    }
+
+    pub(crate) fn parse_request_ref(
         &self,
-        mut arguments: JsonObject,
+        arguments: &JsonObject,
     ) -> Result<BindingCall, ErrorData> {
         if self.is_generic() {
             return self.parse_generic(arguments).map(BindingCall::Generic);
@@ -1091,58 +1118,64 @@ impl CompiledBinding {
         if self.is_payload() {
             return self.parse_payload(arguments);
         }
+        let mut matched = 0;
         let host = if self.is_controller() {
             None
         } else {
-            match arguments.remove("host") {
-                Some(Value::String(host)) => Some(host),
+            matched += 1;
+            match arguments.get("host") {
+                Some(Value::String(host)) => Some(host.clone()),
                 _ => return Err(shape()),
             }
         };
-        let timeout_secs = arguments
-            .remove("timeout_secs")
-            .map(|v| unsigned_integer(&v).ok_or_else(shape))
-            .transpose()?;
+        let timeout_secs = match arguments.get("timeout_secs") {
+            Some(value) => {
+                matched += 1;
+                Some(unsigned_integer(value).ok_or_else(shape)?)
+            }
+            None => None,
+        };
         if self.is_automation() {
-            let inputs = arguments.remove("inputs").ok_or_else(shape)?;
-            if !arguments.is_empty() {
+            let inputs = arguments.get("inputs").ok_or_else(shape)?;
+            matched += 1;
+            if arguments.len() != matched {
                 return Err(shape());
             }
             let Execution::Ansible { overlay, .. } = &self.execution else {
                 unreachable!("module request selected");
             };
-            crate::contracts::module_schema::validate_input_shape(
-                &overlay["input_schema"],
-                &inputs,
-            )
-            .map_err(|_| shape())?;
+            crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], inputs)
+                .map_err(|_| shape())?;
             return Ok(BindingCall::Automation(AutomationRequest {
                 host: host.ok_or_else(shape)?,
                 timeout_secs,
-                inputs,
+                inputs: inputs.clone(),
             }));
         }
-        let retain_output = arguments
-            .remove("retain_output")
-            .map(|value| value.as_bool().ok_or_else(shape))
-            .transpose()?
-            .unwrap_or(false);
+        let retain_output = match arguments.get("retain_output") {
+            Some(value) => {
+                matched += 1;
+                value.as_bool().ok_or_else(shape)?
+            }
+            None => false,
+        };
         let values = self
             .inputs
             .iter()
             .map(|input| {
-                let value = arguments.remove(&input.name).ok_or_else(shape)?;
-                if !input.matches_type(&value) {
+                let value = arguments.get(&input.name).ok_or_else(shape)?;
+                matched += 1;
+                if !input.matches_type(value) {
                     return Err(shape());
                 }
                 Ok(if matches!(input.domain, Domain::Integer { .. }) {
-                    canonical_integer(value)
+                    canonical_integer(value.clone())
                 } else {
-                    value
+                    value.clone()
                 })
             })
             .collect::<Result<_, _>>()?;
-        if !arguments.is_empty() {
+        if arguments.len() != matched {
             return Err(shape());
         }
         Ok(match host {

@@ -48,6 +48,39 @@ impl Estus {
             metadata.reject(started, &error);
             budget.result(ToolReply::<AutomationData>::failure(error))
         };
+        if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
+            return reject(ToolError::new(
+                "cancelled",
+                "Request cancelled before dispatch",
+                false,
+            ));
+        }
+        let prepared = match binding.prepare_payload(&request, self.state.config.limits()) {
+            Ok(prepared) => prepared,
+            Err(error) => return reject(error),
+        };
+        let deadline = match request_deadline(started, prepared.duration) {
+            Ok(deadline) => deadline,
+            Err(error) => return reject(error),
+        };
+        if let Err(error) = self.state.config.automation_target(id, &request.host) {
+            return reject(error);
+        }
+        let authority = match serde_json::to_value(binding.automation_authority())
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+        {
+            Some(authority) => authority,
+            None => {
+                return reject(ToolError::new(
+                    "policy_denied",
+                    "Invalid payload authority",
+                    false,
+                ));
+            }
+        };
+        let argv = prepared.argv;
+        let output_limit = prepared.output_limit;
         let Ok(operation) = Arc::clone(&self.state.operations).try_acquire_owned() else {
             return reject(ToolError::new(
                 "resource_limit",
@@ -62,10 +95,7 @@ impl Estus {
                 false,
             ));
         };
-        if let Err(error) = self.state.config.automation_target(id, &request.host) {
-            return reject(error);
-        }
-        let Some(target) = self.state.automation_targets.get(&request.host) else {
+        let Some(target_gate) = self.state.automation_targets.get(&request.host) else {
             return reject(ToolError::new(
                 "policy_denied",
                 "Operation is not authorized",
@@ -73,7 +103,7 @@ impl Estus {
             ));
         };
         // Keep identical host serialization for native and Ansible mutations.
-        let Ok(target) = Arc::clone(target).try_acquire_owned() else {
+        let Ok(target_permit) = Arc::clone(target_gate).try_acquire_owned() else {
             return reject(ToolError::new(
                 "resource_limit",
                 "Automation target operation limit reached",
@@ -84,12 +114,17 @@ impl Estus {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
             // Dropping an MCP handler never relinquishes execution/admission ownership.
-            let _permits = (operation, runtime, target);
+            let _permits = (operation, runtime, target_permit);
             let binding = state
                 .config
                 .bindings()
                 .get(id)
                 .expect("registered payload binding");
+            let plan = binding.payload_plan().expect("activated payload plan");
+            let target = state
+                .config
+                .automation_target(id, &request.host)
+                .expect("payload target already authorized");
             let metadata = Metadata {
                 request_id: &context.id,
                 tool: state.binding_name(id),
@@ -104,49 +139,19 @@ impl Estus {
                 binding_revision: Some(&binding.revision),
                 executor: Some("native_payload"),
             };
-            let prepared = (|| {
-                if context.ct.is_cancelled() || state.shutdown.is_cancelled() {
-                    return Err(ToolError::new(
-                        "cancelled",
-                        "Request cancelled before dispatch",
-                        false,
-                    ));
-                }
-                let prepared = binding.prepare_payload(&request, state.config.limits())?;
-                let deadline = request_deadline(started, prepared.duration)?;
-                let target = state.config.automation_target(id, &request.host)?;
-                let authority = serde_json::to_value(binding.automation_authority())
-                    .map_err(|_| {
-                        ToolError::new("policy_denied", "Invalid payload authority", false)
-                    })?
-                    .as_str()
-                    .ok_or_else(|| {
-                        ToolError::new("policy_denied", "Invalid payload authority", false)
-                    })?
-                    .to_owned();
-                Ok((prepared, deadline, target, authority))
-            })();
-            let (prepared, deadline, target, authority) = match prepared {
-                Ok(p) => p,
-                Err(error) => {
-                    metadata.reject(started, &error);
-                    let _ = sender.send(ToolReply::<AutomationData>::failure(error));
-                    return;
-                }
-            };
             let audit = Audit::start(metadata, started);
             let reply = state
                 .payload
                 .run(crate::native_payload::PayloadRun {
-                    plan: prepared.plan,
+                    plan,
                     host: &request.host,
                     authority: &authority,
                     target,
-                    argv: prepared.argv,
+                    argv,
+                    output_limit,
                     connect_timeout: Duration::from_secs(
                         state.config.limits().connect_timeout_secs,
                     ),
-                    output_limit: prepared.output_limit,
                     deadline,
                     ct: &context.ct,
                     started,

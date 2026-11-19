@@ -66,6 +66,7 @@ struct State {
 
 #[derive(Clone, Copy)]
 enum Failure {
+    Launch,
     Connect,
     Timeout,
     Cancelled,
@@ -75,6 +76,11 @@ enum Failure {
 impl Failure {
     fn error(self) -> ToolError {
         match self {
+            Self::Launch => ToolError::new(
+                "ssh_spawn_failed",
+                "Local SSH process failed to start; run `estus doctor --target <host>` for diagnostics",
+                false,
+            ),
             Self::Connect => ToolError::SSH_CONNECT_FAILED,
             Self::Timeout => ToolError::new("timeout", "SSH connection deadline expired", false),
             Self::Cancelled => ToolError::new("cancelled", "SSH connection cancelled", false),
@@ -499,12 +505,12 @@ impl Master {
             .prefix("sm-")
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
-            .map_err(|_| Failure::Connect)?;
+            .map_err(|_| Failure::Launch)?;
         // Request owner-only permissions at creation; never inherit TMPDIR or a
         // destination-derived pathname for the control socket.
         let socket = directory.path().join("c");
         if socket.as_os_str().as_bytes().len() > 100 {
-            return Err(Failure::Connect);
+            return Err(Failure::Launch);
         }
         let mut command = Command::new(executable);
         if let Some(agent) = agent {
@@ -552,7 +558,7 @@ impl Master {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|_| Failure::Connect)?;
+        let mut child = command.spawn().map_err(|_| Failure::Launch)?;
         let drain = child.stderr.take().map(|mut stderr| {
             tokio::spawn(async move {
                 let mut discard = [0_u8; 8192];
@@ -1048,7 +1054,7 @@ mod tests {
             .expect("nonexistent ssh fails launch");
         // Must not return connection_lost from the invalidated generation;
         // wait for teardown and attempt launch of a new generation.
-        assert_eq!(err.code, "ssh_connect_failed");
+        assert_eq!(err.code, "ssh_spawn_failed");
         assert!(
             lock(&pool.entries)
                 .get(&key)
@@ -1098,7 +1104,7 @@ mod tests {
             .await
             .err()
             .expect("nonexistent ssh fails launch after eviction");
-        assert_eq!(err.code, "ssh_connect_failed");
+        assert_eq!(err.code, "ssh_spawn_failed");
         assert!(!entries_list[0].1.stop.is_cancelled());
         for (key, entry) in entries_list {
             lock(&pool.entries).remove(&key);
@@ -1174,7 +1180,7 @@ mod tests {
             .await
             .err()
             .expect("fresh launch fails on nonexistent ssh");
-        assert_eq!(err.code, "ssh_connect_failed");
+        assert_eq!(err.code, "ssh_spawn_failed");
         pool.shutdown().await;
     }
 

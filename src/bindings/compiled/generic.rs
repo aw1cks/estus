@@ -100,13 +100,15 @@ impl CompiledBinding {
             _ => None,
         }
     }
-    pub(super) fn parse_generic(&self, arguments: JsonObject) -> Result<Request, ErrorData> {
+    pub(super) fn parse_generic(&self, arguments: &JsonObject) -> Result<Request, ErrorData> {
         // Structural shape belongs to protocol errors; authorization remains dispatch policy.
-        if serde_json::to_vec(&arguments).map_or(true, |b| b.len() > 256 * 1024) {
+        if serde_json::to_vec(arguments).map_or(true, |b| b.len() > 256 * 1024) {
             return Err(shape());
         }
-        let request: Request =
-            serde_json::from_value(Value::Object(arguments)).map_err(|_| shape())?;
+        let request = Request::deserialize(serde::de::value::MapDeserializer::new(
+            arguments.iter().map(|(k, v)| (k.as_str(), v)),
+        ))
+        .map_err(|_| shape())?;
         if request.host().is_empty() || request.host().len() > 128 {
             return Err(shape());
         }

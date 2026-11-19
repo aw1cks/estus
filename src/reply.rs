@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -25,14 +27,14 @@ impl<T> ToolReply<T> {
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ToolError {
     pub(crate) code: &'static str,
-    pub(crate) message: &'static str,
+    pub(crate) message: Cow<'static, str>,
     pub(crate) remote_state_unknown: bool,
 }
 
 impl ToolError {
     pub(crate) const SSH_CONNECT_FAILED: Self = Self::new(
         "ssh_connect_failed",
-        "SSH connection failed; verify the configured alias, authentication and known hosts with your SSH client outside MCP",
+        "SSH connection failed; run `estus doctor --target <host>` outside MCP to diagnose alias, authentication and known hosts",
         false,
     );
 
@@ -43,7 +45,19 @@ impl ToolError {
     ) -> Self {
         Self {
             code,
-            message,
+            message: Cow::Borrowed(message),
+            remote_state_unknown,
+        }
+    }
+
+    pub(crate) fn with_owned_message(
+        code: &'static str,
+        message: String,
+        remote_state_unknown: bool,
+    ) -> Self {
+        Self {
+            code,
+            message: Cow::Owned(message),
             remote_state_unknown,
         }
     }

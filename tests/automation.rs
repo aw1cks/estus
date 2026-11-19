@@ -97,7 +97,21 @@ impl Local {
     }
 
     fn private(&self, output: &Output) -> Result<()> {
-        for bytes in [&output.stdout, &output.stderr] {
+        let stdout_redacted: Vec<u8> = match serde_json::from_slice::<Value>(&output.stdout) {
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut()
+                    && let Some(exe) = object.remove("ssh_executable")
+                {
+                    let exe = exe.to_string();
+                    for secret in [SECRET, "Traceback", "PYTHON_INJECTION_RAN"] {
+                        ensure!(!exe.contains(secret), "private runtime diagnostics leaked");
+                    }
+                }
+                serde_json::to_vec(&value)?
+            }
+            Err(_) => output.stdout.clone(),
+        };
+        for bytes in [&stdout_redacted, &output.stderr] {
             let text = String::from_utf8_lossy(bytes);
             for secret in [
                 SECRET,
@@ -184,7 +198,7 @@ fn report(output: &Output, exit: i32) -> Result<Value> {
             .keys()
             .all(|key| matches!(
                 key.as_str(),
-                "ok" | "targets" | "runtime" | "error_code" | "phase"
+                "ok" | "ssh_executable" | "targets" | "runtime" | "error_code" | "phase"
             ))
     );
     Ok(value)

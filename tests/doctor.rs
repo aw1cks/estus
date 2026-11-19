@@ -98,15 +98,25 @@ fn report(output: &Output, exit: i32) -> Result<Value> {
     );
     let value: Value = serde_json::from_slice(&output.stdout)?;
     let object = value.as_object().context("report object")?;
-    ensure!(
-        object
-            .keys()
-            .all(|key| matches!(key.as_str(), "ok" | "targets" | "error_code" | "phase"))
-    );
+    ensure!(object.keys().all(|key| matches!(
+        key.as_str(),
+        "ok" | "ssh_executable" | "targets" | "error_code" | "phase"
+    )));
+    if let Some(exe) = object.get("ssh_executable") {
+        ensure!(
+            exe.as_str()
+                .is_some_and(|s| std::path::Path::new(s).is_absolute())
+        );
+    }
     ensure!(value["ok"] == (exit == 0));
     for target in value["targets"].as_array().context("target array")? {
         let target = target.as_object().context("target object")?;
-        ensure!(target.len() == 4);
+        ensure!(
+            target.keys().all(|key| matches!(
+                key.as_str(),
+                "target" | "ssh" | "sftp" | "sudo" | "effective_ssh_policy"
+            )) && target.len() >= 4
+        );
         ensure!(target.get("target").is_some_and(Value::is_string));
         for name in ["ssh", "sftp", "sudo"] {
             let check = target
@@ -789,5 +799,48 @@ async fn doctor_explicit_ssh_config_errors_never_fall_back_to_environment() -> R
         "invalid SSH configuration fell back or dispatched"
     );
     ensure!(before == (fs::read(&fixture.config)?, fs::read(&fixture.ssh)?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn doctor_reports_ssh_executable_and_effective_policy_warnings() -> Result<()> {
+    let Some(ssh) = support::find_program("ssh").ok() else {
+        return Ok(());
+    };
+    let directory = tempfile::tempdir()?;
+    let ssh_config = directory.path().join("ssh_config");
+    fs::write(
+        &ssh_config,
+        "Host insecure.invalid\n  StrictHostKeyChecking no\n  UpdateHostKeys no\n  BatchMode yes\n  ProxyCommand false\n",
+    )?;
+    let config = directory.path().join("estus.toml");
+    fs::write(
+        &config,
+        format!(
+            "profile = 'baseline'\n[ssh]\nexecutable = {}\nconfig_file = {}\n[targets.insecure]\nssh_host = 'insecure.invalid'\n",
+            serde_json::to_string(&ssh.to_string_lossy())?,
+            serde_json::to_string(&ssh_config.to_string_lossy())?,
+        ),
+    )?;
+    let output = Doctor::start(command(&config, &["--target", "insecure"])?)?
+        .finish()
+        .await?;
+    let value = report(&output, 1)?;
+    ensure!(value["ssh_executable"] == json!(ssh.to_string_lossy()));
+    let policy = &value["targets"][0]["effective_ssh_policy"];
+    ensure!(
+        matches!(
+            policy["strict_host_key_checking"].as_str(),
+            Some("no" | "off" | "false")
+        ),
+        "{value}"
+    );
+    ensure!(policy["batch_mode"] == "yes", "{value}");
+    ensure!(
+        policy["warnings"]
+            .as_array()
+            .is_some_and(|w| w.contains(&json!("strict_host_key_checking_disabled"))),
+        "{value}"
+    );
     Ok(())
 }

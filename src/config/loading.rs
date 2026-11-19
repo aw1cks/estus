@@ -479,7 +479,7 @@ impl Config {
                 .map(|path| resolve_path(path, &base, "ssh.executable"))
                 .transpose()?,
         };
-        let ssh_executable = resolve_ssh_executable(selected, cwd, || env("PATH"))?;
+        let ssh_executable = resolve_ssh_executable(selected, || env("PATH"))?;
         Ok(Self {
             profile: document.profile,
             ssh_config,
@@ -520,7 +520,6 @@ fn resolve_path(path: PathBuf, base: &Path, field: &'static str) -> Result<PathB
 
 fn resolve_ssh_executable(
     selected: Option<PathBuf>,
-    cwd: &Path,
     path: impl FnOnce() -> Option<OsString>,
 ) -> Result<PathBuf, ConfigError> {
     use std::os::unix::fs::PermissionsExt;
@@ -546,7 +545,10 @@ fn resolve_ssh_executable(
     }
     if let Some(path) = path() {
         for directory in std::env::split_paths(&path) {
-            let candidate = cwd.join(directory).join("ssh");
+            if !directory.is_absolute() {
+                continue;
+            }
+            let candidate = directory.join("ssh");
             if available(&candidate) {
                 return Ok(candidate);
             }
@@ -751,7 +753,7 @@ mod tests {
             args.ssh = cli_value.map(PathBuf::from);
             let config = Config::load_with(args, cwd, |key| match key {
                 "ESTUS_SSH" => env_value.map(OsString::from),
-                "PATH" => Some("bin".into()),
+                "PATH" => Some(cwd.join("bin").into_os_string()),
                 _ => None,
             })
             .unwrap();
@@ -797,7 +799,7 @@ mod tests {
                 }
                 let error = Config::load_with(args, cwd, |key| match key {
                     "ESTUS_SSH" if source == "env" => Some(value.clone()),
-                    "PATH" => Some("bin".into()),
+                    "PATH" => Some(cwd.join("bin").into_os_string()),
                     _ => None,
                 })
                 .err()
@@ -831,21 +833,34 @@ mod tests {
         let executable = std::env::current_exe().unwrap();
         symlink(&executable, cwd.join("selected/ssh")).unwrap();
         symlink(&executable, cwd.join("ssh")).unwrap();
-        for (path, expected) in [
-            ("missing:nonexecutable:directory:selected", "selected/ssh"),
-            ("", "ssh"),
+        let path = std::env::join_paths([
+            cwd.join("missing"),
+            cwd.join("nonexecutable"),
+            cwd.join("directory"),
+            PathBuf::from("relative-selected"),
+            cwd.join("selected"),
+        ])
+        .unwrap();
+        let mut args = cli();
+        args.ssh = None;
+        let config =
+            Config::load_with(args, cwd, |key| (key == "PATH").then(|| path.clone())).unwrap();
+        assert_eq!(config.ssh_executable(), cwd.join("selected/ssh"));
+        let relative_only = std::env::join_paths([
+            PathBuf::from("selected"),
+            PathBuf::from("."),
+            PathBuf::from(""),
+        ])
+        .unwrap();
+        for path in [
+            None,
+            Some(OsString::from("missing:nonexecutable:directory")),
+            Some(relative_only),
         ] {
             let mut args = cli();
             args.ssh = None;
-            let config =
-                Config::load_with(args, cwd, |key| (key == "PATH").then(|| path.into())).unwrap();
-            assert_eq!(config.ssh_executable(), cwd.join(expected));
-        }
-        for path in [None, Some("missing:nonexecutable:directory")] {
-            let mut args = cli();
-            args.ssh = None;
             let error = Config::load_with(args, cwd, |key| {
-                (key == "PATH").then(|| path.map(OsString::from)).flatten()
+                (key == "PATH").then(|| path.clone()).flatten()
             })
             .err()
             .unwrap();

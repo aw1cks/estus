@@ -5235,14 +5235,25 @@ async fn ssh_rename_no_overwrite_preserves_entries() -> Result<()> {
                 (&live, &absent),
                 (&dangling, &absent),
             ] {
-                for explicit_false in [false, true] {
-                    let mut args =
-                        json!({"host":"plain","source":source,"destination":destination});
-                    if explicit_false {
-                        args["overwrite"] = json!(false);
-                    }
-                    let reply = client.call("ssh_rename", args).await?;
-                    failed(&reply, "unsupported")?;
+                let omitted_err = client
+                    .service
+                    .call_tool(params(
+                        "ssh_rename",
+                        json!({"host":"plain","source":source,"destination":destination}),
+                    ))
+                    .await
+                    .unwrap_err();
+                ensure!(
+                    format!("{omitted_err:?}").contains("-32602")
+                        || matches!(omitted_err, rmcp::ServiceError::McpError(_))
+                );
+                let reply = client
+                    .call(
+                        "ssh_rename",
+                        json!({"host":"plain","source":source,"destination":destination,"overwrite":false}),
+                    )
+                    .await?;
+                failed(&reply, "unsupported")?;
                     ensure!(
                         reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false
                     );
@@ -5261,7 +5272,6 @@ async fn ssh_rename_no_overwrite_preserves_entries() -> Result<()> {
                     ensure!(fs::symlink_metadata(&absent).is_err());
                     ensure!(fs::symlink_metadata(&missing_target).is_err());
                     ensure!(fs::read_dir(&directory)?.count() == 5);
-                }
             }
             ensure!(
                 live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,

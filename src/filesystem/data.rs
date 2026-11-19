@@ -168,7 +168,6 @@ pub(crate) struct RenameRequest {
     pub(crate) source: String,
     #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) destination: String,
-    #[serde(default)]
     pub(crate) overwrite: bool,
     #[schemars(range(min = 1))]
     pub(crate) timeout_secs: Option<u64>,
@@ -339,11 +338,11 @@ pub(crate) struct ReplaceData {
 }
 
 impl ReplaceRequest {
-    pub(crate) fn validate(
-        &self,
+    pub(crate) fn take_validated(
+        &mut self,
         max_file_bytes: u64,
         budget: ReplyBudget,
-    ) -> Result<ReplaceSpec<'_>, ToolError> {
+    ) -> Result<(String, Vec<u8>, Option<u64>), ToolError> {
         if !self.overwrite {
             return Err(invalid(
                 "Atomic replacement requires explicit overwrite=true",
@@ -366,10 +365,12 @@ impl ReplaceRequest {
                 error: Some(ToolError::SSH_CONNECT_FAILED),
             })
             .map_err(|_| invalid("Request leaves insufficient response budget for replacement"))?;
-        Ok(ReplaceSpec {
-            path: &self.path,
-            content: decode_content(&self.content, self.encoding, max_file_bytes)?,
-        })
+        let content = decode_content_owned(
+            std::mem::take(&mut self.content),
+            self.encoding,
+            max_file_bytes,
+        )?;
+        Ok((std::mem::take(&mut self.path), content, self.timeout_secs))
     }
 }
 
@@ -514,6 +515,7 @@ impl ListRequest {
 }
 
 impl WriteRequest {
+    #[cfg(test)]
     pub(crate) fn validate(
         &self,
         max_file_bytes: u64,
@@ -542,8 +544,43 @@ impl WriteRequest {
             overwrite: self.overwrite,
         })
     }
+
+    pub(crate) fn take_validated(
+        &mut self,
+        max_file_bytes: u64,
+        budget: ReplyBudget,
+    ) -> Result<(String, Vec<u8>, bool, Option<u64>), ToolError> {
+        if self.path.is_empty() || self.path.contains('\0') {
+            return Err(invalid("path must be nonempty and NUL-free"));
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(invalid("timeout_secs must be positive"));
+        }
+        budget
+            .remaining(&ToolReply {
+                data: Some(WriteData {
+                    bytes_written: u64::MAX,
+                }),
+                error: Some(ToolError::SSH_CONNECT_FAILED),
+            })
+            .map_err(|_| {
+                invalid("Request leaves insufficient response budget for a write result")
+            })?;
+        let content = decode_content_owned(
+            std::mem::take(&mut self.content),
+            self.encoding,
+            max_file_bytes,
+        )?;
+        Ok((
+            std::mem::take(&mut self.path),
+            content,
+            self.overwrite,
+            self.timeout_secs,
+        ))
+    }
 }
 
+#[cfg(test)]
 fn decode_content(
     content: &str,
     encoding: Encoding,
@@ -556,31 +593,48 @@ fn decode_content(
             }
             Ok(Cow::Borrowed(content.as_bytes()))
         }
-        Encoding::Base64 => {
-            let input = content.as_bytes();
-            if !input.len().is_multiple_of(4) {
-                return Err(invalid_base64());
-            }
-            let padding = if input.ends_with(b"==") {
-                2
-            } else {
-                usize::from(input.ends_with(b"="))
-            };
-            let decoded_len = (input.len() / 4)
-                .checked_mul(3)
-                .and_then(|len| len.checked_sub(padding))
-                .ok_or_else(invalid_base64)?;
-            // Inspect the raw length before allocating the exact decoded buffer.
-            if decoded_len as u64 > max_file_bytes {
+        Encoding::Base64 => decode_base64(content.as_bytes(), max_file_bytes).map(Cow::Owned),
+    }
+}
+
+fn decode_content_owned(
+    content: String,
+    encoding: Encoding,
+    max_file_bytes: u64,
+) -> Result<Vec<u8>, ToolError> {
+    match encoding {
+        Encoding::Utf8 => {
+            if content.len() as u64 > max_file_bytes {
                 return Err(invalid("content exceeds the configured file limit"));
             }
-            let mut decoded = vec![0; decoded_len];
-            STANDARD
-                .decode_slice(input, &mut decoded)
-                .map_err(|_| invalid_base64())?;
-            Ok(Cow::Owned(decoded))
+            Ok(content.into_bytes())
         }
+        Encoding::Base64 => decode_base64(content.as_bytes(), max_file_bytes),
     }
+}
+
+fn decode_base64(input: &[u8], max_file_bytes: u64) -> Result<Vec<u8>, ToolError> {
+    if !input.len().is_multiple_of(4) {
+        return Err(invalid_base64());
+    }
+    let padding = if input.ends_with(b"==") {
+        2
+    } else {
+        usize::from(input.ends_with(b"="))
+    };
+    let decoded_len = (input.len() / 4)
+        .checked_mul(3)
+        .and_then(|len| len.checked_sub(padding))
+        .ok_or_else(invalid_base64)?;
+    // Inspect the raw length before allocating the exact decoded buffer.
+    if decoded_len as u64 > max_file_bytes {
+        return Err(invalid("content exceeds the configured file limit"));
+    }
+    let mut decoded = vec![0; decoded_len];
+    STANDARD
+        .decode_slice(input, &mut decoded)
+        .map_err(|_| invalid_base64())?;
+    Ok(decoded)
 }
 
 fn invalid_base64() -> ToolError {

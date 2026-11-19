@@ -1496,24 +1496,53 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
         (
             "ssh_targets",
             json!({"A12_PRIVATE_UNKNOWN_KEY":"/private/A12_PRIVATE_VALUE"}),
+            "arguments",
+            "unknown_field",
         ),
         (
             "ssh_exec",
             json!({"host":"A12_PRIVATE_HOST","command":["A12_PRIVATE_VALUE"]}),
+            "arguments.command",
+            "invalid_type",
         ),
-        ("ssh_exec", json!({"host":"A12_PRIVATE_HOST"})),
+        (
+            "ssh_exec",
+            json!({"host":"A12_PRIVATE_HOST"}),
+            "arguments.command",
+            "missing_field",
+        ),
         (
             "ssh_sudo",
             json!({
                 "host":"A12_PRIVATE_HOST","user":"A12_PRIVATE_USER",
                 "argv":["/private/A12_PRIVATE_PROGRAM",{"A12_PRIVATE_UNKNOWN_KEY":"A12_PRIVATE_VALUE"}]
             }),
+            "arguments.argv.1",
+            "invalid_type",
         ),
         (
             "ssh_read_output",
             json!({
-                "handle":"A12_PRIVATE_HANDLE","stream":"A12_PRIVATE_STREAM"
+                "handle":"0123456789abcdef0123456789abcdef","stream":"A12_PRIVATE_STREAM"
             }),
+            "arguments.stream",
+            "invalid_enum",
+        ),
+        (
+            "ssh_read_output",
+            json!({
+                "handle":"0123456789abcdef0123456789abcdef","stream":"stdout","offset":-1
+            }),
+            "arguments.offset",
+            "below_minimum",
+        ),
+        (
+            "ssh_exec",
+            json!({
+                "host":"A12_PRIVATE_HOST","command":"true","timeout_secs":-1
+            }),
+            "arguments.timeout_secs",
+            "below_minimum",
         ),
     ];
     let scenario = async {
@@ -1527,7 +1556,9 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
         let tools = listed["result"]["tools"]
             .as_array()
             .context("published tools")?;
-        for (index, (name, arguments)) in cases.iter().enumerate() {
+        for (index, (name, arguments, expected_path, expected_constraint)) in
+            cases.iter().enumerate()
+        {
             let tool = tools
                 .iter()
                 .find(|tool| tool["name"] == *name)
@@ -1557,7 +1588,8 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
                         "data":{
                             "code":"invalid_argument",
                             "phase":"argument_shape",
-                            "schema_path":"arguments"
+                            "schema_path":expected_path,
+                            "constraint":expected_constraint,
                         }
                     }),
                 "{name}: unsafe or incomplete argument diagnostic: {response}"
@@ -1609,7 +1641,7 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
             record["event"] != "master_start",
             "shape rejection launched SSH"
         );
-        for (index, (name, _)) in cases.iter().enumerate() {
+        for (index, (name, _, _, _)) in cases.iter().enumerate() {
             if record["request_id"] == 10 + index as u64 {
                 ensure!(!rejected[index], "duplicate shape rejection audit");
                 ensure!(
@@ -1845,6 +1877,11 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                     cases.push((arguments, false, "invalid_argument"));
                     let mut arguments = base.clone();
                     arguments.as_object_mut().context("replace arguments")?.remove("overwrite");
+                    cases.push((arguments, false, "invalid_params"));
+                }
+                if name == "ssh_rename" {
+                    let mut arguments = base.clone();
+                    arguments.as_object_mut().context("rename arguments")?.remove("overwrite");
                     cases.push((arguments, false, "invalid_params"));
                 }
                 if configured_limits && matches!(name, "ssh_run" | "ssh_write_file" | "ssh_replace_file") {
@@ -2527,8 +2564,9 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
                 .map(|field| field.as_str().context("required field"))
                 .collect::<Result<_>>()?;
             required.sort_unstable();
-            ensure!(required == ["destination", "host", "source"]);
+            ensure!(required == ["destination", "host", "overwrite", "source"]);
             ensure!(input["properties"]["overwrite"]["type"] == "boolean");
+            ensure!(input["properties"]["overwrite"]["const"] == true);
             for field in ["source", "destination"] {
                 ensure!(input["properties"][field]["type"] == "string");
                 ensure!(
@@ -6347,5 +6385,140 @@ fi
     fixture.public_only(&stderr)?;
     no_remote_dispatch(&stderr)?;
     ensure!(!std::str::from_utf8(&stderr)?.contains("CONTROLLER_CANCEL_SECRET"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unauthorized_requests_return_policy_denied_even_when_operations_saturated() -> Result<()> {
+    let fixture = ControllerProtocolFixture::new()?;
+    let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|path| path.join("sleep"))
+        .chain([std::path::PathBuf::from("/bin/sleep")])
+        .find(|path| path.is_file())
+        .context("sleep executable is required")?;
+    let sleep_q = format!("'{}'", sleep.to_string_lossy().replace('\'', "'\\''"));
+    let marker_dir = fixture.directory.path().join("sat-markers");
+    std::fs::create_dir(&marker_dir)?;
+    let marker_dir_q = format!(
+        "'{}'",
+        marker_dir
+            .to_str()
+            .context("marker dir UTF-8")?
+            .replace('\'', "'\\''")
+    );
+    let release = fixture.directory.path().join("sat-release");
+    let release_q = format!(
+        "'{}'",
+        release
+            .to_str()
+            .context("release path UTF-8")?
+            .replace('\'', "'\\''")
+    );
+    let script = format!(
+        r#"IFS= read -r payload < "$1" || :
+case "$payload" in
+  *SLOT-1*) idx=1 ;;
+  *SLOT-2*) idx=2 ;;
+  *SLOT-3*) idx=3 ;;
+  *SLOT-4*) idx=4 ;;
+  *SLOT-5*) idx=5 ;;
+  *SLOT-6*) idx=6 ;;
+  *SLOT-7*) idx=7 ;;
+  *SLOT-8*) idx=8 ;;
+  *) idx=0 ;;
+esac
+: > {marker_dir_q}/started-"$idx"
+i=0
+while [ ! -f {release_q} ] && [ "$i" -lt 200 ]; do
+  {sleep_q} 0.05
+  i=$((i+1))
+done
+"#
+    );
+    std::fs::write(&fixture.source, script.as_bytes())?;
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(std::fs::read(&fixture.source)?));
+    let config = fixture
+        .config
+        .replace(&fixture.hash, &hash)
+        .replace("profile = \"actions-only\"", "profile = \"baseline\"")
+        .replace("timeout_secs = 2", "timeout_secs = 5");
+    let mut server = fixture.start(&config)?;
+    let scenario = async {
+        server.initialize().await?;
+        // Saturate all 8 global operation slots.
+        for idx in 1..=8 {
+            server
+                .send(modern_request(
+                    json!(idx),
+                    "tools/call",
+                    json!({
+                        "name": "observe_controller",
+                        "arguments": {"label": format!("SLOT-{idx}-CONTROLLER_INPUT_SECRET"), "count": 1, "verbose": false}
+                    }),
+                    MODERN_VERSION,
+                ))
+                .await?;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&marker_dir)?.count() < 8 {
+            ensure!(tokio::time::Instant::now() < deadline, "did not saturate 8 slots");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Unauthorized command and file calls must still return policy_denied, not resource_limit.
+        server
+            .send(modern_request(
+                json!(101),
+                "tools/call",
+                json!({"name": "ssh_exec", "arguments": {"host": "unconfigured", "command": "true"}}),
+                MODERN_VERSION,
+            ))
+            .await?;
+        profile_policy_denied(&server.response(101).await?)?;
+        server
+            .send(modern_request(
+                json!(102),
+                "tools/call",
+                json!({"name": "ssh_read_file", "arguments": {"host": "unconfigured", "path": "/etc/hosts"}}),
+                MODERN_VERSION,
+            ))
+            .await?;
+        profile_policy_denied(&server.response(102).await?)?;
+        // Authorized call must hit resource_limit while saturated.
+        server
+            .send(modern_request(
+                json!(103),
+                "tools/call",
+                json!({
+                    "name": "observe_controller",
+                    "arguments": {"label": "CONTROLLER_INPUT_SECRET", "count": 1, "verbose": false}
+                }),
+                MODERN_VERSION,
+            ))
+            .await?;
+        let sat = server.response(103).await?;
+        ensure!(
+            sat["result"]["structuredContent"]["error"]["code"] == "resource_limit",
+            "expected resource_limit under saturation: {sat}"
+        );
+        std::fs::write(&release, b"done")?;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 1..=8 {
+            let (frame, _) = server
+                .frame()
+                .await?
+                .context("server closed stdout before saturated calls finished")?;
+            let id = frame["id"].as_u64().context("saturated response id")?;
+            ensure!(seen.insert(id), "duplicate saturated response id {id}");
+        }
+        ensure!(seen == (1..=8).collect(), "unexpected saturated response ids: {seen:?}");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let _ = std::fs::write(&release, b"done");
+    let finished = server.finish().await;
+    scenario?;
+    let (status, _) = finished?;
+    ensure!(status.success());
     Ok(())
 }

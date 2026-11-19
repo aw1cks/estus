@@ -39,17 +39,160 @@ use super::{Estus, preparation::Operation};
 pub(super) struct Empty {}
 
 // RMCP 3.9 converts its Parameters extractor's errors into tool results. This
-// extractor keeps argument-shape failures at the protocol boundary and never
-// reflects malformed input values or field names in diagnostics.
+// extractor keeps argument-shape failures at the protocol boundary and uses the
+// registered schema to identify only declared paths and constraint kinds.
 pub(super) struct Arguments<T>(T);
+
+fn resolve_ref<'a>(
+    root: &'a serde_json::Value,
+    node: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    let Some(reference) = node.get("$ref").and_then(serde_json::Value::as_str) else {
+        return node;
+    };
+    let Some(pointer) = reference.strip_prefix('#') else {
+        return node;
+    };
+    root.pointer(pointer).unwrap_or(node)
+}
+
+fn classify_constraint(error: &jsonschema::ValidationError<'_>) -> &'static str {
+    classify_kind(error.kind(), error.schema_path().as_str())
+}
+
+fn classify_kind(kind: &jsonschema::error::ValidationErrorKind, schema_path: &str) -> &'static str {
+    use jsonschema::error::ValidationErrorKind as K;
+    match kind {
+        K::AdditionalProperties { .. } | K::UnevaluatedProperties { .. } => "unknown_field",
+        K::FalseSchema
+            if schema_path.ends_with("/additionalProperties")
+                || schema_path.ends_with("/unevaluatedProperties") =>
+        {
+            "unknown_field"
+        }
+        K::Required { .. } => "missing_field",
+        K::Type { .. } => "invalid_type",
+        K::Enum { .. } => "invalid_enum",
+        K::Minimum { .. } | K::ExclusiveMinimum { .. } => "below_minimum",
+        K::Maximum { .. } | K::ExclusiveMaximum { .. } => "above_maximum",
+        K::MinLength { .. } | K::MinItems { .. } | K::MinProperties { .. } => "too_short",
+        K::MaxLength { .. } | K::MaxItems { .. } | K::MaxProperties { .. } => "too_long",
+        K::Pattern { .. } | K::BacktrackLimitExceeded { .. } | K::Format { .. } => {
+            "pattern_mismatch"
+        }
+        K::Constant { .. } => "const_mismatch",
+        K::AnyOf { context } | K::OneOfNotValid { context } => context
+            .iter()
+            .flatten()
+            .find(|err| !matches!(err.kind(), K::Type { .. }))
+            .map(|err| classify_constraint(err))
+            .unwrap_or("invalid_type"),
+        _ => "invalid_type",
+    }
+}
+
+fn safe_schema_path(root: &serde_json::Value, error: &jsonschema::ValidationError<'_>) -> String {
+    use jsonschema::error::ValidationErrorKind as K;
+    use jsonschema::paths::LocationSegment;
+    use serde_json::Value;
+
+    let mut path = String::from("arguments");
+    let mut cursor = resolve_ref(root, root);
+    for segment in error.instance_path().iter() {
+        cursor = resolve_ref(root, cursor);
+        match segment {
+            LocationSegment::Property(prop) => {
+                if let Some(next) = cursor
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|props| props.get(prop.as_ref()))
+                {
+                    path.push('.');
+                    path.push_str(prop.as_ref());
+                    cursor = resolve_ref(root, next);
+                } else {
+                    return path;
+                }
+            }
+            LocationSegment::Index(idx) => {
+                let items = cursor.get("items").or_else(|| {
+                    cursor
+                        .get("anyOf")
+                        .and_then(Value::as_array)
+                        .and_then(|branches| {
+                            branches
+                                .iter()
+                                .map(|branch| resolve_ref(root, branch))
+                                .find_map(|branch| branch.get("items"))
+                        })
+                });
+                if let Some(next) = items {
+                    path.push('.');
+                    path.push_str(&idx.to_string());
+                    cursor = resolve_ref(root, next);
+                } else {
+                    return path;
+                }
+            }
+        }
+    }
+    if let K::Required {
+        property: Value::String(prop),
+    } = error.kind()
+    {
+        cursor = resolve_ref(root, cursor);
+        if cursor
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|props| props.contains_key(prop))
+        {
+            path.push('.');
+            path.push_str(prop);
+        }
+    }
+    path
+}
+
+fn diagnose_schema_error(
+    route: Option<&super::registration::RouteSchema>,
+    value: &serde_json::Value,
+) -> (String, &'static str) {
+    let Some(route) = route else {
+        return ("arguments".to_owned(), "invalid_type");
+    };
+    route
+        .validator
+        .iter_errors(value)
+        .map(|error| {
+            (
+                safe_schema_path(&route.schema, &error),
+                classify_constraint(&error),
+            )
+        })
+        .min()
+        .unwrap_or_else(|| ("arguments".to_owned(), "invalid_type"))
+}
+
+fn shape_error(
+    route: Option<&super::registration::RouteSchema>,
+    value: &serde_json::Value,
+) -> ErrorData {
+    let (schema_path, constraint) = diagnose_schema_error(route, value);
+    ErrorData::invalid_params(
+        "Arguments do not match the tool input schema",
+        Some(serde_json::json!({
+            "code": "invalid_argument",
+            "phase": "argument_shape",
+            "schema_path": schema_path,
+            "constraint": constraint,
+        })),
+    )
+}
 
 impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, Estus>> for Arguments<T> {
     fn from_context_part(context: &mut ToolCallContext<'_, Estus>) -> Result<Self, ErrorData> {
-        serde_json::from_value(serde_json::Value::Object(
-            context.arguments.take().unwrap_or_default(),
-        ))
-        .map(Self)
-        .map_err(|_| {
+        let value = serde_json::Value::Object(context.arguments.take().unwrap_or_default());
+        T::deserialize(&value).map(Self).map_err(|_| {
             let error = ToolError::new(
                 "invalid_argument",
                 "Arguments do not match the tool input schema",
@@ -71,13 +214,13 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, Estus>> for Argume
                 executor: None,
             };
             metadata.reject(Instant::now(), &error);
-            ErrorData::invalid_params(
-                error.message,
-                Some(serde_json::json!({
-                    "code": "invalid_argument",
-                    "phase": "argument_shape",
-                    "schema_path": "arguments",
-                })),
+            shape_error(
+                context
+                    .service
+                    .state
+                    .input_schemas
+                    .get(context.name.as_ref()),
+                &value,
             )
         })
     }
@@ -101,7 +244,7 @@ impl Estus {
             .and_then(serde_json::Value::as_str)
             .filter(|host| binding.targets.iter().any(|allowed| allowed == host))
             .map(|host| self.state.config.sudo_mode(host));
-        match binding.parse_request(arguments) {
+        match binding.parse_request_ref(&arguments) {
             Ok(BindingCall::Remote(request)) => {
                 self.command(Operation::Binding { id, request }, context)
                     .await
@@ -114,7 +257,12 @@ impl Estus {
             }
             Ok(BindingCall::Generic(request)) => self.generic_binding(id, request, context).await,
             Ok(BindingCall::Payload(request)) => self.payload_binding(id, request, context).await,
-            Err(error) => {
+            Err(_) => {
+                let value = serde_json::Value::Object(arguments);
+                let error = shape_error(
+                    self.state.input_schemas.get(self.state.binding_name(id)),
+                    &value,
+                );
                 if binding.is_controller() {
                     self.state
                         .controller_metadata(id, &context.id)

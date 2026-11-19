@@ -54,17 +54,46 @@ impl Estus {
             metadata.reject(started, &error);
             budget.result(ToolReply::<AutomationData>::failure(error))
         };
+        if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
+            return reject("cancelled", "Request cancelled before dispatch");
+        }
+        let target = match self.state.config.automation_target(id, &request.host) {
+            Ok(target) => target,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<AutomationData>::failure(error));
+            }
+        };
+        let (bytes, files) = self.state.config.automation_scratch();
+        let prepared = match binding.prepare_automation(
+            &request,
+            self.state.config.limits(),
+            bindings::AutomationTransport {
+                authority: target,
+                scratch_bytes: bytes,
+                scratch_files: files,
+                started,
+            },
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<AutomationData>::failure(error));
+            }
+        };
+        let deadline = match request_deadline(started, prepared.controller.duration) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<AutomationData>::failure(error));
+            }
+        };
         let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
             return reject("resource_limit", "Tool operation limit reached");
         };
         let Ok(runtime) = self.state.automation.clone().try_acquire_owned() else {
             return reject("resource_limit", "Automation operation limit reached");
         };
-        // Authorize before selecting a logical target's fixed semaphore.
-        if let Err(error) = self.state.config.automation_target(id, &request.host) {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<AutomationData>::failure(error));
-        }
         let Some(target) = self.state.automation_targets.get(&request.host) else {
             return reject("policy_denied", "Operation is not authorized");
         };
@@ -96,37 +125,6 @@ impl Estus {
                 program: None,
                 binding_revision: Some(&binding.revision),
                 executor: Some(binding.executor_kind()),
-            };
-            let prepared = (|| {
-                if context.ct.is_cancelled() || state.shutdown.is_cancelled() {
-                    return Err(ToolError::new(
-                        "cancelled",
-                        "Request cancelled before dispatch",
-                        false,
-                    ));
-                }
-                let target = state.config.automation_target(id, &request.host)?;
-                let (bytes, files) = state.config.automation_scratch();
-                let prepared = binding.prepare_automation(
-                    &request,
-                    state.config.limits(),
-                    bindings::AutomationTransport {
-                        authority: target,
-                        scratch_bytes: bytes,
-                        scratch_files: files,
-                        started,
-                    },
-                )?;
-                let deadline = request_deadline(started, prepared.controller.duration)?;
-                Ok((prepared, deadline))
-            })();
-            let (prepared, deadline) = match prepared {
-                Ok(value) => value,
-                Err(error) => {
-                    metadata.reject(started, &error);
-                    let _ = sender.send(ToolReply::<AutomationData>::failure(error));
-                    return;
-                }
             };
             let audit = Audit::start(metadata, started);
             let run = crate::automation::execution::run(
@@ -180,6 +178,38 @@ impl Estus {
                 return Err(error);
             }
         };
+        let prepared = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ControllerError::new(
+                    "cancelled",
+                    "Controller request cancelled before dispatch",
+                ));
+            }
+            if !self.state.config.controller_enabled(id) {
+                return Err(ControllerError::new(
+                    "policy_denied",
+                    "Controller operation is not authorized",
+                ));
+            }
+            let binding = self
+                .state
+                .config
+                .bindings()
+                .get(id)
+                .expect("registered controller binding exists");
+            let prepared = binding.prepare_controller(&request, self.state.config.limits())?;
+            let deadline = request_deadline(started, prepared.duration).map_err(|error| {
+                ControllerError::new(error.code, "Controller request deadline expired")
+            })?;
+            Ok((prepared, deadline))
+        })();
+        let (prepared, deadline) = match prepared {
+            Ok(value) => value,
+            Err(error) => {
+                metadata.reject_controller(started, &error);
+                return budget.controller_result(ControllerReply::failure(error));
+            }
+        };
         let Some(cleanup_slot) = self.state.cleanup_quarantine.try_reserve() else {
             let error = ControllerError::new(
                 "resource_limit",
@@ -202,37 +232,6 @@ impl Estus {
             // Receiver cancellation cannot drop admission, files, or child ownership.
             let permit = permit;
             let metadata = state.controller_metadata(id, &context.id);
-            let prepared = (|| {
-                if state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                    return Err(ControllerError::new(
-                        "cancelled",
-                        "Controller request cancelled before dispatch",
-                    ));
-                }
-                if !state.config.controller_enabled(id) {
-                    return Err(ControllerError::new(
-                        "policy_denied",
-                        "Controller operation is not authorized",
-                    ));
-                }
-                let binding = state
-                    .config
-                    .bindings()
-                    .get(id)
-                    .expect("registered controller binding exists");
-                let prepared = binding.prepare_controller(&request, state.config.limits())?;
-                let deadline = request_deadline(started, prepared.duration)
-                    .map_err(|error| ControllerError::new(error.code, error.message))?;
-                Ok((prepared, deadline))
-            })();
-            let (prepared, deadline) = match prepared {
-                Ok(value) => value,
-                Err(error) => {
-                    metadata.reject_controller(started, &error);
-                    let _ = sender.send(ControllerReply::failure(error));
-                    return;
-                }
-            };
             let audit = Audit::start(metadata, started);
             let retention = request.retain_output.then(|| state.outputs.reserve());
             let run = crate::controller::run(

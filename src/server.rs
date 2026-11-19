@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc, time::Duration};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use tokio::sync::Semaphore;
@@ -31,6 +31,7 @@ struct State {
     config: Config,
     tools: ToolCatalog,
     sudo_name: Cow<'static, str>,
+    input_schemas: BTreeMap<String, registration::RouteSchema>,
     pool: Arc<Pool>,
     shutdown: CancellationToken,
     operations: Arc<Semaphore>,
@@ -51,6 +52,7 @@ impl Estus {
             router: tool_router,
             tools,
             sudo_name,
+            input_schemas,
         } = registration::register(&config)?;
         let shutdown = CancellationToken::new();
         let pool = Pool::new(
@@ -75,6 +77,7 @@ impl Estus {
                 config,
                 tools,
                 sudo_name,
+                input_schemas,
                 pool,
                 shutdown,
                 operations: Arc::new(Semaphore::new(8)),

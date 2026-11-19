@@ -35,6 +35,22 @@ impl Estus {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = file_metadata(&request.host, ToolId::ReadFile, &self.state, &context.id);
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(self.state.config.limits().max_file_bytes, budget)?;
+            self.state.config.resolve(&request.host, ToolId::ReadFile)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<ReadData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -58,6 +74,22 @@ impl Estus {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = file_metadata(&request.host, ToolId::Stat, &self.state, &context.id);
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(budget)?;
+            self.state.config.resolve(&request.host, ToolId::Stat)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<StatData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -86,6 +118,24 @@ impl Estus {
             &self.state,
             &context.id,
         );
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(budget)?;
+            self.state
+                .config
+                .resolve(&request.host, ToolId::ListDirectory)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<ListData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -105,23 +155,56 @@ impl Estus {
 
     pub(super) async fn write_file(
         &self,
-        request: WriteRequest,
+        mut request: WriteRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::WriteFile, &self.state, &context.id);
+        let (path, content, overwrite, deadline) = match (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            let (path, content, overwrite, timeout_secs) =
+                request.take_validated(self.state.config.limits().max_file_bytes, budget)?;
+            self.state
+                .config
+                .resolve(&request.host, ToolId::WriteFile)?;
+            let deadline = request_deadline(started, self.state.config.timeout(timeout_secs)?)?;
+            Ok((path, content, overwrite, deadline))
+        })() {
+            Ok(validated) => validated,
+            Err(error) => {
+                file_metadata(&request.host, ToolId::WriteFile, &self.state, &context.id)
+                    .reject(started, &error);
+                return budget.result(ToolReply::<WriteData>::failure(error));
+            }
+        };
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
+                file_metadata(&request.host, ToolId::WriteFile, &self.state, &context.id)
+                    .reject(started, &error);
                 return budget.result(ToolReply::<WriteData>::failure(error));
             }
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state.write_file(request, context, started, budget).await
+            state
+                .write_file(
+                    request.host,
+                    path,
+                    content,
+                    overwrite,
+                    deadline,
+                    context,
+                    started,
+                )
+                .await
         })
         .await
     }
@@ -134,6 +217,22 @@ impl Estus {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = file_metadata(&request.host, ToolId::Mkdir, &self.state, &context.id);
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(budget)?;
+            self.state.config.resolve(&request.host, ToolId::Mkdir)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<MkdirData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -157,6 +256,22 @@ impl Estus {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = file_metadata(&request.host, ToolId::Rename, &self.state, &context.id);
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(budget)?;
+            self.state.config.resolve(&request.host, ToolId::Rename)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<RenameData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -180,6 +295,24 @@ impl Estus {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = file_metadata(&request.host, ToolId::RemoveFile, &self.state, &context.id);
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(budget)?;
+            self.state
+                .config
+                .resolve(&request.host, ToolId::RemoveFile)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<RemoveFileData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -208,6 +341,24 @@ impl Estus {
             &self.state,
             &context.id,
         );
+        if let Err(error) = (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            request.validate(budget)?;
+            self.state
+                .config
+                .resolve(&request.host, ToolId::RemoveDirectory)?;
+            request_deadline(started, self.state.config.timeout(request.timeout_secs)?)?;
+            Ok(())
+        })() {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<RemoveDirectoryData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -227,27 +378,51 @@ impl Estus {
 
     pub(super) async fn replace_file(
         &self,
-        request: ReplaceRequest,
+        mut request: ReplaceRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let metadata = file_metadata(&request.host, ToolId::ReplaceFile, &self.state, &context.id);
+        let (path, content, deadline) = match (|| {
+            if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+                return Err(ToolError::new(
+                    "cancelled",
+                    "Request cancelled before dispatch",
+                    false,
+                ));
+            }
+            let (path, content, timeout_secs) =
+                request.take_validated(self.state.config.limits().max_file_bytes, budget)?;
+            self.state
+                .config
+                .resolve(&request.host, ToolId::ReplaceFile)?;
+            let deadline = request_deadline(started, self.state.config.timeout(timeout_secs)?)?;
+            Ok((path, content, deadline))
+        })() {
+            Ok(validated) => validated,
+            Err(error) => {
+                file_metadata(&request.host, ToolId::ReplaceFile, &self.state, &context.id)
+                    .reject(started, &error);
+                return budget.result(ToolReply::<ReplaceData>::failure(error));
+            }
+        };
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 let error = ToolError::new("resource_limit", "Tool operation limit reached", false);
-                metadata.reject(started, &error);
+                file_metadata(&request.host, ToolId::ReplaceFile, &self.state, &context.id)
+                    .reject(started, &error);
                 return budget.result(ToolReply::<ReplaceData>::failure(error));
             }
         };
         let state = Arc::clone(&self.state);
         self.file_result(budget, permit, async move {
-            state.replace_file(request, context, started, budget).await
+            state
+                .replace_file(request.host, path, content, deadline, context, started)
+                .await
         })
         .await
     }
-
     async fn file_result<T: Serialize + Send + 'static>(
         &self,
         budget: ReplyBudget,
@@ -440,37 +615,25 @@ impl State {
         reply
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn write_file(
         &self,
-        request: WriteRequest,
+        host: String,
+        path: String,
+        content: Vec<u8>,
+        overwrite: bool,
+        deadline: tokio::time::Instant,
         context: RequestContext<RoleServer>,
         started: Instant,
-        budget: ReplyBudget,
     ) -> ToolReply<WriteData> {
         let progress = crate::progress::Reporter::from_context(&context);
         let request_id = context.id;
         let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::WriteFile, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request
-            .validate(self.config.limits().max_file_bytes, budget)
-            .and_then(|spec| {
-                let target = self.config.resolve(&request.host, ToolId::WriteFile)?;
-                let deadline =
-                    request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-                Ok((spec, target, deadline))
-            });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
+        let metadata = file_metadata(&host, ToolId::WriteFile, self, &request_id);
+        let target = self
+            .config
+            .resolve(&host, ToolId::WriteFile)
+            .expect("write target already authorized");
         let audit = Audit::start(metadata, started);
         let reply = match self
             .pool
@@ -480,7 +643,11 @@ impl State {
             Ok(lease) => {
                 let outcome = operations::write(
                     lease.session(),
-                    spec,
+                    crate::filesystem::data::WriteSpec {
+                        path: &path,
+                        content: std::borrow::Cow::Borrowed(&content),
+                        overwrite,
+                    },
                     FileContext {
                         deadline,
                         ct: &ct,
@@ -737,35 +904,21 @@ impl State {
 
     pub(super) async fn replace_file(
         &self,
-        request: ReplaceRequest,
+        host: String,
+        path: String,
+        content: Vec<u8>,
+        deadline: tokio::time::Instant,
         context: RequestContext<RoleServer>,
         started: Instant,
-        budget: ReplyBudget,
     ) -> ToolReply<ReplaceData> {
         let progress = crate::progress::Reporter::from_context(&context);
         let request_id = context.id;
         let ct = context.ct;
-        let metadata = file_metadata(&request.host, ToolId::ReplaceFile, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let validated = request
-            .validate(self.config.limits().max_file_bytes, budget)
-            .and_then(|spec| {
-                let target = self.config.resolve(&request.host, ToolId::ReplaceFile)?;
-                let deadline =
-                    request_deadline(started, self.config.timeout(request.timeout_secs)?)?;
-                Ok((spec, target, deadline))
-            });
-        let (spec, target, deadline) = match validated {
-            Ok(validated) => validated,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
+        let metadata = file_metadata(&host, ToolId::ReplaceFile, self, &request_id);
+        let target = self
+            .config
+            .resolve(&host, ToolId::ReplaceFile)
+            .expect("replace target already authorized");
         let audit = Audit::start(metadata, started);
         let reply = match self
             .pool
@@ -775,7 +928,10 @@ impl State {
             Ok(lease) => {
                 let outcome = operations::replace_file(
                     lease.session(),
-                    spec,
+                    crate::filesystem::data::ReplaceSpec {
+                        path: &path,
+                        content: std::borrow::Cow::Borrowed(&content),
+                    },
                     FileContext {
                         deadline,
                         ct: &ct,

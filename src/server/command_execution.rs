@@ -35,6 +35,18 @@ impl Estus {
                 return Err(error);
             }
         };
+        if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
+            let error = ToolError::new("cancelled", "Request cancelled before dispatch", false);
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<CommandData>::failure(error));
+        }
+        if let Err(error) = request
+            .prepare(&self.state.config)
+            .and_then(|prepared| request_deadline(started, prepared.duration).map(|_| ()))
+        {
+            metadata.reject(started, &error);
+            return budget.result(ToolReply::<CommandData>::failure(error));
+        }
         let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {

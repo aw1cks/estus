@@ -2,9 +2,7 @@ use super::*;
 use std::time::Duration;
 
 use crate::native_payload::PayloadPlan;
-
-pub(crate) struct PreparedPayload<'a> {
-    pub(crate) plan: &'a PayloadPlan,
+pub(crate) struct PreparedPayload {
     pub(crate) argv: Vec<String>,
     pub(crate) duration: Duration,
     pub(crate) output_limit: usize,
@@ -142,31 +140,34 @@ impl CompiledBinding {
         }
     }
 
-    pub(super) fn parse_payload(
-        &self,
-        mut arguments: JsonObject,
-    ) -> Result<BindingCall, ErrorData> {
+    pub(super) fn parse_payload(&self, arguments: &JsonObject) -> Result<BindingCall, ErrorData> {
         let Execution::Payload { overlay, .. } = &self.execution else {
             return Err(shape());
         };
-        let host = match arguments.remove("host") {
-            Some(Value::String(host)) => host,
-            _ => return Err(shape()),
+        let mut matched = 1;
+        let Some(Value::String(host)) = arguments.get("host") else {
+            return Err(shape());
         };
-        let timeout_secs = arguments
-            .remove("timeout_secs")
-            .map(|value| unsigned_integer(&value).ok_or_else(shape))
-            .transpose()?;
-        let inputs = arguments.remove("inputs").ok_or_else(shape)?;
-        if !arguments.is_empty() {
+        let timeout_secs = match arguments.get("timeout_secs") {
+            Some(value) => {
+                matched += 1;
+                Some(unsigned_integer(value).ok_or_else(shape)?)
+            }
+            None => None,
+        };
+        let Some(inputs) = arguments.get("inputs") else {
+            return Err(shape());
+        };
+        matched += 1;
+        if arguments.len() != matched {
             return Err(shape());
         }
-        crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], &inputs)
+        crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], inputs)
             .map_err(|_| shape())?;
         Ok(BindingCall::Payload(AutomationRequest {
-            host,
+            host: host.clone(),
             timeout_secs,
-            inputs,
+            inputs: inputs.clone(),
         }))
     }
 
@@ -174,7 +175,7 @@ impl CompiledBinding {
         &self,
         request: &AutomationRequest,
         limits: &Limits,
-    ) -> Result<PreparedPayload<'_>, ToolError> {
+    ) -> Result<PreparedPayload, ToolError> {
         let plan = self.payload_plan().ok_or_else(|| {
             ToolError::new("policy_denied", "Native payload is not activated", false)
         })?;
@@ -193,7 +194,6 @@ impl CompiledBinding {
             .unwrap_or(limits.max_output_bytes)
             .min(16_777_216);
         Ok(PreparedPayload {
-            plan,
             argv: plan.arguments(&request.inputs)?,
             duration: Duration::from_secs(timeout),
             output_limit: usize::try_from(output_limit)

@@ -119,13 +119,18 @@ path shared by native SSH, doctor and automation. Explicit relative paths from
 `--ssh` or `ESTUS_SSH` are relative to the launch directory; a relative
 `[ssh].executable` is relative to the TOML file's directory. Explicit selections
 are literal paths, with no tilde or environment-variable interpolation and no
-`PATH` lookup. An invalid override fails configuration loading rather than
-falling back to a lower-priority source.
+`PATH` lookup; `PATH` lookup skips non-absolute entries. An invalid override fails
+configuration loading rather than falling back to a lower-priority source.
 
 The native Nix package prefixes `PATH` with its pinned OpenSSH, leaving explicit
 CLI, environment and TOML selections free to override that default. It does not
 set `ESTUS_SSH`; an environment default would incorrectly outrank TOML.
 
+`estus doctor --target <name>` reports `ssh_executable` and per-target
+`effective_ssh_policy` parsed from `ssh -G -- <destination>`
+(`strict_host_key_checking`, `update_host_keys`, `batch_mode`, and warnings
+when host-key checking is disabled). Note that OpenSSH `ssh -G` can evaluate
+`Match exec` stanzas from the configured or user SSH config.
 ## Builtin input contracts
 
 Tool discovery publishes nonempty executable/path constraints, positive timeout

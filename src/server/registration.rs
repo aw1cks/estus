@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 use rmcp::{
     handler::server::{
@@ -15,10 +15,16 @@ use crate::{
 
 use super::{Estus, schemas::automation_output_schema};
 
+pub(super) struct RouteSchema {
+    pub(super) schema: serde_json::Value,
+    pub(super) validator: jsonschema::Validator,
+}
+
 pub(super) struct Registration {
     pub(super) router: ToolRouter<Estus>,
     pub(super) tools: ToolCatalog,
     pub(super) sudo_name: Cow<'static, str>,
+    pub(super) input_schemas: BTreeMap<String, RouteSchema>,
 }
 
 pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
@@ -128,11 +134,11 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
                 property.insert("maximum".into(), maximum.into());
             }
         }
-        if *id == ToolId::ReplaceFile {
+        if matches!(*id, ToolId::ReplaceFile | ToolId::Rename) {
             properties
                 .get_mut("overwrite")
                 .and_then(serde_json::Value::as_object_mut)
-                .expect("replacement requires explicit overwrite consent")
+                .expect("overwrite requires explicit overwrite consent")
                 .insert("const".into(), true.into());
         }
     }
@@ -232,8 +238,17 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
         ToolKey::Binding(id) => config.binding_enabled(id),
     });
     let mut tool_router = ToolRouter::new();
+    let mut input_schemas = BTreeMap::new();
     for (id, route) in routes {
         if tools.contains(id) {
+            let schema = serde_json::Value::Object((*route.attr.input_schema).clone());
+            let validator = jsonschema::validator_for(&schema).map_err(|_| {
+                ConfigError::new("tools", "Registered tool input schema cannot be compiled")
+            })?;
+            input_schemas.insert(
+                route.attr.name.to_string(),
+                RouteSchema { schema, validator },
+            );
             tool_router.add_route(route);
         }
     }
@@ -241,5 +256,6 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
         router: tool_router,
         tools,
         sudo_name,
+        input_schemas,
     })
 }
