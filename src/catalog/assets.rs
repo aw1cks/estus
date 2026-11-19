@@ -31,20 +31,20 @@ struct PinnedDynamicPayload {
 
 const PINNED_DYNAMIC_PAYLOADS: &[PinnedDynamicPayload] = &[
     PinnedDynamicPayload {
-        name: "cpu_stats",
-        toml_sha256: "57837875559a4c0c47a90879e3ad692140071b41fdd0cbea1c6bf826e8301ca4",
+        name: "observe_cpu",
+        toml_sha256: "dfaa4def61f1f3d2ae6383eaa2f6f6f09475910a35f306ced1294f5eac117200",
         source_sha256: "f8767fb99e075259f3b104f23e5cbff8478cf502f2c91308a9fd27b9117cef64",
         manifest_sha256: "2157c089d17401766ea6984a01e13ec8979031563e9e82f8d1b0a5ab4ca65a69",
     },
     PinnedDynamicPayload {
-        name: "memory_stats",
-        toml_sha256: "3fefabaf6bf1d332f0ad02528544307b5ec2fb2c92c92b11d352ff840dc33d3d",
+        name: "observe_memory",
+        toml_sha256: "75e97867765313558ad6257716c903fdb4f08944bef9557734b820b6c936ff0e",
         source_sha256: "eae9433cc26d1bb5ae810b9b680ef35acd120da960fadb9db205087d90814b27",
         manifest_sha256: "3b867cc3bc8acf63bab1f0b49fd3e0097e6caead19448fa4a1811b88b3367ea7",
     },
     PinnedDynamicPayload {
-        name: "pressure_get",
-        toml_sha256: "f40c2c3a1aae9b141346a1e30d98044217585890a622abee27c7b14a0e8d268c",
+        name: "observe_pressure",
+        toml_sha256: "7751ea63a765e676e7cf9c250e8aeb4855773230016aa93174a40ff2aad81476",
         source_sha256: "bf1e7663c14cd92cdaa8cc5e603007adea8c668a359ce7e22f907c83f88bdf9e",
         manifest_sha256: "b0d7672685c4a8630bc80e4d4c3a47e72118a07c07fd59778156373042dfce92",
     },
@@ -128,6 +128,49 @@ fn name_valid(name: &str) -> bool {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
         })
 }
+fn has_catalog_risk_prefix(name: &str) -> bool {
+    name.starts_with("observe_")
+        || name.starts_with("inspect_")
+        || name.starts_with("preview_")
+        || name.starts_with("change_")
+}
+
+fn risk_prefix_matches_effects(name: &str, effects: &[&str]) -> bool {
+    if effects.is_empty() {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    if effects.iter().any(|effect| !seen.insert(*effect)) {
+        return false;
+    }
+    let is_read_like = |effect: &str| matches!(effect, "read" | "sensitive_read" | "probe");
+    let is_mutating = |effect: &str| {
+        matches!(
+            effect,
+            "runtime_write" | "persistent_write" | "availability" | "unknown"
+        )
+    };
+    if !effects
+        .iter()
+        .all(|effect| is_read_like(effect) || is_mutating(effect))
+    {
+        return false;
+    }
+    if name.starts_with("observe_") {
+        effects.iter().all(|effect| *effect == "read")
+    } else if name.starts_with("inspect_") {
+        effects.iter().all(|effect| is_read_like(effect))
+            && effects
+                .iter()
+                .any(|effect| matches!(*effect, "sensitive_read" | "probe"))
+    } else if name.starts_with("preview_") {
+        effects.iter().all(|effect| is_read_like(effect))
+    } else if name.starts_with("change_") {
+        effects.iter().any(|effect| is_mutating(effect))
+    } else {
+        false
+    }
+}
 
 fn open_child(directory: &File, name: &Path, is_directory: bool) -> Result<File, &'static str> {
     if name.components().count() != 1
@@ -203,6 +246,7 @@ impl Catalog {
         }
         for (name, template) in &manifest.tools {
             if !name_valid(name)
+                || !has_catalog_risk_prefix(name)
                 || template.definition != format!("{name}.toml")
                 || match &template.executor {
                     Executor::AnsibleRole { path } => path != &format!("roles/{name}"),
@@ -228,6 +272,7 @@ impl Catalog {
             {
                 return Err(ERROR);
             }
+            Self::validate_definition(&directory, name, &template.definition)?;
         }
         for (name, tools) in &manifest.presets {
             let mut seen = BTreeSet::new();
@@ -255,14 +300,13 @@ impl Catalog {
         &self.manifest
     }
 
-    pub(crate) fn definition(&self, name: &str) -> Result<toml::Table, &'static str> {
-        let template = self
-            .manifest
-            .tools
-            .get(name)
-            .ok_or("unknown catalog tool")?;
+    fn validate_definition(
+        directory: &File,
+        name: &str,
+        definition: &str,
+    ) -> Result<toml::Table, &'static str> {
         let bytes = bounded_read(
-            open_child(&self.directory, Path::new(&template.definition), false)?,
+            open_child(directory, Path::new(definition), false)?,
             DEFINITION_LIMIT,
         )?;
         let table: toml::Table = std::str::from_utf8(&bytes)
@@ -273,10 +317,34 @@ impl Catalog {
             .get("tools")
             .and_then(toml::Value::as_table)
             .ok_or(ERROR)?;
-        if tools.len() != 1 || !tools.get(name).is_some_and(toml::Value::is_table) {
+        let tool = tools
+            .get(name)
+            .and_then(toml::Value::as_table)
+            .ok_or(ERROR)?;
+        if tools.len() != 1 {
+            return Err(ERROR);
+        }
+        let effects = tool
+            .get("effects")
+            .and_then(toml::Value::as_array)
+            .ok_or(ERROR)?;
+        let mut effect_names = Vec::with_capacity(effects.len());
+        for effect in effects {
+            effect_names.push(effect.as_str().ok_or(ERROR)?);
+        }
+        if !risk_prefix_matches_effects(name, &effect_names) {
             return Err(ERROR);
         }
         Ok(table)
+    }
+
+    pub(crate) fn definition(&self, name: &str) -> Result<toml::Table, &'static str> {
+        let template = self
+            .manifest
+            .tools
+            .get(name)
+            .ok_or("unknown catalog tool")?;
+        Self::validate_definition(&self.directory, name, &template.definition)
     }
 
     pub(crate) fn load_pinned_payload(
@@ -490,7 +558,7 @@ mod pinned_tests {
         let catalog = Catalog::load(Some(&root)).unwrap();
         let mut names: Vec<&str> = pinned_dynamic_payload_names().collect();
         names.sort_unstable();
-        assert_eq!(names, ["cpu_stats", "memory_stats", "pressure_get"]);
+        assert_eq!(names, ["observe_cpu", "observe_memory", "observe_pressure"]);
         for name in names {
             let (tool_def, source, manifest) = catalog.load_pinned_payload(name).unwrap();
             assert!(tool_def.is_table());

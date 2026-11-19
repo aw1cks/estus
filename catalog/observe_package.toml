@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_package/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_package"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_package]
+description = "Installed package metadata, files and independently queried ownership; no refresh."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_package.payload.json", source = "/etc/estus/payloads/observe_package/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_packages" = ["estus-catalog-base", "estus-catalog-demo"] }
+input_map = { "package" = "package" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "additionalProperties" = false, "required" = ["package"], "properties" = { "package" = { "type" = "string", "enum" = ["estus-catalog-base", "estus-catalog-demo"] } } }
+[tools.observe_package.result]
+kind = "capability_projection"
+fields = { "package" = ["mcp_result", "package"], "version" = ["mcp_result", "version"], "architecture" = ["mcp_result", "architecture"], "maintainer" = ["mcp_result", "maintainer"], "description" = ["mcp_result", "description"], "files" = ["mcp_result", "files"], "ownership" = ["mcp_result", "ownership"], "files_total" = ["mcp_result", "files_total"], "files_truncated" = ["mcp_result", "files_truncated"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "additionalProperties" = false, "required" = ["package", "version", "architecture", "maintainer", "description", "files", "ownership", "files_total", "files_truncated"], "properties" = { "package" = { "type" = "string", "maxLength" = 64 }, "version" = { "type" = "string", "maxLength" = 96 }, "architecture" = { "type" = "string", "maxLength" = 64 }, "maintainer" = { "type" = "string", "maxLength" = 512 }, "description" = { "type" = "string", "maxLength" = 2048 }, "files" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "string", "maxLength" = 1024 } }, "ownership" = { "type" = "object", "additionalProperties" = false, "required" = ["path", "owner"], "properties" = { "path" = { "type" = "string", "maxLength" = 1024 }, "owner" = { "type" = "string", "maxLength" = 64 } } }, "files_total" = { "type" = "integer", "minimum" = 0, "maximum" = 4096 }, "files_truncated" = { "type" = "boolean" } } }

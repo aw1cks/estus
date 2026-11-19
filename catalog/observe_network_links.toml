@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_network_links/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_network_links"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_network_links]
+description = "network links list. Bounded Linux observations; operator-approved interfaces; no process attribution, flags, namespace execution or mutation."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_network_links.payload.json", source = "/etc/estus/payloads/observe_network_links/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+input_map = { "interface" = "interface", "limit" = "limit" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "enum" = ["lo", "catalog0"], "maxLength" = 256 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }
+[tools.observe_network_links.result]
+kind = "capability_projection"
+fields = { "entries" = ["mcp_result", "entries"], "truncated" = ["mcp_result", "truncated"], "scope" = ["mcp_result", "scope"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "entries" = { "type" = "array", "items" = { "type" = "object", "properties" = { "interface" = { "type" = "string", "maxLength" = 15 }, "index" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "mtu" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "state" = { "type" = "string", "maxLength" = 32 }, "flags" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 32 }, "maxItems" = 32 }, "address" = { "type" = "string", "maxLength" = 64 }, "kind" = { "type" = "string", "maxLength" = 64 }, "master" = { "type" = "string", "maxLength" = 64 } }, "required" = ["interface", "index", "mtu", "state", "flags"], "additionalProperties" = false }, "maxItems" = 16 }, "truncated" = { "type" = "boolean" }, "scope" = { "type" = "string", "const" = "approved_interfaces", "maxLength" = 32 } }, "required" = ["entries", "truncated", "scope"], "additionalProperties" = false }

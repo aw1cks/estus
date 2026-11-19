@@ -29,7 +29,7 @@ fn md_attributes_enforce_byte_encoding_and_both_bounds() -> Result<()> {
     ] {
         assert_eq!(
             parsed(
-                "storage_raid_status",
+                "observe_storage_raid",
                 "parse_attribute",
                 json!([payload::bytes(input)])
             )?,
@@ -49,7 +49,7 @@ fn md_attributes_enforce_byte_encoding_and_both_bounds() -> Result<()> {
             "ValueError"
         };
         rejected(
-            "storage_raid_status",
+            "observe_storage_raid",
             "parse_attribute",
             json!([payload::bytes(&input)]),
             error,
@@ -71,7 +71,7 @@ fn md_members_counts_and_unknown_reported_states() -> Result<()> {
         .as_array_mut()
         .context("members")?
         .reverse();
-    let actual = parsed("storage_raid_status", "parse_md_snapshot", json!([state]))?;
+    let actual = parsed("observe_storage_raid", "parse_md_snapshot", json!([state]))?;
     assert_eq!(actual["members"][0]["device"], "/dev/vdb");
     assert_eq!(
         actual["members"][0]["read_errors"],
@@ -99,7 +99,7 @@ fn md_members_counts_and_unknown_reported_states() -> Result<()> {
         let mut input = baseline.clone();
         *input.pointer_mut(pointer).context("case pointer")? = value;
         rejected(
-            "storage_raid_status",
+            "observe_storage_raid",
             "parse_md_snapshot",
             json!([input]),
             "ValueError",
@@ -108,7 +108,7 @@ fn md_members_counts_and_unknown_reported_states() -> Result<()> {
     let mut duplicate = baseline.clone();
     duplicate["members"][1] = duplicate["members"][0].clone();
     rejected(
-        "storage_raid_status",
+        "observe_storage_raid",
         "parse_md_snapshot",
         json!([duplicate]),
         "ValueError",
@@ -119,7 +119,7 @@ fn md_members_counts_and_unknown_reported_states() -> Result<()> {
         .context("members")?
         .push(baseline["members"][0].clone());
     rejected(
-        "storage_raid_status",
+        "observe_storage_raid",
         "parse_md_snapshot",
         json!([excessive]),
         "ValueError",
@@ -130,7 +130,7 @@ fn md_members_counts_and_unknown_reported_states() -> Result<()> {
         .context("snapshot")?
         .remove("sync_action");
     rejected(
-        "storage_raid_status",
+        "observe_storage_raid",
         "parse_md_snapshot",
         json!([missing]),
         "KeyError",
@@ -148,7 +148,7 @@ fn nvme_binary_layout_preserves_wide_counters_and_unknown_values() -> Result<()>
     data[48..64].copy_from_slice(&(1u128 << 80).to_le_bytes());
     data[176..192].copy_from_slice(&42u128.to_le_bytes());
     let actual = parsed(
-        "storage_device_health_get",
+        "observe_storage_device_health",
         "parse_smart_log",
         json!([payload::bytes(&data)]),
     )?;
@@ -170,7 +170,7 @@ fn nvme_binary_layout_preserves_wide_counters_and_unknown_values() -> Result<()>
     assert_eq!(actual["unavailable"], json!([]));
     data[1..3].fill(0);
     let absent = parsed(
-        "storage_device_health_get",
+        "observe_storage_device_health",
         "parse_smart_log",
         json!([payload::bytes(&data)]),
     )?;
@@ -178,7 +178,7 @@ fn nvme_binary_layout_preserves_wide_counters_and_unknown_values() -> Result<()>
     assert_eq!(absent["unavailable"], json!(["temperature_kelvin"]));
     for size in [0, 511, 513] {
         rejected(
-            "storage_device_health_get",
+            "observe_storage_device_health",
             "parse_smart_log",
             json!([payload::bytes(&vec![0; size])]),
             "ValueError",
@@ -198,7 +198,7 @@ fn cgroup_counter_parser_rejects_ambiguous_and_unbounded_sources() -> Result<()>
     ] {
         assert_eq!(
             parsed(
-                "cgroup_sample",
+                "observe_cgroup_sample",
                 "parse_cpu_stat",
                 json!([payload::bytes(data.as_bytes())])
             )?,
@@ -215,26 +215,26 @@ fn cgroup_counter_parser_rejects_ambiguous_and_unbounded_sources() -> Result<()>
         "usage_usec\n",
     ] {
         rejected(
-            "cgroup_sample",
+            "observe_cgroup_sample",
             "parse_cpu_stat",
             json!([payload::bytes(data.as_bytes())]),
             "ValueError",
         )?;
     }
     rejected(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "parse_cpu_stat",
         json!([payload::bytes(b"user_usec 1\n")]),
         "KeyError",
     )?;
     rejected(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "parse_cpu_stat",
         json!([payload::bytes(&[0xff])]),
         "UnicodeDecodeError",
     )?;
     rejected(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "parse_cpu_stat",
         json!([payload::bytes(&vec![b' '; 4097])]),
         "ValueError",
@@ -244,7 +244,7 @@ fn cgroup_counter_parser_rejects_ambiguous_and_unbounded_sources() -> Result<()>
     assert_eq!(boundary.len(), 4096);
     assert_eq!(
         parsed(
-            "cgroup_sample",
+            "observe_cgroup_sample",
             "parse_cpu_stat",
             json!([payload::bytes(boundary.as_bytes())])
         )?,
@@ -256,7 +256,7 @@ fn cgroup_counter_parser_rejects_ambiguous_and_unbounded_sources() -> Result<()>
 #[test]
 fn cgroup_rates_require_same_generation_monotonic_counter_and_positive_interval() -> Result<()> {
     let first = parsed(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "cpu_observation",
         json!([null, "1:2", 100, 1000]),
     )?;
@@ -265,7 +265,7 @@ fn cgroup_rates_require_same_generation_monotonic_counter_and_positive_interval(
         json!({"identity":"1:2", "cpu_usage_usec":100, "elapsed_usec":1000, "reset":false})
     );
     let next = parsed(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "cpu_observation",
         json!([first, "1:2", 150, 3000]),
     )?;
@@ -277,7 +277,7 @@ fn cgroup_rates_require_same_generation_monotonic_counter_and_positive_interval(
         ("1:2", 200, 2000, false),
     ] {
         let item = parsed(
-            "cgroup_sample",
+            "observe_cgroup_sample",
             "cpu_observation",
             json!([next, identity, usage, elapsed]),
         )?;
@@ -288,12 +288,12 @@ fn cgroup_rates_require_same_generation_monotonic_counter_and_positive_interval(
         );
     }
     let replaced = parsed(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "cpu_observation",
         json!([next, "1:3", 200, 4000]),
     )?;
     let baseline = parsed(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "cpu_observation",
         json!([replaced, "1:3", 250, 5000]),
     )?;
@@ -307,7 +307,7 @@ fn psi_parses_units_and_rejects_missing_duplicate_unknown_and_oversize_lines() -
     let some = "some avg10=1.25 avg60=2.50 avg300=100.00 total=9007199254740991\n";
     let full = "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
     let actual = parsed(
-        "pressure_get",
+        "observe_pressure",
         "parse_pressure",
         json!([payload::bytes(format!("{some}{full}").as_bytes())]),
     )?;
@@ -318,7 +318,7 @@ fn psi_parses_units_and_rejects_missing_duplicate_unknown_and_oversize_lines() -
     assert_eq!(actual["full"]["total_microseconds"], 0);
     assert!(
         parsed(
-            "pressure_get",
+            "observe_pressure",
             "parse_pressure",
             json!([payload::bytes(some.as_bytes())])
         )?
@@ -338,14 +338,14 @@ fn psi_parses_units_and_rejects_missing_duplicate_unknown_and_oversize_lines() -
         "x".repeat(2049),
     ] {
         rejected(
-            "pressure_get",
+            "observe_pressure",
             "parse_pressure",
             json!([payload::bytes(data.as_bytes())]),
             "ValueError",
         )?;
     }
     rejected(
-        "pressure_get",
+        "observe_pressure",
         "parse_pressure",
         json!([payload::bytes(&[0xff])]),
         "UnicodeDecodeError",
@@ -358,19 +358,19 @@ fn memory_selected_fields_preserve_units_and_fail_closed_on_selected_corruption(
     let source = b"MemTotal: 4 kB\nMemFree: 1 kB\nFutureField: unknown\n";
     assert_eq!(
         parsed(
-            "memory_stats",
+            "observe_memory",
             "parse_meminfo",
             json!([payload::bytes(source)])
         )?,
         json!({"mem_total_bytes":4096,"mem_free_bytes":1024})
     );
     assert_eq!(
-        parsed("memory_stats", "parse_vmstat", json!([null]))?,
+        parsed("observe_memory", "parse_vmstat", json!([null]))?,
         json!({})
     );
     assert_eq!(
         parsed(
-            "memory_stats",
+            "observe_memory",
             "parse_vmstat",
             json!([payload::bytes(
                 b"pgfault 9007199254740991\nfuture_counter 1\n"
@@ -388,7 +388,7 @@ fn memory_selected_fields_preserve_units_and_fail_closed_on_selected_corruption(
         vec![b'x'; 131073],
     ] {
         rejected(
-            "memory_stats",
+            "observe_memory",
             "parse_meminfo",
             json!([payload::bytes(&data)]),
             "ValueError",
@@ -402,7 +402,7 @@ fn memory_selected_fields_preserve_units_and_fail_closed_on_selected_corruption(
         vec![b'x'; 262145],
     ] {
         rejected(
-            "memory_stats",
+            "observe_memory",
             "parse_vmstat",
             json!([payload::bytes(&data)]),
             "ValueError",
@@ -451,21 +451,21 @@ fn pinned_cgroup_counter_cannot_mix_a_replacement_identity() -> Result<()> {
         stream.write_all(b"usage_usec 100\n")?;
         Ok(())
     });
-    let sampled = parsed("cgroup_sample", "sample_cpu", json!([selected]))?;
+    let sampled = parsed("observe_cgroup_sample", "sample_cpu", json!([selected]))?;
     writer
         .join()
         .map_err(|_| anyhow::anyhow!("counter writer panicked"))??;
     assert_eq!(sampled, json!([identity, 100]));
-    let replaced = parsed("cgroup_sample", "sample_cpu", json!([selected]))?;
+    let replaced = parsed("observe_cgroup_sample", "sample_cpu", json!([selected]))?;
     assert_ne!(replaced[0], identity);
     assert_eq!(replaced[1], 200);
     let first = parsed(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "cpu_observation",
         json!([null, sampled[0], sampled[1], 1000]),
     )?;
     let second = parsed(
-        "cgroup_sample",
+        "observe_cgroup_sample",
         "cpu_observation",
         json!([first, replaced[0], replaced[1], 2000]),
     )?;
@@ -477,12 +477,12 @@ fn pinned_cgroup_counter_cannot_mix_a_replacement_identity() -> Result<()> {
 #[test]
 fn cpu_integer_arguments_reject_signs_whitespace_and_overflow() -> Result<()> {
     assert_eq!(
-        parsed("cpu_stats", "integer", json!([payload::bytes(b"16"), 16]))?,
+        parsed("observe_cpu", "integer", json!([payload::bytes(b"16"), 16]))?,
         16
     );
     for data in [b"17".as_slice(), b"-1", b" 1", b"1.0", b"", &[0xff]] {
         rejected(
-            "cpu_stats",
+            "observe_cpu",
             "integer",
             json!([payload::bytes(data), 16]),
             "ValueError",

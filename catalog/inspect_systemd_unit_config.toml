@@ -1,0 +1,38 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/inspect_systemd_unit_config/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["inspect_systemd_unit_config"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+[automation.authorities.catalog.become]
+method = "sudo"
+user = "root"
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.inspect_systemd_unit_config]
+description = "Separately approved sensitive fragment and drop-in content; may contain credentials. No ordinary status environment disclosure."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read", "sensitive_read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_systemd_unit_config.payload.json", source = "/etc/estus/payloads/inspect_systemd_unit_config/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+input_map = { "unit" = "unit" }
+constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
+[tools.inspect_systemd_unit_config.result]
+kind = "capability_projection"
+fields = { "scope" = ["mcp_result", "scope"], "unit" = ["mcp_result", "unit"], "sensitive" = ["mcp_result", "sensitive"], "files" = ["mcp_result", "files"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "unit" = { "type" = "string", "maxLength" = 128 }, "sensitive" = { "type" = "boolean", "const" = true }, "files" = { "type" = "array", "items" = { "type" = "object", "properties" = { "kind" = { "type" = "string", "enum" = ["fragment", "drop_in"], "maxLength" = 8 }, "path" = { "type" = "string", "maxLength" = 1024 }, "content" = { "type" = "string", "maxLength" = 2048 } }, "required" = ["kind", "path", "content"], "additionalProperties" = false }, "maxItems" = 17 } }, "required" = ["scope", "unit", "sensitive", "files"], "additionalProperties" = false }

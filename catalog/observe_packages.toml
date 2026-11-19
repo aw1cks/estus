@@ -1,0 +1,38 @@
+# Opt-in apt-only procedure. Preprovision apt, dpkg, python-apt and signed sources; never bootstrap dependencies.
+# Copy roles/observe_packages to /etc/estus/roles/observe_packages, review tasks and operator-fixed allowlists.
+# Export input_schema/fixed_args/input_map as overlay.json, then import offline:
+# estus --config observe_packages.toml schema import-role observe_packages --role-path /etc/estus/roles/observe_packages --overlay overlay.json --output /etc/estus/observe_packages.schema.json
+# Review snapshot before activation; /var/lib/estus/runner must be mode 0700 owned by MCP.
+# Mutations require separately configured automation:catalog identity with root become; no retry after uncertainty.
+# Package commands may run maintainer scripts. No rollback, transactional snapshot or quiescence is promised.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_packages"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_packages]
+description = "Maintained package_facts apt inventory; no install or refresh."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "ansible_role", snapshot = "/etc/estus/observe_packages.schema.json", role_path = "/etc/estus/observe_packages.schema.roles/observe_packages", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+input_map = { "offset" = "offset", "limit" = "limit" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "additionalProperties" = false, "required" = ["offset", "limit"], "properties" = { "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 4096 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } } }
+[tools.observe_packages.result]
+kind = "ansible_projection"
+fields = { "backend" = ["mcp_result", "backend"], "packages" = ["mcp_result", "packages"], "offset" = ["mcp_result", "offset"], "total" = ["mcp_result", "total"], "truncated" = ["mcp_result", "truncated"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "additionalProperties" = false, "required" = ["backend", "packages", "offset", "total", "truncated"], "properties" = { "backend" = { "type" = "string", "const" = "apt", "maxLength" = 64 }, "packages" = { "type" = "array", "maxItems" = 16, "items" = { "type" = "object", "additionalProperties" = false, "required" = ["name", "version", "architecture", "source"], "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "version" = { "type" = "string", "maxLength" = 96 }, "architecture" = { "type" = "string", "maxLength" = 64 }, "source" = { "type" = "string", "const" = "apt", "maxLength" = 64 } } } }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 4096 }, "total" = { "type" = "integer", "minimum" = 0, "maximum" = 4096 }, "truncated" = { "type" = "boolean" } } }

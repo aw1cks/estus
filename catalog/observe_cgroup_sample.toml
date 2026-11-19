@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_cgroup_sample/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_cgroup_sample"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_cgroup_sample]
+description = "Finite approved cgroup CPU cumulative-use samples, actual monotonic elapsed interval, identity and counter-reset evidence; rates withheld on resets. Includes controller/ancestor context and first/last full resource observations."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_cgroup_sample.payload.json", source = "/etc/estus/payloads/observe_cgroup_sample/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
+input_map = { "duration_ms" = "duration_ms", "samples" = "samples" }
+limits = { timeout_secs = 40 }
+input_schema = { "type" = "object", "properties" = { "duration_ms" = { "type" = "integer", "minimum" = 100, "maximum" = 5000 }, "samples" = { "type" = "integer", "minimum" = 2, "maximum" = 4 } }, "required" = ["duration_ms", "samples"], "additionalProperties" = false }
+[tools.observe_cgroup_sample.result]
+kind = "capability_projection"
+fields = { "root" = ["mcp_result", "root"], "boot_id" = ["mcp_result", "boot_id"], "identity" = ["mcp_result", "identity"], "controllers" = ["mcp_result", "controllers"], "subtree_control" = ["mcp_result", "subtree_control"], "ancestors" = ["mcp_result", "ancestors"], "scope" = ["mcp_result", "scope"], "observations" = ["mcp_result", "observations"], "first" = ["mcp_result", "first"], "last" = ["mcp_result", "last"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "root" = { "type" = "string", "maxLength" = 256 }, "boot_id" = { "type" = "string", "maxLength" = 36 }, "identity" = { "type" = "string", "maxLength" = 128 }, "controllers" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 }, "subtree_control" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 }, "ancestors" = { "type" = "array", "items" = { "type" = "object", "properties" = { "path" = { "type" = "string", "maxLength" = 1024 }, "constraints" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["name", "value"], "additionalProperties" = false }, "maxItems" = 8 } }, "required" = ["path", "constraints"], "additionalProperties" = false }, "maxItems" = 32 }, "scope" = { "type" = "string", "maxLength" = 64 }, "observations" = { "type" = "array", "items" = { "type" = "object", "properties" = { "elapsed_usec" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "identity" = { "type" = "string", "maxLength" = 128 }, "cpu_usage_usec" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "reset" = { "type" = "boolean" }, "cpu_usec_per_second" = { "type" = "number", "minimum" = 0, "maximum" = 9007199254740991 } }, "required" = ["elapsed_usec", "identity", "cpu_usage_usec", "reset"], "additionalProperties" = false }, "maxItems" = 4 }, "first" = { "type" = "object", "properties" = { "files" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "kind" = { "type" = "string", "maxLength" = 32, "enum" = ["cumulative", "gauge", "limit", "pressure"] }, "text" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["name", "kind", "text"], "additionalProperties" = false }, "maxItems" = 17 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 17 } }, "required" = ["files", "unavailable"], "additionalProperties" = false }, "last" = { "type" = "object", "properties" = { "files" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "kind" = { "type" = "string", "maxLength" = 32, "enum" = ["cumulative", "gauge", "limit", "pressure"] }, "text" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["name", "kind", "text"], "additionalProperties" = false }, "maxItems" = 17 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 17 } }, "required" = ["files", "unavailable"], "additionalProperties" = false } }, "required" = ["root", "boot_id", "identity", "controllers", "subtree_control", "ancestors", "scope", "observations", "first", "last"], "additionalProperties" = false }

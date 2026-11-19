@@ -1,0 +1,38 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/change_systemd_enable/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_systemd_enable"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+[automation.authorities.catalog.become]
+method = "sudo"
+user = "root"
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.change_systemd_enable]
+description = "Fixed persistent unit-file enable with --no-reload and actual on-disk enablement readback. Never starts/stops a unit or reloads manager configuration. Install relationships such as Also/Alias may change related links; the target allowlist is not a complete blast-radius bound. Manager state may remain stale until separately approved change_systemd_manager_reload; manager_reload_required means reload is required before relying on refreshed manager configuration, including mask enforcement. Completion is not application health; interrupted work is never replayed."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["persistent_write", "read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/change_systemd_enable.payload.json", source = "/etc/estus/payloads/change_systemd_enable/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+input_map = { "unit" = "unit" }
+constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
+[tools.change_systemd_enable.result]
+kind = "capability_projection"
+fields = { "scope" = ["mcp_result", "scope"], "operation" = ["mcp_result", "operation"], "operation_completed" = ["mcp_result", "operation_completed"], "health" = ["mcp_result", "health"], "unit" = ["mcp_result", "unit"], "properties" = ["mcp_result", "properties"], "manager_reload_performed" = ["mcp_result", "manager_reload_performed"], "manager_reload_required" = ["mcp_result", "manager_reload_required"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "operation" = { "type" = "string", "const" = "enable", "maxLength" = 6 }, "operation_completed" = { "type" = "boolean", "const" = true }, "health" = { "type" = "string", "const" = "not_checked", "maxLength" = 11 }, "unit" = { "type" = "string", "maxLength" = 128 }, "properties" = { "type" = "object", "properties" = { "Id" = { "type" = "string", "maxLength" = 4096 }, "LoadState" = { "type" = "string", "maxLength" = 4096 }, "ActiveState" = { "type" = "string", "maxLength" = 4096 }, "SubState" = { "type" = "string", "maxLength" = 4096 }, "UnitFileState" = { "type" = "string", "maxLength" = 4096 }, "MainPID" = { "type" = "string", "maxLength" = 4096 }, "Result" = { "type" = "string", "maxLength" = 4096 } }, "required" = [], "additionalProperties" = false }, "manager_reload_performed" = { "type" = "boolean", "const" = false }, "manager_reload_required" = { "type" = "boolean", "const" = true } }, "required" = ["scope", "operation", "operation_completed", "health", "unit", "properties", "manager_reload_performed", "manager_reload_required"], "additionalProperties" = false }

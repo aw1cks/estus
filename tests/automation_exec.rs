@@ -1886,12 +1886,12 @@ async fn host_summary_session(
         let listed = server.request(2, "tools/list", json!({})).await?;
         host_summary_private(&listed.to_string(), secrets)?;
         let tools = listed["result"]["tools"].as_array().context("host summary tool list")?;
-        let tool = tools.iter().find(|tool| tool["name"] == "host_summary");
+        let tool = tools.iter().find(|tool| tool["name"] == "observe_host_summary");
         if !enabled {
             ensure!(tool.is_none(), "host_summary was enabled without operator opt-in");
             let authentications = fixture.authentication_count().await?;
             let denied = server.request(3, "tools/call", json!({
-                "name":"host_summary","arguments":{"host":"plain","inputs":{}}
+                "name":"observe_host_summary","arguments":{"host":"plain","inputs":{}}
             })).await?;
             host_summary_private(&denied.to_string(), secrets)?;
             ensure!(
@@ -1937,7 +1937,7 @@ async fn host_summary_session(
             json!({"host":"plain","inputs":{},"argv":["/tmp/host-summary-private-override"]}),
         ].into_iter().enumerate() {
             let reply = server.request(10 + index as u64, "tools/call", json!({
-                "name":"host_summary","arguments":arguments
+                "name":"observe_host_summary","arguments":arguments
             })).await?;
             host_summary_private(&reply.to_string(), secrets)?;
             ensure!(
@@ -1950,7 +1950,7 @@ async fn host_summary_session(
         }
         for host in ["nosftp", "HOST_SUMMARY_UNDECLARED_TARGET_12b8"] {
             let reply = server.request(30 + u64::from(host == "nosftp"), "tools/call", json!({
-                "name":"host_summary","arguments":{"host":host,"inputs":{}}
+                "name":"observe_host_summary","arguments":{"host":host,"inputs":{}}
             })).await?;
             host_summary_private(&reply.to_string(), secrets)?;
             let error = &reply["result"]["structuredContent"]["error"];
@@ -1966,7 +1966,7 @@ async fn host_summary_session(
         );
         let before = observe_host_summary(fixture).await?;
         let response = server.request(40, "tools/call", json!({
-            "name":"host_summary","arguments":{"host":"plain","inputs":{}}
+            "name":"observe_host_summary","arguments":{"host":"plain","inputs":{}}
         })).await?;
         host_summary_private(&response.to_string(), secrets)?;
         ensure!(response["error"].is_null(), "host_summary MCP rejection: {response}");
@@ -2090,28 +2090,28 @@ async fn real_host_summary_acceptance() -> Result<()> {
     let result: Result<()> = async {
         // Deploy the shipped role unchanged; only operator-private config paths,
         // selected controller runtime and target alias mapping are adapted.
-        let mut example: toml::Value = toml::from_str(include_str!("../catalog/host_summary.toml"))?;
-        let role = private.path().join("roles/host_summary");
+        let mut example: toml::Value = toml::from_str(include_str!("../catalog/observe_host_summary.toml"))?;
+        let role = private.path().join("roles/observe_host_summary");
         for (file, source) in [
-            ("meta/argument_specs.yml", include_str!("../catalog/roles/host_summary/meta/argument_specs.yml")),
-            ("tasks/main.yml", include_str!("../catalog/roles/host_summary/tasks/main.yml")),
+            ("meta/argument_specs.yml", include_str!("../catalog/roles/observe_host_summary/meta/argument_specs.yml")),
+            ("tasks/main.yml", include_str!("../catalog/roles/observe_host_summary/tasks/main.yml")),
         ] {
             let path = role.join(file);
             fs::create_dir_all(path.parent().context("role asset parent")?)?;
             fs::write(path, source)?;
         }
-        let snapshot = private.path().join("host_summary.schema.json");
+        let snapshot = private.path().join("observe_host_summary.schema.json");
         let mut overlay = json!({});
         for key in ["input_schema", "fixed_args", "input_map"] {
-            overlay[key] = serde_json::to_value(&example["tools"]["host_summary"][key])?;
+            overlay[key] = serde_json::to_value(&example["tools"]["observe_host_summary"][key])?;
         }
-        let overlay_path = private.path().join("host_summary.overlay.json");
+        let overlay_path = private.path().join("observe_host_summary.overlay.json");
         fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
         let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
         config.insert("automation".into(), table(json!({"runtime":text(&runtime)?}))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         let mut import = support::server_command(&fixture.config)?;
-        import.args(["schema", "import-role", "host_summary"])
+        import.args(["schema", "import-role", "observe_host_summary"])
             .arg("--role-path").arg(&role)
             .arg("--output").arg(&snapshot)
             .arg("--overlay").arg(&overlay_path);
@@ -2120,9 +2120,9 @@ async fn real_host_summary_acceptance() -> Result<()> {
             String::from_utf8_lossy(&imported.stdout));
         let report: Value = serde_json::from_slice(&imported.stdout)?;
         ensure!(report["binding_validated"] == true, "host_summary overlay was not reviewed");
-        example["tools"]["host_summary"]["execution"]["snapshot"] = text(&snapshot)?.into();
-        example["tools"]["host_summary"]["execution"]["role_path"] = text(&approved_role(&snapshot, "host_summary")?)?.into();
-        example["tools"]["host_summary"]["targets"] = table(json!(["plain"]))?;
+        example["tools"]["observe_host_summary"]["execution"]["snapshot"] = text(&snapshot)?.into();
+        example["tools"]["observe_host_summary"]["execution"]["role_path"] = text(&approved_role(&snapshot, "observe_host_summary")?)?.into();
+        example["tools"]["observe_host_summary"]["targets"] = table(json!(["plain"]))?;
         config.insert("tools".into(), example["tools"].clone());
         let mut automation = example["automation"].as_table().context("example automation table")?.clone();
         automation.insert("runtime".into(), text(&runtime)?.into());
@@ -2562,7 +2562,7 @@ async fn cpu_stats_session(
         let tools = listed["result"]["tools"]
             .as_array()
             .context("CPU tool discovery")?;
-        let tool = tools.iter().find(|tool| tool["name"] == "cpu_stats");
+        let tool = tools.iter().find(|tool| tool["name"] == "observe_cpu");
         if !enabled {
             ensure!(tool.is_none(), "CPU tool enabled without opt-in");
             let auth = fixture.authentication_count().await?;
@@ -2571,7 +2571,7 @@ async fn cpu_stats_session(
                     3,
                     "tools/call",
                     json!({
-                        "name":"cpu_stats","arguments":{"host":"plain","inputs":{}}
+                        "name":"observe_cpu","arguments":{"host":"plain","inputs":{}}
                     }),
                 )
                 .await?;
@@ -2745,7 +2745,7 @@ async fn cpu_stats_session(
                 .request(
                     10 + index as u64,
                     "tools/call",
-                    json!({"name":"cpu_stats","arguments":arguments}),
+                    json!({"name":"observe_cpu","arguments":arguments}),
                 )
                 .await?;
             host_summary_private(&reply.to_string(), secrets)?;
@@ -2774,7 +2774,7 @@ async fn cpu_stats_session(
                 .request(
                     id,
                     "tools/call",
-                    json!({"name":"cpu_stats","arguments":{"host":"plain","inputs":inputs}}),
+                    json!({"name":"observe_cpu","arguments":{"host":"plain","inputs":inputs}}),
                 )
                 .await?;
             host_summary_private(&reply.to_string(), secrets)?;
@@ -2831,7 +2831,7 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
     fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
     let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
     let result: Result<()> = async {
-        let binding = catalog::Binding::install(&fixture.config, "cpu_stats", json!({})).await?;
+        let binding = catalog::Binding::install(&fixture.config, "observe_cpu", json!({})).await?;
         let mut config: toml::Table = toml::from_str(&fs::read_to_string(&binding.config)?)?;
         config.insert("enabled_tools".into(), table(json!([]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
@@ -2851,7 +2851,7 @@ async fn real_cpu_stats_acceptance() -> Result<()> {
             "Traceback".into(),
         ]);
         cpu_stats_session(&fixture, &workspace, &secrets, false).await?;
-        config.insert("enabled_tools".into(), table(json!(["cpu_stats"]))?);
+        config.insert("enabled_tools".into(), table(json!(["observe_cpu"]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         cpu_stats_session(&fixture, &workspace, &secrets, true).await
     }
@@ -3223,7 +3223,7 @@ async fn memory_stats_session(
         let tools = listed["result"]["tools"]
             .as_array()
             .context("memory discovery")?;
-        let tool = tools.iter().find(|tool| tool["name"] == "memory_stats");
+        let tool = tools.iter().find(|tool| tool["name"] == "observe_memory");
         if !enabled {
             ensure!(tool.is_none(), "memory observation enabled without opt-in");
             let auth = fixture.authentication_count().await?;
@@ -3232,7 +3232,7 @@ async fn memory_stats_session(
                     3,
                     "tools/call",
                     json!({
-                        "name":"memory_stats","arguments":{"host":"plain","inputs":{}}
+                        "name":"observe_memory","arguments":{"host":"plain","inputs":{}}
                     }),
                 )
                 .await?;
@@ -3417,7 +3417,7 @@ async fn memory_stats_session(
                 .request(
                     10 + index as u64,
                     "tools/call",
-                    json!({"name":"memory_stats","arguments":arguments}),
+                    json!({"name":"observe_memory","arguments":arguments}),
                 )
                 .await?;
             host_summary_private(&reply.to_string(), secrets)?;
@@ -3442,7 +3442,7 @@ async fn memory_stats_session(
                 100,
                 "tools/call",
                 json!({
-                    "name":"memory_stats","arguments":{"host":"plain","inputs":{}}
+                    "name":"observe_memory","arguments":{"host":"plain","inputs":{}}
                 }),
             )
             .await?;
@@ -3499,7 +3499,8 @@ async fn real_memory_stats_acceptance() -> Result<()> {
     fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
     let fixture = isolated::Fixture::start(isolated::ImageKind::Automation).await?;
     let result: Result<()> = async {
-        let binding = catalog::Binding::install(&fixture.config, "memory_stats", json!({})).await?;
+        let binding =
+            catalog::Binding::install(&fixture.config, "observe_memory", json!({})).await?;
         let mut config: toml::Table = toml::from_str(&fs::read_to_string(&binding.config)?)?;
         config.insert("enabled_tools".into(), table(json!([]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
@@ -3522,7 +3523,7 @@ async fn real_memory_stats_acceptance() -> Result<()> {
             "Traceback".into(),
         ]);
         memory_stats_session(&fixture, &workspace, &secrets, false).await?;
-        config.insert("enabled_tools".into(), table(json!(["memory_stats"]))?);
+        config.insert("enabled_tools".into(), table(json!(["observe_memory"]))?);
         fs::write(&fixture.config, toml::to_string(&config)?)?;
         memory_stats_session(&fixture, &workspace, &secrets, true).await
     }

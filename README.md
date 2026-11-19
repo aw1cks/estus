@@ -1015,14 +1015,14 @@ and marks non-catalog bindings unqualified.
 There is no `all` or `admin` preset. Reboot, module/package/repository mutation,
 NIC tuning and other maintenance remain individual opt-ins.
 
-FEC tools are individually opt-in: `nic_fec_get` reads the configured/active
-encoding, and `nic_fec_set` changes the reviewed runtime mode (`off` or `rs`)
+FEC tools are individually opt-in: `observe_nic_fec` reads the configured/active
+encoding, and `change_nic_fec` changes the reviewed runtime mode (`off` or `rs`)
 with driver readback and an honest no-op receipt. The lab uses Linux
 `netdevsim` as `fec0`, separate from its management interface. These tools
 qualify virtual-driver configuration, not physical error correction.
 
 The lab-only `estus_nic_model` driver adds isolated `model0` for
-`nic_eee_get`, `nic_eee_set` and `nic_transceiver_get`. These tools use the normal
+`observe_nic_eee`, `change_nic_eee` and `observe_nic_transceiver`. These tools use the normal
 reviewed native payload path, real kernel ethtool callbacks and the real ethtool binary;
 the driver is not installed on production targets by Estus.
 
@@ -1059,7 +1059,7 @@ version = "7"
 [targets.server]
 ssh_host = "server-ordinary"
 # Omitted selection inherits globally; [] explicitly denies all named tools.
-enabled_tools = ["cpu_stats", "memory_stats", "pressure_get"]
+enabled_tools = ["observe_cpu", "observe_memory", "observe_pressure"]
 
 [automation.targets.server]
 destination = "server-ordinary"
@@ -1150,7 +1150,7 @@ disclosure independently. Inputs cannot choose flags, paths, environment,
 inventory, credentials or privilege beyond the reviewed domain.
 
 Unit-file enable/disable/mask/unmask retain `--no-reload`; manager activation is
-the separate `systemd_manager_reload` capability. Runtime changes do not imply
+the separate `change_systemd_manager_reload` capability. Runtime changes do not imply
 persistence. Reboot scheduling is not confirmed reboot completion. Interrupted
 mutations are never automatically replayed and do not imply rollback.
 
@@ -1165,9 +1165,9 @@ approval from another runtime or silently refresh one.
 
 | Workflow | Reviewed input | Independent confirmation |
 | --- | --- | --- |
-| Host inspection | `examples/workflows/health.toml` / `host_summary` | Actual boot identity, kernel, architecture and bounded uptime; no application-health or isolation assertion |
-| Service diagnosis | `examples/workflows/service-diagnosis.toml` / `systemd_unit_get` | Active/inactive/failed manager state and selected properties; state is not application health |
-| Controlled restart | `examples/workflows/service-restart.toml` / `systemd_unit_restart` | Selected unit PID/invocation changes; completion reports health not checked; cancellation is not rollback/replay |
+| Host inspection | `examples/workflows/health.toml` / `observe_host_summary` | Actual boot identity, kernel, architecture and bounded uptime; no application-health or isolation assertion |
+| Service diagnosis | `examples/workflows/service-diagnosis.toml` / `observe_systemd_unit` | Active/inactive/failed manager state and selected properties; state is not application health |
+| Controlled restart | `examples/workflows/service-restart.toml` / `change_systemd_restart` | Selected unit PID/invocation changes; completion reports health not checked; cancellation is not rollback/replay |
 | Configuration replacement | `examples/workflows/config-replacement.toml` | Restricted SFTP, expected-digest read, complete old/new visibility, independent SHA-256 and new mode0600 inode |
 
 Catalog workflows expose only their reviewed named tool and non-executing
@@ -1202,7 +1202,7 @@ or physical hardware.
 
 ```sh
 nix run .#catalog-acceptance-msrv
-nix run .#catalog-acceptance-msrv -- tools::pressure_get::pressure_get --exact
+nix run .#catalog-acceptance-msrv -- tools::observe_pressure::observe_pressure --exact
 ```
 
 Every real scenario owns a fresh preprovisioned EFI guest, keys, disk and EFI
@@ -1227,7 +1227,7 @@ state. Select it with:
 
 ```sh
 nix run .#catalog-acceptance-msrv -- \
-  tools::network_link_down::network_link_down_requires_stable_executable --exact
+  tools::change_network_link_down::network_link_down_requires_stable_executable --exact
 ```
 
 Recorded native-wave verification: ten scenarios on a Darwin arm64 controller
@@ -1259,7 +1259,7 @@ simulated command result:
 
 ```sh
 nix run .#catalog-acceptance-msrv -- \
-  tools::nic_eee_set::nic_eee_set_requires_stable_ethtool --exact
+  tools::change_nic_eee::nic_eee_set_requires_stable_ethtool --exact
 ```
 
 Recorded native NIC wave: ten real guest scenarios and two FEC parser checks
@@ -1299,13 +1299,13 @@ introducing second collectors:
 
 | Binding | Reused facts | No second collector for |
 |---|---|---|
-| `systemd_unit_get` | [`systemd_service`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/systemd_service_module.html) query-only `status` | Selected per-unit properties in a fixed system/user scope; no mutation arguments |
-| `hardware_system_get` | [`setup`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/setup_module.html) DMI fields | Manufacturer/model, board and BIOS versions |
-| `hardware_identifiers_get` | `setup` DMI fields | Serials, UUIDs and asset tags; retain separate sensitive-read approval |
-| `storage_devices_list`, `storage_device_get` | `setup` device/link facts | Basic block inventory, geometry, partitions and holder/master relationships |
-| `storage_mounts_list` | [`mount_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/mount_facts_module.html) | Dynamic mount inventory and mount capacity/inode data |
-| `packages_list` | [`package_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/package_facts_module.html) | Installed package/version inventory and reported backend metadata |
-| `nic_features_get` | `setup` network feature facts | Reported `ethtool -k` offload states, including fixed-state annotations |
+| `observe_systemd_unit` | [`systemd_service`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/systemd_service_module.html) query-only `status` | Selected per-unit properties in a fixed system/user scope; no mutation arguments |
+| `observe_hardware_system` | [`setup`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/setup_module.html) DMI fields | Manufacturer/model, board and BIOS versions |
+| `inspect_hardware_identifiers` | `setup` DMI fields | Serials, UUIDs and asset tags; retain separate sensitive-read approval |
+| `observe_storage_devices`, `observe_storage_device` | `setup` device/link facts | Basic block inventory, geometry, partitions and holder/master relationships |
+| `observe_storage_mounts` | [`mount_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/mount_facts_module.html) | Dynamic mount inventory and mount capacity/inode data |
+| `observe_packages` | [`package_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/package_facts_module.html) | Installed package/version inventory and reported backend metadata |
+| `observe_nic_features` | `setup` network feature facts | Reported `ethtool -k` offload states, including fixed-state annotations |
 
 Use opt-in reviewed bindings/roles and closed bounded projections, never a public
 dump-all-facts tool. Fix fact subsets, backend/source choices and timeouts;
@@ -1319,7 +1319,7 @@ For query-only unit status, omit `state`, `enabled` and `masked`, and fix daemon
 reload/reexec flags false. Do not use `enabled=false` or `masked=false` as a
 read-only setting: those request changes. Publish only approved status properties.
 
-The shipped `host_summary`, `cpu_stats` and `memory_stats` remain useful:
+The shipped `observe_host_summary`, `observe_cpu` and `observe_memory` remain useful:
 setup does not provide the boot UUID, raw CPU tick counters/two-sample deltas,
 or exact byte gauges plus the selected cumulative VM counters. They are currently
 **Ansible-backed custom collectors**, not native-core implementations; transport
@@ -1333,14 +1333,14 @@ and their API demonstrations are different capabilities, not fact collectors.
 
 ## Opt-in Linux host summary
 
-[`catalog/host_summary.toml`](catalog/host_summary.toml) binds the reviewed
-[`host_summary` role](catalog/roles/host_summary) to one ordinary SSH target.
+[`catalog/observe_host_summary.toml`](catalog/observe_host_summary.toml) binds the reviewed
+[`observe_host_summary` role](catalog/roles/observe_host_summary) to one ordinary SSH target.
 It is not enabled by default. This is an optional Ansible automation tool, not a
 native-only observer: install the wheel's `ansible` extra or select the Nix
 automation runtime, and provision `/usr/bin/python3` on the Linux target.
 No packages are installed automatically and no privilege escalation is used.
 
-Deploy the reviewed role at `/etc/estus/roles/host_summary`, provision
+Deploy the reviewed role at `/etc/estus/roles/observe_host_summary`, provision
 `/var/lib/estus/runner` as a private mode0700 directory owned by the MCP account,
 and configure the `server-ordinary` SSH alias, identity and host-key policy.
 The example fixes both automation Python and the proc reader to
@@ -1351,18 +1351,18 @@ instead select its already-provisioned `ansible` environment.
 Import the exact binding overlay offline before enabling the example:
 
 ```sh
-cat > host_summary.overlay.json <<'JSON'
+cat > observe_host_summary.overlay.json <<'JSON'
 {"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}}
 JSON
-estus schema import-role host_summary \
-  --role-path /etc/estus/roles/host_summary \
-  --overlay host_summary.overlay.json \
-  --output /etc/estus/host_summary.schema.json
-estus --config catalog/host_summary.toml
+estus schema import-role observe_host_summary \
+  --role-path /etc/estus/roles/observe_host_summary \
+  --overlay observe_host_summary.overlay.json \
+  --output /etc/estus/observe_host_summary.schema.json
+estus --config catalog/observe_host_summary.toml
 ```
 
 Import does not execute the role. Review the generated snapshot; no preapproved
-snapshot is shipped. The example explicitly selects only `host_summary` in an
+snapshot is shipped. The example explicitly selects only `observe_host_summary` in an
 `named = true` capability, restricts it to `server`, and caps execution at 30 seconds.
 Its only domain input is the empty object:
 
@@ -1398,8 +1398,8 @@ Docker-compatible backend. No host account, service or sudo policy is changed.
 
 ## Opt-in Linux CPU counters and topology
 
-[`catalog/cpu_stats.toml`](catalog/cpu_stats.toml) selects the reviewed
-[`cpu_stats` payload](catalog/payloads/cpu_stats), retaining ordinary `automation`
+[`catalog/observe_cpu.toml`](catalog/observe_cpu.toml) selects the reviewed
+[`observe_cpu` payload](catalog/payloads/observe_cpu), retaining ordinary `automation`
 authority and the `named = true` capability. It requires target `/usr/bin/python3`,
 not Ansible or a controller workspace. Nothing installs packages, escalates,
 changes services/sysctls or hotplugs CPUs.
@@ -1407,7 +1407,7 @@ changes services/sysctls or hotplugs CPUs.
 Use the public catalog workflow with the site mapping above:
 
 ```sh
-estus catalog export --tool cpu_stats --output ./cpu-review
+estus catalog export --tool observe_cpu --output ./cpu-review
 # Review source, manifest and fixed policy before approval.
 estus catalog prepare --site ./site.toml --definitions ./cpu-review/tools.toml \
   --target server --output ./cpu-approved
@@ -1481,14 +1481,14 @@ Accounting and topology semantics follow the kernel's
 
 ## Opt-in Linux memory gauges and VM counters
 
-[`catalog/memory_stats.toml`](catalog/memory_stats.toml) selects the reviewed
-[`memory_stats` payload](catalog/payloads/memory_stats), retaining ordinary
+[`catalog/observe_memory.toml`](catalog/observe_memory.toml) selects the reviewed
+[`observe_memory` payload](catalog/payloads/observe_memory), retaining ordinary
 `automation` authority and actions-only exposure. It requires target
 `/usr/bin/python3`, not Ansible or a controller workspace, and installs nothing.
 No sudo, service changes or sysctl writes occur.
 
 ```sh
-estus catalog export --tool memory_stats --output ./memory-review
+estus catalog export --tool observe_memory --output ./memory-review
 # Review source, manifest and fixed policy before approval.
 estus catalog prepare --site ./site.toml --definitions ./memory-review/tools.toml \
   --target server --output ./memory-approved

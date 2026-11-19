@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_nic_pause/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_nic_pause"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_nic_pause]
+description = "observe_nic_pause: selected driver-reported pause state; inspection grants no tuning permission."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_nic_pause.payload.json", source = "/etc/estus/payloads/observe_nic_pause/collector.py", no_log = false }
+fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "pause0","mac" = "52:54:00:12:34:58","driver" = "e1000e"}}
+input_map = {"interface" = "interface"}
+limits = { timeout_secs = 40 }
+input_schema = {"type" = "object","properties" = {"interface" = {"type" = "string","enum" = ["pause0"],"maxLength" = 15}},"required" = ["interface"],"additionalProperties" = false}
+[tools.observe_nic_pause.result]
+kind = "capability_projection"
+fields = {"interface" = ["mcp_result","interface"],"autoneg" = ["mcp_result","autoneg"],"rx" = ["mcp_result","rx"],"tx" = ["mcp_result","tx"],"source" = ["mcp_result","source"]}
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = {"type" = "object","properties" = {"interface" = {"type" = "string","maxLength" = 15},"autoneg" = {"type" = "boolean"},"rx" = {"type" = "boolean"},"tx" = {"type" = "boolean"},"source" = {"type" = "string","maxLength" = 128}},"required" = ["interface","autoneg","rx","tx","source"],"additionalProperties" = false}

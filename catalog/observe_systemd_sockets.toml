@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_systemd_sockets/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_systemd_sockets"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_systemd_sockets]
+description = "Bounded actual Listen endpoints, activation relationships and socket counters; no process attribution."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_systemd_sockets.payload.json", source = "/etc/estus/payloads/observe_systemd_sockets/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+input_map = {  }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+[tools.observe_systemd_sockets.result]
+kind = "capability_projection"
+fields = { "scope" = ["mcp_result", "scope"], "sockets" = ["mcp_result", "sockets"], "truncated" = ["mcp_result", "truncated"], "source_count" = ["mcp_result", "source_count"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "sockets" = { "type" = "array", "items" = { "type" = "object", "properties" = { "Id" = { "type" = "string", "maxLength" = 4096 }, "ActiveState" = { "type" = "string", "maxLength" = 4096 }, "Triggers" = { "type" = "string", "maxLength" = 4096 }, "Listen" = { "type" = "string", "maxLength" = 4096 }, "Accept" = { "type" = "string", "maxLength" = 4096 }, "NConnections" = { "type" = "string", "maxLength" = 4096 }, "NAccepted" = { "type" = "string", "maxLength" = 4096 } }, "required" = [], "additionalProperties" = false }, "maxItems" = 8 }, "truncated" = { "type" = "boolean" }, "source_count" = { "type" = "integer", "minimum" = 0, "maximum" = 256 } }, "required" = ["scope", "sockets", "truncated", "source_count"], "additionalProperties" = false }

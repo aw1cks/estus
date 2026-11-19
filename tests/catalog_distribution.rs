@@ -22,7 +22,7 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
     let catalog = canonical_catalog();
     assert_eq!(
         catalog.manifest().presets["linux-health"],
-        ["cpu_stats", "memory_stats", "pressure_get"]
+        ["observe_cpu", "observe_memory", "observe_pressure"]
     );
     assert!(!catalog.manifest().tools.contains_key("app_config"));
     let output = tempfile::tempdir().unwrap();
@@ -46,7 +46,7 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
             0o700
         );
     }
-    assert!(catalog.definition("../cpu_stats").is_err());
+    assert!(catalog.definition("../observe_cpu").is_err());
     assert!(catalog.definition("not_a_tool").is_err());
     assert!(
         catalog
@@ -57,14 +57,14 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
 }
 
 fn small_catalog(root: &Path) {
-    fs::create_dir_all(root.join("roles/cpu_stats/tasks")).unwrap();
-    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["cpu_stats"]},"tools":{"cpu_stats":{"definition":"cpu_stats.toml","executor":{"kind":"ansible_role","path":"roles/cpu_stats"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
+    fs::create_dir_all(root.join("roles/observe_cpu/tasks")).unwrap();
+    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["observe_cpu"]},"tools":{"observe_cpu":{"definition":"observe_cpu.toml","executor":{"kind":"ansible_role","path":"roles/observe_cpu"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
     fs::write(
-        root.join("cpu_stats.toml"),
-        "[tools.cpu_stats]\ndescription = 'fixture'\n",
+        root.join("observe_cpu.toml"),
+        "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\"]\n",
     )
     .unwrap();
-    fs::write(root.join("roles/cpu_stats/tasks/main.yml"), "---\n[]\n").unwrap();
+    fs::write(root.join("roles/observe_cpu/tasks/main.yml"), "---\n[]\n").unwrap();
 }
 #[test]
 fn missing_unknown_and_legacy_qualification_formats_fail_closed() {
@@ -77,13 +77,13 @@ fn missing_unknown_and_legacy_qualification_formats_fail_closed() {
         let mut manifest = original.clone();
         match case {
             0 => {
-                manifest["tools"]["cpu_stats"]
+                manifest["tools"]["observe_cpu"]
                     .as_object_mut()
                     .unwrap()
                     .remove("qualification");
             }
             1 => {
-                manifest["tools"]["cpu_stats"]["qualification"] =
+                manifest["tools"]["observe_cpu"]["qualification"] =
                     serde_json::json!("PRIVATE_UNREVIEWED_QUALIFICATION")
             }
             2 => manifest["schema"] = serde_json::json!(1),
@@ -102,7 +102,7 @@ fn role_export_excludes_installer_generated_python_bytecode() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     small_catalog(&root);
-    let files = root.join("roles/cpu_stats/files");
+    let files = root.join("roles/observe_cpu/files");
     fs::create_dir(&files).unwrap();
     let collector = files.join("collector.py");
     fs::write(
@@ -132,7 +132,7 @@ fn role_export_excludes_installer_generated_python_bytecode() {
     let output = root.join("export");
     Catalog::load(Some(&root))
         .unwrap()
-        .copy_assets("cpu_stats", &output)
+        .copy_assets("observe_cpu", &output)
         .unwrap();
     assert_eq!(
         fs::read(output.join("files/collector.py")).unwrap(),
@@ -153,37 +153,37 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
     let destination = root.join("existing");
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("sentinel"), "keep").unwrap();
-    assert!(catalog.copy_assets("cpu_stats", &destination).is_err());
+    assert!(catalog.copy_assets("observe_cpu", &destination).is_err());
     assert_eq!(
         fs::read_to_string(destination.join("sentinel")).unwrap(),
         "keep"
     );
-    let task = root.join("roles/cpu_stats/tasks/main.yml");
+    let task = root.join("roles/observe_cpu/tasks/main.yml");
     fs::remove_file(&task).unwrap();
-    symlink(root.join("cpu_stats.toml"), &task).unwrap();
+    symlink(root.join("observe_cpu.toml"), &task).unwrap();
     assert!(
         catalog
-            .copy_assets("cpu_stats", &root.join("existing/../traversal"))
+            .copy_assets("observe_cpu", &root.join("existing/../traversal"))
             .is_err()
     );
     assert!(!root.join("traversal").exists());
     assert!(
         catalog
-            .copy_assets("cpu_stats", &root.join("symlink-copy"))
+            .copy_assets("observe_cpu", &root.join("symlink-copy"))
             .is_err()
     );
     assert!(!root.join("symlink-copy").exists());
     fs::remove_file(&task).unwrap();
     fs::write(&task, "---\n[]\n").unwrap();
-    fs::write(root.join("cpu_stats.toml"), vec![b' '; 256 * 1024 + 1]).unwrap();
-    assert!(catalog.definition("cpu_stats").is_err());
-    fs::remove_file(root.join("cpu_stats.toml")).unwrap();
-    symlink(&task, root.join("cpu_stats.toml")).unwrap();
-    assert!(catalog.definition("cpu_stats").is_err());
+    fs::write(root.join("observe_cpu.toml"), vec![b' '; 256 * 1024 + 1]).unwrap();
+    assert!(catalog.definition("observe_cpu").is_err());
+    fs::remove_file(root.join("observe_cpu.toml")).unwrap();
+    symlink(&task, root.join("observe_cpu.toml")).unwrap();
+    assert!(catalog.definition("observe_cpu").is_err());
     let manifest = root.join("catalog.json");
     let original = fs::read_to_string(&manifest).unwrap();
     for replacement in [
-        original.replace("cpu_stats.toml", "../cpu_stats.toml"),
+        original.replace("observe_cpu.toml", "../observe_cpu.toml"),
         original.replace("\"schema\":3", "\"schema\":1"),
         original.replace("\"schema\":3", "\"schema\":3,\"schema\":3"),
         original.replace("\"schema\":3", "\"schema\":3,\"unexpected\":true"),
@@ -254,11 +254,11 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         }
     }
     for (name, prerequisite) in [
-        ("nic_eee_get", "estus_nic_model"),
-        ("nic_eee_set", "estus_nic_model"),
-        ("nic_transceiver_get", "estus_nic_model"),
-        ("nic_fec_get", "netdevsim"),
-        ("nic_fec_set", "netdevsim"),
+        ("observe_nic_eee", "estus_nic_model"),
+        ("change_nic_eee", "estus_nic_model"),
+        ("observe_nic_transceiver", "estus_nic_model"),
+        ("observe_nic_fec", "netdevsim"),
+        ("change_nic_fec", "netdevsim"),
     ] {
         let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
         assert_eq!(tool["qualification"], "laboratory_only", "{name}");
@@ -272,7 +272,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     }
     assert_eq!(
         listing["presets"]["linux-health"],
-        serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"])
+        serde_json::json!(["observe_cpu", "observe_memory", "observe_pressure"])
     );
     let output = work.join("export");
     let exported = installed_command(
@@ -296,12 +296,12 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     assert_eq!(report["enabled"], false);
     assert_eq!(
         report["tools"],
-        serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"])
+        serde_json::json!(["observe_cpu", "observe_memory", "observe_pressure"])
     );
     assert_selection_metadata(
         &output,
         &canonical,
-        &["cpu_stats", "memory_stats", "pressure_get"],
+        &["observe_cpu", "observe_memory", "observe_pressure"],
     );
     let definitions: toml::Table = fs::read_to_string(output.join("tools.toml"))
         .unwrap()
@@ -309,7 +309,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
         .unwrap();
     assert_eq!(definitions.len(), 1);
     assert_eq!(definitions["tools"].as_table().unwrap().len(), 3);
-    for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+    for name in ["observe_cpu", "observe_memory", "observe_pressure"] {
         assert!(
             output
                 .join(format!("payloads/{name}/manifest.json"))
@@ -351,11 +351,11 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
             "catalog",
             "export",
             "--tool",
-            "nic_eee_get",
+            "observe_nic_eee",
             "--tool",
-            "nic_eee_set",
+            "change_nic_eee",
             "--tool",
-            "nic_transceiver_get",
+            "observe_nic_transceiver",
             "--output",
             laboratory.to_str().unwrap(),
         ],
@@ -370,7 +370,11 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     assert_selection_metadata(
         &laboratory,
         &canonical,
-        &["nic_eee_get", "nic_eee_set", "nic_transceiver_get"],
+        &[
+            "observe_nic_eee",
+            "change_nic_eee",
+            "observe_nic_transceiver",
+        ],
     );
     let site = work.join("site.toml");
     fs::write(&site, "").unwrap();
@@ -409,7 +413,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
                 "catalog",
                 "export",
                 "--tool",
-                "cpu_stats",
+                "observe_cpu",
                 "--output",
                 output.to_str().unwrap()
             ]
@@ -434,7 +438,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
                 "catalog",
                 "export",
                 "--tool",
-                "../cpu_stats",
+                "../observe_cpu",
                 "--output",
                 work.join("bad").to_str().unwrap()
             ]
@@ -470,4 +474,80 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+#[test]
+fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail() {
+    let catalog = canonical_catalog();
+    assert_eq!(catalog.manifest().tools.len(), 118);
+    for name in catalog.manifest().tools.keys() {
+        let definition = catalog.definition(name).unwrap();
+        let effects = definition["tools"][name]["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(!effects.is_empty(), "{name}: empty effects");
+        if name.starts_with("observe_") {
+            assert_eq!(effects, ["read"], "{name}: observe_* must be read-only");
+        } else if name.starts_with("inspect_") {
+            assert!(
+                effects
+                    .iter()
+                    .all(|e| matches!(*e, "read" | "sensitive_read" | "probe"))
+                    && effects
+                        .iter()
+                        .any(|e| matches!(*e, "sensitive_read" | "probe")),
+                "{name}: inspect_* must declare sensitive_read or probe without mutation: {effects:?}"
+            );
+        } else if name.starts_with("preview_") {
+            assert!(
+                effects
+                    .iter()
+                    .all(|e| matches!(*e, "read" | "sensitive_read" | "probe")),
+                "{name}: preview_* must not declare mutation: {effects:?}"
+            );
+        } else if name.starts_with("change_") {
+            assert!(
+                effects.iter().any(|e| matches!(
+                    *e,
+                    "runtime_write" | "persistent_write" | "availability" | "unknown"
+                )),
+                "{name}: change_* must declare a mutating or unknown effect: {effects:?}"
+            );
+        } else {
+            panic!("unexpected catalog tool risk prefix: {name}");
+        }
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    small_catalog(&root);
+    fs::write(
+        root.join("observe_cpu.toml"),
+        "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\", \"sensitive_read\"]\n",
+    )
+    .unwrap();
+    assert!(Catalog::load(Some(&root)).is_err());
+
+    let bad_prefix = tempfile::tempdir().unwrap();
+    let bad_root = bad_prefix.path().canonicalize().unwrap();
+    fs::create_dir_all(bad_root.join("roles/legacy_tool/tasks")).unwrap();
+    fs::write(
+        bad_root.join("catalog.json"),
+        r#"{"schema":3,"version":"1","presets":{},"tools":{"legacy_tool":{"definition":"legacy_tool.toml","executor":{"kind":"ansible_role","path":"roles/legacy_tool"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        bad_root.join("legacy_tool.toml"),
+        "[tools.legacy_tool]\ndescription = 'fixture'\neffects = [\"read\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        bad_root.join("roles/legacy_tool/tasks/main.yml"),
+        "---\n[]\n",
+    )
+    .unwrap();
+    assert!(Catalog::load(Some(&bad_root)).is_err());
 }

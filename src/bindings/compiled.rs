@@ -573,6 +573,40 @@ impl Bindings {
     }
 }
 
+fn validate_risk_prefix_effects(name: &str, effects: &[Effect]) -> Result<(), ConfigError> {
+    let has_mutating = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::RuntimeWrite | Effect::PersistentWrite | Effect::Availability | Effect::Unknown
+        )
+    });
+    if name.starts_with("observe_") {
+        if effects.is_empty() || !effects.iter().all(|effect| matches!(effect, Effect::Read)) {
+            return Err(invalid("observe_* tools may only declare read effects"));
+        }
+    } else if name.starts_with("inspect_") {
+        if has_mutating
+            || !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SensitiveRead | Effect::Probe))
+        {
+            return Err(invalid(
+                "inspect_* tools must declare read-only inspection or probe effects",
+            ));
+        }
+    } else if name.starts_with("preview_") {
+        if has_mutating || effects.is_empty() {
+            return Err(invalid(
+                "preview_* tools may not declare mutating or unknown effects",
+            ));
+        }
+    } else if name.starts_with("change_") && !has_mutating {
+        return Err(invalid(
+            "change_* tools must declare mutating or unknown effects",
+        ));
+    }
+    Ok(())
+}
 impl CompiledBinding {
     fn compile_automation(
         name: String,
@@ -761,6 +795,7 @@ impl CompiledBinding {
         activation: &mut ControllerActivation<'_>,
         workstation: bool,
     ) -> Result<Self, ConfigError> {
+        validate_risk_prefix_effects(&name, &raw.effects)?;
         if matches!(&raw.execution, RawExecution::AnsibleGeneric { .. }) {
             return Self::compile_generic(name, raw, enabled, limits, target_exists);
         }

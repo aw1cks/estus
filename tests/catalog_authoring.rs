@@ -93,14 +93,14 @@ async fn prepare_pinned_presets_and_named_runtime_then_call_real_tools() -> Resu
         );
         health.as_table_mut().context("site table")?.insert(
             "disabled_tools".into(),
-            toml::Value::try_from(json!(["memory_stats"]))?,
+            toml::Value::try_from(json!(["observe_memory"]))?,
         );
         health["targets"]["plain"]
             .as_table_mut()
             .context("target")?
             .insert(
                 "enabled_tools".into(),
-                toml::Value::try_from(json!(["pressure_get"]))?,
+                toml::Value::try_from(json!(["observe_pressure"]))?,
             );
         let site_path = root.join("site.toml");
         std::fs::write(&site_path, toml::to_string(&health)?)?;
@@ -123,7 +123,7 @@ async fn prepare_pinned_presets_and_named_runtime_then_call_real_tools() -> Resu
         )
         .await?;
         let config = prepared.join("estus.toml");
-        let reply = use_prepared(&config, "pressure_get").await?;
+        let reply = use_prepared(&config, "observe_pressure").await?;
         let observed = catalog::projection(&reply)?;
         ensure!(
             observed["pressure"].as_array().is_some_and(|rows| rows
@@ -133,14 +133,14 @@ async fn prepare_pinned_presets_and_named_runtime_then_call_real_tools() -> Resu
         );
         let client = support::Client::start(&config).await?;
         let rejected = client
-            .call("cpu_stats", json!({"host":"plain","inputs":{}}))
+            .call("observe_cpu", json!({"host":"plain","inputs":{}}))
             .await;
         let stopped = client.stop().await;
         ensure!(rejected.is_err(), "per-target exclusion was only cosmetic");
         stopped?;
         let client = support::Client::start(&config).await?;
         let rejected = client
-            .call("memory_stats", json!({"host":"plain","inputs":{}}))
+            .call("observe_memory", json!({"host":"plain","inputs":{}}))
             .await;
         let stopped = client.stop().await;
         ensure!(rejected.is_err(), "global disable was bypassed");
@@ -153,7 +153,7 @@ async fn prepare_pinned_presets_and_named_runtime_then_call_real_tools() -> Resu
             &[
                 "export".as_ref(),
                 "--tool".as_ref(),
-                "journal_usage_get".as_ref(),
+                "observe_journal_usage".as_ref(),
                 "--output".as_ref(),
                 export.as_os_str(),
             ],
@@ -186,7 +186,7 @@ async fn prepare_pinned_presets_and_named_runtime_then_call_real_tools() -> Resu
             ],
         )
         .await?;
-        let reply = use_prepared(&prepared.join("estus.toml"), "journal_usage_get").await?;
+        let reply = use_prepared(&prepared.join("estus.toml"), "observe_journal_usage").await?;
         let observed = catalog::projection(&reply)?;
         ensure!(
             observed["disk_usage_text"]
@@ -210,13 +210,13 @@ async fn extracted_baseline_collectors_preserve_real_kernel_identity_and_units()
         let boot = guest.shell("cat /proc/sys/kernel/random/boot_id").await?;
         ensure!(boot.status.success(), "independent boot identity");
         let boot = std::str::from_utf8(&boot.stdout)?.trim();
-        let host = guest.binding("host_summary", json!({})).await?;
+        let host = guest.binding("observe_host_summary", json!({})).await?;
         let reply = host.call(json!({})).await?;
         ensure!(
             catalog::projection(&reply)?["boot_id"] == boot,
             "extracted summary lost actual kernel identity"
         );
-        let cpu = guest.binding("cpu_stats", json!({})).await?;
+        let cpu = guest.binding("observe_cpu", json!({})).await?;
         let reply = cpu.call(json!({"limit":1,"sample_ms":0})).await?;
         let p = catalog::projection(&reply)?;
         ensure!(
@@ -225,7 +225,7 @@ async fn extracted_baseline_collectors_preserve_real_kernel_identity_and_units()
                 && p["counters"]["idle"].as_u64().is_some(),
             "extracted CPU collector lost identity, units or counters"
         );
-        let memory = guest.binding("memory_stats", json!({})).await?;
+        let memory = guest.binding("observe_memory", json!({})).await?;
         let reply = memory.call(json!({})).await?;
         let p = catalog::projection(&reply)?;
         let oracle = guest.shell("cat /proc/meminfo").await?;

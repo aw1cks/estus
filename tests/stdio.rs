@@ -298,7 +298,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             );
             if !is_builtin {
                 ensure!(
-                    matches!(*extra, "cpu_stats" | "memory_stats" | "pressure_get"),
+                    matches!(*extra, "observe_cpu" | "observe_memory" | "observe_pressure"),
                     "unexpected extra tool in no-config workstation: {extra}"
                 );
                 let tool = tools.iter().find(|t| t["name"] == *extra).unwrap();
@@ -3461,7 +3461,7 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
 
 const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
     capabilities = { named = true }
-    enabled_tools = ["observe_account", "change_account"]
+    enabled_tools = ["inspect_account", "change_account"]
     [ssh]
     config_file = "replacement.conf"
     [limits]
@@ -3482,7 +3482,7 @@ const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
     capabilities = { file_read = true, file_write = true }
     [targets.other]
     ssh_host = "private-binding-other.invalid"
-    [tools.observe_account]
+    [tools.inspect_account]
     description = "Observe an approved account."
     revision = "review-1"
     targets = ["base", "read", "files"]
@@ -3553,9 +3553,9 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         let tools = listed["result"]["tools"].as_array().context("named tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["change_account", "change_target_quarantine_clear", "inspect_output", "observe_account", "observe_targets"]);
+        ensure!(names == ["change_account", "change_target_quarantine_clear", "inspect_account", "inspect_output", "observe_targets"]);
         for (name, revision, effects, tier, read_only, destructive) in [
-            ("observe_account", "review-1", json!(["read", "sensitive_read"]), "inspect", true, false),
+            ("inspect_account", "review-1", json!(["read", "sensitive_read"]), "inspect", true, false),
             ("change_account", "change-2", json!(["persistent_write"]), "change", false, true),
         ] {
             let tool = tools.iter().find(|tool| tool["name"] == name).context("binding metadata")?;
@@ -3581,11 +3581,11 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
             ensure!(tool["outputSchema"]["properties"]["data"].is_object());
             ensure!(tool["outputSchema"]["properties"]["error"].is_object());
         }
-        for name in ["observe_account", "change_account"] {
+        for name in ["inspect_account", "change_account"] {
             let tool = tools.iter().find(|tool| tool["name"] == name).context("native binding")?;
             output_control_schema(&tool["inputSchema"])?;
         }
-        let observe = tools.iter().find(|tool| tool["name"] == "observe_account").context("observe tool")?;
+        let observe = tools.iter().find(|tool| tool["name"] == "inspect_account").context("observe tool")?;
         let schema = &observe["inputSchema"];
         ensure!(schema["type"] == "object" && schema["additionalProperties"] == false);
         let hosts = schema["properties"]["host"]["enum"].as_array().context("declared binding hosts")?;
@@ -3608,7 +3608,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         binding_public_only(&serde_json::to_vec(&discovered)?)?;
         let rows = discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("binding target rows")?;
         for (name, expected) in [
-            ("base", json!(["change_account", "observe_account"])),
+            ("base", json!(["change_account", "inspect_account"])),
             ("read", json!([])),
             ("files", json!([])),
             ("other", json!([])),
@@ -3619,7 +3619,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         std::fs::write(
             directory.path().join("operator.toml"),
             config
-                .replace("[\"observe_account\", \"change_account\"]", "[\"disabled_account\"]")
+                .replace("[\"inspect_account\", \"change_account\"]", "[\"disabled_account\"]")
                 .replace("review-1", "review-99"),
         )?;
         server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}})).await?;
@@ -3695,7 +3695,7 @@ async fn named_tool_validation_and_target_policy_precede_ssh() -> Result<()> {
         }
         for (index, (arguments, code)) in cases.into_iter().enumerate() {
             let id = 10 + index as u64;
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_account","arguments":arguments}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"inspect_account","arguments":arguments}})).await?;
             let response = server.response(id).await?;
             binding_public_only(&serde_json::to_vec(&response)?)?;
             if let Some(code) = code {
@@ -3723,7 +3723,7 @@ async fn named_tool_validation_and_target_policy_precede_ssh() -> Result<()> {
     let mut audited_rejections = 0;
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
-        if record["tool"] == "observe_account" {
+        if record["tool"] == "inspect_account" {
             audited_rejections += 1;
             ensure!(record["identity_role"] == "ordinary");
             ensure!(record["event"] == "reject");
@@ -3754,16 +3754,16 @@ async fn file_profiles_do_not_publish_enabled_native_bindings() -> Result<()> {
             server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
             let listed = server.response(2).await?;
             let tools = listed["result"]["tools"].as_array().context("profile tools")?;
-            for name in ["observe_account", "change_account", "disabled_account"] {
+            for name in ["inspect_account", "change_account", "disabled_account"] {
                 ensure!(!tools.iter().any(|tool| tool["name"] == name));
             }
-            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_account","arguments":{"host":"base","account":"root","count":0,"verbose":false}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inspect_account","arguments":{"host":"base","account":"root","count":0,"verbose":false}}})).await?;
             ensure!(server.response(3).await?["error"]["code"] == -32602);
             server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
             let response = server.response(4).await?;
             for row in discovery_data(&response["result"], "configured")?["targets"].as_array().context("profile rows")? {
                 let operations = row["permitted_operations"].as_array().context("profile operations")?;
-                ensure!(!operations.contains(&json!("observe_account")));
+                ensure!(!operations.contains(&json!("inspect_account")));
                 ensure!(!operations.contains(&json!("change_account")));
             }
             Ok::<_, anyhow::Error>(())
@@ -3786,12 +3786,12 @@ async fn invalid_named_tool_definitions_fail_before_mcp_without_private_values()
     let mut invalid = Vec::new();
     for (from, to) in [
         (
-            "[\"observe_account\", \"change_account\"]",
+            "[\"inspect_account\", \"change_account\"]",
             "[\"BINDING_CONFIG_SECRET\"]",
         ),
         (
-            "[\"observe_account\", \"change_account\"]",
-            "[\"observe_account\", \"observe_account\"]",
+            "[\"inspect_account\", \"change_account\"]",
+            "[\"inspect_account\", \"inspect_account\"]",
         ),
         (
             "authority = \"ordinary\"",
@@ -3882,7 +3882,7 @@ async fn invalid_named_tool_definitions_fail_before_mcp_without_private_values()
 #[tokio::test]
 async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<()> {
     for (fixture, names) in [
-        (NAMED_TOOL_CONFIG, ["observe_account", "change_account"]),
+        (NAMED_TOOL_CONFIG, ["inspect_account", "change_account"]),
         (FIXED_SUDO_TOOL_CONFIG, ["fixed_id", "fixed_printf"]),
     ] {
         let config = fixture.replace(
@@ -6213,7 +6213,7 @@ async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() ->
             NAMED_TOOL_CONFIG,
             vec![
                 (
-                    "observe_account",
+                    "inspect_account",
                     json!({"host":"base","account":"root","count":0,"verbose":false}),
                 ),
                 ("change_account", json!({"host":"base"})),

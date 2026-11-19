@@ -1415,7 +1415,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["runtime_write", "read"]
-execution = { kind = "native_payload", snapshot = "/etc/estus/systemd_unit_restart.payload.json", source = "/etc/estus/payloads/systemd_unit_restart/collector.py", no_log = false }
+execution = { kind = "native_payload", snapshot = "/etc/estus/change_systemd_restart.payload.json", source = "/etc/estus/payloads/change_systemd_restart/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3", manager_scope = "system" }
 input_map = { unit = "unit" }
 constraints = { allowed_units = ["nginx.service", "caddy.service"] }
@@ -1425,8 +1425,8 @@ result = { kind = "capability_projection", fields = { unit = ["mcp_result", "uni
     )
     .unwrap();
     let compiled = Bindings::compile(
-        BTreeMap::from([("systemd_unit_restart".into(), raw.clone())]),
-        &["systemd_unit_restart".into()],
+        BTreeMap::from([("change_systemd_restart".into(), raw.clone())]),
+        &["change_systemd_restart".into()],
         &Limits::default(),
         |target| target == "server",
         None,
@@ -1469,5 +1469,67 @@ result = { kind = "capability_projection", fields = { unit = ["mcp_result", "uni
             true,
         )
         .is_err()
+    );
+}
+
+#[test]
+fn risk_prefix_effects_invariant_rejects_mismatches_and_preview_maps_to_preview_tier() {
+    let mut bad_observe = definition();
+    bad_observe["effects"] = toml::Value::Array(vec!["read".into(), "sensitive_read".into()]);
+    assert!(
+        Bindings::compile(
+            BTreeMap::from([("observe_bad".into(), bad_observe)]),
+            &["observe_bad".into()],
+            &Limits::default(),
+            |_| true,
+            None,
+            true,
+        )
+        .is_err()
+    );
+
+    let mut bad_inspect = definition();
+    bad_inspect["effects"] = toml::Value::Array(vec!["read".into()]);
+    assert!(
+        Bindings::compile(
+            BTreeMap::from([("inspect_bad".into(), bad_inspect)]),
+            &["inspect_bad".into()],
+            &Limits::default(),
+            |_| true,
+            None,
+            true,
+        )
+        .is_err()
+    );
+
+    let mut bad_change = definition();
+    bad_change["effects"] = toml::Value::Array(vec!["read".into()]);
+    assert!(
+        Bindings::compile(
+            BTreeMap::from([("change_bad".into(), bad_change)]),
+            &["change_bad".into()],
+            &Limits::default(),
+            |_| true,
+            None,
+            true,
+        )
+        .is_err()
+    );
+
+    let mut preview = definition();
+    preview["effects"] = toml::Value::Array(vec!["read".into(), "sensitive_read".into()]);
+    let compiled = Bindings::compile(
+        BTreeMap::from([("preview_plan".into(), preview)]),
+        &["preview_plan".into()],
+        &Limits::default(),
+        |_| true,
+        None,
+        true,
+    )
+    .unwrap();
+    let (_, binding) = compiled.entries().next().unwrap();
+    assert_eq!(
+        crate::config::risk_tier_for_binding(binding),
+        crate::config::RiskTier::Preview
     );
 }

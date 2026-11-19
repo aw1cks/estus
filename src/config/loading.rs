@@ -1153,7 +1153,7 @@ mod tests {
             .activate_automation(&tokio_util::sync::CancellationToken::new())
             .await
             .unwrap();
-        for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+        for name in ["observe_cpu", "observe_memory", "observe_pressure"] {
             assert!(
                 config.bindings.entries().any(|(id, b)| b.name == name
                     && config.binding_enabled(id)
@@ -1320,9 +1320,9 @@ tool_presets = []
         );
         let text = format!(
             "{prefix}{}{}{}",
-            definition("cpu_stats"),
-            definition("memory_stats"),
-            definition("pressure_get")
+            definition("observe_cpu"),
+            definition("observe_memory"),
+            definition("observe_pressure")
         );
         let config = load(&text).unwrap();
         assert!(

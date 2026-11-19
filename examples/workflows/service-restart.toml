@@ -4,12 +4,12 @@
 # prepare explicitly with the provisioned site.
 # Successful completion is NOT application health. Interrupted work is uncertain:
 # independently inspect the manager before deciding anything; NEVER auto-replay.
-# MCP: systemd_unit_restart {"host":"plain","inputs":{"unit":"estus-fixture.service"}}
-tool = "systemd_unit_restart"
+# MCP: change_systemd_restart {"host":"plain","inputs":{"unit":"estus-fixture.service"}}
+tool = "change_systemd_restart"
 authority = "automation:catalog"
 allowed_units = ["estus-fixture.service"]
 #
-# estus catalog export --tool systemd_unit_restart --output restart-export
+# estus catalog export --tool change_systemd_restart --output restart-export
 # Review roles; replace constraints.allowed_units in restart-export/tools.toml with the
 # allowed_units above. Provision catalog authority separately from ordinary SSH.
 # estus catalog prepare --site provisioned-site.toml --definitions restart-export/tools.toml --target plain --output restart-reviewed

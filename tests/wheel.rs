@@ -502,11 +502,11 @@ async fn installed_wheel_channels() -> Result<()> {
             }
         }
         for (name, prerequisite) in [
-            ("nic_eee_get", "estus_nic_model"),
-            ("nic_eee_set", "estus_nic_model"),
-            ("nic_transceiver_get", "estus_nic_model"),
-            ("nic_fec_get", "netdevsim"),
-            ("nic_fec_set", "netdevsim"),
+            ("observe_nic_eee", "estus_nic_model"),
+            ("change_nic_eee", "estus_nic_model"),
+            ("observe_nic_transceiver", "estus_nic_model"),
+            ("observe_nic_fec", "netdevsim"),
+            ("change_nic_fec", "netdevsim"),
         ] {
             let tool = tools
                 .iter()
@@ -530,13 +530,13 @@ async fn installed_wheel_channels() -> Result<()> {
         let report: Value = serde_json::from_slice(&exported.stdout)?;
         ensure!(
             report["enabled"] == false
-                && report["tools"] == json!(["cpu_stats", "memory_stats", "pressure_get"]),
+                && report["tools"] == json!(["observe_cpu", "observe_memory", "observe_pressure"]),
             "{channel} export granted authority or changed selection: {report}"
         );
         selection_metadata(
             &export,
             &canonical,
-            &["cpu_stats", "memory_stats", "pressure_get"],
+            &["observe_cpu", "observe_memory", "observe_pressure"],
         )?;
         let definitions: toml::Table = fs::read_to_string(export.join("tools.toml"))?.parse()?;
         ensure!(
@@ -545,7 +545,7 @@ async fn installed_wheel_channels() -> Result<()> {
                 .is_some_and(|tools| tools.len() == 3),
             "{channel} health export is incomplete"
         );
-        for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+        for name in ["observe_cpu", "observe_memory", "observe_pressure"] {
             ensure!(
                 export
                     .join(format!("payloads/{name}/manifest.json"))
@@ -564,11 +564,11 @@ async fn installed_wheel_channels() -> Result<()> {
                     "catalog",
                     "export",
                     "--tool",
-                    "nic_eee_get",
+                    "observe_nic_eee",
                     "--tool",
-                    "nic_eee_set",
+                    "change_nic_eee",
                     "--tool",
-                    "nic_transceiver_get",
+                    "observe_nic_transceiver",
                     "--output",
                 ])
                 .arg(&laboratory),
@@ -582,7 +582,11 @@ async fn installed_wheel_channels() -> Result<()> {
         selection_metadata(
             &laboratory,
             &canonical,
-            &["nic_eee_get", "nic_eee_set", "nic_transceiver_get"],
+            &[
+                "observe_nic_eee",
+                "change_nic_eee",
+                "observe_nic_transceiver",
+            ],
         )?;
         for signal in [None, Some(Signal::SIGINT), Some(Signal::SIGTERM)] {
             let mut command = launch(false);
@@ -810,8 +814,8 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
         let manifest_path = catalog.join("catalog.json");
         let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
         let selected = if additional {
-            let name = "sdist_source_probe";
-            let mut template = manifest["tools"]["pressure_get"].clone();
+            let name = "observe_sdist_source_probe";
+            let mut template = manifest["tools"]["observe_pressure"].clone();
             template["definition"] = json!(format!("{name}.toml"));
             template["executor"]["path"] = json!(format!("payloads/{name}"));
             manifest["tools"][name] = template;
@@ -821,13 +825,13 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             ));
             fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
             let mut document: toml::Table =
-                toml::from_str(&fs::read_to_string(catalog.join("pressure_get.toml"))?)?;
+                toml::from_str(&fs::read_to_string(catalog.join("observe_pressure.toml"))?)?;
             let tools = document
                 .get_mut("tools")
                 .and_then(toml::Value::as_table_mut)
                 .context("source template tools")?;
             let definition = tools
-                .remove("pressure_get")
+                .remove("observe_pressure")
                 .context("source template binding")?;
             tools.insert(name.to_owned(), definition);
             fs::write(
@@ -835,12 +839,12 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
                 toml::to_string(&document)?,
             )?;
             copy_environment(
-                &catalog.join("payloads/pressure_get"),
+                &catalog.join("payloads/observe_pressure"),
                 &catalog.join("payloads").join(name),
             )?;
             name
         } else {
-            "pressure_get"
+            "observe_pressure"
         };
         let reviewed =
             assets::Catalog::load(Some(&catalog)).map_err(|code| anyhow::anyhow!(code))?;
@@ -857,7 +861,7 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
         }
         // These files exist in the disposable source but must never enter an artifact.
         fs::write(catalog.join("private_state.json"), b"SDIST_PRIVATE_STATE")?;
-        let cache = catalog.join("payloads/pressure_get/__pycache__");
+        let cache = catalog.join("payloads/observe_pressure/__pycache__");
         fs::create_dir_all(&cache)?;
         fs::write(
             cache.join("collector.cpython-314.pyc"),

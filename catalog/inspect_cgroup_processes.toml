@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/inspect_cgroup_processes/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["inspect_cgroup_processes"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.inspect_cgroup_processes]
+description = "Bounded direct membership of approved cgroup only, without command arguments. PID membership races are explicit; no process signalling or migration."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read", "sensitive_read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_cgroup_processes.payload.json", source = "/etc/estus/payloads/inspect_cgroup_processes/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
+input_map = { "limit" = "limit" }
+limits = { timeout_secs = 40 }
+input_schema = { "type" = "object", "properties" = { "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 64 } }, "required" = ["limit"], "additionalProperties" = false }
+[tools.inspect_cgroup_processes.result]
+kind = "capability_projection"
+fields = { "root" = ["mcp_result", "root"], "boot_id" = ["mcp_result", "boot_id"], "identity" = ["mcp_result", "identity"], "controllers" = ["mcp_result", "controllers"], "subtree_control" = ["mcp_result", "subtree_control"], "ancestors" = ["mcp_result", "ancestors"], "scope" = ["mcp_result", "scope"], "pids" = ["mcp_result", "pids"], "truncated" = ["mcp_result", "truncated"], "membership_atomic" = ["mcp_result", "membership_atomic"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "root" = { "type" = "string", "maxLength" = 256 }, "boot_id" = { "type" = "string", "maxLength" = 36 }, "identity" = { "type" = "string", "maxLength" = 128 }, "controllers" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 }, "subtree_control" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 64 }, "maxItems" = 32 }, "ancestors" = { "type" = "array", "items" = { "type" = "object", "properties" = { "path" = { "type" = "string", "maxLength" = 1024 }, "constraints" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["name", "value"], "additionalProperties" = false }, "maxItems" = 8 } }, "required" = ["path", "constraints"], "additionalProperties" = false }, "maxItems" = 32 }, "scope" = { "type" = "string", "maxLength" = 64 }, "pids" = { "type" = "array", "items" = { "type" = "integer", "minimum" = 1, "maximum" = 2147483647 }, "maxItems" = 64 }, "truncated" = { "type" = "boolean" }, "membership_atomic" = { "type" = "boolean", "const" = false } }, "required" = ["root", "boot_id", "identity", "controllers", "subtree_control", "ancestors", "scope", "pids", "truncated", "membership_atomic"], "additionalProperties" = false }

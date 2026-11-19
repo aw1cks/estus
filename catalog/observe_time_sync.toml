@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_time_sync/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_time_sync"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_time_sync]
+description = "Observable manager synchronization state; unknown never means synchronized or NTP enabled. Source/offset/failure explicitly unavailable when not reported; no clock adjustment."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_time_sync.payload.json", source = "/etc/estus/payloads/observe_time_sync/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+[tools.observe_time_sync.result]
+kind = "capability_projection"
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "status" = ["mcp_result", "status"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { type = "object", additionalProperties = false, required = ["source", "observed_at", "unavailable", "status"], properties = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, source = { type = "string", maxLength = 256 }, observed_at = { type = "string", maxLength = 64 }, unavailable = { type = "array", maxItems = 256, items = { type = "string", maxLength = 128 } }, status = { type = "object", additionalProperties = false, required = ["synchronization"], properties = { synchronization = { type = "string", maxLength = 16, enum = ["synchronized", "unsynchronized", "unknown"] }, ntp_enabled = { type = "boolean" }, ntp_capable = { type = "boolean" }, local_rtc = { type = "boolean" }, timezone = { type = "string", maxLength = 4096 }, synchronization_source = { type = "string", maxLength = 4096 }, offset = { type = "string", maxLength = 4096 }, leap = { type = "string", maxLength = 4096 }, stratum = { type = "string", maxLength = 4096 }, root_distance = { type = "string", maxLength = 4096 }, delay = { type = "string", maxLength = 4096 }, jitter = { type = "string", maxLength = 4096 }, packet_count = { type = "string", maxLength = 4096 }, frequency = { type = "string", maxLength = 4096 } } } } }

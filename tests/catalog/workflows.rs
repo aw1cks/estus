@@ -200,7 +200,7 @@ systemctl daemon-reload
     let result: Result<()> = async {
         server.initialize().await?;
         server.send(json!({"jsonrpc":"2.0","id":40,"method":"tools/call","params":{
-            "name":"systemd_unit_restart","arguments":{"host":"plain","inputs":{"unit":UNIT},"timeout_secs":60}
+            "name":"change_systemd_restart","arguments":{"host":"plain","inputs":{"unit":UNIT},"timeout_secs":60}
         }})).await?;
         timeout(WAIT, async {
             loop {

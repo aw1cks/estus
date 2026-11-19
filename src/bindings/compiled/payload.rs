@@ -17,6 +17,7 @@ impl CompiledBinding {
         target_exists: &impl Fn(&str) -> bool,
         workstation: bool,
     ) -> Result<Self, ConfigError> {
+        validate_risk_prefix_effects(&name, &raw.effects)?;
         let RawExecution::NativePayload {
             snapshot,
             source,

@@ -1,0 +1,35 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/inspect_icmp_probe/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["inspect_icmp_probe"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.inspect_icmp_probe]
+description = "icmp probe. Active bounded diagnostics; only operator-approved fixture destinations; no application payload."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["probe"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_icmp_probe.payload.json", source = "/etc/estus/payloads/inspect_icmp_probe/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+input_map = { "destination" = "destination", "count" = "count", "deadline" = "deadline" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = { "destination" = { "type" = "string", "enum" = ["127.0.0.1"], "maxLength" = 256 }, "count" = { "type" = "integer", "minimum" = 1, "maximum" = 3 }, "deadline" = { "type" = "integer", "minimum" = 1, "maximum" = 5 } }, "required" = ["destination", "count", "deadline"], "additionalProperties" = false }
+[tools.inspect_icmp_probe.result]
+kind = "capability_projection"
+fields = { "destination" = ["mcp_result", "destination"], "transmitted" = ["mcp_result", "transmitted"], "received" = ["mcp_result", "received"], "payload_bytes" = ["mcp_result", "payload_bytes"], "reachable" = ["mcp_result", "reachable"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "destination" = { "type" = "string", "maxLength" = 64 }, "transmitted" = { "type" = "integer", "minimum" = 0, "maximum" = 3 }, "received" = { "type" = "integer", "minimum" = 0, "maximum" = 3 }, "payload_bytes" = { "type" = "integer", "const" = 16 }, "reachable" = { "type" = "boolean" } }, "required" = ["destination", "transmitted", "received", "payload_bytes", "reachable"], "additionalProperties" = false }

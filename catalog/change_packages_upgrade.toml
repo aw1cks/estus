@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/change_packages_upgrade/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_packages_upgrade"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.change_packages_upgrade]
+description = "Single-package upgrade with exact version, hold checks, closed dependency plan and independent postcondition; interrupted execution is never replayed."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["persistent_write", "read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/change_packages_upgrade.payload.json", source = "/etc/estus/payloads/change_packages_upgrade/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_packages" = ["estus-catalog-base", "estus-catalog-demo"] }
+input_map = { "package" = "package", "version" = "version" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "additionalProperties" = false, "required" = ["package", "version"], "properties" = { "package" = { "type" = "string", "enum" = ["estus-catalog-base", "estus-catalog-demo"] }, "version" = { "type" = "string", "minLength" = 1, "maxLength" = 96 } } }
+[tools.change_packages_upgrade.result]
+kind = "capability_projection"
+fields = { "package" = ["mcp_result", "package"], "before" = ["mcp_result", "before"], "after" = ["mcp_result", "after"], "verified" = ["mcp_result", "verified"], "changed" = ["mcp_result", "changed"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "additionalProperties" = false, "required" = ["package", "before", "after", "verified", "changed"], "properties" = { "package" = { "type" = "string", "maxLength" = 64 }, "before" = { "type" = "object", "additionalProperties" = false, "required" = ["installed"], "properties" = { "installed" = { "type" = "boolean" }, "version" = { "type" = "string", "maxLength" = 96 } }, "if" = { "properties" = { "installed" = { "type" = "boolean", "const" = true } }, "required" = ["installed"] }, "then" = { "required" = ["version"] }, "else" = { "not" = { "required" = ["version"] } } }, "after" = { "type" = "object", "additionalProperties" = false, "required" = ["installed"], "properties" = { "installed" = { "type" = "boolean" }, "version" = { "type" = "string", "maxLength" = 96 } }, "if" = { "properties" = { "installed" = { "type" = "boolean", "const" = true } }, "required" = ["installed"] }, "then" = { "required" = ["version"] }, "else" = { "not" = { "required" = ["version"] } } }, "verified" = { "type" = "boolean", "const" = true }, "changed" = { "type" = "boolean" } } }

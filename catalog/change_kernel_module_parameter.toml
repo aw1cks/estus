@@ -1,0 +1,30 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/change_kernel_module_parameter/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_kernel_module_parameter"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.change_kernel_module_parameter]
+description = "Write one approved bounded integer to the fixture-reviewed estus_catalog value sysfs parameter and read back. Unsupported writable capability is explicit; no arbitrary parameter names or persistence."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read", "runtime_write"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/change_kernel_module_parameter.payload.json", source = "/etc/estus/payloads/change_kernel_module_parameter/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = { "name" = "name", "parameter" = "parameter", "value" = "value" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "enum" = ["estus_catalog"], "minLength" = 1, "maxLength" = 64 }, "parameter" = { "type" = "string", "enum" = ["value"], "minLength" = 1, "maxLength" = 64 }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 1024 } }, "required" = ["name", "parameter", "value"], "additionalProperties" = false }
+result = { kind = "capability_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "name" = ["mcp_result", "name"], "parameter" = ["mcp_result", "parameter"], "requested_value" = ["mcp_result", "requested_value"], "quiescence_proven" = ["mcp_result", "quiescence_proven"], "outcome" = ["mcp_result", "outcome"], "postcondition_verified" = ["mcp_result", "postcondition_verified"], "previous_value" = ["mcp_result", "previous_value"], "observed_value" = ["mcp_result", "observed_value"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "name" = { "type" = "string", "maxLength" = 64 }, "parameter" = { "type" = "string", "maxLength" = 64 }, "requested_value" = { "type" = "integer", "minimum" = 0, "maximum" = 1024 }, "quiescence_proven" = { "type" = "boolean" }, "outcome" = { "type" = "string", "maxLength" = 32 }, "postcondition_verified" = { "type" = "boolean" }, "previous_value" = { "type" = "string", "maxLength" = 4096 }, "observed_value" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "name", "parameter", "requested_value", "quiescence_proven", "outcome", "postcondition_verified"], "additionalProperties" = false } }

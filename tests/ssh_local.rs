@@ -7577,7 +7577,7 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
             let tools = listed["result"]["tools"]
                 .as_array()
                 .context("workstation tools")?;
-            for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+            for name in ["observe_cpu", "observe_memory", "observe_pressure"] {
                 let tool = tools
                     .iter()
                     .find(|t| t["name"] == name)
@@ -7600,9 +7600,9 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
             ensure!(targets_data["targets"] == json!([]));
 
             for (id, name, inputs) in [
-                (4, "cpu_stats", json!({"limit": 4})),
-                (5, "memory_stats", json!({})),
-                (6, "pressure_get", json!({})),
+                (4, "observe_cpu", json!({"limit": 4})),
+                (5, "observe_memory", json!({})),
+                (6, "observe_pressure", json!({})),
             ] {
                 let reply = script_wire_call(
                     &mut server,

@@ -23,6 +23,9 @@ pub(crate) fn risk_tier_for_binding(binding: &crate::bindings::CompiledBinding) 
     if binding.is_generic() || binding.sudo().is_some() {
         return RiskTier::Exec;
     }
+    if binding.name.starts_with("preview_") {
+        return RiskTier::Preview;
+    }
     if binding.is_shared_read() {
         if binding
             .effects()
@@ -1901,7 +1904,7 @@ ssh_host = "prod-web-01"
 ssh_host = "dev-01"
 [rules."prod-*"]
 deny_tiers = ["exec", "change"]
-allow_tools = ["observe_stat", "inspect_file", "cpu_stats"]
+allow_tools = ["observe_stat", "inspect_file", "observe_cpu"]
 [rules."*-web-*".constraints.inspect_file.path]
 enum = ["/etc/nginx/nginx.conf", "/etc/hosts"]
 [rules."prod-web-*"]
@@ -1918,10 +1921,15 @@ allow_tools = ["observe_stat", "inspect_file"]
         assert!(config.resolve("prod-web-01", ToolId::Stat).is_ok());
         assert!(config.resolve("prod-web-01", ToolId::ReadFile).is_ok());
         assert!(config.resolve("prod-web-01", ToolId::Exec).is_err());
-        // Rule intersection on prod-web-01 drops cpu_stats (not in prod-web-* allow_tools).
+        // Rule intersection on prod-web-01 drops observe_cpu (not in prod-web-* allow_tools).
         assert!(
-            rules::check_host_tool(&config.rules, "prod-web-01", "cpu_stats", RiskTier::Observe)
-                .is_err()
+            rules::check_host_tool(
+                &config.rules,
+                "prod-web-01",
+                "observe_cpu",
+                RiskTier::Observe
+            )
+            .is_err()
         );
         // Parameter constraint on prod-web-01 permits /etc/hosts, denies /etc/shadow.
         let ok_params = serde_json::json!({"path": "/etc/hosts"})

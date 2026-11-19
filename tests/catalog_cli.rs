@@ -25,7 +25,7 @@ fn site_failures_preserve_safe_causes_locations_and_output_cleanup() -> Result<(
     let output = invoke(&[
         "export".as_ref(),
         "--tool".as_ref(),
-        "pressure_get".as_ref(),
+        "observe_pressure".as_ref(),
         "--output".as_ref(),
         exported.as_os_str(),
     ])?;
@@ -105,13 +105,13 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
     ensure!(data["schema"] == 3 && data["version"] == "7");
     ensure!(
         data["presets"]["linux-health"]
-            == serde_json::json!(["cpu_stats", "memory_stats", "pressure_get"]),
+            == serde_json::json!(["observe_cpu", "observe_memory", "observe_pressure"]),
         "health preset changed disclosure/effect surface"
     );
     let tools = data["tools"].as_array().context("tools")?;
     let pressure = tools
         .iter()
-        .find(|v| v["name"] == "pressure_get")
+        .find(|v| v["name"] == "observe_pressure")
         .context("pressure template")?;
     ensure!(
         pressure["policy_required"] == false
@@ -122,18 +122,18 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
     );
     let tuning = tools
         .iter()
-        .find(|v| v["name"] == "nic_features_set")
+        .find(|v| v["name"] == "change_nic_features")
         .context("tuning template")?;
     ensure!(
         tuning["policy_required"] == true,
         "NIC tuning lost explicit site-policy gate"
     );
     for name in [
-        "nic_eee_get",
-        "nic_eee_set",
-        "nic_transceiver_get",
-        "nic_fec_get",
-        "nic_fec_set",
+        "observe_nic_eee",
+        "change_nic_eee",
+        "observe_nic_transceiver",
+        "observe_nic_fec",
+        "change_nic_fec",
     ] {
         let tool = tools
             .iter()
@@ -184,7 +184,7 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
             && selection["version"] == manifest["version"]
             && selection["scope"] == "catalog_templates"
     );
-    for name in ["cpu_stats", "memory_stats", "pressure_get"] {
+    for name in ["observe_cpu", "observe_memory", "observe_pressure"] {
         for field in ["qualification", "policy_required", "requires"] {
             ensure!(
                 selection["tools"][name][field] == manifest["tools"][name][field],
@@ -198,7 +198,7 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
         definitions.get("automation").is_none() && definitions.get("enabled_tools").is_none(),
         "export generated authority or activation policy"
     );
-    let pressure = &definitions["tools"]["pressure_get"];
+    let pressure = &definitions["tools"]["observe_pressure"];
     let source = Path::new(
         pressure["execution"]["source"]
             .as_str()
@@ -209,7 +209,7 @@ fn export_is_inert_private_and_retains_typed_input_overlay() -> Result<()> {
         "export did not retain the executable reviewed payload"
     );
     let overlay: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        destination.join("overlays/pressure_get.json"),
+        destination.join("overlays/observe_pressure.json"),
     )?)?;
     ensure!(
         overlay["input_schema"]["additionalProperties"] == false
@@ -246,7 +246,7 @@ fn invalid_selection_cannot_clobber_or_leak_private_names() -> Result<()> {
     let output = invoke(&[
         "export".as_ref(),
         "--tool".as_ref(),
-        "pressure_get".as_ref(),
+        "observe_pressure".as_ref(),
         "--output".as_ref(),
         destination.as_os_str(),
     ])?;
@@ -292,9 +292,9 @@ fn inspect_honors_explicit_catalog_root_without_ambient_configuration() -> Resul
         pin
     );
     for name in [
-        "cpu_stats",
-        "memory_stats",
-        "pressure_get",
+        "observe_cpu",
+        "observe_memory",
+        "observe_pressure",
         "custom_action",
         "custom_sudo",
     ] {
@@ -556,7 +556,7 @@ fn global_catalog_options_are_honored_or_rejected_without_reflecting_values() ->
                 .arg(assets());
             if export {
                 command
-                    .args(["export", "--tool", "pressure_get", "--output"])
+                    .args(["export", "--tool", "observe_pressure", "--output"])
                     .arg(&destination);
             } else {
                 command.args(["list", "--json"]);
@@ -580,7 +580,7 @@ async fn preparation_rejects_fifo_ssh_config_without_hanging_or_partial_output()
     let output = invoke(&[
         "export".as_ref(),
         "--tool".as_ref(),
-        "pressure_get".as_ref(),
+        "observe_pressure".as_ref(),
         "--output".as_ref(),
         export.as_os_str(),
     ])?;
@@ -640,9 +640,9 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     let output = invoke(&[
         "export".as_ref(),
         "--tool".as_ref(),
-        "host_summary".as_ref(),
+        "observe_host_summary".as_ref(),
         "--tool".as_ref(),
-        "hardware_system_get".as_ref(),
+        "observe_hardware_system".as_ref(),
         "--output".as_ref(),
         export.as_os_str(),
     ])?;
@@ -782,7 +782,7 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         String::from_utf8_lossy(&inspected.stderr)
     );
     let mut approved_root = None;
-    for name in ["host_summary", "hardware_system_get"] {
+    for name in ["observe_host_summary", "observe_hardware_system"] {
         let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(
             prepared.join(format!("snapshots/{name}.json")),
         )?)?;
@@ -799,8 +799,12 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         ensure!(
             config["tools"][name]["execution"]["role_path"].as_str() == bundle.join(name).to_str()
         );
-        ensure!(bundle.join("host_summary/tasks/main.yml").is_file());
-        ensure!(bundle.join("hardware_system_get/tasks/main.yml").is_file());
+        ensure!(bundle.join("observe_host_summary/tasks/main.yml").is_file());
+        ensure!(
+            bundle
+                .join("observe_hardware_system/tasks/main.yml")
+                .is_file()
+        );
     }
     let bundles = std::fs::read_dir(prepared.join("snapshots"))?
         .collect::<std::io::Result<Vec<_>>>()?
@@ -823,9 +827,9 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
         invoke(&[
             "export".as_ref(),
             "--tool".as_ref(),
-            "systemd_unit_get".as_ref(),
+            "observe_systemd_unit".as_ref(),
             "--tool".as_ref(),
-            "cpu_stats".as_ref(),
+            "observe_cpu".as_ref(),
             "--output".as_ref(),
             export_a.as_os_str(),
         ])?
@@ -836,9 +840,9 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
         invoke(&[
             "export".as_ref(),
             "--tool".as_ref(),
-            "systemd_unit_get".as_ref(),
+            "observe_systemd_unit".as_ref(),
             "--tool".as_ref(),
-            "memory_stats".as_ref(),
+            "observe_memory".as_ref(),
             "--output".as_ref(),
             export_b.as_os_str(),
         ])?
@@ -847,9 +851,9 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
     );
     let mut doc_b: toml::Value =
         toml::from_str(&std::fs::read_to_string(export_b.join("tools.toml"))?)?;
-    doc_b["tools"]["systemd_unit_get"]["constraints"]["allowed_units"] =
+    doc_b["tools"]["observe_systemd_unit"]["constraints"]["allowed_units"] =
         toml::Value::Array(vec!["nginx.service".into()]);
-    doc_b["tools"]["systemd_unit_get"]["revision"] = "2".into();
+    doc_b["tools"]["observe_systemd_unit"]["revision"] = "2".into();
     std::fs::write(export_b.join("tools.toml"), toml::to_string(&doc_b)?)?;
 
     let diff_out = invoke(&[
@@ -866,10 +870,10 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
     );
     let diff: serde_json::Value = serde_json::from_slice(&diff_out.stdout)?;
     ensure!(diff["ok"] == true);
-    ensure!(diff["added"] == serde_json::json!(["memory_stats"]));
-    ensure!(diff["removed"] == serde_json::json!(["cpu_stats"]));
+    ensure!(diff["added"] == serde_json::json!(["observe_memory"]));
+    ensure!(diff["removed"] == serde_json::json!(["observe_cpu"]));
     let changed = diff["changed"].as_array().context("changed array")?;
-    ensure!(changed.len() == 1 && changed[0]["name"] == "systemd_unit_get");
+    ensure!(changed.len() == 1 && changed[0]["name"] == "observe_systemd_unit");
     ensure!(changed[0].get("constraints").is_some());
     ensure!(changed[0].get("approval_identity").is_some());
 
@@ -898,19 +902,18 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
         .as_array()
         .context("omitted_templates")?;
     ensure!(
-        omitted
-            .iter()
-            .any(|t| t["name"] == "host_summary" && t["reason"] == "requires_runner_and_approval")
+        omitted.iter().any(|t| t["name"] == "observe_host_summary"
+            && t["reason"] == "requires_runner_and_approval")
     );
     ensure!(
         omitted
             .iter()
-            .any(|t| t["name"] == "cpu_stats" && t["reason"] == "not_prepared")
+            .any(|t| t["name"] == "observe_cpu" && t["reason"] == "not_prepared")
     );
     ensure!(
         omitted
             .iter()
-            .any(|t| t["name"] == "network_links_list" && t["reason"] == "site_policy_required")
+            .any(|t| t["name"] == "observe_network_links" && t["reason"] == "site_policy_required")
     );
     ensure!(omitted.iter().any(|t| t["reason"] == "laboratory_only"));
     Ok(())

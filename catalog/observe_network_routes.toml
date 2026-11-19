@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_network_routes/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_network_routes"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_network_routes]
+description = "network routes list. Bounded Linux observations; operator-approved interfaces; no process attribution, flags, namespace execution or mutation."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_network_routes.payload.json", source = "/etc/estus/payloads/observe_network_routes/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+input_map = { "family" = "family", "table" = "table", "destination" = "destination", "limit" = "limit" }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = { "family" = { "type" = "string", "enum" = ["inet", "inet6"], "maxLength" = 256 }, "table" = { "type" = "integer", "minimum" = 1, "maximum" = 4294967295 }, "destination" = { "type" = "string", "enum" = ["192.0.2.0/24", "198.51.100.0/24", "127.0.0.0/8"], "maxLength" = 256 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }
+[tools.observe_network_routes.result]
+kind = "capability_projection"
+fields = { "entries" = ["mcp_result", "entries"], "truncated" = ["mcp_result", "truncated"], "scope" = ["mcp_result", "scope"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "entries" = { "type" = "array", "items" = { "type" = "object", "properties" = { "destination" = { "type" = "string", "maxLength" = 64 }, "interface" = { "type" = "string", "maxLength" = 15 }, "gateway" = { "type" = "string", "maxLength" = 64 }, "source" = { "type" = "string", "maxLength" = 64 }, "table" = { "type" = "string", "maxLength" = 32 }, "protocol" = { "type" = "string", "maxLength" = 32 }, "scope" = { "type" = "string", "maxLength" = 32 }, "type" = { "type" = "string", "maxLength" = 32 }, "metric" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } }, "required" = [], "additionalProperties" = false }, "maxItems" = 16 }, "truncated" = { "type" = "boolean" }, "scope" = { "type" = "string", "const" = "current_network_namespace", "maxLength" = 32 } }, "required" = ["entries", "truncated", "scope"], "additionalProperties" = false }

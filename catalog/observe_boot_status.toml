@@ -1,0 +1,30 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_boot_status/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_boot_status"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog-admin"
+python = "/usr/bin/python3"
+
+[tools.observe_boot_status]
+description = "Observe actual EFI loader identity, raw loader current/default/one-shot selections and Secure Boot/SetupMode. Missing variables are unknown, not disabled. A missing default EFI override does not imply no loader.conf default."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_boot_status.payload.json", source = "/etc/estus/payloads/observe_boot_status/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+result = { kind = "capability_projection", fields = { "boot_id" = ["mcp_result", "boot_id"], "source" = ["mcp_result", "source"], "unavailable" = ["mcp_result", "unavailable"], "observed_at" = ["mcp_result", "observed_at"], "firmware_mode" = ["mcp_result", "firmware_mode"], "loader" = ["mcp_result", "loader"], "selection_source" = ["mcp_result", "selection_source"], "security_source" = ["mcp_result", "security_source"], "current_entry" = ["mcp_result", "current_entry"], "default_entry" = ["mcp_result", "default_entry"], "oneshot_entry" = ["mcp_result", "oneshot_entry"], "secure_boot" = ["mcp_result", "secure_boot"], "setup_mode" = ["mcp_result", "setup_mode"] }, max_bytes = 4096, max_items = 256, max_depth = 8, schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "minLength" = 36, "maxLength" = 36 }, "source" = { "type" = "string", "maxLength" = 128 }, "unavailable" = { "type" = "array", "maxItems" = 32, "items" = { "type" = "string", "maxLength" = 128 } }, "observed_at" = { "type" = "string", "maxLength" = 32 }, "firmware_mode" = { "type" = "string", "maxLength" = 16 }, "loader" = { "type" = "string", "maxLength" = 2048 }, "selection_source" = { "type" = "string", "maxLength" = 128 }, "security_source" = { "type" = "string", "maxLength" = 128 }, "current_entry" = { "type" = "string", "maxLength" = 2048 }, "default_entry" = { "type" = "string", "maxLength" = 2048 }, "oneshot_entry" = { "type" = "string", "maxLength" = 2048 }, "secure_boot" = { "type" = "string", "maxLength" = 16 }, "setup_mode" = { "type" = "string", "maxLength" = 16 } }, "required" = ["boot_id", "source", "unavailable", "observed_at", "firmware_mode", "loader", "selection_source", "security_source", "secure_boot", "setup_mode"], "additionalProperties" = false } }

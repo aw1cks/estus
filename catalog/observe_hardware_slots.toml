@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_hardware_slots/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_hardware_slots"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_hardware_slots]
+description = "Selected per-expansion slot SMBIOS inventory with explicit firmware provenance and unknowns; identifiers/serials omitted, no capacity/occupancy inference from missing data. Requires dmidecode and approved firmware access."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_hardware_slots.payload.json", source = "/etc/estus/payloads/observe_hardware_slots/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+input_map = {  }
+limits = { timeout_secs = 30 }
+input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+[tools.observe_hardware_slots.result]
+kind = "capability_projection"
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "records" = ["mcp_result", "records"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "records" = { "type" = "array", "items" = { "type" = "object", "properties" = { "handle" = { "type" = "string", "maxLength" = 6 }, "designation" = { "type" = "string", "maxLength" = 4096 }, "type" = { "type" = "string", "maxLength" = 4096 }, "current_usage" = { "type" = "string", "maxLength" = 4096 }, "length" = { "type" = "string", "maxLength" = 4096 }, "slot_id" = { "type" = "string", "maxLength" = 4096 }, "bus_address" = { "type" = "string", "maxLength" = 4096 }, "data_bus_width" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["handle"], "additionalProperties" = false }, "maxItems" = 256 } }, "required" = ["source", "observed_at", "unavailable", "records"], "additionalProperties" = false }

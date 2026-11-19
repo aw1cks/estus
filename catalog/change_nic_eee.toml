@@ -1,0 +1,35 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/change_nic_eee/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_nic_eee"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+[tools.change_nic_eee]
+description = "change_nic_eee: Reviewed runtime-only synthetic EEE configuration, fixed Tx LPI on and actual readback; not negotiated link proof."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read","runtime_write","availability"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/change_nic_eee.payload.json", source = "/etc/estus/payloads/change_nic_eee/collector.py", no_log = false }
+fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "model0","mac" = "52:54:00:12:34:5a","driver" = "estus_nic_model","allow_runtime_tuning" = true}}
+input_map = {"interface" = "interface","enabled" = "enabled","tx_lpi_timer_us" = "tx_lpi_timer_us"}
+limits = {"timeout_secs" = 40}
+input_schema = {"type" = "object","properties" = {"interface" = {"type" = "string","maxLength" = 15,"enum" = ["model0"]},"enabled" = {"type" = "boolean"},"tx_lpi_timer_us" = {"type" = "integer","minimum" = 0,"maximum" = 1000000}},"required" = ["interface","enabled","tx_lpi_timer_us"],"additionalProperties" = false}
+[tools.change_nic_eee.result]
+kind = "capability_projection"
+fields = {"interface" = ["mcp_result","interface"],"driver" = ["mcp_result","driver"],"scope" = ["mcp_result","scope"],"before" = ["mcp_result","before"],"after" = ["mcp_result","after"],"changed" = ["mcp_result","changed"],"verified" = ["mcp_result","verified"],"persistence" = ["mcp_result","persistence"]}
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = {"type" = "object","properties" = {"interface" = {"type" = "string","maxLength" = 15,"enum" = ["model0"]},"driver" = {"type" = "string","maxLength" = 32,"enum" = ["estus_nic_model"]},"scope" = {"type" = "string","maxLength" = 14,"enum" = ["software_model"]},"before" = {"type" = "object","properties" = {"enabled" = {"type" = "boolean"},"active" = {"type" = "boolean"},"tx_lpi_enabled" = {"type" = "boolean"},"tx_lpi_timer_us" = {"type" = "integer","minimum" = 0,"maximum" = 4294967295},"supported_modes" = {"type" = "array","maxItems" = 16,"items" = {"type" = "string","maxLength" = 64}},"advertised_modes" = {"type" = "array","maxItems" = 16,"items" = {"type" = "string","maxLength" = 64}},"peer_modes" = {"type" = "array","maxItems" = 16,"items" = {"type" = "string","maxLength" = 64}}},"required" = ["enabled","active","tx_lpi_enabled","supported_modes","advertised_modes","peer_modes"],"additionalProperties" = false},"after" = {"type" = "object","properties" = {"enabled" = {"type" = "boolean"},"active" = {"type" = "boolean"},"tx_lpi_enabled" = {"type" = "boolean","const" = true},"tx_lpi_timer_us" = {"type" = "integer","minimum" = 0,"maximum" = 1000000},"supported_modes" = {"type" = "array","maxItems" = 16,"items" = {"type" = "string","maxLength" = 64}},"advertised_modes" = {"type" = "array","maxItems" = 16,"items" = {"type" = "string","maxLength" = 64}},"peer_modes" = {"type" = "array","maxItems" = 16,"items" = {"type" = "string","maxLength" = 64}}},"required" = ["enabled","active","tx_lpi_enabled","tx_lpi_timer_us","supported_modes","advertised_modes","peer_modes"],"additionalProperties" = false},"changed" = {"type" = "boolean"},"verified" = {"type" = "boolean","const" = true},"persistence" = {"type" = "string","maxLength" = 12,"enum" = ["runtime_only"]}},"required" = ["interface","driver","scope","before","after","changed","verified","persistence"],"additionalProperties" = false}

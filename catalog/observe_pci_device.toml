@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_pci_device/manifest.json and fixed policy, then catalog prepare.
+# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_pci_device"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_pci_device]
+description = "Numeric full-address PCI observation; bounded sysfs only, no exhaustive configuration-space access or external name lookup. Unknown fields explicit."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_pci_device.payload.json", source = "/etc/estus/payloads/observe_pci_device/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3", address = "0000:00:00.0" }
+input_map = {}
+limits = { timeout_secs = 30 }
+input_schema = { type = "object", properties = {}, required = [], additionalProperties = false }
+[tools.observe_pci_device.result]
+kind = "capability_projection"
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "device" = ["mcp_result", "device"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "device" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "vendor" = { "type" = "string", "maxLength" = 10 }, "device" = { "type" = "string", "maxLength" = 10 }, "class" = { "type" = "string", "maxLength" = 10 }, "subsystem_vendor" = { "type" = "string", "maxLength" = 10 }, "subsystem_device" = { "type" = "string", "maxLength" = 10 }, "revision" = { "type" = "string", "maxLength" = 10 } }, "required" = ["address"], "additionalProperties" = false } }, "required" = ["source", "observed_at", "unavailable", "device"], "additionalProperties" = false }
