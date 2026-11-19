@@ -73,17 +73,26 @@ private executable but does not map the generated catalog assets into the source
 package. Offline catalog discovery then fails. Use a wheel or an explicitly
 prepared native build rather than relying on `--editable`.
 
-Recorded installed qualification uses CPython3.14.6 on Darwin25 arm64, for both
+Recorded installed qualification uses CPython 3.14.6 on Darwin25 arm64, for both
 base and `ansible`-extra channels, including interpreter selection, asset discovery,
-stdio purity and process lifecycle. Metadata retains the conservative
-`cp314-cp314` tags and Python3.14-only requirement. A standalone executable's lack
-of CPython linkage does not qualify another Python version, platform or OS release;
-the declared native payload baselines are audited separately below.
+stdio purity and process lifecycle. Launcher-only checks in `tests/wheel.rs`
+parameterize the target Python version (`ESTUS_TEST_LAUNCHER_PYTHONS`) across
+`--help` and an MCP handshake, while `[ansible]` remains pinned to 3.14. Because
+multi-platform `3.10`/`3.12`/`3.14` launcher qualification has not yet passed across
+all supported packaging platforms, package metadata retains `requires-python =
+">=3.14,<3.15"` and `cp314-cp314` tags rather than widening prematurely. A
+standalone executable's lack of CPython linkage does not qualify another Python
+version, platform or OS release; the declared native payload baselines are audited
+separately below.
 
-Source archives select catalog definitions/roles through the manifest-driven build
-hook, not a second tool-name list in `MANIFEST.in`. They include required Rust
-sources, embedded helpers and the vendored SFTP client, while excluding generated
-caches, demonstrations, test fixtures, local plans and build outputs.
+Source archives select catalog definitions/roles/payloads through the manifest-driven
+build hook, not a second tool-name list in `MANIFEST.in`. They include required Rust
+sources, embedded helpers and the path-vendored SFTP client (`openssh-sftp-client`
+`0.15.12` from upstream commit `1633973b6591d9ba3d34ee442919ec94472669ec`, with local
+`OpenOptions::create_permissions` delta recorded in
+`vendor/openssh-sftp-client/README.md`; remove only after identifying an exact
+upstream release containing that fix), while excluding generated caches,
+demonstrations, test fixtures, local plans and build outputs.
 
 The opt-in `source_distribution_roundtrip_preserves_manifest_selected_assets`
 wheel test builds sdists from a clean tracked-source export, extracts them outside

@@ -150,18 +150,21 @@ impl Installed {
             .join("estus/bin/estus")
     }
 
-    async fn python(&self) -> Result<PathBuf> {
-        let python = if std::env::var_os("ESTUS_TEST_PYTHON").is_some() {
+    async fn python(&self, version: &str) -> Result<PathBuf> {
+        let env_key = format!("ESTUS_TEST_PYTHON_{}", version.replace('.', "_"));
+        let python = if let Some(value) = std::env::var_os(&env_key) {
+            PathBuf::from(value)
+        } else if version == "3.14" && std::env::var_os("ESTUS_TEST_PYTHON").is_some() {
             input("ESTUS_TEST_PYTHON")?
         } else {
-            checked(self.uv().args(["python", "install", "--no-bin", "3.14"])).await?;
+            checked(self.uv().args(["python", "install", "--no-bin", version])).await?;
             // Query output is data; uv's global quiet mode suppresses it.
             let found = checked(self.command(&self.uv).args([
                 "--no-config",
                 "python",
                 "find",
                 "--managed-python",
-                "3.14",
+                version,
             ]))
             .await?;
             PathBuf::from(std::str::from_utf8(&found.stdout)?.trim())
@@ -171,13 +174,46 @@ impl Installed {
             !fs::canonicalize(&python)?.starts_with("/nix/store"),
             "wheel acceptance requires an outside-Nix Python"
         );
-        let version = checked(self.command(&python).arg("--version")).await?;
+        let version_out = checked(self.command(&python).arg("--version")).await?;
+        let expected_prefix = format!("Python {version}.");
         ensure!(
-            std::str::from_utf8(&version.stdout)?.starts_with("Python 3.14."),
-            "requires Python 3.14, got {version:?}"
+            std::str::from_utf8(&version_out.stdout)?.starts_with(&expected_prefix),
+            "requires Python {version}, got {version_out:?}"
         );
         Ok(python)
     }
+}
+
+async fn verify_launcher_handshake(
+    installed: &Installed,
+    wheel: &Path,
+    version: &str,
+) -> Result<()> {
+    let python = installed.python(version).await?;
+    let suffix = format!("launcher-{}", version.replace('.', "_"));
+    let tool_dir = installed.root.path().join(format!("tools-{suffix}"));
+    let bin_dir = installed.root.path().join(format!("bin-{suffix}"));
+    let mut install = installed.uv();
+    install
+        .env("UV_TOOL_DIR", &tool_dir)
+        .env("UV_TOOL_BIN_DIR", &bin_dir)
+        .args(["tool", "install", "--python"])
+        .arg(&python)
+        .args(["--no-python-downloads", "--link-mode", "copy"])
+        .arg(wheel);
+    checked(&mut install).await?;
+    let launcher = executable(&tool_dir.join("estus/bin/estus"))?;
+    let help = checked(installed.command(&launcher).arg("--help")).await?;
+    ensure!(
+        !help.stdout.is_empty(),
+        "Python {version} launcher --help emitted empty output"
+    );
+    let mut server = WireServer::start_command(installed.command(&launcher))?;
+    let handshake = server.initialize().await;
+    let stopped = server.stop(None).await;
+    handshake?;
+    stopped?;
+    Ok(())
 }
 
 // Downloads and existing compiled suites need a longer deadline than short fixture helpers.
@@ -384,7 +420,7 @@ async fn installed_wheel_channels() -> Result<()> {
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
     let canonical: Value = serde_json::from_slice(&fs::read(catalog_assets.join("catalog.json"))?)?;
     let installed = Installed::new()?;
-    let python = installed.python().await?;
+    let python = installed.python("3.14").await?;
     let extra_requirement = format!("{}[ansible]", wheel.to_str().context("UTF-8 wheel path")?);
     for extra in [false, true] {
         let mut command = installed.uv();
@@ -400,6 +436,29 @@ async fn installed_wheel_channels() -> Result<()> {
             });
         checked(&mut command).await?;
         executable(&installed.launcher(extra))?;
+    }
+    let direct_catalog = checked(
+        installed
+            .command(&installed.root.path().join("tools-base/estus/bin/python"))
+            .args([
+                "-I",
+                "-c",
+                "from pathlib import Path; import estus; print(Path(estus.__file__).parent / '_catalog')",
+            ]),
+    )
+    .await?;
+    let direct_catalog = PathBuf::from(std::str::from_utf8(&direct_catalog.stdout)?.trim());
+    ensure!(
+        asset_bytes(&direct_catalog)? == asset_bytes(&catalog_assets)?,
+        "installed direct wheel catalog assets diverged from approved catalog"
+    );
+    if let Some(versions) = std::env::var_os("ESTUS_TEST_LAUNCHER_PYTHONS") {
+        let raw = versions.to_string_lossy();
+        for version in raw.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+            verify_launcher_handshake(&installed, &wheel, version).await?;
+        }
+    } else {
+        verify_launcher_handshake(&installed, &wheel, "3.14").await?;
     }
     let config = installed.root.path().join("work/server.toml");
     fs::write(&config, "")?;
@@ -783,7 +842,7 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
     ensure!(native.is_absolute() && native.is_dir());
     let native_assets = asset_bytes(&native)?;
     let installed = Installed::new()?;
-    let python = installed.python().await?;
+    let python = installed.python("3.14").await?;
     let tar = find_program("tar")?;
     let clean = installed.root.path().join("clean");
     fs::create_dir(&clean)?;
@@ -1073,6 +1132,13 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     )
     .await?;
     let assets = workspace.join("estus/_catalog");
+    let source_catalog = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
+    ensure!(
+        asset_bytes(&assets)? == asset_bytes(&source_catalog)?,
+        "direct wheel catalog bytes diverged from source/native catalog"
+    );
     let catalog = assets::Catalog::load(Some(&assets)).map_err(anyhow::Error::msg)?;
     for (name, template) in &catalog.manifest().tools {
         catalog.definition(name).map_err(anyhow::Error::msg)?;
@@ -1081,6 +1147,16 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
                 .copy_assets(name, &workspace.join(format!("assets-{name}")))
                 .map_err(anyhow::Error::msg)?;
         }
+    }
+    for member in listing.lines() {
+        if member.is_empty() || member.ends_with('/') {
+            continue;
+        }
+        let allowed = member == payload_member
+            || member == "estus/__init__.py"
+            || member.starts_with("estus/_catalog/")
+            || (member.starts_with("estus-") && member.contains(".dist-info/"));
+        ensure!(allowed, "unexpected non-catalog wheel member: {member}");
     }
     for member in listing
         .lines()
@@ -1263,8 +1339,10 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
                 .context("unrecognized Mach-O dylib entry")?
                 .0;
             ensure!(
-                library.starts_with("/usr/lib/") || library.starts_with("/System/Library/"),
-                "non-system Mach-O dependency: {library}"
+                (library.starts_with("/usr/lib/") || library.starts_with("/System/Library/"))
+                    && !library.contains("libpython")
+                    && !library.contains("Python.framework"),
+                "non-system or Python-linked Mach-O dependency: {library}"
             );
             system_library_seen = true;
         }
@@ -1329,16 +1407,17 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
                     .and_then(|name| name.to_str())
                     .context("missing dynamic linker name")?;
                 ensure!(
-                    library == dynamic_linker
-                        || matches!(
-                            library,
-                            "libc.so.6"
-                                | "libgcc_s.so.1"
-                                | "libm.so.6"
-                                | "libpthread.so.0"
-                                | "librt.so.1"
-                                | "libdl.so.2"
-                        ),
+                    !library.contains("libpython")
+                        && (library == dynamic_linker
+                            || matches!(
+                                library,
+                                "libc.so.6"
+                                    | "libgcc_s.so.1"
+                                    | "libm.so.6"
+                                    | "libpthread.so.0"
+                                    | "librt.so.1"
+                                    | "libdl.so.2"
+                            )),
                     "nonportable ELF dependency outside the system C runtime: {library}"
                 );
                 needed_seen = true;

@@ -471,6 +471,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
         assert_eq!(
             selection["tools"][name],
             serde_json::json!({
+                "executor": canonical["tools"][name]["executor"],
                 "qualification": canonical["tools"][name]["qualification"],
                 "policy_required": canonical["tools"][name]["policy_required"],
                 "requires": canonical["tools"][name]["requires"],
@@ -620,4 +621,47 @@ fn all_payload_manifests_pin_modules_executable_candidates_and_python_min() {
             }
         }
     }
+}
+
+#[test]
+fn role_and_payload_export_rejects_unexpected_asset_types_and_subdirectories() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    small_catalog(&root);
+    let unexpected_dir = root.join("roles/observe_cpu/unexpected");
+    fs::create_dir(&unexpected_dir).unwrap();
+    fs::write(unexpected_dir.join("main.yml"), "---\n[]\n").unwrap();
+    assert!(
+        Catalog::load(Some(&root))
+            .unwrap()
+            .copy_assets("observe_cpu", &root.join("out-dir"))
+            .is_err()
+    );
+    fs::remove_dir_all(&unexpected_dir).unwrap();
+
+    let top_file = root.join("roles/observe_cpu/stray.yml");
+    fs::write(&top_file, "---\n[]\n").unwrap();
+    assert!(
+        Catalog::load(Some(&root))
+            .unwrap()
+            .copy_assets("observe_cpu", &root.join("out-top"))
+            .is_err()
+    );
+    fs::remove_file(&top_file).unwrap();
+
+    let bad_ext = root.join("roles/observe_cpu/tasks/extra.sh");
+    fs::write(&bad_ext, "#!/bin/sh\n").unwrap();
+    assert!(
+        Catalog::load(Some(&root))
+            .unwrap()
+            .copy_assets("observe_cpu", &root.join("out-ext"))
+            .is_err()
+    );
+    fs::remove_file(&bad_ext).unwrap();
+    assert!(
+        Catalog::load(Some(&root))
+            .unwrap()
+            .copy_assets("observe_cpu", &root.join("out-clean"))
+            .is_ok()
+    );
 }

@@ -424,18 +424,20 @@ impl Catalog {
         }
         let roles = open_child(&self.directory, Path::new(directory_name), true)?;
         let directory = open_child(&roles, Path::new(name), true)?;
-        let mut files = Vec::new();
-        let mut remaining = ROLE_LIMIT;
-        let mut entries = 0;
+        let mut scan = RoleScan {
+            is_role: directory_name == "roles",
+            files: Vec::new(),
+            remaining: ROLE_LIMIT,
+            entries: 0,
+        };
         collect_role(
             &directory,
             &self.root.join(directory_name).join(name),
             Path::new(""),
-            &mut files,
-            &mut remaining,
-            &mut entries,
+            &mut scan,
             0,
         )?;
+        let files = scan.files;
         if required
             .iter()
             .any(|required| !files.iter().any(|(path, _)| path == Path::new(required)))
@@ -491,14 +493,18 @@ impl Catalog {
         result
     }
 }
+struct RoleScan {
+    is_role: bool,
+    files: Vec<(PathBuf, Vec<u8>)>,
+    remaining: u64,
+    entries: usize,
+}
 
 fn collect_role(
     directory: &File,
     source: &Path,
     relative: &Path,
-    files: &mut Vec<(PathBuf, Vec<u8>)>,
-    remaining: &mut u64,
-    entries: &mut usize,
+    scan: &mut RoleScan,
     depth: usize,
 ) -> Result<(), &'static str> {
     if depth > 16 {
@@ -506,8 +512,8 @@ fn collect_role(
     }
     for entry in fs::read_dir(source).map_err(|_| ERROR)? {
         let entry = entry.map_err(|_| ERROR)?;
-        *entries += 1;
-        if *entries > ROLE_FILES {
+        scan.entries += 1;
+        if scan.entries > ROLE_FILES {
             return Err(ERROR);
         }
         let name = entry.file_name();
@@ -519,16 +525,17 @@ fn collect_role(
             if name == "__pycache__" {
                 continue;
             }
+            if scan.is_role
+                && depth == 0
+                && !matches!(
+                    name.to_str(),
+                    Some("tasks" | "meta" | "files" | "defaults" | "vars" | "handlers")
+                )
+            {
+                return Err(ERROR);
+            }
             let child = open_child(directory, Path::new(&name), true)?;
-            collect_role(
-                &child,
-                &source.join(&name),
-                &path,
-                files,
-                remaining,
-                entries,
-                depth + 1,
-            )?;
+            collect_role(&child, &source.join(&name), &path, scan, depth + 1)?;
         } else if kind.is_file() {
             if matches!(
                 Path::new(&name)
@@ -538,9 +545,23 @@ fn collect_role(
             ) {
                 continue;
             }
-            let bytes = bounded_read(open_child(directory, Path::new(&name), false)?, *remaining)?;
-            *remaining -= bytes.len() as u64;
-            files.push((path, bytes));
+            if scan.is_role && depth == 0 {
+                return Err(ERROR);
+            }
+            if !matches!(
+                Path::new(&name)
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("yml" | "yaml" | "py" | "json" | "toml")
+            ) {
+                return Err(ERROR);
+            }
+            let bytes = bounded_read(
+                open_child(directory, Path::new(&name), false)?,
+                scan.remaining,
+            )?;
+            scan.remaining -= bytes.len() as u64;
+            scan.files.push((path, bytes));
         } else {
             return Err(ERROR);
         }

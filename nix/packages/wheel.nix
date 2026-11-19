@@ -36,11 +36,10 @@ let
         craneLib.filterCargoSources path type
         || builtins.elem relative [ "pyproject.toml" "setup.py" "MANIFEST.in" "README.md" ]
         || lib.hasPrefix "vendor/openssh-sftp-client/" relative
-        || (lib.hasPrefix "catalog/" relative && (
-          lib.hasSuffix ".toml" relative || lib.hasSuffix ".json" relative
-          || lib.hasSuffix ".yml" relative || lib.hasSuffix ".yaml" relative
-          || lib.hasSuffix ".py" relative
-        ))
+        || (lib.hasPrefix "catalog/" relative
+          && !lib.hasInfix "/__pycache__/" relative
+          && !lib.hasSuffix ".pyc" relative
+          && !lib.hasSuffix ".pyo" relative)
         || (lib.hasPrefix "python/" relative && lib.hasSuffix ".py" relative)
         || (lib.hasPrefix "src/" relative && lib.hasSuffix ".py" relative)
       );
