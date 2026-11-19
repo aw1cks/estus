@@ -873,6 +873,63 @@ async fn projection_reducer_probes(a: &Acceptance) -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires the pinned Ansible runtime; no SSH or sudo execution"]
+async fn runner_sudo_executable_is_one_shell_word() -> Result<()> {
+    let runtime = PathBuf::from(
+        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("set ESTUS_TEST_ANSIBLE_RUNTIME")?,
+    )
+    .canonicalize()?;
+    let workspace = tempfile::tempdir()?;
+    let runner = workspace.path().join("runner.py");
+    fs::write(
+        &runner,
+        format!(
+            "_ESTUS_CLI_SOURCE = {}\n{}",
+            serde_json::to_string(include_str!("../src/automation/python/cli.py"))?,
+            include_str!("../src/automation/python/runner.py"),
+        ),
+    )?;
+    let probe = r#"
+import json, runpy, shlex, sys
+from pathlib import Path
+
+runtime, runner = map(Path, sys.argv[1:])
+sys.path.insert(0, str(runtime / json.loads((runtime / "runtime.json").read_text())["site_packages"]))
+import yaml
+from ansible.plugins.loader import become_loader, shell_loader
+
+executable = "/opt/site tools/sudo"
+workspace = runner.parent
+spec = {
+    "expected": {"module": "ansible.builtin.ping"}, "no_log": False, "projection": None,
+    "destination": "unused", "target_python": "/usr/bin/python3", "ssh_config": None,
+    "ssh_executable": "/usr/bin/ssh", "agent": {"mode": "disabled"}, "arguments": {},
+    "become": {"method": "sudo", "user": "root", "executable": executable},
+}
+runpy.run_path(str(runner))["layout"](workspace, spec, [], "/usr/bin:/bin")
+controls = yaml.load((workspace / "project" / "arguments.yml").read_text(), Loader=yaml.BaseLoader)
+shell = shell_loader.get("sh")
+for alias in ("ansible_become_exe", "ansible_sudo_exe"):
+    sudo = become_loader.get("sudo")
+    sudo.set_options(var_options={alias: controls[alias]})
+    command = sudo.build_become_command("true", shell)
+    assert shlex.split(command)[0] == executable, (alias, command)
+"#;
+    let mut command = Command::new(runtime.join("python/bin/python"));
+    command
+        .args(["-I", "-B", "-c", probe])
+        .arg(runtime)
+        .arg(runner);
+    let output = support::run(&mut command).await?;
+    ensure!(
+        output.status.success(),
+        "sudo path was not preserved as one executable: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 /// Real selected-runtime milestones, without exposing the private Runner stream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires selected pinned Runner/target Python, Nix sshd, non-root private localhost fixture"]

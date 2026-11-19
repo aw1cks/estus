@@ -205,7 +205,7 @@ impl Engine {
         key: String,
         lease: Lease,
         python: String,
-        r#become: Option<String>,
+        r#become: Option<&AutomationBecome>,
         requirements: Value,
         deadline: Instant,
         ct: &CancellationToken,
@@ -224,6 +224,7 @@ impl Engine {
         if launch {
             let worker = Arc::clone(&probe);
             let shutdown = self.shutdown.clone();
+            let r#become = r#become.cloned();
             // A cancelled waiter cannot drop another waiter's owned probe/channel.
             tokio::spawn(async move {
                 let _completion = ProbeCompletion(Arc::clone(&worker));
@@ -236,7 +237,7 @@ impl Engine {
                     Ok(frame) => channel(
                         lease.session(),
                         &python,
-                        r#become.as_deref(),
+                        r#become.as_ref(),
                         &frame,
                         PROBE_LIMIT,
                         Instant::now() + Duration::from_secs(30),
@@ -287,9 +288,7 @@ impl Engine {
         let operation = async {
             let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
             let candidates = interpreters(plan, &target.target.python)?;
-            let r#become = target.r#become.map(|privilege| match privilege {
-                AutomationBecome::Sudo { user } => user.clone(),
-            });
+            let r#become = target.r#become;
             let role = if r#become.is_some() {
                 crate::config::IdentityRole::Automation
             } else {
@@ -318,7 +317,7 @@ impl Engine {
                         key.clone(),
                         probe_lease,
                         python.to_owned(),
-                        r#become.clone(),
+                        r#become,
                         requirements.clone(),
                         deadline,
                         ct,
@@ -368,7 +367,7 @@ impl Engine {
             let out = channel(
                 lease.session(),
                 python,
-                r#become.as_deref(),
+                r#become,
                 &input,
                 output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
                 deadline,
@@ -687,7 +686,7 @@ async fn bounded<R: AsyncRead + Unpin>(
 async fn channel(
     session: &Session,
     python: &str,
-    r#become: Option<&str>,
+    r#become: Option<&AutomationBecome>,
     input: &Frame<'_>,
     limit: usize,
     deadline: Instant,
@@ -695,8 +694,8 @@ async fn channel(
     shutdown: &CancellationToken,
 ) -> Result<Output, Failure> {
     let operation = async {
-        let mut command = if let Some(user) = r#become {
-            let mut command = session.command("/usr/bin/sudo");
+        let mut command = if let Some(AutomationBecome::Sudo { user, executable }) = r#become {
+            let mut command = session.command(executable);
             command.args(["-H", "-n", "-k", "-u", user, "--", python]);
             command
         } else {

@@ -240,10 +240,18 @@ struct NamedAutomationAuthority {
     targets: BTreeMap<String, AutomationTarget>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum AutomationBecome {
-    Sudo { user: String },
+    Sudo {
+        user: String,
+        #[serde(default = "default_sudo_executable")]
+        executable: String,
+    },
+}
+
+fn default_sudo_executable() -> String {
+    "/usr/bin/sudo".to_owned()
 }
 
 pub(crate) enum AutomationAgent<'a> {

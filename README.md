@@ -1622,6 +1622,11 @@ destination = "server-automation"
 python = "/usr/bin/python3"
 ```
 
+`become.executable` optionally pins an absolute remote sudo executable; the
+default is `/usr/bin/sudo`. For NixOS, select `/run/wrappers/bin/sudo`.
+The same operator-pinned path applies to native payloads and Ansible; callers
+cannot override it, and it does not enable generic command or sudo tools.
+
 The replacement SSH configuration selects independently provisioned credentials
 through ordinary OpenSSH `IdentityFile` or `IdentityAgent` settings. No privileged
 key is installed on ordinary targets. An optional `ssh_auth_sock` selects an

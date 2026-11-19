@@ -648,7 +648,10 @@ mod tests {
 
     #[test]
     fn named_authority_resolution_never_falls_back_to_native_or_ordinary_credentials() {
-        let text = named_authority_text("baseline", "baseline", true);
+        let text = named_authority_text("baseline", "baseline", true).replace(
+            "become={method='sudo',user='root'}",
+            "become={method='sudo',user='root',executable='/private-authority/sudo'}",
+        );
         for (socket_config, fixed) in [("", false), ("ssh_auth_sock='/selected/agent'\n", true)] {
             let config = load_text(
                 &text.replace("become={", &format!("{socket_config}become={{")),
@@ -665,7 +668,7 @@ mod tests {
             assert_eq!(authority.ssh_executable, config.ssh_executable());
             assert_eq!(
                 serde_json::to_value(authority.r#become).unwrap(),
-                serde_json::json!({"method":"sudo","user":"root"})
+                serde_json::json!({"method":"sudo","user":"root","executable":"/private-authority/sudo"})
             );
             match authority.agent {
                 AutomationAgent::Fixed(socket) if fixed => {

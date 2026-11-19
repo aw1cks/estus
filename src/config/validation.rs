@@ -77,7 +77,7 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
         let r#become = table(
             r#become,
             "automation.authorities.*.become",
-            &["method", "user"],
+            &["method", "user", "executable"],
         )?;
         if r#become.get("method").and_then(toml::Value::as_str) != Some("sudo") {
             return Err(invalid(
@@ -94,6 +94,11 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 "automation.authorities.*.become.user",
                 "must be a named POSIX account",
             ));
+        }
+        if let Some(value) = r#become.get("executable") {
+            let field = "automation.authorities.*.become.executable";
+            let path = value.as_str().ok_or_else(|| invalid(field, "must be a string"))?;
+            authority_path(path, field)?;
         }
         let mappings = authority
             .get("targets")
@@ -722,6 +727,25 @@ mod tests {
             let error = load_text(&invalid_text, &[]).err().unwrap();
             assert!(error.field.starts_with("automation.authorities"));
             assert!(!error.to_string().contains("private-authority"));
+        }
+    }
+
+    #[test]
+    fn named_sudo_executable_is_operator_pinned_and_absolute() {
+        let text = named_authority_text("actions-only", "actions-only", false);
+        let configured = text.replace(
+            "become={method='sudo',user='root'}",
+            "become={method='sudo',user='root',executable='/run/wrappers/bin/sudo'}",
+        );
+        let config = load_text(&configured, &[]).unwrap();
+        let AutomationBecome::Sudo { executable, .. } = &config.automation.authorities["ops"].r#become;
+        assert_eq!(executable, "/run/wrappers/bin/sudo");
+        for value in ["'sudo'", "''", "42", "\"/private\\u0000sudo\""] {
+            let invalid_text = text.replace(
+                "become={method='sudo',user='root'}",
+                &format!("become={{method='sudo',user='root',executable={value}}}"),
+            );
+            assert!(load_text(&invalid_text, &[]).is_err());
         }
     }
 

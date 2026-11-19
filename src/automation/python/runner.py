@@ -788,9 +788,10 @@ def validate(spec):
         require(absolute(spec["ssh_config"]).is_file())
     become = spec["become"]
     if become is not None:
-        keys(become, ("method", "user"))
+        keys(become, ("method", "user", "executable"))
         require(become["method"] == "sudo" and type(become["user"]) is str
                 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", become["user"]) is not None)
+        absolute(become["executable"])
     agent = spec["agent"]
     require(type(agent) is dict)
     if agent.get("mode") == "fixed":
@@ -956,13 +957,15 @@ def layout(workspace, spec, roots, selected_path):
     if become:
         # The sudo plugin's aliases can override the generic become variables.
         # Fix both public forms; never provide a password or sudo's stdin flag.
+        # The plugin inserts this value directly into a remote shell command.
+        sudo_executable = shlex.quote(spec["become"]["executable"])
         transport.update({
             "ansible_become_method": "ansible.builtin.sudo",
             "ansible_become_user": spec["become"]["user"],
-            "ansible_become_exe": "/usr/bin/sudo",
+            "ansible_become_exe": sudo_executable,
             "ansible_become_flags": "-H -n -k",
             "ansible_sudo_user": spec["become"]["user"],
-            "ansible_sudo_exe": "/usr/bin/sudo",
+            "ansible_sudo_exe": sudo_executable,
             "ansible_sudo_flags": "-H -n -k",
             # A truthy password option makes Core remove -n and enable prompts.
             "ansible_become_password": "",
