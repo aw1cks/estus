@@ -1,0 +1,223 @@
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+
+
+def canonical_file(path, limit=1048576):
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return {"exists": False}
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("not a regular file")
+    with open(path, "rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("file exceeds prestate bound")
+    return {
+        "exists": True,
+        "mode": stat.S_IMODE(st.st_mode),
+        "uid": st.st_uid,
+        "gid": st.st_gid,
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def stat_identity(path):
+    st = os.stat(path)
+    return {
+        "dev": st.st_dev,
+        "ino": st.st_ino,
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+    }
+
+
+def valid_name(value):
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 256
+        and "\x00" not in value
+        and "\n" not in value
+        and "\r" not in value
+        and not any(ch.isspace() for ch in value)
+        and not value.startswith("-")
+    )
+
+
+def package_names(args):
+    raw = args.get("name")
+    if raw is None:
+        raw = args.get("pkg")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise ValueError("invalid package names")
+    out = []
+    for item in items:
+        if not valid_name(item):
+            raise ValueError("invalid package name")
+        out.append(item)
+    return sorted(set(out))
+
+
+def observe_systemd(args):
+    unit = args.get("name")
+    if not valid_name(unit):
+        raise ValueError("invalid unit")
+    scope = args.get("scope", "system")
+    if scope not in ("system", "user", "global"):
+        raise ValueError("invalid scope")
+    cmd = ["systemctl"]
+    if scope == "user":
+        cmd.append("--user")
+    elif scope == "global":
+        cmd.append("--global")
+    cmd.extend([
+        "show",
+        "--no-pager",
+        "--property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic,FragmentPath,DropInPaths",
+        "--",
+        unit,
+    ])
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=15)
+    if proc.returncode != 0 or len(proc.stdout.encode("utf-8")) > 65536:
+        raise RuntimeError("systemctl show failed")
+    fragment = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("FragmentPath="):
+            value = line.split("=", 1)[1].strip()
+            if value:
+                fragment = canonical_file(value)
+            break
+    return {
+        "module": "ansible.builtin.systemd_service",
+        "unit": unit,
+        "scope": scope,
+        "show": proc.stdout,
+        "fragment": fragment,
+    }
+
+
+def observe_sysctl(args):
+    key = args.get("name")
+    if not valid_name(key) or ".." in key or "/" in key:
+        raise ValueError("invalid sysctl key")
+    sysctl_file = args.get("sysctl_file") or "/etc/sysctl.conf"
+    if not isinstance(sysctl_file, str) or not sysctl_file.startswith("/") or len(sysctl_file) > 4096 or "\x00" in sysctl_file:
+        raise ValueError("invalid sysctl_file")
+    proc_path = "/proc/sys/" + key.replace(".", "/")
+    try:
+        fd = os.open(proc_path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            data = os.read(fd, 65537)
+        finally:
+            os.close(fd)
+        if len(data) > 65536:
+            raise ValueError("proc sysctl value exceeds bound")
+        proc_state = {"exists": True, "sha256": hashlib.sha256(data).hexdigest()}
+    except FileNotFoundError:
+        proc_state = {"exists": False}
+    return {
+        "module": "ansible.posix.sysctl",
+        "key": key,
+        "sysctl_file": sysctl_file,
+        "proc_sys": proc_state,
+        "file": canonical_file(sysctl_file),
+    }
+
+
+def observe_apt(args):
+    names = package_names(args)
+    dpkg_status = stat_identity("/var/lib/dpkg/status")
+    query_rc = None
+    query_out = ""
+    if names:
+        proc = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Package}\t${db:Status-Status}\t${Version}\n", "--"] + names,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if proc.returncode not in (0, 1) or len(proc.stdout.encode("utf-8")) > 65536:
+            raise RuntimeError("dpkg-query failed")
+        query_rc = proc.returncode
+        query_out = proc.stdout
+    return {
+        "module": "ansible.builtin.apt",
+        "names": names,
+        "dpkg_status": dpkg_status,
+        "query_rc": query_rc,
+        "query_out": query_out,
+    }
+
+
+def observe_dnf(args):
+    names = package_names(args)
+    rpmdb = None
+    for candidate in ("/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages"):
+        if os.path.exists(candidate):
+            rpmdb = stat_identity(candidate)
+            break
+    if rpmdb is None:
+        raise RuntimeError("rpmdb unavailable")
+    query_rc = None
+    query_out = ""
+    if names:
+        proc = subprocess.run(
+            ["rpm", "-q", "--qf", "%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n", "--"] + names,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if proc.returncode < 0 or proc.returncode > len(names) or len(proc.stdout.encode("utf-8")) > 65536:
+            raise RuntimeError("rpm query failed")
+        query_rc = proc.returncode
+        query_out = proc.stdout
+    return {
+        "module": "ansible.builtin.dnf",
+        "names": names,
+        "rpmdb": rpmdb,
+        "query_rc": query_rc,
+        "query_out": query_out,
+    }
+
+
+def main():
+    raw = sys.stdin.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("prestate input exceeds bound")
+    req = json.loads(raw)
+    module = req.get("module")
+    args = req.get("arguments")
+    if not isinstance(args, dict):
+        raise ValueError("invalid arguments")
+    if module == "ansible.builtin.systemd_service":
+        snapshot = observe_systemd(args)
+    elif module == "ansible.posix.sysctl":
+        snapshot = observe_sysctl(args)
+    elif module == "ansible.builtin.apt":
+        snapshot = observe_apt(args)
+    elif module == "ansible.builtin.dnf":
+        snapshot = observe_dnf(args)
+    else:
+        raise ValueError("unqualified module")
+    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if len(encoded.encode("ascii")) > 65536:
+        raise ValueError("prestate snapshot exceeds bound")
+    sys.stdout.write(encoded)
+
+
+if __name__ == "__main__":
+    main()

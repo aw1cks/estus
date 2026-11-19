@@ -64,6 +64,17 @@ impl Estus {
         if let Err(error) = self.state.config.automation_target(id, &request.host) {
             return reject(error);
         }
+        if matches!(
+            crate::config::risk_tier_for_binding(binding),
+            crate::config::RiskTier::Change | crate::config::RiskTier::Exec
+        ) && self.state.config.requires_preview(&request.host)
+        {
+            return reject(ToolError::new(
+                "preview_required",
+                "Operation has no qualified preview path under require_preview policy",
+                false,
+            ));
+        }
         let Some(authority) = binding
             .automation_authority()
             .map(|a| a.label().into_owned())

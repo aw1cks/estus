@@ -377,7 +377,6 @@ impl PlaybookError {
 #[derive(Clone, Copy)]
 enum DocumentationRequest<'a> {
     Module(&'a str),
-    Inventory,
     Role {
         role: &'a str,
         entry_point: &'a str,
@@ -769,39 +768,6 @@ pub(crate) async fn check(runtime: Option<PathBuf>, ctx: RuntimeContext<'_>) -> 
     }
 }
 
-/// Explicit operator inventory import. Requests never call this to refresh policy.
-pub(crate) async fn import_inventory(
-    runtime: Option<PathBuf>,
-    ctx: RuntimeContext<'_>,
-) -> Result<super::generic::Inventory, &'static str> {
-    let (reply, source) = run_selected(runtime, &ctx, Some(DocumentationRequest::Inventory))
-        .await
-        .map_err(RuntimeFailure::code)?;
-    let stdout = observed_stdout(reply)?;
-    let report: serde_json::Value =
-        serde_json::from_str(&stdout).map_err(|_| "runtime_protocol_error")?;
-    if report["schema"] != 2 || report["status"] != "passed" {
-        return Err("generic_inventory_failed");
-    }
-    let identity: RuntimeIdentity =
-        serde_json::from_value(report["identity"].clone()).map_err(|_| "runtime_protocol_error")?;
-    if !valid_identity(&identity) || !matches_source(&identity, &source) {
-        return Err("runtime_identity_mismatch");
-    }
-    let inventory = super::generic::Inventory {
-        schema: 1,
-        identity,
-        content_sha256: report["inventory"]["content_sha256"]
-            .as_str()
-            .ok_or("runtime_protocol_error")?
-            .to_owned(),
-        modules: serde_json::from_value(report["inventory"]["modules"].clone())
-            .map_err(|_| "runtime_protocol_error")?,
-    };
-    inventory.validate()?;
-    Ok(inventory)
-}
-
 pub(crate) async fn import_module(
     runtime: Option<PathBuf>,
     module: &str,
@@ -1125,9 +1091,6 @@ async fn run_loaded(
         let mut input: serde_json::Value = serde_json::from_slice(&input_json)
             .map_err(|_| RuntimeFailure::Failed("invalid_runtime_manifest"))?;
         match documentation {
-            DocumentationRequest::Inventory => {
-                input["inventory"] = serde_json::Value::Bool(true);
-            }
             DocumentationRequest::Module(module) => {
                 input["module"] = serde_json::Value::String(module.to_owned());
             }

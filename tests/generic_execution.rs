@@ -110,332 +110,496 @@ print(json.dumps(out))
     Ok(())
 }
 
-async fn call(server: &mut WireServer, id: u64, args: Value) -> Result<Value> {
-    let response = server
-        .request(id, "tools/call", json!({"name":"generic","arguments":args}))
-        .await?;
+#[test]
+fn runner_check_mode_skipped_is_never_an_observation() -> Result<()> {
+    let script = r#"
+import json, runpy, sys
+m = runpy.run_path(sys.argv[1], run_name='skipped_preview_test')
+class Sink:
+    def __init__(self):
+        self.events = []
+    def emit(self, kind, **fields):
+        self.events.append((kind, fields))
+sink = Sink()
+plan = {'fields': {'changed': ['changed']}, 'schema': {'type': 'object', 'properties': {'changed': {'type': 'boolean'}}, 'required': ['changed'], 'additionalProperties': False}, 'max_bytes': 1024, 'max_items': 16, 'max_depth': 4}
+ev = m['Evidence'](sink, 'ansible.posix.sysctl', False, plan, None, True, False)
+ev.status({'status': 'starting'}, {})
+ev.status({'status': 'running'}, {})
+ev.status({'status': 'successful'}, {})
+ev.event({'event': 'playbook_on_task_start', 'event_data': {'host': 'estus_target', 'task': 'estus_module', 'task_action': 'ansible.posix.sysctl', 'task_uuid': 'u1'}})
+ev.event({'event': 'runner_on_skipped', 'event_data': {'host': 'estus_target', 'task': 'estus_module', 'task_action': 'ansible.posix.sysctl', 'task_uuid': 'u1', 'res': {'changed': False, 'skip_reason': 'Conditional result was False'}}})
+ev.event({'event': 'playbook_on_stats', 'event_data': {'ok': {}, 'failures': {}, 'dark': {}, 'skipped': {'estus_target': 1}, 'changed': {}, 'processed': {'estus_target': 1}, 'rescued': {}, 'ignored': {}}})
+class R:
+    rc = 0
+    status = 'successful'
+ev.reconcile(R())
+print(json.dumps({'tasks': ev.tasks, 'events': sink.events}))
+"#;
+    let output =
+        Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
+            .args(["-I", "-B", "-c", script])
+            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/automation/python/runner.py"))
+            .output()?;
     ensure!(
-        response["error"].is_null(),
-        "MCP rejected bounded call: {response}"
+        output.status.success(),
+        "skipped preview check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    Ok(response["result"]["structuredContent"].clone())
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(parsed["tasks"]["skipped"] == 1 && parsed["tasks"]["ok"] == 0);
+    let proj = parsed["events"]
+        .as_array()
+        .context("events")?
+        .iter()
+        .find(|e| e[0] == "projection")
+        .context("projection event")?;
+    ensure!(proj[1]["projection"] == json!({"status": "unavailable"}));
+    Ok(())
+}
+
+async fn import_module_snapshot(
+    config: &std::path::Path,
+    module: &str,
+    overlay: &Value,
+    overlay_path: &std::path::Path,
+    snapshot_path: &std::path::Path,
+) -> Result<()> {
+    fs::write(overlay_path, serde_json::to_vec(overlay)?)?;
+    let mut import = support::server_command(config)?;
+    import
+        .args(["schema", "import", module, "--overlay"])
+        .arg(overlay_path)
+        .arg("--output")
+        .arg(snapshot_path);
+    let result = support::run_authoring(&mut import).await?;
+    ensure!(
+        result.status.success(),
+        "schema import {module} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ESTUS_TEST_ANSIBLE_RUNTIME, ESTUS_TEST_TARGET_PYTHON and existing disposable SSH fixture"]
-async fn real_mcp_generic_disposable_smoke() -> Result<()> {
+async fn real_mcp_named_module_disposable_smoke() -> Result<()> {
     let runtime = fs::canonicalize(
         std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("selected pinned runtime")?,
     )?;
-    let python = PathBuf::from(
-        std::env::var_os("ESTUS_TEST_TARGET_PYTHON").context("selected target Python")?,
-    );
+    let python = std::env::var("ESTUS_TEST_TARGET_PYTHON").context("target python")?;
     let fixture = Fixture::start().await?;
-    let result:Result<()>=async {
-        let workspace=fixture.root.path().join("generic-workspaces");fs::create_dir(&workspace)?;
+    let result: Result<()> = async {
+        let workspace = fixture.root.path().join("workspace");
+        fs::create_dir(&workspace)?;
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
-        let approval=fixture.root.path().join("generic-inventory.json");
-        let owned=fixture.root.path().join("owned-generic-file");let canary=fixture.root.path().join("forbidden-generic-lookup");
-        let mut config:toml::Table=toml::from_str(&fs::read_to_string(&fixture.config)?)?;
+        let owned = fixture.root.path().join("owned-named-target");
+        let canary = fixture.root.path().join("template-canary");
+        let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
         config["limits"]["operation_timeout_secs"] = 60.into();
         config["limits"]["max_timeout_secs"] = 60.into();
-        config.insert("automation".into(),toml::Value::try_from(json!({"runtime":runtime,"workspace_root":workspace,"targets":{"plain":{"destination":"plain","python":python}}}))?);
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut import=support::server_command(&fixture.config)?;import.args(["schema","import-inventory","--output"]).arg(&approval);
-        let output=support::run_authoring(&mut import).await.context("generic inventory authoring")?;ensure!(output.status.success(),"explicit inventory import failed: {}",String::from_utf8_lossy(&output.stdout));
-        let binding=json!({"description":"Owned disposable generic acceptance","revision":"1","targets":["plain"],"authority":"automation","effects":["sensitive_read","runtime_write","persistent_write","availability","unknown"],"execution":{"kind":"ansible_generic","policy":{"snapshot":approval,"scope":{"kind":"exact","modules":["ansible.builtin.copy","ansible.builtin.debug","ansible.builtin.file"]},"deny":["ansible.builtin.file"],"disclosure":{"kind":"module_result","max_bytes":1024,"max_items":32,"max_depth":4},"retention":{"max_entries":4,"max_bytes":32768,"lifetime_secs":60}}},"result":{"kind":"ansible_summary"}});
-        config.insert("tools".into(),toml::Value::try_from(json!({"generic":binding}))?);
-        config.insert("enabled_tools".into(),toml::Value::try_from(json!([]))?);
-        // Generic execution is not enabled by an ordinary named-tool profile.
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut disabled=WireServer::start(&fixture.config)?;
-        disabled.initialize().await?;
-        let denied=disabled.request(2,"tools/call",json!({"name":"generic","arguments":{"operation":"list","host":"plain"}})).await?;
-        ensure!(!denied["error"].is_null(),"generic tool became callable without independent enablement");
-        disabled.stop(None).await?;
-        config.insert("enabled_generic_tools".into(),toml::Value::try_from(json!(["generic"]))?);
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut server=WireServer::start(&fixture.config)?;
-        let calls:Result<()>=async {
+        config.insert(
+            "automation".into(),
+            toml::Value::try_from(json!({
+                "runtime": runtime, "workspace_root": workspace,
+                "targets": {"plain": {"destination": "plain", "python": python}}
+            }))?,
+        );
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+
+        // Reject ansible.builtin.setup without reviewed fixed gather_subset and gather_timeout.
+        let setup_bad = json!({
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+            "fixed_args": {},
+            "input_map": {}
+        });
+        let setup_overlay_path = fixture.root.path().join("setup-bad-overlay.json");
+        let setup_snap = fixture.root.path().join("setup-bad.json");
+        fs::write(&setup_overlay_path, serde_json::to_vec(&setup_bad)?)?;
+        let mut bad_import = support::server_command(&fixture.config)?;
+        bad_import
+            .args(["schema", "import", "ansible.builtin.setup", "--overlay"])
+            .arg(&setup_overlay_path)
+            .arg("--output")
+            .arg(&setup_snap);
+        let bad_out = support::run_authoring(&mut bad_import).await?;
+        ensure!(!bad_out.status.success(), "setup without gather_subset/gather_timeout succeeded");
+
+        let copy_overlay = json!({
+            "input_schema": {"type": "object", "properties": {
+                "content": {"type": "string", "maxLength": 512},
+                "src": {"type": "string", "maxLength": 512}
+            }, "additionalProperties": false},
+            "fixed_args": {"dest": owned, "mode": "0600"},
+            "input_map": {"content": "content", "src": "src"},
+            "argument_types": {"mode": {"type": "string", "enum": ["0600"]}}
+        });
+        let copy_snap = fixture.root.path().join("copy.json");
+        import_module_snapshot(
+            &fixture.config,
+            "ansible.builtin.copy",
+            &copy_overlay,
+            &fixture.root.path().join("copy-overlay.json"),
+            &copy_snap,
+        )
+        .await?;
+
+        let debug_overlay = json!({
+            "input_schema": {"type": "object", "properties": {
+                "msg": {"type": "string", "maxLength": 256}
+            }, "required": ["msg"], "additionalProperties": false},
+            "fixed_args": {},
+            "input_map": {"msg": "msg"}
+        });
+        let debug_snap = fixture.root.path().join("debug.json");
+        import_module_snapshot(
+            &fixture.config,
+            "ansible.builtin.debug",
+            &debug_overlay,
+            &fixture.root.path().join("debug-overlay.json"),
+            &debug_snap,
+        )
+        .await?;
+
+        let tools_table = json!({
+            "change_owned_copy": {
+                "description": "Reviewed copy to owned file.",
+                "revision": "1",
+                "targets": ["plain"],
+                "authority": "automation",
+                "effects": ["persistent_write"],
+                "execution": {"kind": "ansible_module", "snapshot": copy_snap},
+                "input_schema": copy_overlay["input_schema"],
+                "fixed_args": copy_overlay["fixed_args"],
+                "input_map": copy_overlay["input_map"],
+                "argument_types": copy_overlay["argument_types"],
+                "result": {"kind": "ansible_summary"}
+            },
+            "inspect_secret_debug": {
+                "description": "No-log debug check.",
+                "revision": "1",
+                "targets": ["plain"],
+                "authority": "automation",
+                "effects": ["sensitive_read"],
+                "execution": {"kind": "ansible_module", "snapshot": debug_snap, "no_log": true},
+                "input_schema": debug_overlay["input_schema"],
+                "fixed_args": debug_overlay["fixed_args"],
+                "input_map": debug_overlay["input_map"],
+                "result": {
+                    "kind": "ansible_projection",
+                    "fields": {"msg": ["msg"]},
+                    "max_bytes": 512, "max_items": 16, "max_depth": 4,
+                    "schema": {"type": "object", "properties": {"msg": {"type": "string", "maxLength": 256}}, "required": ["msg"], "additionalProperties": false}
+                }
+            }
+        });
+        config.insert("tools".into(), toml::Value::try_from(tools_table)?);
+        config.insert(
+            "enabled_tools".into(),
+            toml::Value::try_from(json!(["change_owned_copy", "inspect_secret_debug"]))?,
+        );
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+
+        let mut server = WireServer::start(&fixture.config)?;
+        let calls: Result<()> = async {
             server.initialize().await?;
-            let listed=call(&mut server,2,json!({"operation":"list","host":"plain","limit":1})).await?;
-            ensure!(listed["data"]["modules"].as_array().context("module list")?.len()==1);
-            let described=call(&mut server,20,json!({"operation":"describe","host":"plain","module":"ansible.builtin.copy"})).await?;
-            ensure!(described["data"]["documentation"]["status"]=="partial"
-                && described["data"]["documentation"]["short_description"].as_str().is_some_and(|s|!s.is_empty() && s.len()<=512),
-                "real selected-runtime public documentation was not captured: {described}");
-            ensure!(described["data"]["generation"]==listed["data"]["generation"]);
-            let denied=call(&mut server,3,json!({"operation":"call","host":"plain","module":"ansible.builtin.file","arguments":{"path":owned,"state":"absent"}})).await?;ensure!(denied["error"]["code"]=="policy_denied");
-            let alias=call(&mut server,4,json!({"operation":"call","host":"plain","module":"ansible.legacy.copy","arguments":{}})).await?;ensure!(alias["error"]["code"]=="policy_denied");
-            let literal=format!("{{{{ lookup('pipe', 'touch {}') }}}}; $(false)",canary.display());
-            let copied=call(&mut server,5,json!({"operation":"call","host":"plain","module":"ansible.builtin.copy","arguments":{"dest":owned,"content":literal,"mode":"0600"}})).await?;
-            ensure!(copied["error"].is_null() && copied["data"]["complete"]==true,"generic raw metadata module failed: {copied}");
-            ensure!(fs::read_to_string(&owned)?==literal && !canary.exists(),"caller strings were evaluated or wrong effect");
-            let controller_source=fixture.root.path().join("owned-controller-source");
-            fs::write(&controller_source,"approved controller canary")?;
-            let copied_source=call(&mut server,21,json!({"operation":"call","host":"plain","module":"ansible.builtin.copy","arguments":{"src":controller_source,"dest":owned,"mode":"0600"}})).await?;
-            ensure!(copied_source["error"].is_null() && fs::read_to_string(&owned)?=="approved controller canary",
-                "controller-side copy action did not read the owned canary: {copied_source}");
-            let invalid=call(&mut server,6,json!({"operation":"call","host":"plain","module":"ansible.builtin.copy","arguments":{"dest":owned,"not_a_module_option":true}})).await?;ensure!(invalid["data"]["status"]=="failed","Ansible did not reject invalid args: {invalid}");
-            let receipt=copied["data"]["receipt"].as_str().context("retained receipt")?;
-            let retained=call(&mut server,7,json!({"operation":"receipts","host":"plain","receipt":receipt})).await?;
-            ensure!(retained["data"]["data"]["generic"]["module"]=="ansible.builtin.copy");
-            let inject=server.request(8,"tools/call",json!({"name":"generic","arguments":{"operation":"call","host":"plain","module":"ansible.builtin.debug","arguments":{},"become":true}})).await?;ensure!(!inject["error"].is_null());
+            let listed = server.request(2, "tools/list", json!({})).await?;
+            let names: Vec<_> = listed["result"]["tools"]
+                .as_array()
+                .context("tools list")?
+                .iter()
+                .filter_map(|t| t["name"].as_str())
+                .collect();
+            ensure!(
+                names.contains(&"change_owned_copy") && names.contains(&"inspect_secret_debug"),
+                "named bindings missing from tools/list: {names:?}"
+            );
+
+            let literal = format!("{{{{ lookup('pipe', 'touch {}') }}}}; $(false)", canary.display());
+            let copied = server
+                .request(
+                    3,
+                    "tools/call",
+                    json!({"name": "change_owned_copy", "arguments": {"host": "plain", "inputs": {"content": literal}}}),
+                )
+                .await?;
+            let sc = &copied["result"]["structuredContent"];
+            ensure!(sc["error"].is_null() && sc["data"]["complete"] == true, "copy failed: {copied}");
+            ensure!(fs::read_to_string(&owned)? == literal && !canary.exists());
+
+            let controller_source = fixture.root.path().join("owned-controller-source");
+            fs::write(&controller_source, "approved controller canary")?;
+            let copied_src = server
+                .request(
+                    4,
+                    "tools/call",
+                    json!({"name": "change_owned_copy", "arguments": {"host": "plain", "inputs": {"src": controller_source}}}),
+                )
+                .await?;
+            ensure!(
+                copied_src["result"]["structuredContent"]["error"].is_null()
+                    && fs::read_to_string(&owned)? == "approved controller canary",
+                "controller-side copy failed: {copied_src}"
+            );
+
+            let nolog = server
+                .request(
+                    5,
+                    "tools/call",
+                    json!({"name": "inspect_secret_debug", "arguments": {"host": "plain", "inputs": {"msg": "PRIVATE_NAMED_NO_LOG_SENTINEL"}}}),
+                )
+                .await?;
+            let nolog_sc = &nolog["result"]["structuredContent"];
+            ensure!(
+                nolog_sc["data"]["censored"] == true
+                    && nolog_sc["data"]["projection"]["status"] == "censored",
+                "no_log lost precedence: {nolog}"
+            );
+            ensure!(!nolog.to_string().contains("PRIVATE_NAMED_NO_LOG_SENTINEL"));
+
+            let inject = server
+                .request(
+                    6,
+                    "tools/call",
+                    json!({"name": "change_owned_copy", "arguments": {"host": "plain", "inputs": {"dest": "/unapproved"}}}),
+                )
+                .await?;
+            ensure!(inject["error"]["code"] == -32602);
             Ok(())
-        }.await;
-        let stopped=server.stop(None).await?;ensure!(!stopped.text().contains("lookup('pipe'"),"argument value reached audit");calls?;
-        reviewed_raw_file(&fixture, &config, &owned).await?;
-        // Locked approval mismatch fails startup; no request refreshes it.
-        let mut snapshot:Value=serde_json::from_slice(&fs::read(&approval)?)?;snapshot["content_sha256"]=json!("0".repeat(64));fs::write(&approval,serde_json::to_vec(&snapshot)?)?;
-        rejected_activation(&fixture.config, "generic_runtime_drift").await?;
-        // Follow-selected is advance consent, but only an explicit new startup activates it.
-        let policy = config["tools"]["generic"]["execution"]["policy"].as_table_mut().context("generic policy")?;
-        policy.insert("runtime_policy".into(), "follow_selected_runtime".into());
-        policy.insert("no_log".into(), true.into());
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut follow=WireServer::start(&fixture.config)?;
-        let followed:Result<()>=async {
-            follow.initialize().await?;
-            let result=call(&mut follow,10,json!({"operation":"call","host":"plain","module":"ansible.builtin.debug","arguments":{"msg":"PRIVATE_GENERIC_NO_LOG_SENTINEL"}})).await?;
-            ensure!(result["data"]["censored"]==true && result["data"]["projection"]["status"]=="censored","no_log lost precedence: {result}");
-            ensure!(!result.to_string().contains("PRIVATE_GENERIC_NO_LOG_SENTINEL"));
-            ensure!(result["data"]["generic"]["policy_generation"].as_str().is_some_and(|v|v.len()==64));
-            Ok(())
-        }.await;
-        let log=follow.stop(None).await?;ensure!(!log.text().contains("PRIVATE_GENERIC_NO_LOG_SENTINEL"));followed?;
+        }
+        .await;
+        let stopped = server.stop(None).await?;
+        ensure!(!stopped.text().contains("lookup('pipe'"), "argument leaked to audit");
+        ensure!(!stopped.text().contains("PRIVATE_NAMED_NO_LOG_SENTINEL"));
+        calls?;
+
+        // Tampered snapshot content digest fails activation.
+        let mut snapshot: Value = serde_json::from_slice(&fs::read(&copy_snap)?)?;
+        snapshot["content_sha256"] = json!("0".repeat(64));
+        fs::write(&copy_snap, serde_json::to_vec(&snapshot)?)?;
+        rejected_activation(&fixture.config, "invalid_schema_snapshot").await?;
         Ok(())
-    }.await;
+    }
+    .await;
     let cleanup = fixture.stop().await;
     result?;
     cleanup
 }
 
-async fn reviewed_raw_file(
-    fixture: &Fixture,
-    base: &toml::Table,
-    owned: &std::path::Path,
-) -> Result<()> {
-    let overlay = json!({
-        "input_schema":{"type":"object","properties":{},"additionalProperties":false},
-        "fixed_args":{"path":owned,"state":"file","mode":"0644"},
-        "input_map":{},
-        "argument_types":{"mode":{"type":"string","enum":["0644"]}}
-    });
-    let overlay_path = fixture.root.path().join("reviewed-overlay.json");
-    let snapshot = fixture.root.path().join("reviewed-file.json");
-    fs::write(&overlay_path, serde_json::to_vec(&overlay)?)?;
-    let mut import = support::server_command(&fixture.config)?;
-    import
-        .args(["schema", "import", "ansible.builtin.file", "--overlay"])
-        .arg(&overlay_path)
-        .arg("--output")
-        .arg(&snapshot);
-    let result = support::run_authoring(&mut import).await?;
-    ensure!(
-        result.status.success(),
-        "reviewed raw-mode import failed: {}",
-        String::from_utf8_lossy(&result.stdout)
-    );
-    let binding = json!({
-        "description":"Owned reviewed file mode", "revision":"1", "targets":["plain"],
-        "authority":"automation", "effects":["persistent_write"],
-        "execution":{"kind":"ansible_module","snapshot":snapshot},
-        "input_schema":overlay["input_schema"], "fixed_args":overlay["fixed_args"],
-        "input_map":overlay["input_map"], "argument_types":overlay["argument_types"],
-        "result":{"kind":"ansible_summary"}
-    });
-    let mut config = base.clone();
-    config.insert(
-        "tools".into(),
-        toml::Value::try_from(json!({"reviewed_file":binding}))?,
-    );
-    config.insert(
-        "enabled_generic_tools".into(),
-        toml::Value::try_from(json!([]))?,
-    );
-    config.insert(
-        "enabled_tools".into(),
-        toml::Value::try_from(json!(["reviewed_file"]))?,
-    );
-    let path = fixture.root.path().join("reviewed.toml");
-    fs::write(&path, toml::to_string(&config)?)?;
-    fs::set_permissions(owned, fs::Permissions::from_mode(0o600))?;
-    let mut server = WireServer::start(&path)?;
-    let calls: Result<()> = async {
-        server.initialize().await?;
-        let result = server
-            .request(
-                2,
-                "tools/call",
-                json!({
-                    "name":"reviewed_file","arguments":{"host":"plain","inputs":{}}
-                }),
-            )
-            .await?;
-        let receipt = &result["result"]["structuredContent"];
-        ensure!(
-            receipt["error"].is_null() && receipt["data"]["changed"] == true,
-            "reviewed file mode did not execute: {result}"
-        );
-        ensure!(
-            fs::metadata(owned)?.permissions().mode() & 0o777 == 0o644,
-            "independent mode observation disagrees"
-        );
-        let denied = server.request(3,"tools/call",json!({
-            "name":"reviewed_file","arguments":{"host":"plain","inputs":{"path":"/unapproved"}}
-        })).await?;
-        ensure!(
-            denied["error"]["code"] == -32602,
-            "fixed path override escaped review: {denied}"
-        );
-        Ok(())
-    }
-    .await;
-    server.stop(None).await?;
-    calls?;
-    config["tools"]["reviewed_file"]["fixed_args"]["mode"] = "0777".into();
-    fs::write(&path, toml::to_string(&config)?)?;
-    rejected_activation(&path, "invalid_config").await?;
-    ensure!(
-        fs::metadata(owned)?.permissions().mode() & 0o777 == 0o644,
-        "rejected approval changed the file"
-    );
-    Ok(())
-}
-
-fn mutable_runtime(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
-    fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if entry.file_name() == "__pycache__" {
-                continue;
-            }
-            ensure!(!kind.is_symlink(), "fixture source has an interior symlink");
-            let output = destination.join(entry.file_name());
-            if kind.is_dir() {
-                copy_tree(&entry.path(), &output)?;
-            } else {
-                fs::copy(entry.path(), output)?;
-            }
-        }
-        Ok(())
-    }
-    fs::create_dir(destination)?;
-    fs::create_dir(destination.join("bin"))?;
-    std::os::unix::fs::symlink(source.join("bin/python3"), destination.join("bin/python3"))?;
-    std::os::unix::fs::symlink(source.join("python"), destination.join("python"))?;
-    std::os::unix::fs::symlink(source.join("collections"), destination.join("collections"))?;
-    std::os::unix::fs::symlink(source.join("ansible.cfg"), destination.join("ansible.cfg"))?;
-    let mut manifest: Value = serde_json::from_slice(&fs::read(source.join("runtime.json"))?)?;
-    let core = fs::canonicalize(
-        source
-            .join(manifest["site_packages"].as_str().context("runtime site")?)
-            .join("ansible"),
-    )?;
-    copy_tree(&core, &destination.join("site-packages/ansible"))?;
-    manifest["site_packages"] = json!("site-packages");
-    fs::write(
-        destination.join("runtime.json"),
-        serde_json::to_vec(&manifest)?,
-    )?;
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires selected runtime and disposable local SSH fixture"]
-async fn real_mcp_generic_generation_cutover() -> Result<()> {
+async fn real_mcp_named_module_generation_and_preview_gate() -> Result<()> {
     let selected =
         fs::canonicalize(std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("runtime")?)?;
     let fixture = Fixture::start().await?;
     let result: Result<()> = async {
-        let runtime = fixture.root.path().join("mutable-runtime");
-        mutable_runtime(&selected, &runtime)?;
         let workspace = fixture.root.path().join("workspace");
         fs::create_dir(&workspace)?;
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
-        let owned = fixture.root.path().join("generation-canary");
-        fs::write(&owned, "unchanged generation canary")?;
-        let approval = fixture.root.path().join("inventory.json");
+        let sysctl_conf = fixture.root.path().join("99-estus-preview.conf");
         let mut config: toml::Table = toml::from_str(&fs::read_to_string(&fixture.config)?)?;
         config["limits"]["operation_timeout_secs"] = 60.into();
         config["limits"]["max_timeout_secs"] = 60.into();
-        config.insert("automation".into(),toml::Value::try_from(json!({
-            "runtime":runtime,"workspace_root":workspace,
-            "targets":{"plain":{"destination":"plain","python":selected.join("bin/python3")}}
-        }))?);
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut import = support::server_command(&fixture.config)?;
-        import.args(["schema","import-inventory","--output"]).arg(&approval);
-        ensure!(support::run_authoring(&mut import).await?.status.success(), "mutable runtime inventory import failed");
-        let binding = json!({
-            "description":"Explicit generation acceptance","revision":"1","targets":["plain"],
-            "authority":"automation","effects":["sensitive_read","runtime_write","persistent_write","availability","unknown"],
-            "execution":{"kind":"ansible_generic","policy":{
-                "snapshot":approval,"scope":{"kind":"collections","collections":["ansible.builtin"]},
-                "deny":["ansible.builtin.file"],
-                "restrictions":{"ansible.builtin.stat":{
-                    "input_schema":{"type":"object","properties":{},"additionalProperties":false},
-                    "fixed_args":{"path":owned},"input_map":{}
-                }}
-            }},
-            "result":{"kind":"ansible_summary"}
+        config.insert(
+            "automation".into(),
+            toml::Value::try_from(json!({
+                "runtime": selected, "workspace_root": workspace,
+                "targets": {"plain": {"destination": "plain", "python": selected.join("bin/python3")}}
+            }))?,
+        );
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+
+        let sysctl_overlay = json!({
+            "input_schema": {"type": "object", "properties": {
+                "value": {"type": "string", "enum": ["1", "2"]}
+            }, "required": ["value"], "additionalProperties": false},
+            "fixed_args": {
+                "name": "net.ipv4.ip_forward",
+                "sysctl_file": sysctl_conf,
+                "sysctl_set": false,
+                "reload": false,
+                "state": "present"
+            },
+            "input_map": {"value": "value"}
         });
-        config.insert("tools".into(),toml::Value::try_from(json!({"generic":binding}))?);
-        config.insert("enabled_tools".into(),toml::Value::try_from(json!([]))?);
-        config.insert("enabled_generic_tools".into(),toml::Value::try_from(json!(["generic"]))?);
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut collections = WireServer::start(&fixture.config)?;
+        let sysctl_snap = fixture.root.path().join("sysctl.json");
+        import_module_snapshot(
+            &fixture.config,
+            "ansible.posix.sysctl",
+            &sysctl_overlay,
+            &fixture.root.path().join("sysctl-overlay.json"),
+            &sysctl_snap,
+        )
+        .await?;
+
+        config.insert(
+            "rules".into(),
+            toml::Value::try_from(json!({
+                "plain": {"require_preview": true}
+            }))?,
+        );
+        config.insert(
+            "tools".into(),
+            toml::Value::try_from(json!({
+                "preview_sysctl": {
+                    "description": "Check-mode preview with diff for sysctl file.",
+                    "revision": "1",
+                    "targets": ["plain"],
+                    "authority": "automation",
+                    "effects": ["read"],
+                    "execution": {"kind": "ansible_module", "snapshot": sysctl_snap, "check_mode": true, "diff": true},
+                    "input_schema": sysctl_overlay["input_schema"],
+                    "fixed_args": sysctl_overlay["fixed_args"],
+                    "input_map": sysctl_overlay["input_map"],
+                    "result": {
+                        "kind": "ansible_projection",
+                        "fields": {"changed": ["changed"], "diff": ["diff"]},
+                        "max_bytes": 4096, "max_items": 64, "max_depth": 5,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "changed": {"type": "boolean"},
+                                "diff": {
+                                    "type": "object",
+                                    "properties": {
+                                        "before": {"type": "string", "maxLength": 2048},
+                                        "after": {"type": "string", "maxLength": 2048},
+                                        "before_header": {"type": "string", "maxLength": 256},
+                                        "after_header": {"type": "string", "maxLength": 256},
+                                        "prepared": {"type": "string", "maxLength": 2048}
+                                    },
+                                    "additionalProperties": false
+                                }
+                            },
+                            "required": ["changed"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "change_sysctl": {
+                    "description": "Apply reviewed sysctl file setting.",
+                    "revision": "1",
+                    "targets": ["plain"],
+                    "authority": "automation",
+                    "effects": ["persistent_write"],
+                    "execution": {"kind": "ansible_module", "snapshot": sysctl_snap},
+                    "input_schema": sysctl_overlay["input_schema"],
+                    "fixed_args": sysctl_overlay["fixed_args"],
+                    "input_map": sysctl_overlay["input_map"],
+                    "result": {"kind": "ansible_summary"}
+                }
+            }))?,
+        );
+        config.insert(
+            "enabled_tools".into(),
+            toml::Value::try_from(json!(["preview_sysctl", "change_sysctl"]))?,
+        );
+        fs::write(&fixture.config, toml::to_string(&config)?)?;
+
+        let mut server = WireServer::start(&fixture.config)?;
         let checked: Result<()> = async {
-            collections.initialize().await?;
-            let outside = call(&mut collections,2,json!({"operation":"describe","host":"plain","module":"community.general.modprobe"})).await?;
-            ensure!(outside["error"]["code"]=="policy_denied", "collection scope widened");
-            let fixed = call(&mut collections,3,json!({"operation":"call","host":"plain","module":"ansible.builtin.stat","arguments":{}})).await?;
-            ensure!(fixed["error"].is_null() && fixed["data"]["generic"]["validation"]=="reviewed_restriction");
-            let override_path = call(&mut collections,4,json!({"operation":"call","host":"plain","module":"ansible.builtin.stat","arguments":{"dest":"/unapproved"}})).await?;
-            ensure!(override_path["error"]["code"]=="invalid_argument", "fixed argument alias override escaped restriction");
+            server.initialize().await?;
+            // Apply without prior preview fails closed with preview_required.
+            let before = server
+                .request(
+                    2,
+                    "tools/call",
+                    json!({"name": "change_sysctl", "arguments": {"host": "plain", "inputs": {"value": "1"}}}),
+                )
+                .await?;
+            ensure!(
+                before["result"]["structuredContent"]["error"]["code"] == "preview_required",
+                "apply without preview did not reject: {before}"
+            );
+            ensure!(!sysctl_conf.exists());
+
+            // Preview runs in check mode (non-mutating) and captures diff.
+            let preview = server
+                .request(
+                    3,
+                    "tools/call",
+                    json!({"name": "preview_sysctl", "arguments": {"host": "plain", "inputs": {"value": "1"}}}),
+                )
+                .await?;
+            let preview_sc = &preview["result"]["structuredContent"];
+            ensure!(
+                preview_sc["error"].is_null()
+                    && preview_sc["data"]["changed"] == true
+                    && preview_sc["data"]["projection"]["status"] == "complete",
+                "preview_sysctl failed: {preview}"
+            );
+            ensure!(!sysctl_conf.exists(), "preview mutated target file");
+
+            // Argument mismatch rejects with preview_required and leaves preview unconsumed or separate.
+            let arg_mismatch = server
+                .request(
+                    4,
+                    "tools/call",
+                    json!({"name": "change_sysctl", "arguments": {"host": "plain", "inputs": {"value": "2"}}}),
+                )
+                .await?;
+            ensure!(
+                arg_mismatch["result"]["structuredContent"]["error"]["code"] == "preview_required",
+                "mismatched args bypassed require_preview: {arg_mismatch}"
+            );
+
+            // Out-of-band target state drift invalidates pre_state_digest.
+            fs::write(&sysctl_conf, "net.ipv4.ip_forward = 0\n")?;
+            let drifted = server
+                .request(
+                    5,
+                    "tools/call",
+                    json!({"name": "change_sysctl", "arguments": {"host": "plain", "inputs": {"value": "1"}}}),
+                )
+                .await?;
+            ensure!(
+                drifted["result"]["structuredContent"]["error"]["code"] == "preview_required",
+                "pre-state drift bypassed require_preview: {drifted}"
+            );
+
+            // Re-preview under current pre-state, then apply succeeds and consumes entry.
+            let preview2 = server
+                .request(
+                    6,
+                    "tools/call",
+                    json!({"name": "preview_sysctl", "arguments": {"host": "plain", "inputs": {"value": "1"}}}),
+                )
+                .await?;
+            ensure!(preview2["result"]["structuredContent"]["error"].is_null());
+
+            let applied = server
+                .request(
+                    7,
+                    "tools/call",
+                    json!({"name": "change_sysctl", "arguments": {"host": "plain", "inputs": {"value": "1"}}}),
+                )
+                .await?;
+            ensure!(
+                applied["result"]["structuredContent"]["error"].is_null()
+                    && applied["result"]["structuredContent"]["data"]["changed"] == true,
+                "apply after matching preview failed: {applied}"
+            );
+            ensure!(fs::read_to_string(&sysctl_conf)?.contains("net.ipv4.ip_forward=1"));
+
+            // Re-applying without a fresh preview fails closed because the entry was consumed.
+            let replay = server
+                .request(
+                    8,
+                    "tools/call",
+                    json!({"name": "change_sysctl", "arguments": {"host": "plain", "inputs": {"value": "1"}}}),
+                )
+                .await?;
+            ensure!(
+                replay["result"]["structuredContent"]["error"]["code"] == "preview_required",
+                "consumed preview was reused: {replay}"
+            );
             Ok(())
-        }.await;
-        collections.stop(None).await?;
-        checked?;
-        config["tools"]["generic"]["execution"]["policy"]["scope"] = toml::Value::try_from(json!({"kind":"selected_runtime"}))?;
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut active = WireServer::start(&fixture.config)?;
-        let checked: Result<()> = async {
-            active.initialize().await?;
-            let modules = runtime.join("site-packages/ansible/modules");
-            fs::copy(modules.join("stat.py"), modules.join("estus_generation_probe.py"))?;
-            let absent = call(&mut active,5,json!({"operation":"describe","host":"plain","module":"ansible.builtin.estus_generation_probe"})).await?;
-            ensure!(absent["error"]["code"]=="policy_denied", "active inventory silently acquired new code");
-            let drift = call(&mut active,6,json!({"operation":"call","host":"plain","module":"ansible.builtin.copy","arguments":{"dest":owned,"content":"must not execute"}})).await?;
-            ensure!(!drift["error"].is_null() && fs::read_to_string(&owned)?=="unchanged generation canary",
-                "content drift reached mutation: {drift}");
-            Ok(())
-        }.await;
-        active.stop(None).await?;
-        checked?;
-        rejected_activation(&fixture.config, "generic_runtime_drift").await?;
-        config["tools"]["generic"]["execution"]["policy"].as_table_mut().context("generic policy")?
-            .insert("runtime_policy".into(), "follow_selected_runtime".into());
-        fs::write(&fixture.config,toml::to_string(&config)?)?;
-        let mut follow = WireServer::start(&fixture.config)?;
-        let checked: Result<()> = async {
-            follow.initialize().await?;
-            let permitted = call(&mut follow,7,json!({"operation":"call","host":"plain","module":"ansible.builtin.estus_generation_probe","arguments":{"path":owned}})).await?;
-            ensure!(permitted["error"].is_null() && permitted["data"]["complete"]==true, "explicit generation did not acquire provisioned module: {permitted}");
-            let denied = call(&mut follow,8,json!({"operation":"call","host":"plain","module":"ansible.builtin.file","arguments":{"path":owned,"state":"absent"}})).await?;
-            ensure!(denied["error"]["code"]=="policy_denied" && owned.exists(), "deny lost precedence on upgrade");
-            let tools = follow.request(9,"tools/list",json!({})).await?;
-            let tool = tools["result"]["tools"].as_array().context("tools")?.iter().find(|tool|tool["name"]=="generic").context("generic tool")?;
-            ensure!(tool["_meta"]["generic_policy"]["scope_diff"]["added"].as_array()
-                .is_some_and(|added|added.contains(&json!("ansible.builtin.estus_generation_probe"))),
-                "activation hid module-scope widening");
-            Ok(())
-        }.await;
-        follow.stop(None).await?;
+        }
+        .await;
+        server.stop(None).await?;
         checked
-    }.await;
+    }
+    .await;
     let cleanup = fixture.stop().await;
     result?;
     cleanup

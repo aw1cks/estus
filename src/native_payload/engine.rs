@@ -27,6 +27,7 @@ use crate::{
 };
 
 const BOOTSTRAP: &str = include_str!("bootstrap.py");
+const PRESTATE: &str = include_str!("prestate.py");
 const PROBE_LIMIT: usize = 65_536;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -435,6 +436,136 @@ impl Engine {
             ),
         }
     }
+
+    pub(crate) async fn observe_preview_prestate(
+        &self,
+        request: PreviewPrestateRequest<'_>,
+    ) -> Result<[u8; 32], ToolError> {
+        let PreviewPrestateRequest {
+            host,
+            authority,
+            target,
+            module,
+            arguments,
+            connect_timeout,
+            deadline,
+            ct,
+        } = request;
+        let (_, pool) = self.pool(host, authority, target, connect_timeout)?;
+        let role = if target.r#become.is_some() {
+            crate::config::IdentityRole::Automation
+        } else {
+            crate::config::IdentityRole::Ordinary
+        };
+        let lease = pool
+            .acquire(host, &target.target.destination, role, deadline, ct)
+            .await?;
+        let python = if !target.target.python.is_empty() {
+            target.target.python.as_str()
+        } else if target.dynamic_python {
+            "python3"
+        } else {
+            return Err(error(
+                "preview_required",
+                "Independent pre-state probe interpreter is unavailable",
+                false,
+            ));
+        };
+        let payload = serde_json::to_vec(&json!({
+            "module": module,
+            "arguments": arguments,
+        }))
+        .map_err(|_| error("preview_required", "Invalid pre-state request", false))?;
+        let r#become = target.r#become;
+        let shutdown = &self.shutdown;
+        let operation = async {
+            let mut command = if let Some(AutomationBecome::Sudo { user, executable }) = r#become {
+                let mut command = lease.session().command(executable);
+                command.args(["-H", "-n", "-k", "-u", user, "--", python]);
+                command
+            } else {
+                lease.session().command(python)
+            };
+            command
+                .args(["-I", "-c", PRESTATE])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().await.map_err(|_| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe could not spawn",
+                    false,
+                )
+            })?;
+            let mut stdin = child.stdin().take().ok_or_else(|| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe pipe unavailable",
+                    false,
+                )
+            })?;
+            let stdout = child.stdout().take().ok_or_else(|| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe output unavailable",
+                    false,
+                )
+            })?;
+            let stderr = child.stderr().take().ok_or_else(|| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe error pipe unavailable",
+                    false,
+                )
+            })?;
+            let (out, err, write) = tokio::join!(
+                bounded(stdout, PROBE_LIMIT),
+                bounded(stderr, 0),
+                async move {
+                    stdin.write_all(&payload).await?;
+                    stdin.shutdown().await
+                }
+            );
+            let (stdout, overflow) = out.map_err(|_| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe read failed",
+                    false,
+                )
+            })?;
+            let _ = err;
+            write.map_err(|_| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe input failed",
+                    false,
+                )
+            })?;
+            let status = child.wait().await.map_err(|_| {
+                error(
+                    "preview_required",
+                    "Independent pre-state probe exit failed",
+                    false,
+                )
+            })?;
+            if !status.success() || overflow || parse(&stdout).is_err() {
+                return Err(error(
+                    "preview_required",
+                    "Independent pre-state digest could not be obtained",
+                    false,
+                ));
+            }
+            Ok(<sha2::Sha256 as sha2::Digest>::digest(&stdout).into())
+        };
+        tokio::select! {
+            biased;
+            _ = ct.cancelled() => Err(error("cancelled", "Request cancelled before preview pre-state probe", false)),
+            _ = shutdown.cancelled() => Err(error("cancelled", "Server shutting down", false)),
+            _ = sleep_until(deadline) => Err(error("timeout", "Request deadline exceeded during preview pre-state probe", false)),
+            result = operation => result,
+        }
+    }
 }
 
 fn interpreters<'a>(
@@ -795,6 +926,17 @@ pub(crate) struct PayloadRun<'a> {
     pub(crate) deadline: Instant,
     pub(crate) ct: &'a CancellationToken,
     pub(crate) started: std::time::Instant,
+}
+
+pub(crate) struct PreviewPrestateRequest<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) authority: &'a str,
+    pub(crate) target: &'a ResolvedAutomation<'a>,
+    pub(crate) module: &'a str,
+    pub(crate) arguments: &'a Value,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) deadline: Instant,
+    pub(crate) ct: &'a CancellationToken,
 }
 
 struct DiscoverRequest<'a> {

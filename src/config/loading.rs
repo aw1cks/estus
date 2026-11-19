@@ -95,7 +95,6 @@ struct Document {
     rules: BTreeMap<String, rules::RawHostRule>,
     tools: BTreeMap<String, toml::Value>,
     enabled_tools: Vec<String>,
-    enabled_generic_tools: Vec<String>,
     tool_presets: Vec<String>,
     disabled_tools: Vec<String>,
     catalog: CatalogSettings,
@@ -118,7 +117,6 @@ impl Default for Document {
             rules: BTreeMap::new(),
             tools: BTreeMap::new(),
             enabled_tools: Vec::new(),
-            enabled_generic_tools: Vec::new(),
             tool_presets: Vec::new(),
             disabled_tools: Vec::new(),
             catalog: CatalogSettings::default(),
@@ -138,7 +136,7 @@ fn resolve_catalog_selection(
     document: &mut Document,
     base: &Path,
     env: &impl Fn(&str) -> Option<OsString>,
-) -> Result<(), ConfigError> {
+) -> Result<Option<String>, ConfigError> {
     let definitions: BTreeSet<&str> = document.tools.keys().map(String::as_str).collect();
     let unknown = |names: &[String]| names.iter().any(|n| !definitions.contains(n.as_str()));
     let target_needs_catalog = document.targets.iter().flat_map(|t| t.values()).any(|t| {
@@ -191,7 +189,12 @@ fn resolve_catalog_selection(
         ));
     }
     let manifest = catalog.as_ref().map(|c| c.manifest());
-    let mut selected = crate::catalog::selection::expand(
+    let resolved_catalog_version = document
+        .catalog
+        .version
+        .clone()
+        .or_else(|| manifest.map(|m| m.version.clone()));
+    let selected = crate::catalog::selection::expand(
         &definitions,
         manifest,
         &document.enabled_tools,
@@ -207,33 +210,6 @@ fn resolve_catalog_selection(
             "tools",
             "selected catalog tools require prepared reviewed definitions",
         ));
-    }
-    let generic = |name: &str| {
-        document
-            .tools
-            .get(name)
-            .and_then(|definition| definition.get("execution"))
-            .and_then(|execution| execution.get("kind"))
-            .and_then(toml::Value::as_str)
-            == Some("ansible_generic")
-    };
-    if selected.iter().any(|name| generic(name)) {
-        return Err(invalid(
-            "enabled_generic_tools",
-            "Generic tools require independent explicit selection",
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for name in &document.enabled_generic_tools {
-        if !generic(name) || !seen.insert(name) {
-            return Err(invalid(
-                "enabled_generic_tools",
-                "Must name unique configured generic tools",
-            ));
-        }
-        if !document.disabled_tools.contains(name) {
-            selected.insert(name.clone());
-        }
     }
     if let Some(targets) = &mut document.targets {
         for target in targets.values_mut() {
@@ -295,7 +271,7 @@ fn resolve_catalog_selection(
             })
         })
         .collect();
-    Ok(())
+    Ok(resolved_catalog_version)
 }
 
 #[derive(Default, Deserialize)]
@@ -404,7 +380,7 @@ impl Config {
         if let Some(root) = catalog_root {
             document.catalog.root = Some(root);
         }
-        resolve_catalog_selection(&mut document, &base, &env)?;
+        let mut catalog_version = resolve_catalog_selection(&mut document, &base, &env)?;
         let ssh_override = cli
             .ssh_config
             .or_else(|| env("ESTUS_SSH_CONFIG").map(PathBuf::from));
@@ -529,6 +505,9 @@ impl Config {
             if let Some(path) = catalog_source {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
                     .map_err(|reason| invalid("catalog", reason))?;
+                if catalog_version.is_none() {
+                    catalog_version = Some(catalog.manifest().version.clone());
+                }
                 for name in crate::catalog::assets::pinned_dynamic_payload_names() {
                     if document.disabled_tools.iter().any(|d| d == name)
                         || bindings.entries().any(|(_, b)| b.name == name)
@@ -571,6 +550,7 @@ impl Config {
             rules,
             bindings,
             automation: document.automation,
+            catalog_version,
         })
     }
 

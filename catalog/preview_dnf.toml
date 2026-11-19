@@ -1,0 +1,49 @@
+# Opt-in check-mode preview for approved dnf package transitions via ansible.builtin.dnf.
+# Import offline with `estus schema import ansible.builtin.dnf` before activation.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["preview_dnf"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+
+[automation.authorities.catalog.become]
+method = "sudo"
+user = "root"
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+
+[tools.preview_dnf]
+description = "Preview approved dnf package change and optional supplied diff in check mode without mutating packages. Skipped tasks are never treated as observations; diff is omitted unless actually supplied."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "ansible_module", snapshot = "/etc/estus/preview_dnf.schema.json", no_log = false, check_mode = true, diff = true }
+fixed_args = { "update_cache" = false }
+input_map = { "name" = "name", "state" = "state" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "name" = { "type" = "array", "items" = { "type" = "string", "enum" = ["estus-catalog-base", "estus-catalog-demo"] }, "minItems" = 1, "maxItems" = 4 }, "state" = { "type" = "string", "enum" = ["present", "absent"] } }, "required" = ["name", "state"], "additionalProperties" = false }
+
+[tools.preview_dnf.result]
+kind = "ansible_projection"
+fields = { "changed" = ["changed"], "diff" = ["diff"] }
+max_bytes = 4096
+max_items = 64
+max_depth = 5
+schema = { "type" = "object", "properties" = { "changed" = { "type" = "boolean" }, "diff" = { "type" = "object", "properties" = { "before" = { "type" = "string", "maxLength" = 2048 }, "after" = { "type" = "string", "maxLength" = 2048 }, "before_header" = { "type" = "string", "maxLength" = 256 }, "after_header" = { "type" = "string", "maxLength" = 256 }, "prepared" = { "type" = "string", "maxLength" = 2048 } }, "additionalProperties" = false } }, "required" = ["changed"], "additionalProperties" = false }

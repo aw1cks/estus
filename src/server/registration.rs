@@ -203,7 +203,7 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
         } else {
             format!("{} Fixed remote execution with declared authority on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description)
         };
-        let mut meta = JsonObject::from_iter([
+        let meta = JsonObject::from_iter([
             ("risk_tier".into(), serde_json::json!(tier)),
             ("revision".into(), serde_json::json!(binding.revision)),
             ("result".into(), serde_json::json!(binding.result_kind())),
@@ -214,12 +214,7 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             ("trusted_controller_code".into(), serde_json::json!(binding.trusted_controller_code())),
             ("restriction_boundary".into(), binding.restriction_boundary()),
         ]);
-        if let Some(policy) = binding.generic_policy() {
-            meta.insert("generic_policy".into(), policy.inspect());
-        }
-        let output_schema = if binding.is_generic() {
-            schema_for_type::<crate::reply::ToolReply<serde_json::Value>>()
-        } else if binding.is_automation() || binding.is_payload() {
+        let output_schema = if binding.is_automation() || binding.is_payload() {
             binding.projection().map_or_else(
                 || Arc::clone(&summary_output_schema),
                 |plan| automation_output_schema(Some(plan)),

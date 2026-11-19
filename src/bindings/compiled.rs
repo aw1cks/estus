@@ -19,7 +19,6 @@ use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot, SiteCo
 use plans::AutomationPlan;
 pub(crate) use plans::{AutomationTransport, ControllerPlan, PreparedController, controller_root};
 
-mod generic;
 mod payload;
 mod plans;
 
@@ -335,10 +334,6 @@ enum Execution {
     ControllerScript {
         plan: Option<Arc<ControllerPlan>>,
     },
-    Generic {
-        policy: Box<crate::automation::generic::Policy>,
-        authority: AutomationAuthority,
-    },
     Payload {
         plan: Option<Box<crate::native_payload::PayloadPlan>>,
         authority: AutomationAuthority,
@@ -354,6 +349,8 @@ enum Execution {
         authority: AutomationAuthority,
         overlay: Value,
         no_log: bool,
+        check_mode: bool,
+        diff: bool,
         projection: Option<Arc<crate::contracts::projection::Plan>>,
         // One startup allocation keeps native bindings from reserving the large plan.
         plan: Option<Box<AutomationPlan>>,
@@ -447,7 +444,6 @@ pub(crate) enum BindingCall {
     Remote(BindingRequest),
     Controller(ControllerRequest),
     Automation(AutomationRequest),
-    Generic(crate::automation::generic::Request),
     Payload(AutomationRequest),
 }
 
@@ -615,10 +611,13 @@ impl CompiledBinding {
         limits: &Limits,
         target_exists: &impl Fn(&str) -> bool,
     ) -> Result<Self, ConfigError> {
-        let (snapshot, no_log, source) = match raw.execution {
-            RawExecution::AnsibleModule { snapshot, no_log } => {
-                (snapshot, no_log, AnsibleSource::Module)
-            }
+        let (snapshot, no_log, check_mode, diff, source) = match raw.execution {
+            RawExecution::AnsibleModule {
+                snapshot,
+                no_log,
+                check_mode,
+                diff,
+            } => (snapshot, no_log, check_mode, diff, AnsibleSource::Module),
             RawExecution::AnsibleRole {
                 snapshot,
                 role_path,
@@ -630,6 +629,8 @@ impl CompiledBinding {
                 (
                     snapshot,
                     no_log,
+                    false,
+                    false,
                     AnsibleSource::Role {
                         path: role_path.map(PathBuf::from),
                     },
@@ -646,6 +647,8 @@ impl CompiledBinding {
                 (
                     snapshot,
                     no_log,
+                    false,
+                    false,
                     AnsibleSource::Playbook {
                         project_root: PathBuf::from(project_root),
                     },
@@ -653,6 +656,15 @@ impl CompiledBinding {
             }
             _ => unreachable!("automation execution selected"),
         };
+        if check_mode && (!matches!(source, AnsibleSource::Module) || !name.starts_with("preview_"))
+        {
+            return Err(invalid(
+                "check_mode is only supported on preview_* ansible_module bindings",
+            ));
+        }
+        if diff && (!check_mode || no_log) {
+            return Err(invalid("diff requires preview check_mode without no_log"));
+        }
         let targets = raw.targets.unwrap_or_default();
         let authority = AutomationAuthority::parse(&raw.authority)?;
         if !matches!(
@@ -674,7 +686,12 @@ impl CompiledBinding {
             ));
         }
         let projection = match raw.result {
-            RawResult::AnsibleSummary {} => None,
+            RawResult::AnsibleSummary {} => {
+                if diff {
+                    return Err(invalid("diff requires a disclosure-approved projection"));
+                }
+                None
+            }
             RawResult::AnsibleProjection {
                 fields,
                 schema,
@@ -691,13 +708,25 @@ impl CompiledBinding {
                         "Workflow projections require mcp_result member paths",
                     ));
                 }
+                if diff
+                    && !fields
+                        .values()
+                        .any(|path| path.first().map(String::as_str) == Some("diff"))
+                {
+                    return Err(invalid(
+                        "diff requires explicit approval in projection fields",
+                    ));
+                }
                 let schema = serde_json::to_value(schema)
                     .map_err(|_| invalid("Invalid projection schema"))?;
                 Some(Arc::new(
-                    crate::contracts::projection::compile(json!({
-                        "fields": fields, "schema": schema, "max_bytes": max_bytes,
-                        "max_items": max_items, "max_depth": max_depth
-                    }))
+                    crate::contracts::projection::compile_with_diff(
+                        json!({
+                            "fields": fields, "schema": schema, "max_bytes": max_bytes,
+                            "max_items": max_items, "max_depth": max_depth
+                        }),
+                        diff,
+                    )
                     .map_err(invalid)?,
                 ))
             }
@@ -777,6 +806,8 @@ impl CompiledBinding {
                 authority,
                 overlay,
                 no_log,
+                check_mode,
+                diff,
                 projection,
                 plan: None,
             },
@@ -796,9 +827,6 @@ impl CompiledBinding {
         workstation: bool,
     ) -> Result<Self, ConfigError> {
         validate_risk_prefix_effects(&name, &raw.effects)?;
-        if matches!(&raw.execution, RawExecution::AnsibleGeneric { .. }) {
-            return Self::compile_generic(name, raw, enabled, limits, target_exists);
-        }
         if matches!(&raw.execution, RawExecution::NativePayload { .. }) {
             return Self::compile_payload(name, raw, enabled, limits, target_exists, workstation);
         }
@@ -927,7 +955,6 @@ impl CompiledBinding {
                 (Execution::ControllerScript { plan }, Vec::new(), false)
             }
             RawExecution::NativePayload { .. }
-            | RawExecution::AnsibleGeneric { .. }
             | RawExecution::AnsibleModule { .. }
             | RawExecution::AnsibleRole { .. }
             | RawExecution::AnsiblePlaybook { .. } => {
@@ -1159,7 +1186,6 @@ impl CompiledBinding {
         match self.execution {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::ControllerScript { .. } => "controller_script",
-            Execution::Generic { .. } => "ansible_generic",
             Execution::Payload { .. } => "native_payload",
             Execution::Ansible {
                 source: AnsibleSource::Role { .. },
@@ -1181,25 +1207,40 @@ impl CompiledBinding {
     }
 
     pub(crate) fn is_automation(&self) -> bool {
-        matches!(
-            self.execution,
-            Execution::Ansible { .. } | Execution::Generic { .. }
-        )
-    }
-
-    pub(crate) fn is_generic(&self) -> bool {
-        matches!(self.execution, Execution::Generic { .. })
+        matches!(self.execution, Execution::Ansible { .. })
     }
 
     pub(crate) fn is_payload(&self) -> bool {
         matches!(self.execution, Execution::Payload { .. })
     }
 
+    pub(crate) fn is_preview_check_mode(&self) -> bool {
+        matches!(
+            self.execution,
+            Execution::Ansible {
+                check_mode: true,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn automation_reviewed(
+        &self,
+    ) -> Option<&crate::contracts::schema_import::ReviewedModule> {
+        let Execution::Ansible {
+            plan: Some(plan), ..
+        } = &self.execution
+        else {
+            return None;
+        };
+        plan.reviewed_module()
+    }
+
     pub(crate) fn automation_authority(&self) -> Option<&AutomationAuthority> {
         match &self.execution {
-            Execution::Ansible { authority, .. }
-            | Execution::Generic { authority, .. }
-            | Execution::Payload { authority, .. } => Some(authority),
+            Execution::Ansible { authority, .. } | Execution::Payload { authority, .. } => {
+                Some(authority)
+            }
             _ => None,
         }
     }
@@ -1207,7 +1248,6 @@ impl CompiledBinding {
     pub(crate) fn automation_activated(&self) -> bool {
         match &self.execution {
             Execution::Ansible { plan, .. } => plan.is_some(),
-            Execution::Generic { policy, .. } => policy.is_activated(),
             _ => false,
         }
     }
@@ -1215,7 +1255,6 @@ impl CompiledBinding {
     pub(crate) fn projection(&self) -> Option<&Arc<crate::contracts::projection::Plan>> {
         match &self.execution {
             Execution::Ansible { projection, .. } => projection.as_ref(),
-            Execution::Generic { policy, .. } => policy.projection(),
             Execution::Payload { projection, .. } => Some(projection),
             _ => None,
         }
@@ -1260,11 +1299,9 @@ impl CompiledBinding {
         }
     }
     pub(crate) fn read_only(&self) -> bool {
-        !self.is_generic()
-            && self
-                .effects
-                .iter()
-                .all(|v| matches!(v, Effect::Read | Effect::SensitiveRead))
+        self.effects
+            .iter()
+            .all(|v| matches!(v, Effect::Read | Effect::SensitiveRead))
     }
     pub(crate) fn effects(&self) -> &[Effect] {
         &self.effects
@@ -1286,9 +1323,6 @@ impl CompiledBinding {
         &self,
         arguments: &JsonObject,
     ) -> Result<BindingCall, ErrorData> {
-        if self.is_generic() {
-            return self.parse_generic(arguments).map(BindingCall::Generic);
-        }
         if self.is_payload() {
             return self.parse_payload(arguments);
         }

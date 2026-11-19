@@ -64,8 +64,30 @@ impl Estus {
                 return budget.result(ToolReply::<AutomationData>::failure(error));
             }
         };
+        let is_preview = binding.is_preview_check_mode();
+        let requires_preview = !is_preview
+            && matches!(
+                crate::config::risk_tier_for_binding(binding),
+                crate::config::RiskTier::Change | crate::config::RiskTier::Exec
+            )
+            && self.state.config.requires_preview(&request.host);
+        let Some(authority_label) = binding
+            .automation_authority()
+            .map(|a| a.label().into_owned())
+        else {
+            return reject("policy_denied", "Operation is not authorized");
+        };
+        let authority_identity = if is_preview || requires_preview {
+            let Ok(digest) = super::preview::authority_identity_digest(&authority_label, &target)
+            else {
+                return reject("preview_required", "Invalid preview authority identity");
+            };
+            Some(digest)
+        } else {
+            None
+        };
         let (bytes, files) = self.state.config.automation_scratch();
-        let prepared = match binding.prepare_automation(
+        let mut prepared = match binding.prepare_automation(
             &request,
             self.state.config.limits(),
             bindings::AutomationTransport {
@@ -81,6 +103,17 @@ impl Estus {
                 return budget.result(ToolReply::<AutomationData>::failure(error));
             }
         };
+        if requires_preview
+            && !prepared
+                .module_name
+                .as_deref()
+                .is_some_and(super::preview::is_qualified_module)
+        {
+            return reject(
+                "preview_required",
+                "Operation has no qualified preview path under require_preview policy",
+            );
+        }
         let deadline = match request_deadline(started, prepared.controller.duration) {
             Ok(deadline) => deadline,
             Err(error) => {
@@ -88,11 +121,37 @@ impl Estus {
                 return budget.result(ToolReply::<AutomationData>::failure(error));
             }
         };
-        let Some(authority_label) = binding
-            .automation_authority()
-            .map(|a| a.label().into_owned())
-        else {
-            return reject("policy_denied", "Operation is not authorized");
+        let preview_meta = if is_preview || requires_preview {
+            let (Some(module_name), Some(args), Some(reviewed), Some(authority_identity)) = (
+                prepared.module_name.take(),
+                prepared.arguments.take(),
+                binding.automation_reviewed(),
+                authority_identity,
+            ) else {
+                return reject(
+                    "preview_required",
+                    "Operation has no qualified preview path under require_preview policy",
+                );
+            };
+            let Ok(catalog_revision) = super::preview::catalog_revision_digest(
+                self.state.config.catalog_version(),
+                reviewed,
+            ) else {
+                return reject("preview_required", "Invalid preview catalog revision");
+            };
+            let Ok(canonical_arguments) = super::preview::canonical_json_sha256(&args) else {
+                return reject("preview_required", "Invalid preview arguments");
+            };
+            Some((
+                module_name,
+                args,
+                authority_identity,
+                catalog_revision,
+                binding.revision.clone(),
+                canonical_arguments,
+            ))
+        } else {
+            None
         };
         let shared_read = binding.is_shared_read();
         let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
@@ -143,9 +202,85 @@ impl Estus {
                     return;
                 }
             };
+            if requires_preview {
+                let Some((
+                    ref module_name,
+                    ref args,
+                    authority_identity,
+                    catalog_revision,
+                    ref binding_revision,
+                    canonical_arguments,
+                )) = preview_meta
+                else {
+                    let error = ToolError::new(
+                        "preview_required",
+                        "Operation has no qualified preview path under require_preview policy",
+                        false,
+                    );
+                    metadata.reject(started, &error);
+                    let _ = sender.send(ToolReply::failure(error));
+                    return;
+                };
+                let resolved = state
+                    .config
+                    .automation_target(id, &request.host)
+                    .expect("automation target already authorized");
+                let pre_state_digest = match state
+                    .payload
+                    .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
+                        host: &request.host,
+                        authority: &authority_label,
+                        target: &resolved,
+                        module: module_name,
+                        arguments: args,
+                        connect_timeout: std::time::Duration::from_secs(
+                            state.config.limits().connect_timeout_secs,
+                        ),
+                        deadline,
+                        ct: &context.ct,
+                    })
+                    .await
+                {
+                    Ok(digest) => digest,
+                    Err(error) => {
+                        let error = if error.code == "cancelled" || error.code == "timeout" {
+                            error
+                        } else {
+                            ToolError::new(
+                                "preview_required",
+                                "Independent pre-state digest could not be obtained",
+                                false,
+                            )
+                        };
+                        target_lease.finish(false, error.code);
+                        metadata.reject(started, &error);
+                        let _ = sender.send(ToolReply::failure(error));
+                        return;
+                    }
+                };
+                let key = super::preview::PreviewKey {
+                    target: request.host.clone(),
+                    authority_identity,
+                    catalog_revision,
+                    binding_revision: binding_revision.clone(),
+                    canonical_arguments,
+                    pre_state_digest,
+                };
+                if !state.previews.consume(&key) {
+                    let error = ToolError::new(
+                        "preview_required",
+                        "A matching non-expired preview is required before apply",
+                        false,
+                    );
+                    target_lease.finish(false, error.code);
+                    metadata.reject(started, &error);
+                    let _ = sender.send(ToolReply::failure(error));
+                    return;
+                }
+            }
             let audit = Audit::start(metadata, started);
-            target_lease.mark_dispatched(request.host.clone(), authority_label, executor);
-            let run = crate::automation::execution::run(
+            target_lease.mark_dispatched(request.host.clone(), authority_label.clone(), executor);
+            let mut run = crate::automation::execution::run(
                 prepared,
                 crate::controller::ControllerContext {
                     deadline,
@@ -158,6 +293,66 @@ impl Estus {
                 },
             )
             .await;
+            if is_preview {
+                let valid_observation = run.reply.error.is_none()
+                    && run.reply.data.as_ref().is_some_and(|d| {
+                        d.complete
+                            && d.status == crate::reply::AutomationStatus::Successful
+                            && d.tasks.ok == 1
+                            && d.tasks.skipped == 0
+                    });
+                if valid_observation {
+                    if let Some((
+                        module_name,
+                        args,
+                        authority_identity,
+                        catalog_revision,
+                        binding_revision,
+                        canonical_arguments,
+                    )) = preview_meta
+                    {
+                        let resolved = state
+                            .config
+                            .automation_target(id, &request.host)
+                            .expect("automation target already authorized");
+                        if let Ok(pre_state_digest) = state
+                            .payload
+                            .observe_preview_prestate(
+                                crate::native_payload::PreviewPrestateRequest {
+                                    host: &request.host,
+                                    authority: &authority_label,
+                                    target: &resolved,
+                                    module: &module_name,
+                                    arguments: &args,
+                                    connect_timeout: std::time::Duration::from_secs(
+                                        state.config.limits().connect_timeout_secs,
+                                    ),
+                                    deadline,
+                                    ct: &context.ct,
+                                },
+                            )
+                            .await
+                        {
+                            state.previews.insert(super::preview::PreviewKey {
+                                target: request.host.clone(),
+                                authority_identity,
+                                catalog_revision,
+                                binding_revision,
+                                canonical_arguments,
+                                pre_state_digest,
+                            });
+                        }
+                    }
+                } else if run.reply.error.is_none()
+                    && run.reply.data.as_ref().is_some_and(|d| d.tasks.skipped > 0)
+                {
+                    run.reply.error = Some(ToolError::new(
+                        "invalid_result",
+                        "Preview was skipped; no target observation was produced",
+                        false,
+                    ));
+                }
+            }
             target_lease.finish(
                 run.reply
                     .error

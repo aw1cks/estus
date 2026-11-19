@@ -14,12 +14,12 @@ use crate::{
 mod admission;
 mod command_execution;
 mod file_execution;
-mod generic_execution;
 mod guidance;
 mod handlers;
 mod local_execution;
 mod payload_execution;
 mod preparation;
+pub(crate) mod preview;
 mod registration;
 mod schemas;
 
@@ -46,6 +46,7 @@ struct State {
     admission: admission::TargetAdmission,
     payload: Arc<crate::native_payload::Engine>,
     cleanup_quarantine: Arc<crate::controller::CleanupQuarantine>,
+    previews: preview::PreviewStore,
 }
 
 impl Estus {
@@ -88,6 +89,7 @@ impl Estus {
                 outputs,
                 directories,
                 cleanup_quarantine: Arc::new(crate::controller::CleanupQuarantine::new()),
+                previews: preview::PreviewStore::new(),
                 progress: crate::progress::Registry::default(),
             }),
         })

@@ -26,7 +26,7 @@ fn identifier(value: &str) -> bool {
             .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
 }
 
-fn source_key(value: &str) -> bool {
+fn source_key(value: &str, allow_diff: bool) -> bool {
     identifier(value)
         && !value.starts_with('_')
         && !matches!(
@@ -39,11 +39,15 @@ fn source_key(value: &str) -> bool {
                 | "env"
                 | "environment"
                 | "ansible_env"
-                | "diff"
         )
+        && (allow_diff || value != "diff")
 }
 
 pub(crate) fn compile(config: Value) -> Result<Plan, &'static str> {
+    compile_with_diff(config, false)
+}
+
+pub(crate) fn compile_with_diff(config: Value, allow_diff: bool) -> Result<Plan, &'static str> {
     let plan: Plan = serde_json::from_value(config).map_err(|_| INVALID)?;
     if !(64..=65536).contains(&plan.max_bytes)
         || !(1..=1024).contains(&plan.max_items)
@@ -54,7 +58,7 @@ pub(crate) fn compile(config: Value) -> Result<Plan, &'static str> {
             !identifier(alias)
                 || path.is_empty()
                 || path.len() > 8
-                || path.iter().any(|key| !source_key(key))
+                || path.iter().any(|key| !source_key(key, allow_diff))
         })
     {
         return Err(INVALID);
@@ -73,7 +77,7 @@ pub(crate) fn compile(config: Value) -> Result<Plan, &'static str> {
     {
         return Err(INVALID);
     }
-    check_node(&plan.schema, 0, true, true)?;
+    check_node(&plan.schema, 0, true, true, allow_diff)?;
     Ok(plan)
 }
 
@@ -86,6 +90,7 @@ fn check_node(
     depth: usize,
     concrete: bool,
     root: bool,
+    allow_diff: bool,
 ) -> Result<(), &'static str> {
     if depth > 8 {
         return Err(INVALID);
@@ -112,24 +117,24 @@ fn check_node(
     }
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (key, child) in properties {
-            if !root && !source_key(key) {
+            if !root && !source_key(key, allow_diff) {
                 return Err(INVALID);
             }
-            check_node(child, depth + 1, true, false)?;
+            check_node(child, depth + 1, true, false, allow_diff)?;
         }
     }
     if let Some(items) = schema.get("items") {
-        check_node(items, depth + 1, true, false)?;
+        check_node(items, depth + 1, true, false, allow_diff)?;
     }
     for key in ["if", "then", "else", "not"] {
         if let Some(child) = schema.get(key) {
-            check_node(child, depth, false, root)?;
+            check_node(child, depth, false, root, allow_diff)?;
         }
     }
     for key in ["allOf", "anyOf", "oneOf"] {
         if let Some(children) = schema.get(key).and_then(Value::as_array) {
             for child in children {
-                check_node(child, depth, false, root)?;
+                check_node(child, depth, false, root, allow_diff)?;
             }
         }
     }

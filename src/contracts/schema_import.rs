@@ -33,11 +33,6 @@ pub(crate) struct SchemaArgs {
 
 #[derive(Subcommand)]
 enum SchemaCommand {
-    /// Explicitly approve the selected runtime's canonical generic module inventory.
-    ImportInventory {
-        #[arg(long)]
-        output: PathBuf,
-    },
     /// Import installed public ansible-doc metadata into a new reviewable snapshot.
     Import {
         module: String,
@@ -337,47 +332,6 @@ async fn perform(
     phase: &mut &'static str,
 ) -> Result<Report, &'static str> {
     let command = match args.command {
-        SchemaCommand::ImportInventory { output } => {
-            *phase = "runtime_import";
-            let reference = config
-                .automation_runtime()
-                .map_err(|_| "runtime_unavailable")?;
-            let duration = config
-                .timeout(args.timeout_secs)
-                .map_err(|_| "invalid_timeout")?;
-            let deadline = tokio::time::Instant::now()
-                .checked_add(duration)
-                .ok_or("invalid_timeout")?;
-            let inventory = automation::import_inventory(
-                reference,
-                RuntimeContext {
-                    deadline,
-                    ct: &shutdown,
-                    shutdown: &shutdown,
-                },
-            )
-            .await?;
-            stopped(&shutdown, deadline)?;
-            *phase = "schema_write";
-            tokio::task::spawn_blocking(move || {
-                let mut bytes =
-                    serde_json::to_vec(&inventory).map_err(|_| "invalid_generic_inventory")?;
-                bytes.push(b'\n');
-                if bytes.len() as u64 > crate::automation::generic::INVENTORY_BYTES {
-                    return Err("schema_file_limit");
-                }
-                write_document_bytes(&output, &bytes)
-            })
-            .await
-            .map_err(|_| "schema_output_failed")??;
-            return Ok(Report {
-                ok: true,
-                error_code: None,
-                phase: None,
-                binding_validated: None,
-                input_validated: None,
-            });
-        }
         SchemaCommand::ImportRole(role) => {
             return Ok(crate::contracts::role_import::perform(
                 config,
@@ -462,8 +416,7 @@ async fn perform(
                     input,
                 ))
             }
-            SchemaCommand::ImportInventory { .. }
-            | SchemaCommand::ImportRole(_)
+            SchemaCommand::ImportRole(_)
             | SchemaCommand::VerifyRole(_)
             | SchemaCommand::ImportPlaybook(_)
             | SchemaCommand::VerifyPlaybook(_) => {
@@ -501,6 +454,7 @@ async fn perform(
     let binding = binding.or_else(|| previous.and_then(|p| p.binding));
     if let Some(overlay) = &binding {
         *phase = "binding_validation";
+        module_schema::validate_setup_overlay(&module, overlay)?;
         let compiled = module_schema::compile_binding(&contract, overlay)?;
         if let Some(input) = &input {
             *phase = "input_validation";
@@ -547,6 +501,7 @@ pub(crate) async fn author_module(
 ) -> Result<(), &'static str> {
     let observed = automation::import_module(runtime, module, context).await?;
     let contract = module_schema::import_document(&observed.document)?;
+    module_schema::validate_setup_overlay(module, overlay)?;
     module_schema::compile_binding(&contract, overlay)?;
     let mut snapshot = Snapshot {
         schema: 1,

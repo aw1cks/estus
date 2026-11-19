@@ -21,8 +21,9 @@ pub(crate) struct PreparedAutomation {
     pub controller: PreparedController,
     pub host: String,
     pub projection: Option<std::sync::Arc<crate::contracts::projection::Plan>>,
+    pub module_name: Option<String>,
+    pub arguments: Option<serde_json::Value>,
 }
-
 pub(crate) struct AutomationRun {
     pub reply: ToolReply<AutomationData>,
     pub pending: Option<PendingCleanup>,
@@ -77,6 +78,8 @@ mod spawn_failures {
         let prepared = PreparedAutomation {
             host: "logical".into(),
             projection: None,
+            module_name: None,
+            arguments: None,
             controller: PreparedController {
                 plan: Arc::new(crate::bindings::ControllerPlan {
                     source: Cow::Borrowed(""),

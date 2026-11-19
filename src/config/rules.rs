@@ -36,6 +36,8 @@ pub(crate) struct RawHostRule {
     pub(crate) allow_tools: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) constraints: BTreeMap<String, BTreeMap<String, ParameterConstraint>>,
+    #[serde(default)]
+    pub(crate) require_preview: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +46,7 @@ pub(crate) struct HostRule {
     pub(crate) deny_tiers: Vec<RiskTier>,
     pub(crate) allow_tools: Option<BTreeSet<String>>,
     pub(crate) constraints: BTreeMap<String, BTreeMap<String, ParameterConstraint>>,
+    pub(crate) require_preview: bool,
 }
 
 fn valid_scalar(value: &toml::Value) -> bool {
@@ -356,6 +359,7 @@ pub(super) fn compile_rules(
             deny_tiers: rule.deny_tiers,
             allow_tools,
             constraints: rule.constraints,
+            require_preview: rule.require_preview,
         });
     }
     for (i, left) in compiled.iter().enumerate() {
@@ -431,4 +435,10 @@ pub(crate) fn check_host_params(
         }
     }
     Ok(())
+}
+
+pub(crate) fn requires_preview(rules: &[HostRule], host: &str) -> bool {
+    rules
+        .iter()
+        .any(|rule| rule.require_preview && wildcard_match(&rule.pattern, host))
 }

@@ -3446,7 +3446,7 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
             "capabilities",
         ),
         ("mode = 'private-profile-secret'\n", "mode"),
-        ("[rules.'*']\nrequire_preview = true\n", "rules.*"),
+        ("[rules.'*']\nunknown_rule_key = true\n", "rules.*"),
     ] {
         std::fs::write(&path, text)?;
         let output = timeout(
@@ -6859,6 +6859,68 @@ enum = ["/etc/hosts"]
     }.await;
     let fin = disclosed_server.finish().await;
     disclosed_res?;
+    ensure!(fin?.0.success());
+    Ok(())
+}
+
+#[tokio::test]
+async fn require_preview_rejects_unqualified_mutations_without_connecting() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("require-preview.toml");
+    std::fs::write(
+        &config_path,
+        indoc::indoc! {r#"
+            capabilities = { named = true, file_read = true, file_write = true, exec = true }
+            enabled_tools = ["change_ping"]
+            [targets.alpha]
+            ssh_host = "alpha.invalid"
+            [rules."alpha"]
+            require_preview = true
+            [tools.change_ping]
+            description = "Unqualified native argv mutation."
+            revision = "1"
+            targets = ["alpha"]
+            authority = "ordinary"
+            effects = ["runtime_write"]
+            execution = { kind = "native_argv", program = "/bin/true", argv = [] }
+            input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+            result = { kind = "command" }
+        "#},
+    )?;
+    let mut server = Server::start(&["--config", config_path.to_str().context("config")?])?;
+    let scenario = async {
+        server.initialize().await?;
+        for (id, name, arguments) in [
+            (
+                2,
+                "change_file_write",
+                json!({"host":"alpha","path":"/tmp/estus-never","content":"x"}),
+            ),
+            (3, "exec_command", json!({"host":"alpha","command":"true"})),
+            (4, "change_ping", json!({"host":"alpha"})),
+        ] {
+            server
+                .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
+                .await?;
+            let reply = server.response(id).await?;
+            ensure!(
+                reply["result"]["structuredContent"]["error"]["code"] == "preview_required",
+                "{name} did not fail closed with preview_required: {reply}"
+            );
+        }
+        server
+            .send(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"observe_stat","arguments":{"host":"alpha","path":"/tmp/x"}}}))
+            .await?;
+        let obs = server.response(5).await?;
+        ensure!(
+            obs["result"]["structuredContent"]["error"]["code"] != "preview_required",
+            "read-only observe_stat was blocked by require_preview: {obs}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let fin = server.finish().await;
+    scenario?;
     ensure!(fin?.0.success());
     Ok(())
 }

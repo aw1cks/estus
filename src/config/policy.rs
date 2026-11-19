@@ -20,7 +20,7 @@ pub(crate) fn risk_tier_for_builtin(tool: ToolId) -> RiskTier {
 }
 
 pub(crate) fn risk_tier_for_binding(binding: &crate::bindings::CompiledBinding) -> RiskTier {
-    if binding.is_generic() || binding.sudo().is_some() {
+    if binding.sudo().is_some() {
         return RiskTier::Exec;
     }
     if binding.name.starts_with("preview_") {
@@ -489,6 +489,14 @@ impl Config {
         &self.bindings
     }
 
+    pub(crate) fn catalog_version(&self) -> Option<&str> {
+        self.catalog_version.as_deref()
+    }
+
+    pub(crate) fn requires_preview(&self, host: &str) -> bool {
+        rules::requires_preview(&self.rules, host)
+    }
+
     /// Import against exactly the runtime used by this authority at activation.
     pub(crate) fn catalog_runtime(&self, authority: &str) -> Result<Option<PathBuf>, ConfigError> {
         if authority == "automation" {
@@ -558,10 +566,22 @@ impl Config {
             &binding.name,
             risk_tier_for_binding(binding),
         )?;
-        match binding.sudo() {
+        let resolved = match binding.sudo() {
             Some((user, program)) => target.sudo.resolve(host, &target.ssh_host, user, program),
             None => self.resolve_ordinary(host),
+        }?;
+        if matches!(
+            risk_tier_for_binding(binding),
+            RiskTier::Change | RiskTier::Exec
+        ) && self.requires_preview(host)
+        {
+            return Err(ToolError::new(
+                "preview_required",
+                "Operation has no qualified preview path under require_preview policy",
+                false,
+            ));
         }
+        Ok(resolved)
     }
 
     pub(crate) fn tool_enabled(&self, tool: ToolId) -> bool {
@@ -622,7 +642,19 @@ impl Config {
             tool.wire_name(),
             risk_tier_for_builtin(tool),
         )?;
-        self.resolve_ordinary(host)
+        let resolved = self.resolve_ordinary(host)?;
+        if matches!(
+            risk_tier_for_builtin(tool),
+            RiskTier::Change | RiskTier::Exec
+        ) && self.requires_preview(host)
+        {
+            return Err(ToolError::new(
+                "preview_required",
+                "Operation has no qualified preview path under require_preview policy",
+                false,
+            ));
+        }
+        Ok(resolved)
     }
 
     /// Resolve an operator diagnostic independently of MCP publication profiles.
@@ -709,7 +741,15 @@ impl Config {
             ToolId::Sudo.wire_name(),
             risk_tier_for_builtin(ToolId::Sudo),
         )?;
-        target.sudo.resolve(host, &target.ssh_host, user, program)
+        let resolved = target.sudo.resolve(host, &target.ssh_host, user, program)?;
+        if self.requires_preview(host) {
+            return Err(ToolError::new(
+                "preview_required",
+                "Operation has no qualified preview path under require_preview policy",
+                false,
+            ));
+        }
+        Ok(resolved)
     }
 
     pub(crate) fn timeout(&self, seconds: Option<u64>) -> Result<std::time::Duration, ToolError> {

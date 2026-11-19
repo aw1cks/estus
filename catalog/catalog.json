@@ -1693,6 +1693,34 @@
         "path": "payloads/observe_time_sync"
       }
     },
+    "preview_apt": {
+      "definition": "preview_apt.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "apt"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.builtin.apt"
+      }
+    },
+    "preview_dnf": {
+      "definition": "preview_dnf.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "dnf"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.builtin.dnf"
+      }
+    },
     "preview_kernel_module_load": {
       "definition": "preview_kernel_module_load.toml",
       "qualification": "laboratory_only",
@@ -1706,6 +1734,34 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/preview_kernel_module_load"
+      }
+    },
+    "preview_sysctl": {
+      "definition": "preview_sysctl.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "sysctl"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.posix.sysctl"
+      }
+    },
+    "preview_systemd_service": {
+      "definition": "preview_systemd_service.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "systemd"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.builtin.systemd_service"
       }
     }
   }

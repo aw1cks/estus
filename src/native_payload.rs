@@ -6,7 +6,7 @@ use crate::{
     reply::ToolError,
     strict_json::parse,
 };
-pub(crate) use engine::{Engine, PayloadRun};
+pub(crate) use engine::{Engine, PayloadRun, PreviewPrestateRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};

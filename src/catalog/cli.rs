@@ -1165,7 +1165,6 @@ fn inspect(
                 "execution_location":binding.execution_location(),
                 "trusted_controller_code":binding.trusted_controller_code(),
                 "restriction_boundary":binding.restriction_boundary(),
-                "generic_policy":binding.generic_policy().map(|policy| policy.inspect()),
             })
         })
         .collect();

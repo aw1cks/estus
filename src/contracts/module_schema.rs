@@ -984,6 +984,34 @@ pub(crate) fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
+pub(crate) fn validate_setup_overlay(module: &str, overlay: &Value) -> Result<(), &'static str> {
+    if module != "ansible.builtin.setup" {
+        return Ok(());
+    }
+    let fixed = overlay
+        .get("fixed_args")
+        .and_then(Value::as_object)
+        .ok_or(SCHEMA)?;
+    let subset_valid = match fixed.get("gather_subset") {
+        Some(Value::String(item)) => !item.is_empty(),
+        Some(Value::Array(items)) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.as_str().is_some_and(|s| !s.is_empty()))
+        }
+        _ => false,
+    };
+    let timeout_valid = fixed
+        .get("gather_timeout")
+        .and_then(Value::as_i64)
+        .is_some_and(|timeout| (1..=600).contains(&timeout));
+    if !subset_valid || !timeout_valid {
+        return Err(SCHEMA);
+    }
+    Ok(())
+}
+
 pub(crate) struct CapabilityBinding {
     contract: Contract,
     input_schema: Value,
@@ -1845,5 +1873,35 @@ mod reviewed_opaque_options {
             }}}))
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod setup_overlay {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn setup_requires_reviewed_fixed_gather_subset_and_gather_timeout() {
+        let good = json!({
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+            "fixed_args": {"gather_subset": ["!all", "!min", "platform"], "gather_timeout": 5},
+            "input_map": {}
+        });
+        assert!(validate_setup_overlay("ansible.builtin.setup", &good).is_ok());
+        assert!(validate_setup_overlay("ansible.builtin.stat", &json!({"fixed_args": {}})).is_ok());
+
+        for bad in [
+            json!({"fixed_args": {"gather_timeout": 5}}),
+            json!({"fixed_args": {"gather_subset": ["!all"]}}),
+            json!({"fixed_args": {"gather_subset": [], "gather_timeout": 5}}),
+            json!({"fixed_args": {"gather_subset": ["!all"], "gather_timeout": 0}}),
+            json!({"fixed_args": {"gather_subset": ["!all"], "gather_timeout": "5"}}),
+        ] {
+            assert!(
+                validate_setup_overlay("ansible.builtin.setup", &bad).is_err(),
+                "setup overlay unexpectedly accepted: {bad}"
+            );
+        }
     }
 }

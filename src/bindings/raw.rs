@@ -49,13 +49,14 @@ pub(super) enum RawExecution {
         #[serde(default)]
         no_log: bool,
     },
-    AnsibleGeneric {
-        policy: crate::automation::generic::RawPolicy,
-    },
     AnsibleModule {
         snapshot: String,
         #[serde(default)]
         no_log: bool,
+        #[serde(default)]
+        check_mode: bool,
+        #[serde(default)]
+        diff: bool,
     },
     AnsibleRole {
         snapshot: String,

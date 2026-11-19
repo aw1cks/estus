@@ -527,11 +527,10 @@ supplies the baseline collections; Core and Runner alone are insufficient.
 pip/uv resolves their transitive dependencies at installation time. This is not a
 fully locked or immutable environment, and no installer runs during MCP requests.
 The Nix runtime explicitly exposes `ansible.posix`, `community.general` and its
-declared `community.library_inventory_filtering_v1` dependency. Generic inventory
-approval checks declared collection presence and hashes Core, Runner and every
-searchable collection, including action plugins and module utilities. It is not
-attestation of every possible third-party Python import or target dependency.
-
+declared `community.library_inventory_filtering_v1` dependency. Runtime checks
+verify declared collection presence and hash Core, Runner and selected modules or
+collections, including action plugins and module utilities. This is drift detection,
+not attestation of every possible third-party Python import or target dependency.
 The launcher supplies its own interpreter, installed package and script locations
 to Rust without requiring virtualenv activation or searching PATH for Python.
 Explicit roots also support uv-run overlays without importing arbitrary ambient
@@ -622,70 +621,29 @@ against a same-user attacker replacing trusted files. Mutable content can still
 change after verification. Enabled module execution checks selected source content
 again before dispatch; this is drift detection, not immutable attestation.
 
-## Explicit generic Ansible execution
+## Reviewed module and preview bindings
 
-Generic module execution is separately disabled by default. Neither catalog presets
-nor `enabled_tools` enable it: select each configured policy with
-`enabled_generic_tools`. Global/target capabilities and `[rules."<pattern>"]` still restrict exposure; target
-selection and `disabled_tools` can only narrow access. Reviewed bindings never fall
-back to this surface.
+All Ansible module execution uses individually registered, reviewed `ansible_module`
+bindings enabled explicitly via `enabled_tools` (and host/target policy). Unreviewed
+generic module dispatch is not exposed; discovery uses `tools/list` and execution uses
+ordinary Runner/audit receipts.
 
-This is broad administrative authority, including **controller-side action plugins**.
-Module allowlists are not sandboxes. The operator fixes runtime, SSH destination,
-credential exposure and privilege; callers supply only logical host, canonical
-module name, module arguments and a bounded timeout. Ansible validates/coerces
-unrestricted module arguments. Caller strings remain literal, not nested templates.
+An `ansible.builtin.setup` binding is rejected unless reviewed fixed `gather_subset`
+and `gather_timeout` are present in `fixed_args` (never inferred from upstream docs).
 
-First explicitly approve the already-provisioned selected runtime:
+Named `preview_*` `ansible_module` bindings may enable `check_mode = true` (and optional
+`diff = true` when `!no_log` and `diff` is explicitly approved in `result.fields`) only
+for the C19-qualified operations (`ansible.builtin.systemd_service`,
+`ansible.posix.sysctl`, `ansible.builtin.apt`, `ansible.builtin.dnf`). A skipped task
+result is never treated as an observation, and `diff` remains unavailable unless supplied
+and disclosure-approved.
 
-```sh
-estus --config site.toml schema import-inventory --output /etc/estus/admin-inventory.json
-```
-
-Using the same site's ordinary automation authority and private Runner workspace:
-
-```toml
-enabled_generic_tools = ["admin_modules"]
-
-[tools.admin_modules]
-description = "Operator-authorized broad file administration"
-revision = "1"
-targets = ["server"]
-authority = "automation"
-effects = ["sensitive_read", "runtime_write", "persistent_write", "availability", "unknown"]
-execution = { kind = "ansible_generic", policy = { snapshot = "/etc/estus/admin-inventory.json", scope = { kind = "exact", modules = ["ansible.builtin.file", "ansible.builtin.stat"] } } }
-result = { kind = "ansible_summary" }
-```
-
-Calls use `{"operation":"call","host":"server","module":"ansible.builtin.file",
-"arguments":{"path":"/owned/path","state":"directory","mode":"0700"}}`.
-`operation="list"` supports bounded `after`/`limit`; `operation="describe"` takes
-`module`. Discovery does not grant additional authority or install anything.
-
-Policy controls:
-- `scope.kind`: `exact` with `modules`, `collections` with collection names, or
-  explicitly `selected_runtime`. Canonical exclusions in `deny` win.
-- `targets.<logical>` may narrow scope, add exclusions and lower `ceilings`.
-  Ceilings bound arguments, publication, time, concurrency and scratch usage.
-- `restrictions.<fqcn>` is a reviewed `input_schema`/`fixed_args`/`input_map`
-  overlay, optionally with bounded `argument_types`. Aliases are canonicalized;
-  unenforceable restrictions reject activation rather than becoming unrestricted.
-- `disclosure.kind` defaults to `summary`; `selected` requires an outer reviewed
-  `ansible_projection`. Explicit `module_result` publishes bounded sanitized JSON
-  text at `data.projection.value.module_result_json`. It may contain secrets.
-  `no_log` and nested censorship always override publication.
-- Optional `retention` sets `max_entries`, `max_bytes`, `lifetime_secs` for in-memory
-  public receipts only. `operation="receipts"` lists or retrieves a scoped receipt.
-  Restart discards them; raw events, argument values and environment are not retained.
-- `runtime_policy` defaults to `locked`: inventory/content drift rejects activation
-  or dispatch. Explicit `follow_selected_runtime` accepts operator-provisioned
-  changes only at a new activation, with a new generation and bounded scope diff.
-  Active requests never acquire new inventory or install dependencies.
-
-Results identify validation mode and policy/runtime generations. `changed` remains
-Ansible's report, not proof of exhaustive effects, idempotence or rollback.
-Cancellation/lost transport can leave remote state unknown; mutations are never replayed.
-
+When a matching `[rules."<pattern>"]` sets `require_preview = true`, mutating operations
+fail closed with `preview_required` unless a qualified preview ran within 300s (bounded
+to 256 entries) matching target, resolved authority identity, catalog and binding
+revisions, canonical arguments, and an independently observed target pre-state digest.
+The entry is consumed on dispatch; this proves ordering only, not human approval or
+absence of concurrent drift.
 ## Offline role contracts
 
 Role authoring uses the same selected runtime and closed binding validator:

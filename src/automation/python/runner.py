@@ -49,23 +49,18 @@ def identifier(value):
     return type(value) is str and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,127}", value) is not None
 
 
-def arguments(value, depth=0, nodes=None, generic=False):
+def arguments(value, depth=0, nodes=None):
     if nodes is None:
         nodes = [0]
     nodes[0] += 1
     require(depth <= 32 and nodes[0] <= 16384)
     if type(value) is dict:
         for key, child in value.items():
-            if generic:
-                require(type(key) is str and "\x00" not in key and len(key.encode("utf-8")) <= 4096)
-                if depth == 0:
-                    require(identifier(key) and not key.startswith("ansible_") and not key.startswith("_"))
-            else:
-                require(identifier(key) and not key.startswith("ansible_"))
-            arguments(child, depth + 1, nodes, generic)
+            require(identifier(key) and not key.startswith("ansible_"))
+            arguments(child, depth + 1, nodes)
     elif type(value) is list:
         for child in value:
-            arguments(child, depth + 1, nodes, generic)
+            arguments(child, depth + 1, nodes)
     elif type(value) in (int, float):
         require(math.isfinite(value) and abs(value) <= 9007199254740991)
     else:
@@ -103,10 +98,11 @@ class ProjectionCensored(Exception):
     pass
 
 
-def projection_key(key):
+def projection_key(key, allow_diff=False):
     return (type(key) is str and not key.startswith("_")
             and key not in ("invocation", "module_args", "args", "argv", "cmd",
-                            "env", "environment", "ansible_env", "diff"))
+                            "env", "environment", "ansible_env")
+            and (allow_diff or key != "diff"))
 
 
 def projection_censorship(value):
@@ -135,8 +131,9 @@ class Projection:
     against the full schema, including conditional assertions.
     """
 
-    def __init__(self, plan):
+    def __init__(self, plan, allow_diff=False):
         self.plan = plan
+        self.allow_diff = allow_diff
         self.bytes = 0
         self.nodes = 0
         self.truncated = False
@@ -222,7 +219,7 @@ class Projection:
             for key in sorted(properties, key=lambda key: (key not in required, key)):
                 child_schema = properties[key]
                 if fields is None:
-                    require(projection_key(key))
+                    require(projection_key(key, self.allow_diff))
                     child = source.get(key)
                     present = key in source
                 else:
@@ -230,11 +227,11 @@ class Projection:
                     present = True
                     path = fields[key]
                     require(type(path) is list and 1 <= len(path) <= 8)
-                    for segment in path:
-                        require(projection_key(segment))
+                    for index, segment in enumerate(path):
+                        require(projection_key(segment, self.allow_diff and index == 0))
                         require(type(child) is dict)
                         projection_censorship(child)
-                        if segment not in child:
+                        if segment not in child or (self.allow_diff and index == 0 and segment == "diff" and child[segment] is None):
                             present = False
                             break
                         child = child[segment]
@@ -351,7 +348,7 @@ def module_result(result, censored, policy):
 
 
 class Evidence:
-    def __init__(self, frames, module, no_log, projection=None, disclosure=None):
+    def __init__(self, frames, module, no_log, projection=None, disclosure=None, check_mode=False, allow_diff=False):
         self.frames = frames
         self.module = module
         self.censored = no_log
@@ -366,6 +363,8 @@ class Evidence:
         self.tasks = dict(ok=0, failed=0, unreachable=0, skipped=0)
         self.projection = projection
         self.disclosure = disclosure
+        self.check_mode = check_mode
+        self.allow_diff = allow_diff
 
     def status(self, data, runner_config):
         # Starting data contains argv/env: never retain it or serialize it.
@@ -417,9 +416,12 @@ class Evidence:
             self.tasks[self.outcome] = 1
             self.frames.emit("task", outcome=self.outcome, changed=self.changed, censored=self.censored)
             if self.projection is not None:
-                selected = (module_result(result, self.censored, self.disclosure)
-                            if self.disclosure is not None and self.disclosure.get("kind") == "module_result"
-                            else Projection(self.projection).reduce(result, self.censored))
+                if self.check_mode and self.outcome == "skipped":
+                    selected = dict(status="unavailable")
+                else:
+                    selected = (module_result(result, self.censored, self.disclosure)
+                                if self.disclosure is not None and self.disclosure.get("kind") == "module_result"
+                                else Projection(self.projection, allow_diff=self.allow_diff).reduce(result, self.censored))
                 self.frames.emit("projection", projection=selected)
         elif kind == "playbook_on_stats":
             require(self.stats is None and self.outcome is not None)
@@ -746,18 +748,11 @@ class Cancellation:
 def validate(spec):
     keys(spec, ("schema", "invocation_id", "runtime", "expected", "destination", "target_python",
                 "ssh_config", "ssh_executable", "become", "agent", "arguments", "no_log",
-                "timeout_secs", "scratch_bytes", "scratch_files", "projection"))
+                "check_mode", "diff", "timeout_secs", "scratch_bytes", "scratch_files", "projection"))
     require(type(spec["schema"]) is int and spec["schema"] == 2)
     require(type(spec["invocation_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", spec["invocation_id"]))
     expected = spec["expected"]
-    if expected.get("generic") is True:
-        keys(expected, ("generic", "module", "identity", "content_sha256", "generation",
-                        "policy_generation", "disclosure"))
-        require(type(expected["module"]) is str and len(expected["module"]) <= 256 and re.fullmatch(
-            r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*){2,}", expected["module"]))
-        require(all(type(expected[key]) is str and re.fullmatch(r"[0-9a-f]{64}", expected[key])
-                    for key in ("generation", "policy_generation")))
-    elif "playbook" in expected:
+    if "playbook" in expected:
         keys(expected, ("identity", "content_sha256", "playbook", "project_root"))
         # The content verifier owns canonical entry syntax before any dispatch.
         require(type(expected["playbook"]) is str
@@ -805,8 +800,10 @@ def validate(spec):
     else:
         keys(agent, ("mode",))
         require(agent["mode"] in ("inherit", "disabled"))
-    require(type(spec["no_log"]) is bool and type(spec["arguments"]) is dict)
-    arguments(spec["arguments"], generic=expected.get("generic") is True)
+    require(type(spec["no_log"]) is bool and type(spec["check_mode"]) is bool
+            and type(spec["diff"]) is bool and type(spec["arguments"]) is dict)
+    require(not spec["diff"] or (spec["check_mode"] and not spec["no_log"]))
+    arguments(spec["arguments"])
     require(type(spec["timeout_secs"]) in (int, float) and math.isfinite(spec["timeout_secs"])
             and 0 < spec["timeout_secs"])
     require(type(spec["scratch_bytes"]) is int and 0 < spec["scratch_bytes"] <= 64 * 1024 * 1024)
@@ -822,11 +819,6 @@ def selected_runtime(spec, workspace):
         spec["runtime"], role_request=any(key in spec["expected"] for key in ("role", "playbook")))
     expected = spec["expected"]
     require(observed == expected["identity"])
-    if expected.get("generic") is True:
-        inventory = namespace["generic_inventory"](roots)
-        require(inventory["content_sha256"] == expected["content_sha256"]
-                and expected["module"] in inventory["modules"])
-        return roots
     if "playbook" in expected:
         directory, content = namespace["playbook_content"](
             expected["playbook"], expected["project_root"], roots)
@@ -921,9 +913,14 @@ def layout(workspace, spec, roots, selected_path):
                   "vars": {key: "{{ estus_arguments['" + key + "'] }}"
                            for key in spec["arguments"]}}]
     else:
-        tasks = [{"name": TASK, "no_log": spec["no_log"], "become": become,
-                  expected["module"]: {key: "{{ estus_arguments['" + key + "'] }}"
-                                       for key in spec["arguments"]}}]
+        task = {"name": TASK, "no_log": spec["no_log"], "become": become,
+                expected["module"]: {key: "{{ estus_arguments['" + key + "'] }}"
+                                     for key in spec["arguments"]}}
+        if spec["check_mode"]:
+            task["check_mode"] = True
+        if spec["diff"]:
+            task["diff"] = True
+        tasks = [task]
     play = {"name": "estus_play", "hosts": HOST, "gather_facts": False, "become": become,
             "strategy": "linear", "vars_files": ["arguments.yml"], "tasks": tasks}
     if (role or playbook) and spec["projection"] is not None:
@@ -1072,7 +1069,7 @@ def main():
                                  workspace / "project" / "playbook.yml")
                     if any(key in spec["expected"] for key in ("role", "playbook")) else
                     Evidence(frames, spec["expected"]["module"], spec["no_log"], spec["projection"],
-                             spec["expected"].get("disclosure")))
+                             spec["expected"].get("disclosure"), spec["check_mode"], spec["diff"]))
         if cancellation.requested():
             status = cancellation.reason
         else:

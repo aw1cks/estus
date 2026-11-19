@@ -262,7 +262,6 @@ impl Estus {
             Ok(BindingCall::Automation(request)) => {
                 self.automation_binding(id, request, context).await
             }
-            Ok(BindingCall::Generic(request)) => self.generic_binding(id, request, context).await,
             Ok(BindingCall::Payload(request)) => self.payload_binding(id, request, context).await,
             Err(_) => {
                 let value = serde_json::Value::Object(arguments);

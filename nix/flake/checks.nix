@@ -42,7 +42,7 @@
             res = subprocess.run(cmd, check=False)
             if res.returncode != 0:
                 sys.exit(res.returncode)
-        check("3.8", [src / "src/native_payload/bootstrap.py"])
+        check("3.8", [src / "src/native_payload/bootstrap.py", src / "src/native_payload/prestate.py"])
         groups = {}
         for p in sorted((src / "catalog/payloads").iterdir()):
             manifest = json.loads((p / "manifest.json").read_text())

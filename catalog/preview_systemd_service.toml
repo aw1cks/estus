@@ -1,0 +1,49 @@
+# Opt-in check-mode preview for approved systemd units via ansible.builtin.systemd_service.
+# Import offline with `estus schema import ansible.builtin.systemd_service` before activation.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["preview_systemd_service"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+workspace_root = "/var/lib/estus/runner"
+max_concurrent = 2
+max_scratch_bytes = 16777216
+max_scratch_files = 512
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+
+[automation.authorities.catalog.become]
+method = "sudo"
+user = "root"
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+
+[tools.preview_systemd_service]
+description = "Preview systemd service state change in check mode for approved units without mutating unit state. Skipped tasks are never treated as observations; preview does not prove human approval or freedom from concurrent drift."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["read"]
+execution = { kind = "ansible_module", snapshot = "/etc/estus/preview_systemd_service.schema.json", no_log = false, check_mode = true, diff = false }
+fixed_args = { "scope" = "system" }
+input_map = { "name" = "name", "state" = "state" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "minLength" = 1, "maxLength" = 128, "enum" = ["estus-fixture.service", "estus-fixture-idle.service"] }, "state" = { "type" = "string", "enum" = ["started", "stopped", "restarted", "reloaded"] } }, "required" = ["name", "state"], "additionalProperties" = false }
+
+[tools.preview_systemd_service.result]
+kind = "ansible_projection"
+fields = { "changed" = ["changed"] }
+max_bytes = 2048
+max_items = 64
+max_depth = 4
+schema = { "type" = "object", "properties" = { "changed" = { "type" = "boolean" } }, "required" = ["changed"], "additionalProperties" = false }

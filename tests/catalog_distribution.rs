@@ -34,17 +34,27 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
                 .is_some()
         );
         let destination = output.join(name);
-        catalog.copy_assets(name, &destination).unwrap();
-        let source = match &catalog.manifest().tools[name].executor {
-            assets::Executor::AnsibleRole { .. } => "tasks/main.yml",
-            assets::Executor::NativePayload { .. } => "collector.py",
-            assets::Executor::AnsibleModule { .. } => unreachable!(),
-        };
-        assert!(destination.join(source).is_file(), "{name}");
-        assert_eq!(
-            fs::metadata(destination).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
+        match &catalog.manifest().tools[name].executor {
+            assets::Executor::AnsibleRole { .. } => {
+                catalog.copy_assets(name, &destination).unwrap();
+                assert!(destination.join("tasks/main.yml").is_file(), "{name}");
+                assert_eq!(
+                    fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+            assets::Executor::NativePayload { .. } => {
+                catalog.copy_assets(name, &destination).unwrap();
+                assert!(destination.join("collector.py").is_file(), "{name}");
+                assert_eq!(
+                    fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+            assets::Executor::AnsibleModule { .. } => {
+                assert!(catalog.copy_assets(name, &destination).is_err(), "{name}");
+            }
+        }
     }
     assert!(catalog.definition("../observe_cpu").is_err());
     assert!(catalog.definition("not_a_tool").is_err());
@@ -479,7 +489,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
 #[test]
 fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail() {
     let catalog = canonical_catalog();
-    assert_eq!(catalog.manifest().tools.len(), 119);
+    assert_eq!(catalog.manifest().tools.len(), 123);
     for name in catalog.manifest().tools.keys() {
         let definition = catalog.definition(name).unwrap();
         let effects = definition["tools"][name]["effects"]

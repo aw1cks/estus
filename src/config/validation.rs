@@ -359,7 +359,12 @@ fn validate_rules_schema(value: &toml::Value) -> Result<(), ConfigError> {
         let rule = table(
             entry,
             "rules.*",
-            &["deny_tiers", "allow_tools", "constraints"],
+            &[
+                "deny_tiers",
+                "allow_tools",
+                "constraints",
+                "require_preview",
+            ],
         )?;
         if let Some(tiers) = rule.get("deny_tiers") {
             let tiers = tiers
@@ -381,6 +386,11 @@ fn validate_rules_schema(value: &toml::Value) -> Result<(), ConfigError> {
             for tool in tools {
                 string(tool, "rules.*.allow_tools")?;
             }
+        }
+        if let Some(require_preview) = rule.get("require_preview")
+            && !require_preview.is_bool()
+        {
+            return Err(invalid("rules.*.require_preview", "must be a boolean"));
         }
         if let Some(constraints) = rule.get("constraints") {
             let tools = constraints
@@ -411,12 +421,7 @@ fn validate_rules_schema(value: &toml::Value) -> Result<(), ConfigError> {
 }
 
 fn validate_tool_selection(table: &toml::Table, field: &'static str) -> Result<(), ConfigError> {
-    for key in [
-        "enabled_tools",
-        "enabled_generic_tools",
-        "disabled_tools",
-        "tool_presets",
-    ] {
+    for key in ["enabled_tools", "disabled_tools", "tool_presets"] {
         if let Some(value) = table.get(key) {
             let entries = value
                 .as_array()
@@ -444,7 +449,6 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "rules",
             "tools",
             "enabled_tools",
-            "enabled_generic_tools",
             "disabled_tools",
             "tool_presets",
             "catalog",
@@ -1076,8 +1080,12 @@ mod tests {
                 "targets.*.capabilities",
             ),
             (
-                "[rules.'*']\nrequire_preview=true".to_owned(),
+                "[rules.'*']\nunknown_rule_key=true".to_owned(),
                 "rules.*",
+            ),
+            (
+                "[rules.'*']\nrequire_preview='secret_payload'".to_owned(),
+                "rules.*.require_preview",
             ),
             (
                 "[rules.'*']\ndeny_tiers=['secret_payload']".to_owned(),

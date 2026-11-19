@@ -66,6 +66,16 @@ pub(super) struct AutomationPlan {
     controller: Arc<ControllerPlan>,
 }
 
+impl AutomationPlan {
+    pub(super) fn reviewed_module(
+        &self,
+    ) -> Option<&crate::contracts::schema_import::ReviewedModule> {
+        match &self.reviewed {
+            ReviewedContent::Module { reviewed, .. } => Some(reviewed),
+            _ => None,
+        }
+    }
+}
 impl std::fmt::Debug for AutomationPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AutomationPlan { reviewed: <private> }")
@@ -222,6 +232,8 @@ struct AutomationSpec<'a> {
     agent: AgentReference<'a>,
     arguments: &'a Value,
     no_log: bool,
+    check_mode: bool,
+    diff: bool,
     projection: Option<&'a crate::contracts::projection::Plan>,
     timeout_secs: f64,
     scratch_bytes: u64,
@@ -325,11 +337,6 @@ impl Bindings {
         agent_socket: Option<std::ffi::OsString>,
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<(), ConfigError> {
-        if self.get(id).is_some_and(|binding| binding.is_generic()) {
-            return self
-                .activate_generic(id, runtime, root, agent_socket, ct)
-                .await;
-        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let check_interrupted = || {
             if ct.is_cancelled() {
@@ -349,12 +356,14 @@ impl Bindings {
             snapshot,
             overlay,
             source,
+            check_mode,
             plan,
             ..
         } = &mut binding.execution
         else {
             return Err(invalid("Not an automation binding"));
         };
+        let check_mode = *check_mode;
         let snapshot = snapshot.clone();
         let overlay = overlay.clone();
         let source = source.clone();
@@ -386,8 +395,19 @@ impl Bindings {
                 ));
             }
             let compiled = match &reviewed {
-                ReviewedContent::Module { .. } => {
-                    crate::contracts::module_schema::compile_binding(reviewed.contract(), &overlay)
+                ReviewedContent::Module { reviewed, .. } => {
+                    if check_mode && !crate::server::preview::is_qualified_module(&reviewed.module)
+                    {
+                        return Err(invalid(
+                            "check_mode preview is only allowed for C19-qualified modules",
+                        ));
+                    }
+                    crate::contracts::module_schema::validate_setup_overlay(
+                        &reviewed.module,
+                        &overlay,
+                    )
+                    .map_err(|code| invalid(code).with_cause(code, "setup_validation"))?;
+                    crate::contracts::module_schema::compile_binding(&reviewed.contract, &overlay)
                 }
                 ReviewedContent::Role { .. } => {
                     crate::contracts::role_import::compile_binding(reviewed.contract(), &overlay)
@@ -487,6 +507,8 @@ impl CompiledBinding {
         let Execution::Ansible {
             plan: Some(plan),
             no_log,
+            check_mode,
+            diff,
             projection,
             ..
         } = &self.execution
@@ -528,6 +550,8 @@ impl CompiledBinding {
             },
             arguments: &arguments,
             no_log: *no_log,
+            check_mode: *check_mode,
+            diff: *diff,
             projection: projection.as_deref(),
             timeout_secs: Duration::from_secs(timeout)
                 .saturating_sub(started.elapsed())
@@ -542,6 +566,8 @@ impl CompiledBinding {
         serde_json::to_writer(&mut writer, &spec)
             .map_err(|_| bound("Automation invocation exceeds byte bound"))?;
         let input_json = writer.bytes;
+        let module_name = plan.reviewed_module().map(|m| m.module.clone());
+        let prepared_args = module_name.as_ref().map(|_| arguments);
         Ok(crate::automation::execution::PreparedAutomation {
             controller: PreparedController {
                 plan: Arc::clone(&plan.controller),
@@ -557,6 +583,8 @@ impl CompiledBinding {
             },
             host: request.host.clone(),
             projection: projection.clone(),
+            module_name,
+            arguments: prepared_args,
         })
     }
 
@@ -582,7 +610,6 @@ impl CompiledBinding {
             },
             Execution::ControllerScript { .. }
             | Execution::Ansible { .. }
-            | Execution::Generic { .. }
             | Execution::Payload { .. }
             | Execution::NativeArgv {
                 authority: Authority::Controller,
