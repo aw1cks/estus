@@ -259,7 +259,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .map(|tool| tool["name"].as_str().context("default tool name"))
             .collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["ssh_read_output", "ssh_targets"], "omitted profile exposed native routes");
+        ensure!(names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"], "omitted profile exposed native routes");
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
@@ -1755,8 +1755,8 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 .collect::<Result<_>>()?;
             names.sort_unstable();
             ensure!(names == [
-                "ssh_exec", "ssh_list_directory", "ssh_mkdir", "ssh_read_file",
-                "ssh_read_output", "ssh_remove_directory", "ssh_remove_file",
+                "clear_target_quarantine", "ssh_exec", "ssh_list_directory", "ssh_mkdir",
+                "ssh_read_file", "ssh_read_output", "ssh_remove_directory", "ssh_remove_file",
                 "ssh_rename", "ssh_replace_file", "ssh_run", "ssh_stat",
                 "ssh_sudo", "ssh_targets", "ssh_write_file",
             ]);
@@ -1770,6 +1770,12 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 if name == "ssh_targets" {
                     ensure!(validator.is_valid(&json!({})));
                     ensure!(!validator.is_valid(&json!({"extra":true})));
+                    continue;
+                }
+                if name == "clear_target_quarantine" {
+                    ensure!(validator.is_valid(&json!({"host":"unconfigured","acknowledge_remote_state_reconciled":true})));
+                    ensure!(!validator.is_valid(&json!({"host":"unconfigured","acknowledge_remote_state_reconciled":false})));
+                    ensure!(!validator.is_valid(&json!({"host":"unconfigured"})));
                     continue;
                 }
                 let mut base = if name == "ssh_read_output" {
@@ -2962,6 +2968,9 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                         .collect();
                     expected_operations.sort_unstable();
                     let mut expected_routes = expected_operations.clone();
+                    if matches!(profile, "baseline" | "actions-only") {
+                        expected_routes.push("clear_target_quarantine");
+                    }
                     expected_routes.push("ssh_targets");
                     expected_routes.push("ssh_read_output");
                     expected_routes.sort_unstable();
@@ -3111,7 +3120,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
             .await?;
         let listed = server.response(2).await?;
-        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 14);
+        ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 15);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"ssh_targets","arguments":{}}}))
@@ -3284,8 +3293,8 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
         let tools = listed["result"]["tools"]
             .as_array()
             .context("immutable tool list")?;
-        ensure!(tools.len() == 2);
-        for name in ["ssh_read_output", "ssh_targets"] {
+        ensure!(tools.len() == 3);
+        for name in ["clear_target_quarantine", "ssh_read_output", "ssh_targets"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         for (index, tool) in [
@@ -3473,7 +3482,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         let tools = listed["result"]["tools"].as_array().context("named tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["change_account", "observe_account", "ssh_read_output", "ssh_targets"]);
+        ensure!(names == ["change_account", "clear_target_quarantine", "observe_account", "ssh_read_output", "ssh_targets"]);
         for (name, revision, effects, read_only, destructive) in [
             ("observe_account", "review-1", json!(["read", "sensitive_read"]), true, false),
             ("change_account", "change-2", json!(["persistent_write"]), false, true),
@@ -3911,7 +3920,7 @@ async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Re
         let tools = listed["result"]["tools"].as_array().context("fixed sudo tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["fixed_id", "fixed_printf", "ssh_read_output", "ssh_targets"]);
+        ensure!(names == ["clear_target_quarantine", "fixed_id", "fixed_printf", "ssh_read_output", "ssh_targets"]);
         for (name, revision, effects, read_only, destructive) in [
             ("fixed_id", "id-1", json!(["read"]), true, false),
             ("fixed_printf", "printf-1", json!(["persistent_write"]), false, true),

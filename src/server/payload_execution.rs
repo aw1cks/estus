@@ -66,19 +66,17 @@ impl Estus {
         if let Err(error) = self.state.config.automation_target(id, &request.host) {
             return reject(error);
         }
-        let authority = match serde_json::to_value(binding.automation_authority())
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-        {
-            Some(authority) => authority,
-            None => {
-                return reject(ToolError::new(
-                    "policy_denied",
-                    "Invalid payload authority",
-                    false,
-                ));
-            }
+        let Some(authority) = binding
+            .automation_authority()
+            .map(|a| a.label().into_owned())
+        else {
+            return reject(ToolError::new(
+                "policy_denied",
+                "Invalid payload authority",
+                false,
+            ));
         };
+        let shared_read = binding.is_shared_read();
         let argv = prepared.argv;
         let output_limit = prepared.output_limit;
         let Ok(operation) = Arc::clone(&self.state.operations).try_acquire_owned() else {
@@ -95,36 +93,16 @@ impl Estus {
                 false,
             ));
         };
-        let Some(target_gate) = self.state.automation_targets.get(&request.host) else {
-            return reject(ToolError::new(
-                "policy_denied",
-                "Operation is not authorized",
-                false,
-            ));
-        };
-        // Keep identical host serialization for native and Ansible mutations.
-        let Ok(target_permit) = Arc::clone(target_gate).try_acquire_owned() else {
-            return reject(ToolError::new(
-                "resource_limit",
-                "Automation target operation limit reached",
-                false,
-            ));
-        };
         let state = Arc::clone(&self.state);
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
             // Dropping an MCP handler never relinquishes execution/admission ownership.
-            let _permits = (operation, runtime, target_permit);
+            let _permits = (operation, runtime);
             let binding = state
                 .config
                 .bindings()
                 .get(id)
                 .expect("registered payload binding");
-            let plan = binding.payload_plan().expect("activated payload plan");
-            let target = state
-                .config
-                .automation_target(id, &request.host)
-                .expect("payload target already authorized");
             let metadata = Metadata {
                 request_id: &context.id,
                 tool: state.binding_name(id),
@@ -139,7 +117,31 @@ impl Estus {
                 binding_revision: Some(&binding.revision),
                 executor: Some("native_payload"),
             };
+            let mut target_lease = match state
+                .admission
+                .acquire(
+                    &request.host,
+                    shared_read,
+                    deadline,
+                    &context.ct,
+                    &state.shutdown,
+                )
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    metadata.reject(started, &error);
+                    let _ = sender.send(ToolReply::failure(error));
+                    return;
+                }
+            };
+            let plan = binding.payload_plan().expect("activated payload plan");
+            let target = state
+                .config
+                .automation_target(id, &request.host)
+                .expect("payload target already authorized");
             let audit = Audit::start(metadata, started);
+            target_lease.mark_dispatched(request.host.clone(), authority.clone(), "native_payload");
             let reply = state
                 .payload
                 .run(crate::native_payload::PayloadRun {
@@ -157,6 +159,10 @@ impl Estus {
                     started,
                 })
                 .await;
+            target_lease.finish(
+                reply.error.as_ref().is_some_and(|e| e.remote_state_unknown),
+                reply.error.as_ref().map_or("unknown", |e| e.code),
+            );
             audit.finish_automation(&reply);
             let _ = sender.send(reply);
         });

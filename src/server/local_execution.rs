@@ -88,30 +88,29 @@ impl Estus {
                 return budget.result(ToolReply::<AutomationData>::failure(error));
             }
         };
+        let Some(authority_label) = binding
+            .automation_authority()
+            .map(|a| a.label().into_owned())
+        else {
+            return reject("policy_denied", "Operation is not authorized");
+        };
+        let shared_read = binding.is_shared_read();
         let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
             return reject("resource_limit", "Tool operation limit reached");
         };
         let Ok(runtime) = self.state.automation.clone().try_acquire_owned() else {
             return reject("resource_limit", "Automation operation limit reached");
         };
-        let Some(target) = self.state.automation_targets.get(&request.host) else {
-            return reject("policy_denied", "Operation is not authorized");
-        };
-        let Ok(target) = target.clone().try_acquire_owned() else {
-            return reject(
-                "resource_limit",
-                "Automation target operation limit reached",
-            );
-        };
         let state = self.state.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
-            let _permits = (operation, runtime, target);
+            let _permits = (operation, runtime);
             let binding = state
                 .config
                 .bindings()
                 .get(id)
                 .expect("registered module binding");
+            let executor = binding.executor_kind();
             let metadata = Metadata {
                 request_id: &context.id,
                 tool: state.binding_name(id),
@@ -124,9 +123,28 @@ impl Estus {
                 user: None,
                 program: None,
                 binding_revision: Some(&binding.revision),
-                executor: Some(binding.executor_kind()),
+                executor: Some(executor),
+            };
+            let mut target_lease = match state
+                .admission
+                .acquire(
+                    &request.host,
+                    shared_read,
+                    deadline,
+                    &context.ct,
+                    &state.shutdown,
+                )
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    metadata.reject(started, &error);
+                    let _ = sender.send(ToolReply::failure(error));
+                    return;
+                }
             };
             let audit = Audit::start(metadata, started);
+            target_lease.mark_dispatched(request.host.clone(), authority_label, executor);
             let run = crate::automation::execution::run(
                 prepared,
                 crate::controller::ControllerContext {
@@ -140,6 +158,13 @@ impl Estus {
                 },
             )
             .await;
+            target_lease.finish(
+                run.reply
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.remote_state_unknown),
+                run.reply.error.as_ref().map_or("unknown", |e| e.code),
+            );
             audit.finish_automation(&run.reply);
             let _ = sender.send(run.reply);
             if let Some(pending) = run.pending {

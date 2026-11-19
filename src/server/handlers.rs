@@ -28,7 +28,7 @@ use crate::{
         metadata::StatData,
     },
     output::ReadOutputRequest,
-    reply::{CommandData, ControllerError, ToolError, ToolReply},
+    reply::{ClearTargetQuarantineData, CommandData, ControllerError, ToolError, ToolReply},
     wire::ReplyBudget,
 };
 
@@ -37,6 +37,13 @@ use super::{Estus, preparation::Operation};
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Empty {}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClearTargetQuarantineRequest {
+    host: String,
+    acknowledge_remote_state_reconciled: bool,
+}
 
 // RMCP 3.9 converts its Parameters extractor's errors into tool results. This
 // extractor keeps argument-shape failures at the protocol boundary and uses the
@@ -581,6 +588,106 @@ impl Estus {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.command(Operation::Sudo(request), context).await
+    }
+
+    #[tool(
+        name = "clear_target_quarantine",
+        description = "Explicitly clear this session's in-memory mutation quarantine for a logical target after an uncertain remote mutation. Requires host and acknowledge_remote_state_reconciled=true; this is an operator assertion of independent reconciliation, not proof that remote work stopped. Only affects this server session's in-memory gate (estus doctor is a separate process and cannot clear session state). An unknown or non-quarantined target returns a bounded no-change result without probing or connecting.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
+        input_schema = schema_for_type::<ClearTargetQuarantineRequest>(),
+        output_schema = schema_for_type::<ToolReply<ClearTargetQuarantineData>>()
+    )]
+    pub(super) fn clear_target_quarantine(
+        &self,
+        Arguments(request): Arguments<ClearTargetQuarantineRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let started = Instant::now();
+        let budget = ReplyBudget::new(&context.id)?;
+        let host_known = self.state.admission.contains(&request.host);
+        let metadata = Metadata {
+            request_id: &context.id,
+            tool: self.state.tool_name(ToolId::ClearTargetQuarantine),
+            host: host_known.then_some(request.host.as_str()),
+            identity_role: IdentityRole::Ordinary,
+            sudo_mode: None,
+            user: None,
+            program: None,
+            binding_revision: None,
+            executor: None,
+        };
+        let reject = |error: ToolError| {
+            metadata.reject(started, &error);
+            budget.result(ToolReply::<ClearTargetQuarantineData>::failure(error))
+        };
+        if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
+            return reject(ToolError::new(
+                "cancelled",
+                "Quarantine clear cancelled before execution",
+                false,
+            ));
+        }
+        if !self
+            .state
+            .config
+            .tool_enabled(ToolId::ClearTargetQuarantine)
+        {
+            return reject(ToolError::new(
+                "policy_denied",
+                "Operation is not authorized",
+                false,
+            ));
+        }
+        if request.host.is_empty()
+            || request.host.len() > 256
+            || request.host.contains('\0')
+            || request.host.chars().any(char::is_control)
+        {
+            return reject(ToolError::new(
+                "invalid_argument",
+                "Invalid target host",
+                false,
+            ));
+        }
+        if !request.acknowledge_remote_state_reconciled {
+            return reject(ToolError::new(
+                "invalid_argument",
+                "Clearing target quarantine requires acknowledge_remote_state_reconciled=true",
+                false,
+            ));
+        }
+        let Ok(_permit) = self.state.operations.try_acquire() else {
+            return reject(ToolError::new(
+                "resource_limit",
+                "Tool operation limit reached",
+                false,
+            ));
+        };
+        let audit = Audit::start(metadata, started);
+        let data = match self.state.admission.clear_quarantine(&request.host) {
+            Some(previous) => {
+                crate::audit::target_quarantine(
+                    "cleared",
+                    &request.host,
+                    Some(&previous.authority),
+                    Some(previous.executor),
+                    previous.cause,
+                );
+                ClearTargetQuarantineData {
+                    cleared: true,
+                    was_quarantined: true,
+                    previous_cause: Some(previous.cause),
+                }
+            }
+            None => ClearTargetQuarantineData {
+                cleared: false,
+                was_quarantined: false,
+                previous_cause: None,
+            },
+        };
+        let reply = ToolReply::success(data);
+        audit.finish(None, None);
+        budget.result(reply)
     }
 }
 

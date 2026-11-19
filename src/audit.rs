@@ -227,6 +227,41 @@ pub(crate) fn cleanup_quarantine(
     });
 }
 
+#[derive(Serialize)]
+struct TargetQuarantineRecord<'a> {
+    event: &'static str,
+    timestamp_ms: u64,
+    phase: &'static str,
+    target: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authority: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor: Option<&'static str>,
+    cause: &'static str,
+}
+
+pub(crate) fn target_quarantine(
+    phase: &'static str,
+    target: &str,
+    authority: Option<&str>,
+    executor: Option<&'static str>,
+    cause: &'static str,
+) {
+    emit(&TargetQuarantineRecord {
+        event: "target_quarantine",
+        timestamp_ms: millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(),
+        ),
+        phase,
+        target,
+        authority,
+        executor,
+        cause,
+    });
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Metadata<'a> {
     pub(crate) request_id: &'a RequestId,

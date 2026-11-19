@@ -347,6 +347,13 @@ impl AutomationAuthority {
             Self::Named(_) => crate::config::IdentityRole::Automation,
         }
     }
+
+    pub(crate) fn label(&self) -> Cow<'static, str> {
+        match self {
+            Self::Ordinary => Cow::Borrowed("automation"),
+            Self::Named(name) => Cow::Owned(format!("automation:{name}")),
+        }
+    }
 }
 
 impl Serialize for AutomationAuthority {
@@ -1102,6 +1109,14 @@ impl CompiledBinding {
     }
     pub(crate) fn effects(&self) -> &[Effect] {
         &self.effects
+    }
+    pub(crate) fn is_shared_read(&self) -> bool {
+        self.read_only()
+            && !self.effects.is_empty()
+            && !self
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Probe | Effect::Unknown))
     }
     #[cfg(test)]
     pub(crate) fn parse_request(&self, arguments: JsonObject) -> Result<BindingCall, ErrorData> {

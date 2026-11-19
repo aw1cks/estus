@@ -11,6 +11,7 @@ use crate::{
     ssh::Pool,
 };
 
+mod admission;
 mod command_execution;
 mod file_execution;
 mod generic_execution;
@@ -41,7 +42,7 @@ struct State {
     directories: Option<operations::DirectoryStore>,
     progress: crate::progress::Registry,
     automation: Arc<Semaphore>,
-    automation_targets: std::collections::BTreeMap<String, Arc<Semaphore>>,
+    admission: admission::TargetAdmission,
     payload: Arc<crate::native_payload::Engine>,
     cleanup_quarantine: Arc<crate::controller::CleanupQuarantine>,
 }
@@ -69,10 +70,7 @@ impl Estus {
             tool_router,
             state: Arc::new(State {
                 automation: Arc::new(Semaphore::new(config.automation_concurrency())),
-                automation_targets: config
-                    .automation_hosts()
-                    .map(|host| (host.clone(), Arc::new(Semaphore::new(1))))
-                    .collect(),
+                admission: admission::TargetAdmission::new(config.automation_hosts()),
                 payload: crate::native_payload::Engine::new(shutdown.clone()),
                 config,
                 tools,

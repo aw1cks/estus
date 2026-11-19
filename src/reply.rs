@@ -247,3 +247,11 @@ pub(crate) enum ModuleProjection {
     Invalid,
     Unavailable,
 }
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct ClearTargetQuarantineData {
+    pub cleared: bool,
+    pub was_quarantined: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_cause: Option<&'static str>,
+}

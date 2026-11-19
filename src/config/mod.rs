@@ -42,6 +42,7 @@ pub(crate) enum ToolId {
     Stat,
     ListDirectory,
     Sudo,
+    ClearTargetQuarantine,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,7 +213,7 @@ impl Default for Automation {
             required: false,
             runtime: None,
             workspace_root: None,
-            max_concurrent: 2,
+            max_concurrent: 8,
             max_scratch_bytes: 16 * 1024 * 1024,
             max_scratch_files: 512,
             targets: BTreeMap::new(),

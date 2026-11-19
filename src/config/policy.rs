@@ -21,6 +21,7 @@ impl Profile {
                 matches!(self, Self::Baseline | Self::FilesOnly)
             }
             ToolId::Exec | ToolId::Run | ToolId::Sudo => matches!(self, Self::Baseline),
+            ToolId::ClearTargetQuarantine => self.permits_bindings(),
         }
     }
 
@@ -430,7 +431,9 @@ impl Config {
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         let denied = || ToolError::new("policy_denied", "Operation is not authorized", false);
         match tool {
-            ToolId::Targets | ToolId::ReadOutput | ToolId::Sudo => return Err(denied()),
+            ToolId::Targets | ToolId::ReadOutput | ToolId::ClearTargetQuarantine | ToolId::Sudo => {
+                return Err(denied());
+            }
             ToolId::Exec
             | ToolId::Run
             | ToolId::ReadFile

@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn automation_defaults_and_bounds_are_explicit() {
         let config = load_text("", &[]).unwrap();
-        assert_eq!(config.automation_concurrency(), 2);
+        assert_eq!(config.automation_concurrency(), 8);
         assert_eq!(config.automation_scratch(), (16 * 1024 * 1024, 512));
         for field in [
             "max_concurrent=0",

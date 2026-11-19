@@ -77,6 +77,40 @@ impl Estus {
                 Err(error) => reject(error),
             };
         }
+        let Some(authority_label) = binding
+            .automation_authority()
+            .map(|a| a.label().into_owned())
+        else {
+            return reject(ToolError::new(
+                "policy_denied",
+                "Operation is not authorized",
+                false,
+            ));
+        };
+        let prepared = {
+            let authority = match self.state.config.automation_target(id, request.host()) {
+                Ok(authority) => authority,
+                Err(error) => return reject(error),
+            };
+            let (scratch_bytes, scratch_files) = self.state.config.automation_scratch();
+            match binding.prepare_generic(
+                &request,
+                self.state.config.limits(),
+                bindings::AutomationTransport {
+                    authority,
+                    scratch_bytes,
+                    scratch_files,
+                    started,
+                },
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => return reject(error),
+            }
+        };
+        let deadline = match request_deadline(started, prepared.controller.duration) {
+            Ok(deadline) => deadline,
+            Err(error) => return reject(error),
+        };
         let Ok(runtime) = self.state.automation.clone().try_acquire_owned() else {
             return reject(ToolError::new(
                 "resource_limit",
@@ -84,30 +118,17 @@ impl Estus {
                 false,
             ));
         };
-        let Some(target) = self.state.automation_targets.get(request.host()) else {
-            return reject(ToolError::new(
-                "policy_denied",
-                "Generic target is not authorized",
-                false,
-            ));
-        };
-        let Ok(target) = target.clone().try_acquire_owned() else {
-            return reject(ToolError::new(
-                "resource_limit",
-                "Automation target operation limit reached",
-                false,
-            ));
-        };
         let state = self.state.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
-            let _permits = (operation, runtime, target, policy_permits);
+            let _permits = (operation, runtime, policy_permits);
             let binding = state
                 .config
                 .bindings()
                 .get(id)
                 .expect("registered generic binding");
             let policy = binding.generic_policy().expect("registered generic policy");
+            let executor = binding.executor_kind();
             let metadata = Metadata {
                 request_id: &context.id,
                 tool: state.binding_name(id),
@@ -120,33 +141,14 @@ impl Estus {
                 user: None,
                 program: None,
                 binding_revision: Some(&binding.revision),
-                executor: Some(binding.executor_kind()),
+                executor: Some(executor),
             };
-            let prepared = (|| {
-                if context.ct.is_cancelled() || state.shutdown.is_cancelled() {
-                    return Err(ToolError::new(
-                        "cancelled",
-                        "Request cancelled before dispatch",
-                        false,
-                    ));
-                }
-                let authority = state.config.automation_target(id, request.host())?;
-                let (scratch_bytes, scratch_files) = state.config.automation_scratch();
-                let prepared = binding.prepare_generic(
-                    &request,
-                    state.config.limits(),
-                    bindings::AutomationTransport {
-                        authority,
-                        scratch_bytes,
-                        scratch_files,
-                        started,
-                    },
-                )?;
-                let deadline = request_deadline(started, prepared.controller.duration)?;
-                Ok((prepared, deadline))
-            })();
-            let (prepared, deadline) = match prepared {
-                Ok(p) => p,
+            let mut target_lease = match state
+                .admission
+                .acquire_write(request.host(), deadline, &context.ct, &state.shutdown)
+                .await
+            {
+                Ok(lease) => lease,
                 Err(error) => {
                     metadata.reject(started, &error);
                     let _ = sender.send(ToolReply::<Value>::failure(error));
@@ -154,6 +156,7 @@ impl Estus {
                 }
             };
             let audit = Audit::start(metadata, started);
+            target_lease.mark_dispatched(request.host().to_owned(), authority_label, executor);
             let run = crate::automation::execution::run(
                 prepared,
                 crate::controller::ControllerContext {
@@ -167,6 +170,13 @@ impl Estus {
                 },
             )
             .await;
+            target_lease.finish(
+                run.reply
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.remote_state_unknown),
+                run.reply.error.as_ref().map_or("unknown", |e| e.code),
+            );
             audit.finish_automation(&run.reply);
             let mut data = run
                 .reply

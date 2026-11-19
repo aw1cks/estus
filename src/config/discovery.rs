@@ -84,7 +84,9 @@ impl Serialize for PermittedOperations<'_> {
                         self.global_profile.permits(id)
                             && self.target_profile.permits(id)
                             && match id {
-                                ToolId::Targets | ToolId::ReadOutput => false,
+                                ToolId::Targets
+                                | ToolId::ReadOutput
+                                | ToolId::ClearTargetQuarantine => false,
                                 ToolId::Sudo => self.sudo.permits_programs(),
                                 ToolId::Exec
                                 | ToolId::Run

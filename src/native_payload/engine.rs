@@ -200,7 +200,10 @@ impl Engine {
         Ok((probe, true))
     }
 
-    async fn discover(&self, request: DiscoverRequest<'_>) -> Result<(Value, String), ToolError> {
+    async fn discover(
+        &self,
+        request: DiscoverRequest<'_>,
+    ) -> Result<(Value, String, u64), ToolError> {
         let DiscoverRequest {
             key,
             lease,
@@ -210,12 +213,13 @@ impl Engine {
             deadline,
             ct,
         } = request;
+        let generation = lease.generation();
         let requirement_bytes = serde_json::to_vec(&requirements)
             .map_err(|_| error("invalid_argument", "Invalid requirements", false))?;
         let key = format!(
             "{}:{}:{}:{}",
             key,
-            lease.generation(),
+            generation,
             python,
             digest(&requirement_bytes)
         );
@@ -228,6 +232,7 @@ impl Engine {
             // A cancelled waiter cannot drop another waiter's owned probe/channel.
             tokio::spawn(async move {
                 let _completion = ProbeCompletion(Arc::clone(&worker));
+                let lease = lease;
                 let id = crate::automation::execution::invocation_id();
                 let spec = json!({
                     "schema": 1, "operation": "discover", "id": id,
@@ -253,9 +258,12 @@ impl Engine {
                     error.unknown = false;
                     error
                 });
+                drop(lease);
                 *lock(&worker.result) = Some(result);
                 worker.ready.cancel();
             });
+        } else {
+            drop(lease);
         }
         tokio::select! {
             biased;
@@ -264,7 +272,7 @@ impl Engine {
             _ = sleep_until(deadline) => Err(error("timeout", "Payload request deadline expired before dispatch", false)),
             _ = probe.ready.cancelled() => {
                 match lock(&probe.result).as_ref() {
-                    Some(Ok(value)) => Ok((value.clone(), key)),
+                    Some(Ok(value)) => Ok((value.clone(), key, generation)),
                     Some(Err(error)) => Err(error.tool()),
                     None => Err(error("discovery_failed", "Discovery evidence unavailable", false)),
                 }
@@ -294,10 +302,6 @@ impl Engine {
             } else {
                 crate::config::IdentityRole::Ordinary
             };
-            let lease = pool
-                .acquire(host, &target.target.destination, role, deadline, ct)
-                .await?;
-            let generation = lease.generation();
             let requirements = serde_json::to_value(&plan.manifest.requirements)
                 .map_err(|_| error("invalid_argument", "Invalid requirements", false))?;
             let mut discovered = None;
@@ -305,13 +309,6 @@ impl Engine {
                 let probe_lease = pool
                     .acquire(host, &target.target.destination, role, deadline, ct)
                     .await?;
-                if generation != probe_lease.generation() {
-                    return Err(error(
-                        "discovery_failed",
-                        "SSH generation changed before dispatch",
-                        false,
-                    ));
-                }
                 match self
                     .discover(DiscoverRequest {
                         key: key.clone(),
@@ -324,8 +321,8 @@ impl Engine {
                     })
                     .await
                 {
-                    Ok((identity, cache_key)) => {
-                        discovered = Some((python, identity, cache_key));
+                    Ok((identity, cache_key, discovery_generation)) => {
+                        discovered = Some((python, identity, cache_key, discovery_generation));
                         break;
                     }
                     Err(error)
@@ -339,13 +336,24 @@ impl Engine {
                     Err(error) => return Err(error),
                 }
             }
-            let (python, identity, cache_key) = discovered.ok_or_else(|| {
-                error(
+            let (python, identity, cache_key, discovery_generation) =
+                discovered.ok_or_else(|| {
+                    error(
+                        "discovery_failed",
+                        "Approved target interpreters or requirements are unavailable",
+                        false,
+                    )
+                })?;
+            let lease = pool
+                .acquire(host, &target.target.destination, role, deadline, ct)
+                .await?;
+            if lease.generation() != discovery_generation {
+                return Err(error(
                     "discovery_failed",
-                    "Approved target interpreters or requirements are unavailable",
+                    "SSH generation changed before dispatch",
                     false,
-                )
-            })?;
+                ));
+            }
             let id = crate::automation::execution::invocation_id();
             let remaining = deadline
                 .saturating_duration_since(Instant::now())

@@ -605,7 +605,7 @@ async fn installed_wheel_channels() -> Result<()> {
                 .collect::<Result<_>>()?;
             names.sort_unstable();
             ensure!(
-                names == ["ssh_read_output", "ssh_targets"],
+                names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"],
                 "{channel} omitted profile exposed native authority: {names:?}"
             );
             if let Some(expected) = &expected {

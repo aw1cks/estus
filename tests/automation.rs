@@ -289,11 +289,9 @@ impl Server {
             .context("native tool list")?;
         ensure!(!tools.is_empty());
         for tool in tools {
+            let name = tool["name"].as_str().context("tool name")?;
             ensure!(
-                tool["name"]
-                    .as_str()
-                    .context("tool name")?
-                    .starts_with("ssh_"),
+                name.starts_with("ssh_") || name == "clear_target_quarantine",
                 "runtime auto-registered a tool"
             );
         }
@@ -330,7 +328,7 @@ async fn native_startup_ignores_absent_bad_and_disabled_runtime_references() -> 
         .collect::<Result<_>>()?;
     names.sort_unstable();
     ensure!(
-        names == ["ssh_read_output", "ssh_targets"],
+        names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"],
         "omitted profile exposed native authority: {names:?}"
     );
     for reference in [

@@ -46,7 +46,7 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
     }
     // This is the explicit publication inventory. Each entry binds native
     // SDK metadata and its callable handler to a target-policy identity.
-    let mut routes: [(ToolId, ToolRoute<Estus>); 14] = [
+    let mut routes: [(ToolId, ToolRoute<Estus>); 15] = [
         (
             ToolId::Targets,
             (Estus::ssh_targets_tool_attr(), Estus::ssh_targets).into_tool_route(),
@@ -111,6 +111,14 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             ToolId::Sudo,
             (Estus::ssh_sudo_tool_attr(), Estus::ssh_sudo).into_tool_route(),
         ),
+        (
+            ToolId::ClearTargetQuarantine,
+            (
+                Estus::clear_target_quarantine_tool_attr(),
+                Estus::clear_target_quarantine,
+            )
+                .into_tool_route(),
+        ),
     ];
     for (id, route) in &mut routes {
         if *id == ToolId::Targets {
@@ -139,6 +147,13 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
                 .get_mut("overwrite")
                 .and_then(serde_json::Value::as_object_mut)
                 .expect("overwrite requires explicit overwrite consent")
+                .insert("const".into(), true.into());
+        }
+        if *id == ToolId::ClearTargetQuarantine {
+            properties
+                .get_mut("acknowledge_remote_state_reconciled")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("clear_target_quarantine requires explicit reconciliation consent")
                 .insert("const".into(), true.into());
         }
     }

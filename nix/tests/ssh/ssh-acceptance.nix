@@ -36,7 +36,7 @@ craneLib.mkCargoDerivation (commonArgs // {
       --add-flags '--nocapture'
     makeWrapper "$out/libexec/ssh_local" "$out/bin/ssh-native" \
       --set ESTUS_TEST_BINARY ${package}/bin/estus \
-      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]} \
+      --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils pkgs.python314 ]} \
       --add-flags '--ignored --nocapture --test-threads=2'
     makeWrapper ${mkFilteredRunner "mkdir-acceptance" [ "--ignored" "ssh_mkdir" ] [ "--ignored" "--nocapture" "--test-threads=2" "ssh_mkdir" ]} "$out/bin/mkdir-acceptance" \
       --set ESTUS_LIBTEST_HARNESS "$out/libexec/ssh_local" \

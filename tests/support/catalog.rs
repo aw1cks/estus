@@ -432,8 +432,9 @@ impl Binding {
             // These two non-executing protocol tools are always present in
             // actions-only; neither grants generic shell or file access.
             ensure!(
-                tools.len() == 3
+                tools.len() == 4
                     && tools.iter().all(|tool| tool["name"] == self.name
+                        || tool["name"] == "clear_target_quarantine"
                         || tool["name"] == "ssh_targets"
                         || tool["name"] == "ssh_read_output"),
                 "workflow tools/list escape: {reply}"
