@@ -28,7 +28,7 @@ fn selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) -> Re
     let path = output.join("catalog-selection.json");
     let selection: Value = serde_json::from_slice(&fs::read(&path)?)?;
     ensure!(
-        selection["schema"] == 2
+        selection["schema"] == canonical["schema"]
             && selection["version"] == canonical["version"]
             && selection["scope"] == "catalog_templates"
             && selection
@@ -46,6 +46,7 @@ fn selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) -> Re
         ensure!(
             selection["tools"][name]
                 == json!({
+                    "executor": canonical["tools"][name]["executor"],
                     "qualification": canonical["tools"][name]["qualification"],
                     "policy_required": canonical["tools"][name]["policy_required"],
                     "requires": canonical["tools"][name]["requires"],
@@ -459,7 +460,8 @@ async fn installed_wheel_channels() -> Result<()> {
         let listed = checked(launch(false).args(["catalog", "list", "--json"])).await?;
         let listing: Value = serde_json::from_slice(&listed.stdout)?;
         ensure!(
-            listing["schema"] == 2 && listing["version"] == "6" && listing["tools"].is_array(),
+            listing["schema"] == canonical["schema"]
+                && listing["version"] == canonical["version"] && listing["tools"].is_array(),
             "{channel} invalid catalog listing: {listing}"
         );
         let tools = listing["tools"]
@@ -544,10 +546,10 @@ async fn installed_wheel_channels() -> Result<()> {
         for name in ["cpu_stats", "memory_stats", "pressure_get"] {
             ensure!(
                 export
-                    .join(format!("roles/{name}/tasks/main.yml"))
+                    .join(format!("payloads/{name}/manifest.json"))
                     .is_file()
                     && export
-                        .join(format!("roles/{name}/files/collector.py"))
+                        .join(format!("payloads/{name}/collector.py"))
                         .is_file()
                     && export.join(format!("overlays/{name}.json")).is_file(),
                 "{channel} health export is missing production assets for {name}"
@@ -804,9 +806,10 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             let name = "sdist_source_probe";
             let mut template = manifest["tools"]["pressure_get"].clone();
             template["definition"] = json!(format!("{name}.toml"));
-            template["role"] = json!(format!("roles/{name}"));
+            template["executor"]["path"] = json!(format!("payloads/{name}"));
             manifest["tools"][name] = template;
-            manifest["version"] = json!("6-sdist-probe");
+            manifest["version"] = json!(format!("{}-sdist-probe",
+                manifest["version"].as_str().context("catalog version")?));
             fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
             let mut document: toml::Table =
                 toml::from_str(&fs::read_to_string(catalog.join("pressure_get.toml"))?)?;
@@ -823,8 +826,8 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
                 toml::to_string(&document)?,
             )?;
             copy_environment(
-                &catalog.join("roles/pressure_get"),
-                &catalog.join("roles").join(name),
+                &catalog.join("payloads/pressure_get"),
+                &catalog.join("payloads").join(name),
             )?;
             name
         } else {
@@ -845,7 +848,7 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
         }
         // These files exist in the disposable source but must never enter an artifact.
         fs::write(catalog.join("private_state.json"), b"SDIST_PRIVATE_STATE")?;
-        let cache = catalog.join("roles/pressure_get/files/__pycache__");
+        let cache = catalog.join("payloads/pressure_get/__pycache__");
         fs::create_dir_all(&cache)?;
         fs::write(
             cache.join("collector.cpython-314.pyc"),
@@ -1060,11 +1063,13 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     .await?;
     let assets = workspace.join("estus/_catalog");
     let catalog = assets::Catalog::load(Some(&assets)).map_err(anyhow::Error::msg)?;
-    for name in catalog.manifest().tools.keys() {
+    for (name, template) in &catalog.manifest().tools {
         catalog.definition(name).map_err(anyhow::Error::msg)?;
-        catalog
-            .copy_role(name, &workspace.join(format!("role-{name}")))
-            .map_err(anyhow::Error::msg)?;
+        if !matches!(template.executor, assets::Executor::AnsibleModule { .. }) {
+            catalog
+                .copy_assets(name, &workspace.join(format!("assets-{name}")))
+                .map_err(anyhow::Error::msg)?;
+        }
     }
     for member in listing
         .lines()
@@ -1080,11 +1085,21 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
                 .strip_suffix(".toml")
                 .is_some_and(|name| catalog.manifest().tools.contains_key(name)),
             ["roles", name, directory, rest @ ..] => {
-                catalog.manifest().tools.contains_key(*name)
+                matches!(catalog.manifest().tools.get(*name).map(|tool| &tool.executor),
+                    Some(assets::Executor::AnsibleRole { .. }))
                     && matches!(
                         *directory,
                         "tasks" | "meta" | "files" | "defaults" | "vars" | "handlers"
                     )
+                    && !rest.is_empty()
+                    && Path::new(member)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| matches!(ext, "yml" | "yaml" | "py" | "json" | "toml"))
+            }
+            ["payloads", name, rest @ ..] => {
+                matches!(catalog.manifest().tools.get(*name).map(|tool| &tool.executor),
+                    Some(assets::Executor::NativePayload { .. }))
                     && !rest.is_empty()
                     && Path::new(member)
                         .extension()
