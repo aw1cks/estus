@@ -575,7 +575,7 @@ async fn flood_audit(server: &mut Server) -> Result<()> {
     for id in 100..4196 {
         server
             .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_targets","arguments":{}}}))
+                "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let response = server.response(id).await?;
         ensure!(
@@ -635,7 +635,7 @@ async fn audit_backpressure_does_not_hold_cleanup_and_recovers_ordered_records()
         // A later operation proves delivery recovers, not merely buffered bytes.
         server
             .send(json!({"jsonrpc":"2.0","id":5000,"method":"tools/call",
-                "params":{"name":"ssh_targets","arguments":{}}}))
+                "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         server.response(5000).await?;
         Ok::<_, anyhow::Error>(())
@@ -655,7 +655,7 @@ async fn audit_backpressure_does_not_hold_cleanup_and_recovers_ordered_records()
     let mut recovered = false;
     for line in audit.split_inclusive(|byte| *byte == b'\n') {
         let event: Value = serde_json::from_slice(line)?;
-        if event["tool"] == "ssh_targets" {
+        if event["tool"] == "observe_targets" {
             let id = event["request_id"].as_u64().context("discovery audit ID")?;
             // Each request emits start then finish; both retain enqueue order.
             ensure!(id >= last, "accepted diagnostics reordered");
@@ -1245,7 +1245,7 @@ async fn global_admission_is_held_by_live_controller_owners_and_recovers_after_c
 async fn controller_output_read(server: &mut Server, id: u64, arguments: Value) -> Result<Value> {
     server
         .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-        "params":{"name":"ssh_read_output","arguments":arguments}}))
+        "params":{"name":"inspect_output","arguments":arguments}}))
         .await?;
     let frame = server.response(id).await?;
     let result = &frame["result"];
@@ -1501,7 +1501,7 @@ printf 'REPAIRED\n'
         }
         server
             .send(json!({"jsonrpc":"2.0","id":19,"method":"tools/call",
-                "params":{"name":"ssh_targets","arguments":{}}}))
+                "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let discovery = server.response(19).await?;
         ensure!(

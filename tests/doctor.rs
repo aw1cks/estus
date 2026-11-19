@@ -568,7 +568,7 @@ async fn doctor_native_selected_ssh_executable_is_shared_with_native_tools() -> 
                 .request(
                     2,
                     "tools/call",
-                    json!({"name":"ssh_exec","arguments":{
+                    json!({"name":"exec_command","arguments":{
                         "host":"selected","command":"printf selected-native"
                     }}),
                 )

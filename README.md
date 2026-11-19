@@ -29,7 +29,7 @@ configured logical names are accepted; backend aliases do not grant authority.
 
 No-config startup uses `mode = "workstation"` with all five capability ceilings
 enabled (`named`, `file_read`, `file_write`, `exec`, `sudo`) and open ordinary SSH
-resolution (actual `ssh_sudo` still requires configured target sudo). Explicit
+resolution (actual `exec_sudo` still requires configured target sudo). Explicit
 configuration files default to `mode = "headless"` with `[capabilities]`
 `named = true` only unless `[capabilities]` or `mode = "workstation"` is specified.
 Per-target `[targets.<name>.capabilities]` fields only narrow the global set.
@@ -192,7 +192,7 @@ SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
 
 ## Bounded directory enumeration
 
-With `file_read = true` capability enabled, call `ssh_list_directory` with a logical host,
+With `file_read = true` capability enabled, call `inspect_directory` with a logical host,
 literal UTF-8 path and optional `max_entries` (1–1000, default200). Empty/exhausted
 listings remain one-shot results. A truncated page returns `continuation` and
 `expires_in_secs`; send that token with the identical host/path for the next page
@@ -228,7 +228,7 @@ not a claim of remote quiescence. No sorting, recursion, shell fallback or repla
 
 ## Ordinary SFTP directory creation
 
-`ssh_mkdir` creates one literal directory on the ordinary SSH identity:
+`change_mkdir` creates one literal directory on the ordinary SSH identity:
 
 ```json
 {"host":"server","path":"/srv/example/new-directory","timeout_secs":10}
@@ -261,7 +261,7 @@ usual non-root/private-runtime-directory prerequisites.
 
 ## Ordinary SFTP rename
 
-`ssh_rename` renames one entry through the ordinary SSH identity:
+`change_rename` renames one entry through the ordinary SSH identity:
 
 ```json
 {"host":"server","source":"/srv/example/old","destination":"/srv/example/new","overwrite":true,"timeout_secs":10}
@@ -282,7 +282,7 @@ Paths are literal UTF-8 and intermediate symlinks retain server semantics. No
 cross-filesystem, path sandbox, metadata-preservation or crash-durability promise
 is added.
 
-Policy, pre-SSH validation, admission and channel ownership match `ssh_mkdir`.
+Policy, pre-SSH validation, admission and channel ownership match `change_mkdir`.
 Any error after rename dispatch retains `remote_state_unknown=true`, including
 server refusal or cleanup failure; no replay or rollback is inferred.
 `nix run .#rename-acceptance-msrv` exercises real moves, replacement consent,
@@ -290,7 +290,7 @@ unsupported protection and dispatch uncertainty with the same native prerequisit
 
 ## Ordinary SFTP file unlink
 
-`ssh_remove_file` removes one named file or final symlink entry:
+`change_file_remove` removes one named file or final symlink entry:
 
 ```json
 {"host":"server","path":"/srv/example/obsolete-file","timeout_secs":10}
@@ -314,7 +314,7 @@ targets, literal names and dispatch uncertainty with the same native prerequisit
 
 ## Ordinary SFTP empty-directory removal
 
-`ssh_remove_directory` removes one empty directory:
+`change_directory_remove` removes one empty directory:
 
 ```json
 {"host":"server","path":"/srv/example/empty-directory","timeout_secs":10}
@@ -338,7 +338,7 @@ contents and dispatch uncertainty with the same native prerequisites.
 
 ## Explicit atomic file replacement
 
-`ssh_replace_file` requires explicit replacement consent:
+`change_file_replace` requires explicit replacement consent:
 
 ```json
 {"host":"server","path":"/srv/example/config.json","content":"{\"enabled\":true}\n","overwrite":true}
@@ -375,7 +375,7 @@ exclusively created staging entry may be removed before rename polling. No clean
 ever deletes the destination or a staging pathname after rename starts. Cancel,
 timeout, connection loss or ambiguous rename may leave `.estus-replace-*` siblings;
 review possible leftovers out of band rather than automatically retrying or
-sweeping names. Channel closure never proves rollback. Direct `ssh_write_file`
+sweeping names. Channel closure never proves rollback. Direct `change_file_write`
 retains its existing non-atomic contract.
 
 `nix run .#replace-file-acceptance-msrv` exercises atomic visibility, metadata,
@@ -401,7 +401,7 @@ expiry and separate stdout/stderr `bytes_retained`, `total_bytes` observed, and
 command's observed exit code, termination, signal, uncertainty or cleanup evidence.
 Inline truncation/lossiness is independent of exact raw artifact bytes.
 
-Use the returned handle with `ssh_read_output(handle, stream, offset, max_bytes,
+Use the returned handle with `inspect_output(handle, stream, offset, max_bytes,
 encoding)`, where stream is `stdout` or `stderr`. Reads use strict UTF-8 or padded
 lossless base64 and SHA-256 of the returned raw range. `eof` means end of the
 retained prefix, not proof that the original stream was complete. File/read limits
@@ -449,7 +449,7 @@ Include `_meta.progressToken` in `tools/call` parameters to request advisory
 across active requests. Requests without a token produce no progress.
 
 ```json
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ssh_exec","arguments":{"host":"server","command":"your-command"},"_meta":{"progressToken":"request-7"}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"exec_command","arguments":{"host":"server","command":"your-command"},"_meta":{"progressToken":"request-7"}}}
 ```
 
 Native/controller command progress counts actual stdout+stderr bytes drained,
@@ -1136,6 +1136,12 @@ default to `mode = "headless"` (`named = true` only); no-config startup uses
 `mode = "workstation"` with all five ceilings enabled and dynamic ordinary SSH
 resolution. `[rules."<pattern>"]` narrows per-host permissions via `deny_tiers`,
 `allow_tools`, and per-tool `constraints`. Capabilities are not OS/account sandboxes.
+
+Every registered tool publishes `_meta.risk_tier` (`observe`, `inspect`, `preview`,
+`change`, `exec`). For MCP client approval rules, allow exact `observe_*` tools
+(`observe_targets`, `observe_stat`, and read-only `observe_*` catalog tools) and
+require confirmation (`ask`) for `inspect_*`, `preview_*` (until qualified),
+`change_*`, and `exec_*`.
 
 Privileged/sensitive entries require separately configured `automation:catalog`
 authority where declared, never an inferred native sudo grant. Typed sensitive

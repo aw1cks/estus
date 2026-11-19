@@ -260,41 +260,41 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             .collect::<Result<_>>()?;
         names.sort_unstable();
         for expected_builtin in [
-            "clear_target_quarantine",
-            "ssh_exec",
-            "ssh_list_directory",
-            "ssh_mkdir",
-            "ssh_read_file",
-            "ssh_read_output",
-            "ssh_remove_directory",
-            "ssh_remove_file",
-            "ssh_rename",
-            "ssh_replace_file",
-            "ssh_run",
-            "ssh_stat",
-            "ssh_targets",
-            "ssh_write_file",
+            "change_target_quarantine_clear",
+            "exec_command",
+            "inspect_directory",
+            "change_mkdir",
+            "inspect_file",
+            "inspect_output",
+            "change_directory_remove",
+            "change_file_remove",
+            "change_rename",
+            "change_file_replace",
+            "exec_argv",
+            "observe_stat",
+            "observe_targets",
+            "change_file_write",
         ] {
             ensure!(names.contains(&expected_builtin), "missing workstation builtin {expected_builtin}: {names:?}");
         }
-        ensure!(!names.contains(&"ssh_sudo"), "no-config workstation exposed ssh_sudo");
+        ensure!(!names.contains(&"exec_sudo"), "no-config workstation exposed ssh_sudo");
         for extra in &names {
             let is_builtin = matches!(
                 *extra,
-                "clear_target_quarantine"
-                    | "ssh_exec"
-                    | "ssh_list_directory"
-                    | "ssh_mkdir"
-                    | "ssh_read_file"
-                    | "ssh_read_output"
-                    | "ssh_remove_directory"
-                    | "ssh_remove_file"
-                    | "ssh_rename"
-                    | "ssh_replace_file"
-                    | "ssh_run"
-                    | "ssh_stat"
-                    | "ssh_targets"
-                    | "ssh_write_file"
+                "change_target_quarantine_clear"
+                    | "exec_command"
+                    | "inspect_directory"
+                    | "change_mkdir"
+                    | "inspect_file"
+                    | "inspect_output"
+                    | "change_directory_remove"
+                    | "change_file_remove"
+                    | "change_rename"
+                    | "change_file_replace"
+                    | "exec_argv"
+                    | "observe_stat"
+                    | "observe_targets"
+                    | "change_file_write"
             );
             if !is_builtin {
                 ensure!(
@@ -310,7 +310,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
                 );
             }
         }
-        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
         ensure!(discovery_data(result, "open")?["targets"] == json!([]));
@@ -319,12 +319,12 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         ensure!(content.len() == 1);
         let text: Value = serde_json::from_str(content[0]["text"].as_str().context("text")?)?;
         ensure!(text == result["structuredContent"]);
-        server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{"extra":true}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"observe_targets","arguments":{"extra":true}}})).await?;
         ensure!(server.response(4).await?["error"]["code"] == -32602);
         server.send(json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
-            "params":{"name":"ssh_sudo","arguments":profile_call_arguments("ssh_sudo", "DO_NOT_CONNECT.invalid")}})).await?;
+            "params":{"name":"exec_sudo","arguments":profile_call_arguments("exec_sudo", "DO_NOT_CONNECT.invalid")}})).await?;
         let denied = server.response(5).await?;
-        ensure!(denied["error"]["code"] == -32602, "ssh_sudo: {denied}");
+        ensure!(denied["error"]["code"] == -32602, "exec_sudo: {denied}");
         ensure!(denied.get("result").is_none());
         Ok::<_, anyhow::Error>(())
     }.await;
@@ -438,7 +438,7 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
             }
             let id = 2;
             let modern = override_limits;
-            let params = json!({"name":"ssh_targets","arguments":{}});
+            let params = json!({"name":"observe_targets","arguments":{}});
             let request = if modern {
                 modern_request(json!(id), "tools/call", params, MODERN_VERSION)
             } else {
@@ -465,32 +465,32 @@ async fn configured_discovery_preserves_authority_boundaries() -> Result<()> {
                 ensure!(row["observed_capabilities"] == "unknown");
                 let expected = if permits_sudo {
                     json!([
-                        "ssh_exec",
-                        "ssh_list_directory",
-                        "ssh_mkdir",
-                        "ssh_read_file",
-                        "ssh_remove_directory",
-                        "ssh_remove_file",
-                        "ssh_rename",
-                        "ssh_replace_file",
-                        "ssh_run",
-                        "ssh_stat",
-                        "ssh_sudo",
-                        "ssh_write_file"
+                        "change_directory_remove",
+                        "change_file_remove",
+                        "change_file_replace",
+                        "change_file_write",
+                        "change_mkdir",
+                        "change_rename",
+                        "exec_argv",
+                        "exec_command",
+                        "exec_sudo",
+                        "inspect_directory",
+                        "inspect_file",
+                        "observe_stat"
                     ])
                 } else {
                     json!([
-                        "ssh_exec",
-                        "ssh_list_directory",
-                        "ssh_mkdir",
-                        "ssh_read_file",
-                        "ssh_remove_directory",
-                        "ssh_remove_file",
-                        "ssh_rename",
-                        "ssh_replace_file",
-                        "ssh_run",
-                        "ssh_stat",
-                        "ssh_write_file"
+                        "change_directory_remove",
+                        "change_file_remove",
+                        "change_file_replace",
+                        "change_file_write",
+                        "change_mkdir",
+                        "change_rename",
+                        "exec_argv",
+                        "exec_command",
+                        "inspect_directory",
+                        "inspect_file",
+                        "observe_stat"
                     ])
                 };
                 ensure!(row["permitted_operations"] == expected, "policy for {name}");
@@ -672,7 +672,7 @@ async fn discovery_metadata_exact_caps_respect_aggregate_and_response_wire_bound
         server.initialize().await?;
         server
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let response = server.response(2).await?;
         let data = discovery_data(&response["result"], "configured")?;
@@ -693,7 +693,7 @@ async fn discovery_metadata_exact_caps_respect_aggregate_and_response_wire_bound
         const MESSAGE_LIMIT: usize = 16_777_216;
         let id = json!("i".repeat(MESSAGE_LIMIT - 65_536));
         let request = json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}});
+            "params":{"name":"observe_targets","arguments":{}}});
         ensure!(serde_json::to_vec(&request)?.len() + 1 < MESSAGE_LIMIT);
         server.send(request).await?;
         let (rejected, bytes) = server.response_with_id(&id).await?;
@@ -704,7 +704,7 @@ async fn discovery_metadata_exact_caps_respect_aggregate_and_response_wire_bound
         drop(id);
         server
             .send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let healthy = server.response(4).await?;
         ensure!(
@@ -867,49 +867,49 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
         server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
         let listed = server.response(2).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
-        ensure!(tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
-        for name in ["ssh_exec", "ssh_run", "ssh_sudo"] {
+        ensure!(tools.iter().any(|tool| tool["name"] == "exec_sudo"));
+        for name in ["exec_command", "exec_argv", "exec_sudo"] {
             let tool = tools.iter().find(|tool| tool["name"] == name).context("command tool")?;
             output_control_schema(&tool["inputSchema"])?;
         }
         for (index, (tool, args)) in [
-            ("ssh_exec", json!({"host":"allowed","command":["DO_NOT_LOG_PAYLOAD"]})),
-            ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","shell":"interactive"})),
-            ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","sudo":true})),
-            ("ssh_run", json!({"host":"allowed","argv":"DO_NOT_LOG_PAYLOAD"})),
-            ("ssh_run", json!({"host":"allowed","argv":["true",17]})),
-            ("ssh_run", json!({"host":"allowed","argv":["true"],"env":{"SECRET":"DO_NOT_LOG_PAYLOAD"}})),
-            ("ssh_exec", json!({"host":"allowed","command":"true","retain_output":"DO_NOT_LOG_PAYLOAD"})),
-            ("ssh_run", json!({"host":"allowed","argv":["true"],"retain_output":1})),
-            ("ssh_sudo", json!({"host":"allowed","argv":["/usr/bin/id"],"retain_output":null})),
+            ("exec_command", json!({"host":"allowed","command":["DO_NOT_LOG_PAYLOAD"]})),
+            ("exec_command", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","shell":"interactive"})),
+            ("exec_command", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","sudo":true})),
+            ("exec_argv", json!({"host":"allowed","argv":"DO_NOT_LOG_PAYLOAD"})),
+            ("exec_argv", json!({"host":"allowed","argv":["true",17]})),
+            ("exec_argv", json!({"host":"allowed","argv":["true"],"env":{"SECRET":"DO_NOT_LOG_PAYLOAD"}})),
+            ("exec_command", json!({"host":"allowed","command":"true","retain_output":"DO_NOT_LOG_PAYLOAD"})),
+            ("exec_argv", json!({"host":"allowed","argv":["true"],"retain_output":1})),
+            ("exec_sudo", json!({"host":"allowed","argv":["/usr/bin/id"],"retain_output":null})),
         ].into_iter().enumerate() {
             let id = 10 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}})).await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602);
         }
         for (index, (tool, args, code)) in [
-            ("ssh_exec", json!({"host":"ordinary.invalid","command":"DO_NOT_LOG_PAYLOAD"}), "policy_denied"),
-            ("ssh_exec", json!({"host":"privileged.invalid","command":"DO_NOT_LOG_PAYLOAD"}), "policy_denied"),
-            ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","timeout_secs":601}), "invalid_argument"),
-            ("ssh_exec", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","cwd":"relative"}), "invalid_argument"),
-            ("ssh_exec", json!({"host":"allowed","command":"bad\u{0}DO_NOT_LOG_PAYLOAD"}), "invalid_argument"),
-            ("ssh_run", json!({"host":"ordinary.invalid","argv":["DO_NOT_LOG_PAYLOAD"]}), "policy_denied"),
-            ("ssh_run", json!({"host":"allowed","argv":[]}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":[""]}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":["bad\u{0}DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":["true","bad\u{0}DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":["true"],"cwd":"relative"}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":["true"],"timeout_secs":0}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":["true"],"timeout_secs":601}), "invalid_argument"),
-            ("ssh_run", json!({"host":"allowed","argv":["true"],"stdin":"λ".repeat(33)}), "invalid_argument"),
-            ("ssh_sudo", json!({"host":"disabled","argv":["/usr/bin/id"]}), "policy_denied"),
-            ("ssh_sudo", json!({"host":"allowed","user":"service","argv":["/usr/bin/id"]}), "policy_denied"),
-            ("ssh_sudo", json!({"host":"allowed","argv":["/bin/id"]}), "policy_denied"),
-            ("ssh_sudo", json!({"host":"allowed","argv":["relative"]}), "invalid_argument"),
-            ("ssh_sudo", json!({"host":"allowed","user":"bad DO_NOT_LOG_PAYLOAD","argv":["/usr/bin/id"]}), "invalid_argument"),
-            ("ssh_sudo", json!({"host":"allowed","user":"DO_NOT_LOG_PAYLOAD","argv":["/usr/bin/id"]}), "policy_denied"),
-            ("ssh_sudo", json!({"host":"allowed","argv":["DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
-            ("ssh_sudo", json!({"host":"allowed","argv":["/DO_NOT_LOG_PAYLOAD"]}), "policy_denied"),
+            ("exec_command", json!({"host":"ordinary.invalid","command":"DO_NOT_LOG_PAYLOAD"}), "policy_denied"),
+            ("exec_command", json!({"host":"privileged.invalid","command":"DO_NOT_LOG_PAYLOAD"}), "policy_denied"),
+            ("exec_command", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","timeout_secs":601}), "invalid_argument"),
+            ("exec_command", json!({"host":"allowed","command":"DO_NOT_LOG_PAYLOAD","cwd":"relative"}), "invalid_argument"),
+            ("exec_command", json!({"host":"allowed","command":"bad\u{0}DO_NOT_LOG_PAYLOAD"}), "invalid_argument"),
+            ("exec_argv", json!({"host":"ordinary.invalid","argv":["DO_NOT_LOG_PAYLOAD"]}), "policy_denied"),
+            ("exec_argv", json!({"host":"allowed","argv":[]}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":[""]}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":["bad\u{0}DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":["true","bad\u{0}DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":["true"],"cwd":"relative"}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":["true"],"timeout_secs":0}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":["true"],"timeout_secs":601}), "invalid_argument"),
+            ("exec_argv", json!({"host":"allowed","argv":["true"],"stdin":"λ".repeat(33)}), "invalid_argument"),
+            ("exec_sudo", json!({"host":"disabled","argv":["/usr/bin/id"]}), "policy_denied"),
+            ("exec_sudo", json!({"host":"allowed","user":"service","argv":["/usr/bin/id"]}), "policy_denied"),
+            ("exec_sudo", json!({"host":"allowed","argv":["/bin/id"]}), "policy_denied"),
+            ("exec_sudo", json!({"host":"allowed","argv":["relative"]}), "invalid_argument"),
+            ("exec_sudo", json!({"host":"allowed","user":"bad DO_NOT_LOG_PAYLOAD","argv":["/usr/bin/id"]}), "invalid_argument"),
+            ("exec_sudo", json!({"host":"allowed","user":"DO_NOT_LOG_PAYLOAD","argv":["/usr/bin/id"]}), "policy_denied"),
+            ("exec_sudo", json!({"host":"allowed","argv":["DO_NOT_LOG_PAYLOAD"]}), "invalid_argument"),
+            ("exec_sudo", json!({"host":"allowed","argv":["/DO_NOT_LOG_PAYLOAD"]}), "policy_denied"),
         ].into_iter().enumerate() {
             let id = 20 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}})).await?;
@@ -934,7 +934,7 @@ async fn command_input_and_policy_failures_never_launch_ssh() -> Result<()> {
             record["event"] != "master_start",
             "rejected request launched SSH"
         );
-        if record["tool"] == "ssh_sudo" {
+        if record["tool"] == "exec_sudo" {
             ensure!(record["event"] == "reject");
             ensure!(
                 record.get("user").is_none() && record.get("program").is_none(),
@@ -978,7 +978,7 @@ async fn accepted_sudo_keeps_validated_identifiers_on_transport_failure() -> Res
         server.initialize().await?;
         server
             .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
-                "params":{"name":"ssh_sudo","arguments":{
+                "params":{"name":"exec_sudo","arguments":{
                     "host":"allowed","user":"root","argv":["/usr/bin/id"]}}}))
             .await?;
         let response = server.response(2).await?;
@@ -999,7 +999,7 @@ async fn accepted_sudo_keeps_validated_identifiers_on_transport_failure() -> Res
     let mut events = Vec::new();
     for line in stderr.split_inclusive(|byte| *byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
-        if record["tool"] == "ssh_sudo" && record["request_id"] == 2 {
+        if record["tool"] == "exec_sudo" && record["request_id"] == 2 {
             ensure!(record["user"] == "root" && record["program"] == "/usr/bin/id");
             ensure!(record["identity_role"] == "elevated");
             events.push(record["event"].as_str().context("audit event")?.to_owned());
@@ -1036,38 +1036,38 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
         let cases = [
             (
                 "apostrophe expansion",
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"allowed","command":format!("#{}", "'".repeat(65_535))}),
             ),
             (
                 "bang expansion",
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"allowed","command":"!".repeat(65_000)}),
             ),
             (
                 "nested cwd escaping",
-                "ssh_exec",
+                "exec_command",
                 // Both the raw cwd and inner script fit; outer shell escaping does not.
                 json!({"host":"allowed","command":"true","cwd":format!("/{}", "'".repeat(8_000))}),
             ),
             (
                 "ordinary argv quote expansion",
-                "ssh_run",
+                "exec_argv",
                 json!({"host":"allowed","argv":["true","'".repeat(20_000)]}),
             ),
             (
                 "ordinary cwd quote expansion",
-                "ssh_run",
+                "exec_argv",
                 json!({"host":"allowed","argv":["true"],"cwd":format!("/{}", "'".repeat(20_000))}),
             ),
             (
                 "empty ordinary arguments",
-                "ssh_run",
+                "exec_argv",
                 json!({"host":"allowed","argv":&argv}),
             ),
             (
                 "empty sudo arguments",
-                "ssh_sudo",
+                "exec_sudo",
                 json!({"host":"allowed","user":"root","argv":argv}),
             ),
         ];
@@ -1099,7 +1099,7 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
         server
             .send(json!({
                 "jsonrpc":"2.0", "id":20, "method":"tools/call",
-                "params":{"name":"ssh_targets","arguments":{}}
+                "params":{"name":"observe_targets","arguments":{}}
             }))
             .await?;
         let discovery = server.response(20).await?;
@@ -1118,18 +1118,18 @@ async fn encoded_command_rejections_precede_ssh_and_keep_session_usable() -> Res
         ensure!(
             rows[0]["permitted_operations"]
                 == json!([
-                    "ssh_exec",
-                    "ssh_list_directory",
-                    "ssh_mkdir",
-                    "ssh_read_file",
-                    "ssh_remove_directory",
-                    "ssh_remove_file",
-                    "ssh_rename",
-                    "ssh_replace_file",
-                    "ssh_run",
-                    "ssh_stat",
-                    "ssh_sudo",
-                    "ssh_write_file"
+                    "change_directory_remove",
+                    "change_file_remove",
+                    "change_file_replace",
+                    "change_file_write",
+                    "change_mkdir",
+                    "change_rename",
+                    "exec_argv",
+                    "exec_command",
+                    "exec_sudo",
+                    "inspect_directory",
+                    "inspect_file",
+                    "observe_stat"
                 ])
         );
         Ok::<_, anyhow::Error>(())
@@ -1178,35 +1178,35 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
         let tools = listed["result"]["tools"].as_array().context("budget tool catalog")?;
         for (name, arguments) in [
             (
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"127.0.0.1","command":"printf budget"}),
             ),
             (
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"127.0.0.1","command":"printf budget","retain_output":true}),
             ),
             (
-                "ssh_run",
+                "exec_argv",
                 json!({"host":"127.0.0.1","argv":["/usr/bin/true"],"retain_output":true}),
             ),
             (
-                "ssh_mkdir",
+                "change_mkdir",
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
             (
-                "ssh_rename",
+                "change_rename",
                 json!({"host":"127.0.0.1","source":"budget-private-source","destination":"budget-private-destination","overwrite":true}),
             ),
             (
-                "ssh_replace_file",
+                "change_file_replace",
                 json!({"host":"127.0.0.1","path":"budget-private-path","content":"x","overwrite":true}),
             ),
             (
-                "ssh_remove_file",
+                "change_file_remove",
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
             (
-                "ssh_remove_directory",
+                "change_directory_remove",
                 json!({"host":"127.0.0.1","path":"budget-private-path"}),
             ),
         ] {
@@ -1251,7 +1251,7 @@ async fn insufficient_reply_budget_rejects_before_ssh_and_keeps_session_usable()
         server
             .send(json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "ssh_targets", "arguments": {}}
+                "params": {"name": "observe_targets", "arguments": {}}
             }))
             .await?;
         let targets = server.response(2).await?;
@@ -1341,7 +1341,7 @@ fn no_remote_dispatch(stderr: &[u8]) -> Result<()> {
             "protocol rejection launched SSH"
         );
         ensure!(
-            record["tool"] != "ssh_exec",
+            record["tool"] != "exec_command",
             "protocol rejection reached remote handler"
         );
     }
@@ -1368,7 +1368,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
 
         // These hit distinct admission paths: bootstrap and an established inline session.
         server.send(modern_request(json!("rejected-bootstrap"), "tools/call", json!({
-            "name":"ssh_exec","arguments":{"host":"must-not-connect.invalid","command":"printf NEVER"}
+            "name":"exec_command","arguments":{"host":"must-not-connect.invalid","command":"printf NEVER"}
         }), "2099-01-01")).await?;
         let rejected = server.response_with_id(&json!("rejected-bootstrap")).await?.0;
         ensure!(rejected["error"]["code"] == -32022);
@@ -1378,16 +1378,16 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         server.send(modern_request(json!("tools"), "tools/list", json!({}), MODERN_VERSION)).await?;
         let listed = server.response_with_id(&json!("tools")).await?.0;
         let tools = listed["result"]["tools"].as_array().context("modern tool catalog")?;
-        for name in ["ssh_targets", "ssh_exec", "ssh_run", "ssh_read_file", "ssh_read_output", "ssh_stat", "ssh_list_directory", "ssh_mkdir", "ssh_remove_directory", "ssh_remove_file", "ssh_rename", "ssh_replace_file", "ssh_write_file"] {
+        for name in ["observe_targets", "exec_command", "exec_argv", "inspect_file", "inspect_output", "observe_stat", "inspect_directory", "change_mkdir", "change_directory_remove", "change_file_remove", "change_rename", "change_file_replace", "change_file_write"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
-        ensure!(!tools.iter().any(|tool| tool["name"] == "ssh_sudo"));
-        let run = tools.iter().find(|tool| tool["name"] == "ssh_run")
+        ensure!(!tools.iter().any(|tool| tool["name"] == "exec_sudo"));
+        let run = tools.iter().find(|tool| tool["name"] == "exec_argv")
             .context("run absent from modern discovery")?;
         ensure!(run["annotations"]["readOnlyHint"] == false);
         ensure!(run["annotations"]["destructiveHint"] == true);
         ensure!(run["annotations"]["idempotentHint"] == false);
-        let write = tools.iter().find(|tool| tool["name"] == "ssh_write_file")
+        let write = tools.iter().find(|tool| tool["name"] == "change_file_write")
             .context("write absent from modern discovery")?;
         ensure!(write["annotations"]["readOnlyHint"] == false);
         ensure!(write["annotations"]["destructiveHint"] == true);
@@ -1395,10 +1395,10 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         // Both are outstanding before either response is read; correlate by ID,
         // never assume handler completion order.
         server.send(modern_request(json!("targets"), "tools/call", json!({
-            "name":"ssh_targets","arguments":{}
+            "name":"observe_targets","arguments":{}
         }), MODERN_VERSION)).await?;
         server.send(modern_request(json!(17), "tools/call", json!({
-            "name":"ssh_targets","arguments":{"extra":true}
+            "name":"observe_targets","arguments":{"extra":true}
         }), MODERN_VERSION)).await?;
         let mut replies = [None, None];
         for _ in 0..2 {
@@ -1418,7 +1418,7 @@ async fn modern_discovery_calls_and_version_rejection_need_no_initialize() -> Re
         ensure!(invalid["error"]["code"] == -32602);
 
         server.send(modern_request(json!("rejected-inline"), "tools/call", json!({
-            "name":"ssh_exec","arguments":{"host":"must-not-connect.invalid","command":"printf NEVER"}
+            "name":"exec_command","arguments":{"host":"must-not-connect.invalid","command":"printf NEVER"}
         }), "2099-01-01")).await?;
         let rejected = server.response_with_id(&json!("rejected-inline")).await?.0;
         ensure!(rejected["error"]["code"] == -32022 && rejected.get("result").is_none());
@@ -1446,7 +1446,7 @@ async fn sigterm_closes_a_handshake_free_session_with_stdin_open() -> Result<()>
                 json!(1),
                 "tools/call",
                 json!({
-                    "name":"ssh_targets","arguments":{}
+                    "name":"observe_targets","arguments":{}
                 }),
                 MODERN_VERSION,
             ))
@@ -1472,7 +1472,7 @@ async fn fragmented_utf8_request_survives_multiple_pipe_writes() -> Result<()> {
         server.initialize().await?;
         let frame = serde_json::to_vec(&json!({
             "jsonrpc":"2.0","id":"fragmented","method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{},"_meta":{
+            "params":{"name":"observe_targets","arguments":{},"_meta":{
                 "h07/a-padding":"x".repeat(131_072),"h07/z-unicode":"🙂"
             }}
         }))?;
@@ -1514,7 +1514,7 @@ async fn malformed_input_is_isolated_and_following_requests_still_correlate() ->
         ensure!(rejected.get("id").is_none());
         ensure!(rejected["error"]["code"] == -32600 && rejected.get("result").is_none());
         server.send(json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}})).await?;
+            "params":{"name":"observe_targets","arguments":{}}})).await?;
         let healthy = server.response(7).await?;
         ensure!(healthy["result"]["structuredContent"]["data"]["mode"] == "configured");
         Ok::<_, anyhow::Error>(())
@@ -1541,25 +1541,25 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
     )?;
     let cases = [
         (
-            "ssh_targets",
+            "observe_targets",
             json!({"A12_PRIVATE_UNKNOWN_KEY":"/private/A12_PRIVATE_VALUE"}),
             "arguments",
             "unknown_field",
         ),
         (
-            "ssh_exec",
+            "exec_command",
             json!({"host":"A12_PRIVATE_HOST","command":["A12_PRIVATE_VALUE"]}),
             "arguments.command",
             "invalid_type",
         ),
         (
-            "ssh_exec",
+            "exec_command",
             json!({"host":"A12_PRIVATE_HOST"}),
             "arguments.command",
             "missing_field",
         ),
         (
-            "ssh_sudo",
+            "exec_sudo",
             json!({
                 "host":"A12_PRIVATE_HOST","user":"A12_PRIVATE_USER",
                 "argv":["/private/A12_PRIVATE_PROGRAM",{"A12_PRIVATE_UNKNOWN_KEY":"A12_PRIVATE_VALUE"}]
@@ -1568,7 +1568,7 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
             "invalid_type",
         ),
         (
-            "ssh_read_output",
+            "inspect_output",
             json!({
                 "handle":"0123456789abcdef0123456789abcdef","stream":"A12_PRIVATE_STREAM"
             }),
@@ -1576,7 +1576,7 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
             "invalid_enum",
         ),
         (
-            "ssh_read_output",
+            "inspect_output",
             json!({
                 "handle":"0123456789abcdef0123456789abcdef","stream":"stdout","offset":-1
             }),
@@ -1584,7 +1584,7 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
             "below_minimum",
         ),
         (
-            "ssh_exec",
+            "exec_command",
             json!({
                 "host":"A12_PRIVATE_HOST","command":"true","timeout_secs":-1
             }),
@@ -1649,13 +1649,13 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
         // Shape failures do not poison the session or change valid empty input.
         let targets = tools
             .iter()
-            .find(|tool| tool["name"] == "ssh_targets")
+            .find(|tool| tool["name"] == "observe_targets")
             .context("targets tool")?;
         ensure!(jsonschema::validator_for(&targets["inputSchema"])?.is_valid(&json!({})));
         server
             .send(json!({
                 "jsonrpc":"2.0","id":30,"method":"tools/call",
-                "params":{"name":"ssh_targets","arguments":{}}
+                "params":{"name":"observe_targets","arguments":{}}
             }))
             .await?;
         let healthy = server.response(30).await?;
@@ -1699,7 +1699,7 @@ async fn malformed_tool_arguments_expose_only_fixed_diagnostics_and_rejection_au
                 ensure!(record["remote_state_unknown"] == false);
                 ensure!(
                     record["identity_role"]
-                        == if *name == "ssh_sudo" {
+                        == if *name == "exec_sudo" {
                             "elevated"
                         } else {
                             "ordinary"
@@ -1732,7 +1732,7 @@ async fn eof_discards_unterminated_requests_without_dispatch_or_response() -> Re
             server.initialize().await?;
             let mut frame = serde_json::to_vec(&json!({
                 "jsonrpc":"2.0","id":"truncated","method":"tools/call",
-                "params":{"name":"ssh_exec","arguments":{
+                "params":{"name":"exec_command","arguments":{
                     "host":"must-not-connect.invalid","command":"printf TRUNCATED_PAYLOAD_NO_ECHO"
                 }}
             }))?;
@@ -1804,11 +1804,15 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 .collect::<Result<_>>()?;
             names.sort_unstable();
             ensure!(names == [
-                "clear_target_quarantine", "ssh_exec", "ssh_list_directory", "ssh_mkdir",
-                "ssh_read_file", "ssh_read_output", "ssh_remove_directory", "ssh_remove_file",
-                "ssh_rename", "ssh_replace_file", "ssh_run", "ssh_stat",
-                "ssh_sudo", "ssh_targets", "ssh_write_file",
+                "change_directory_remove", "change_file_remove", "change_file_replace",
+                "change_file_write", "change_mkdir", "change_rename",
+                "change_target_quarantine_clear", "exec_argv", "exec_command", "exec_sudo",
+                "inspect_directory", "inspect_file", "inspect_output", "observe_stat",
+                "observe_targets",
             ]);
+            for tool in tools {
+                ensure!(tool["_meta"]["risk_tier"].is_string(), "missing risk_tier on {}", tool["name"]);
+            }
             let mut id = 10;
             for tool in tools {
                 let name = tool["name"].as_str().context("builtin name")?;
@@ -1816,18 +1820,18 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 // references. Cargo disables both HTTP and file retrieval.
                 let validator = jsonschema::validator_for(&tool["inputSchema"])
                     .with_context(|| format!("invalid published inputSchema for {name}"))?;
-                if name == "ssh_targets" {
+                if name == "observe_targets" {
                     ensure!(validator.is_valid(&json!({})));
                     ensure!(!validator.is_valid(&json!({"extra":true})));
                     continue;
                 }
-                if name == "clear_target_quarantine" {
+                if name == "change_target_quarantine_clear" {
                     ensure!(validator.is_valid(&json!({"host":"unconfigured","acknowledge_remote_state_reconciled":true})));
                     ensure!(!validator.is_valid(&json!({"host":"unconfigured","acknowledge_remote_state_reconciled":false})));
                     ensure!(!validator.is_valid(&json!({"host":"unconfigured"})));
                     continue;
                 }
-                let mut base = if name == "ssh_read_output" {
+                let mut base = if name == "inspect_output" {
                     json!({"handle":handle,"stream":"stdout","max_bytes":1})
                 } else {
                     profile_call_arguments(name, "unconfigured")
@@ -1843,12 +1847,12 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 if base.get("argv").is_some() {
                     base["argv"] = json!(["/SCHEMA_INPUT_SECRET", ""]);
                 }
-                if name == "ssh_exec" {
+                if name == "exec_command" {
                     base["command"] = json!("SCHEMA_INPUT_SECRET");
                 }
-                let expected = if name == "ssh_read_output" { "not_found" } else { "policy_denied" };
+                let expected = if name == "inspect_output" { "not_found" } else { "policy_denied" };
                 let mut cases = vec![(base.clone(), true, expected)];
-                if name != "ssh_read_output" {
+                if name != "inspect_output" {
                     for (seconds, valid) in [
                         (0, false), (1, true), (max_timeout, true), (max_timeout + 1, false),
                     ] {
@@ -1871,14 +1875,14 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                         }
                     }
                 }
-                if matches!(name, "ssh_run" | "ssh_sudo") {
+                if matches!(name, "exec_argv" | "exec_sudo") {
                     for invalid in [json!([]), json!([""]), json!(["/SCHEMA_INPUT_SECRET", "bad\0argument"])] {
                         let mut arguments = base.clone();
                         arguments["argv"] = invalid;
                         cases.push((arguments, false, "invalid_argument"));
                     }
                 }
-                if name == "ssh_list_directory" {
+                if name == "inspect_directory" {
                     ensure!(tool["annotations"]["readOnlyHint"] == true);
                     ensure!(tool["annotations"]["idempotentHint"] == false);
                     for (token, valid) in [
@@ -1896,7 +1900,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                         cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
                     }
                 }
-                if matches!(name, "ssh_read_file" | "ssh_read_output") {
+                if matches!(name, "inspect_file" | "inspect_output") {
                     for (bytes, valid) in [
                         (0, false), (1, true), (max_file_bytes, true), (max_file_bytes + 1, false),
                         (9, !configured_limits),
@@ -1909,7 +1913,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                     arguments["offset"] = json!(u64::MAX);
                     cases.push((arguments, true, expected));
                 }
-                if name == "ssh_read_file" {
+                if name == "inspect_file" {
                     for (digest, valid) in [
                         (hash.clone(), true), (String::new(), false),
                         ("a".repeat(63), false), ("a".repeat(65), false), ("g".repeat(64), false),
@@ -1919,14 +1923,14 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                         cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
                     }
                 }
-                if name == "ssh_read_output" {
+                if name == "inspect_output" {
                     for invalid in ["".to_owned(), "a".repeat(31), "a".repeat(33), "F".repeat(32), "g".repeat(32)] {
                         let mut arguments = base.clone();
                         arguments["handle"] = json!(invalid);
                         cases.push((arguments, false, "invalid_argument"));
                     }
                 }
-                if name == "ssh_replace_file" {
+                if name == "change_file_replace" {
                     let mut arguments = base.clone();
                     arguments["overwrite"] = json!(false);
                     cases.push((arguments, false, "invalid_argument"));
@@ -1934,14 +1938,14 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                     arguments.as_object_mut().context("replace arguments")?.remove("overwrite");
                     cases.push((arguments, false, "invalid_params"));
                 }
-                if name == "ssh_rename" {
+                if name == "change_rename" {
                     let mut arguments = base.clone();
                     arguments.as_object_mut().context("rename arguments")?.remove("overwrite");
                     cases.push((arguments, false, "invalid_params"));
                 }
-                if configured_limits && matches!(name, "ssh_run" | "ssh_write_file" | "ssh_replace_file") {
+                if configured_limits && matches!(name, "exec_argv" | "change_file_write" | "change_file_replace") {
                     let mut arguments = base.clone();
-                    let field = if name == "ssh_run" { "stdin" } else { "content" };
+                    let field = if name == "exec_argv" { "stdin" } else { "content" };
                     // JSON Schema string lengths count characters, not UTF-8
                     // bytes. Runtime byte budgets remain authoritative.
                     arguments[field] = json!("λ".repeat(5));
@@ -1950,7 +1954,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 for (index, (mut arguments, schema_valid, code)) in cases.into_iter().enumerate() {
                     // Let invalid inputs reach their validator: an unconfigured
                     // host must not mask a missing limit check with policy denial.
-                    if name != "ssh_read_output" && matches!(code, "invalid_argument" | "invalid_params") {
+                    if name != "inspect_output" && matches!(code, "invalid_argument" | "invalid_params") {
                         arguments["host"] = json!("allowed");
                     }
                     ensure!(
@@ -1997,7 +2001,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 record["event"] != "master_start",
                 "schema acceptance launched SSH"
             );
-            if record["tool"] == "ssh_read_output" {
+            if record["tool"] == "inspect_output" {
                 ensure!(matches!(record["event"].as_str(), Some("start" | "finish")));
             } else {
                 ensure!(
@@ -2084,7 +2088,7 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
             let id = 100 + index as u64;
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_read_file","arguments":arguments}}))
+                "params":{"name":"inspect_file","arguments":arguments}}))
                 .await?;
             let called = server.response(id).await?;
             let result = &called["result"];
@@ -2107,13 +2111,13 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
         ] {
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_read_file","arguments":arguments}}))
+                "params":{"name":"inspect_file","arguments":arguments}}))
                 .await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602);
         }
         server
             .send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         ensure!(
             server.response(300).await?["result"]["structuredContent"]["data"]["mode"]
@@ -2132,7 +2136,7 @@ async fn read_validation_precedes_ssh_and_cannot_raise_the_wire_ceiling() -> Res
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
         ensure!(
-            record["tool"] != "ssh_read_file" || record["event"] == "reject",
+            record["tool"] != "inspect_file" || record["event"] == "reject",
             "invalid read was accepted before validation"
         );
     }
@@ -2167,7 +2171,7 @@ async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
             let id = 100 + index as u64;
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_stat","arguments":arguments}}))
+                "params":{"name":"observe_stat","arguments":arguments}}))
                 .await?;
             let called = server.response(id).await?;
             let result = &called["result"];
@@ -2185,13 +2189,13 @@ async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
         ] {
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_stat","arguments":arguments}}))
+                "params":{"name":"observe_stat","arguments":arguments}}))
                 .await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602);
         }
         server
             .send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         ensure!(
             server.response(300).await?["result"]["structuredContent"]["data"]["mode"]
@@ -2210,7 +2214,7 @@ async fn stat_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
         ensure!(
-            record["tool"] != "ssh_stat" || record["event"] == "reject",
+            record["tool"] != "observe_stat" || record["event"] == "reject",
             "invalid stat was accepted before validation"
         );
     }
@@ -2269,7 +2273,7 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
             let id = 100 + index as u64;
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_list_directory","arguments":arguments}}))
+                "params":{"name":"inspect_directory","arguments":arguments}}))
                 .await?;
             let called = server.response(id).await?;
             let result = &called["result"];
@@ -2290,7 +2294,7 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
             let id = 200 + index as u64;
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_list_directory","arguments":arguments}}))
+                "params":{"name":"inspect_directory","arguments":arguments}}))
                 .await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602);
         }
@@ -2306,7 +2310,7 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
     no_remote_dispatch(&stderr)?;
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
-        ensure!(record["tool"] != "ssh_list_directory" || record["event"] == "reject");
+        ensure!(record["tool"] != "inspect_directory" || record["event"] == "reject");
     }
     Ok(())
 }
@@ -2342,7 +2346,7 @@ async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
         ].into_iter().enumerate() {
             let id = 100 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_write_file","arguments":arguments}})).await?;
+                "params":{"name":"change_file_write","arguments":arguments}})).await?;
             let called = server.response(id).await?;
             let result = &called["result"];
             let reply = &result["structuredContent"];
@@ -2367,12 +2371,12 @@ async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
         ].into_iter().enumerate() {
             let id = 200 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_write_file","arguments":arguments}})).await?;
+                "params":{"name":"change_file_write","arguments":arguments}})).await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602,
                 "wrong-shaped write {index} reached the handler");
         }
         server.send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}})).await?;
+            "params":{"name":"observe_targets","arguments":{}}})).await?;
         let healthy = server.response(300).await?;
         ensure!(discovery_data(&healthy["result"], "configured")?["targets"] == json!([]));
         Ok::<_, anyhow::Error>(())
@@ -2387,7 +2391,7 @@ async fn write_validation_and_policy_precede_any_ssh_dispatch() -> Result<()> {
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let record: Value = serde_json::from_slice(line)?;
         ensure!(
-            record["tool"] != "ssh_write_file" || record["event"] == "reject",
+            record["tool"] != "change_file_write" || record["event"] == "reject",
             "invalid write was admitted before validation"
         );
         for field in ["path", "content", "payload"] {
@@ -2462,7 +2466,7 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
             let id = 100 + index as u64;
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_mkdir","arguments":arguments}}))
+                "params":{"name":"change_mkdir","arguments":arguments}}))
                 .await?;
             let called = server.response(id).await?;
             ensure!(
@@ -2509,7 +2513,7 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
             arguments[control] = value;
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":"ssh_mkdir","arguments":arguments}}))
+                "params":{"name":"change_mkdir","arguments":arguments}}))
                 .await?;
             let rejected = server.response(id).await?;
             ensure!(
@@ -2519,7 +2523,7 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
         }
         server
             .send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let healthy = server.response(300).await?;
         ensure!(
@@ -2545,7 +2549,7 @@ async fn mkdir_validation_and_private_inputs_reject_before_ssh_dispatch() -> Res
     for line in audit.lines() {
         let record: Value = serde_json::from_str(line)?;
         ensure!(
-            record["tool"] != "ssh_mkdir" || record["event"] == "reject",
+            record["tool"] != "change_mkdir" || record["event"] == "reject",
             "mkdir admitted before prevalidation"
         );
         for field in ["path", "content", "payload"] {
@@ -2599,7 +2603,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
                 .as_array()
                 .context("tool catalog")?
                 .iter()
-                .find(|tool| tool["name"] == "ssh_rename")
+                .find(|tool| tool["name"] == "change_rename")
                 .context("rename route")?;
             ensure!(rename["annotations"]["readOnlyHint"] == false);
             ensure!(rename["annotations"]["destructiveHint"] == true);
@@ -2680,7 +2684,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
                 let id = 100 + index as u64;
                 let mut arguments = valid.clone();
                 arguments[field] = value;
-                let params = json!({"name":"ssh_rename","arguments":arguments});
+                let params = json!({"name":"change_rename","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -2740,7 +2744,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
                 let id = 200 + index as u64;
                 let mut arguments = valid.clone();
                 arguments[control] = value;
-                let params = json!({"name":"ssh_rename","arguments":arguments});
+                let params = json!({"name":"change_rename","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -2757,7 +2761,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
                     "shape error disclosed paths"
                 );
             }
-            let params = json!({"name":"ssh_targets","arguments":{}});
+            let params = json!({"name":"observe_targets","arguments":{}});
             let request = if modern {
                 modern_request(json!(300), "tools/call", params, MODERN_VERSION)
             } else {
@@ -2795,7 +2799,7 @@ async fn ssh_rename_validation_schema_and_private_inputs_reject_before_ssh_dispa
         for line in audit.lines() {
             let record: Value = serde_json::from_str(line)?;
             ensure!(
-                record["tool"] != "ssh_rename" || record["event"] == "reject",
+                record["tool"] != "change_rename" || record["event"] == "reject",
                 "rename admitted before prevalidation"
             );
             for field in ["source", "destination", "path", "content", "payload"] {
@@ -2836,11 +2840,11 @@ async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()>
                 .as_array()
                 .context("tool list")?
                 .iter()
-                .any(|tool| tool["name"] == "ssh_sudo")
+                .any(|tool| tool["name"] == "exec_sudo")
         );
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let response = server.response(3).await?;
         let data = discovery_data(&response["result"], "configured")?;
@@ -2851,11 +2855,11 @@ async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()>
                 .as_array()
                 .context("target operations")?
                 .iter()
-                .any(|operation| operation == "ssh_sudo")
+                .any(|operation| operation == "exec_sudo")
         );
         server
             .send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
-            "params":{"name":"ssh_sudo","arguments":{"host":"one","argv":["/usr/bin/id"]}}}))
+            "params":{"name":"exec_sudo","arguments":{"host":"one","argv":["/usr/bin/id"]}}}))
             .await?;
         let denied = server.response(4).await?;
         ensure!(
@@ -2882,24 +2886,24 @@ async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()>
 // omission, rather than accidentally testing argument deserialization.
 fn profile_call_arguments(tool: &str, host: &str) -> Value {
     match tool {
-        "ssh_exec" => json!({"host":host,"command":"true"}),
-        "ssh_run" => json!({"host":host,"argv":["/usr/bin/true"]}),
-        "ssh_sudo" => json!({"host":host,"argv":["/usr/bin/true"]}),
-        "ssh_rename" => {
+        "exec_command" => json!({"host":host,"command":"true"}),
+        "exec_argv" => json!({"host":host,"argv":["/usr/bin/true"]}),
+        "exec_sudo" => json!({"host":host,"argv":["/usr/bin/true"]}),
+        "change_rename" => {
             json!({"host":host,"source":"/private/profile-payload-source","destination":"/private/profile-payload-destination","overwrite":true})
         }
-        "ssh_replace_file" => {
+        "change_file_replace" => {
             json!({"host":host,"path":"/private/profile-payload","content":"x","overwrite":true})
         }
-        "ssh_write_file" => {
+        "change_file_write" => {
             json!({"host":host,"path":"/private/profile-payload","content":"PROFILE_PAYLOAD"})
         }
-        "ssh_read_file"
-        | "ssh_stat"
-        | "ssh_list_directory"
-        | "ssh_mkdir"
-        | "ssh_remove_directory"
-        | "ssh_remove_file" => {
+        "inspect_file"
+        | "observe_stat"
+        | "inspect_directory"
+        | "change_mkdir"
+        | "change_directory_remove"
+        | "change_file_remove" => {
             json!({"host":host,"path":"/private/profile-payload"})
         }
         _ => panic!("unexpected profile test tool"),
@@ -2944,18 +2948,18 @@ fn profile_policy_denied(response: &Value) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Result<()> {
     let ordinary = [
-        "ssh_exec",
-        "ssh_list_directory",
-        "ssh_mkdir",
-        "ssh_read_file",
-        "ssh_remove_directory",
-        "ssh_remove_file",
-        "ssh_rename",
-        "ssh_replace_file",
-        "ssh_run",
-        "ssh_stat",
-        "ssh_sudo",
-        "ssh_write_file",
+        "exec_command",
+        "inspect_directory",
+        "change_mkdir",
+        "inspect_file",
+        "change_directory_remove",
+        "change_file_remove",
+        "change_rename",
+        "change_file_replace",
+        "exec_argv",
+        "observe_stat",
+        "exec_sudo",
+        "change_file_write",
     ];
     for (profile, caps, expected) in [
         (
@@ -2966,21 +2970,21 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
         (
             "read-only-files",
             "capabilities = { file_read = true }",
-            &["ssh_list_directory", "ssh_read_file", "ssh_stat"][..],
+            &["inspect_directory", "inspect_file", "observe_stat"][..],
         ),
         (
             "files-only",
             "capabilities = { file_read = true, file_write = true }",
             &[
-                "ssh_list_directory",
-                "ssh_mkdir",
-                "ssh_read_file",
-                "ssh_remove_directory",
-                "ssh_remove_file",
-                "ssh_rename",
-                "ssh_replace_file",
-                "ssh_stat",
-                "ssh_write_file",
+                "inspect_directory",
+                "change_mkdir",
+                "inspect_file",
+                "change_directory_remove",
+                "change_file_remove",
+                "change_rename",
+                "change_file_replace",
+                "observe_stat",
+                "change_file_write",
             ][..],
         ),
         ("actions-only", "capabilities = { named = true }", &[][..]),
@@ -3019,15 +3023,15 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                     let mut expected_operations: Vec<&str> = expected
                         .iter()
                         .copied()
-                        .filter(|name| *name != "ssh_sudo" || target_kind == "sudo")
+                        .filter(|name| *name != "exec_sudo" || target_kind == "sudo")
                         .collect();
                     expected_operations.sort_unstable();
                     let mut expected_routes = expected_operations.clone();
                     if matches!(profile, "baseline" | "actions-only") {
-                        expected_routes.push("clear_target_quarantine");
+                        expected_routes.push("change_target_quarantine_clear");
                     }
-                    expected_routes.push("ssh_targets");
-                    expected_routes.push("ssh_read_output");
+                    expected_routes.push("observe_targets");
+                    expected_routes.push("inspect_output");
                     expected_routes.sort_unstable();
                     let params = json!({});
                     let request = if modern {
@@ -3049,13 +3053,13 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                         "{profile}/{target_kind}/{modern}: {names:?}"
                     );
                     for tool in listed["result"]["tools"].as_array().context("profile annotations")? {
-                        if tool["name"] == "ssh_run" || tool["name"] == "ssh_write_file" {
+                        if tool["name"] == "exec_argv" || tool["name"] == "change_file_write" {
                             ensure!(tool["annotations"]["readOnlyHint"] == false);
                             ensure!(tool["annotations"]["destructiveHint"] == true);
                             ensure!(tool["annotations"]["idempotentHint"] == false);
                         }
                     }
-                    let params = json!({"name":"ssh_targets","arguments":{}});
+                    let params = json!({"name":"observe_targets","arguments":{}});
                     let request = if modern {
                         modern_request(json!(3), "tools/call", params, MODERN_VERSION)
                     } else {
@@ -3074,7 +3078,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                         );
                         ensure!(data["targets"][0]["observed_capabilities"] == "unknown");
                     }
-                    let params = json!({"name":"ssh_read_output","arguments":{"handle":"0123456789abcdef0123456789abcdef","stream":"stdout","max_bytes":1}});
+                    let params = json!({"name":"inspect_output","arguments":{"handle":"0123456789abcdef0123456789abcdef","stream":"stdout","max_bytes":1}});
                     let request = if modern {
                         modern_request(json!(4), "tools/call", params, MODERN_VERSION)
                     } else {
@@ -3178,7 +3182,7 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
         ensure!(listed["result"]["tools"].as_array().context("tools")?.len() == 15);
         server
             .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-            "params":{"name":"ssh_targets","arguments":{}}}))
+            "params":{"name":"observe_targets","arguments":{}}}))
             .await?;
         let discovered = server.response(3).await?;
         let rows = discovery_data(&discovered["result"], "configured")?["targets"]
@@ -3189,52 +3193,52 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             (
                 "base",
                 json!([
-                    "ssh_exec",
-                    "ssh_list_directory",
-                    "ssh_mkdir",
-                    "ssh_read_file",
-                    "ssh_remove_directory",
-                    "ssh_remove_file",
-                    "ssh_rename",
-                    "ssh_replace_file",
-                    "ssh_run",
-                    "ssh_stat",
-                    "ssh_write_file"
+                    "change_directory_remove",
+                    "change_file_remove",
+                    "change_file_replace",
+                    "change_file_write",
+                    "change_mkdir",
+                    "change_rename",
+                    "exec_argv",
+                    "exec_command",
+                    "inspect_directory",
+                    "inspect_file",
+                    "observe_stat"
                 ]),
             ),
             (
                 "empty",
                 json!([
-                    "ssh_exec",
-                    "ssh_list_directory",
-                    "ssh_mkdir",
-                    "ssh_read_file",
-                    "ssh_remove_directory",
-                    "ssh_remove_file",
-                    "ssh_rename",
-                    "ssh_replace_file",
-                    "ssh_run",
-                    "ssh_stat",
-                    "ssh_write_file"
+                    "change_directory_remove",
+                    "change_file_remove",
+                    "change_file_replace",
+                    "change_file_write",
+                    "change_mkdir",
+                    "change_rename",
+                    "exec_argv",
+                    "exec_command",
+                    "inspect_directory",
+                    "inspect_file",
+                    "observe_stat"
                 ]),
             ),
             (
                 "files",
                 json!([
-                    "ssh_list_directory",
-                    "ssh_mkdir",
-                    "ssh_read_file",
-                    "ssh_remove_directory",
-                    "ssh_remove_file",
-                    "ssh_rename",
-                    "ssh_replace_file",
-                    "ssh_stat",
-                    "ssh_write_file"
+                    "change_directory_remove",
+                    "change_file_remove",
+                    "change_file_replace",
+                    "change_file_write",
+                    "change_mkdir",
+                    "change_rename",
+                    "inspect_directory",
+                    "inspect_file",
+                    "observe_stat"
                 ]),
             ),
             (
                 "read",
-                json!(["ssh_list_directory", "ssh_read_file", "ssh_stat"]),
+                json!(["inspect_directory", "inspect_file", "observe_stat"]),
             ),
         ] {
             let row = rows
@@ -3248,37 +3252,37 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
             (
                 "read",
                 &[
-                    "ssh_exec",
-                    "ssh_run",
-                    "ssh_write_file",
-                    "ssh_mkdir",
-                    "ssh_remove_directory",
-                    "ssh_remove_file",
-                    "ssh_rename",
-                    "ssh_replace_file",
-                    "ssh_sudo",
+                    "exec_command",
+                    "exec_argv",
+                    "change_file_write",
+                    "change_mkdir",
+                    "change_directory_remove",
+                    "change_file_remove",
+                    "change_rename",
+                    "change_file_replace",
+                    "exec_sudo",
                 ][..],
             ),
-            ("files", &["ssh_exec", "ssh_run", "ssh_sudo"][..]),
+            ("files", &["exec_command", "exec_argv", "exec_sudo"][..]),
             (
                 "actions",
                 &[
-                    "ssh_exec",
-                    "ssh_run",
-                    "ssh_write_file",
-                    "ssh_sudo",
-                    "ssh_read_file",
-                    "ssh_stat",
-                    "ssh_list_directory",
-                    "ssh_mkdir",
-                    "ssh_remove_directory",
-                    "ssh_remove_file",
-                    "ssh_rename",
-                    "ssh_replace_file",
+                    "exec_command",
+                    "exec_argv",
+                    "change_file_write",
+                    "exec_sudo",
+                    "inspect_file",
+                    "observe_stat",
+                    "inspect_directory",
+                    "change_mkdir",
+                    "change_directory_remove",
+                    "change_file_remove",
+                    "change_rename",
+                    "change_file_replace",
                 ][..],
             ),
-            ("base", &["ssh_sudo"][..]),
-            ("empty", &["ssh_sudo"][..]),
+            ("base", &["exec_sudo"][..]),
+            ("empty", &["exec_sudo"][..]),
         ] {
             for tool in forbidden {
                 server
@@ -3327,9 +3331,9 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
         .enumerate()
         {
             let tool = if index == 0 {
-                "ssh_targets"
+                "observe_targets"
             } else {
-                "ssh_exec"
+                "exec_command"
             };
             let id = 10 + index as u64;
             server
@@ -3350,22 +3354,22 @@ async fn startup_profile_cannot_be_selected_by_mcp_or_reloaded() -> Result<()> {
             .as_array()
             .context("immutable tool list")?;
         ensure!(tools.len() == 3);
-        for name in ["clear_target_quarantine", "ssh_read_output", "ssh_targets"] {
+        for name in ["change_target_quarantine_clear", "inspect_output", "observe_targets"] {
             ensure!(tools.iter().any(|tool| tool["name"] == name));
         }
         for (index, tool) in [
-            "ssh_exec",
-            "ssh_run",
-            "ssh_sudo",
-            "ssh_read_file",
-            "ssh_stat",
-            "ssh_list_directory",
-            "ssh_write_file",
-            "ssh_mkdir",
-            "ssh_remove_directory",
-            "ssh_remove_file",
-            "ssh_rename",
-            "ssh_replace_file",
+            "exec_command",
+            "exec_argv",
+            "exec_sudo",
+            "inspect_file",
+            "observe_stat",
+            "inspect_directory",
+            "change_file_write",
+            "change_mkdir",
+            "change_directory_remove",
+            "change_file_remove",
+            "change_rename",
+            "change_file_replace",
         ]
         .into_iter()
         .enumerate()
@@ -3549,13 +3553,14 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         let tools = listed["result"]["tools"].as_array().context("named tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["change_account", "clear_target_quarantine", "observe_account", "ssh_read_output", "ssh_targets"]);
-        for (name, revision, effects, read_only, destructive) in [
-            ("observe_account", "review-1", json!(["read", "sensitive_read"]), true, false),
-            ("change_account", "change-2", json!(["persistent_write"]), false, true),
+        ensure!(names == ["change_account", "change_target_quarantine_clear", "inspect_output", "observe_account", "observe_targets"]);
+        for (name, revision, effects, tier, read_only, destructive) in [
+            ("observe_account", "review-1", json!(["read", "sensitive_read"]), "inspect", true, false),
+            ("change_account", "change-2", json!(["persistent_write"]), "change", false, true),
         ] {
             let tool = tools.iter().find(|tool| tool["name"] == name).context("binding metadata")?;
             ensure!(tool["_meta"] == json!({
+                "risk_tier": tier,
                 "revision": revision,
                 "authority": "ordinary",
                 "effects": effects,
@@ -3598,7 +3603,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         for name in ["host", "account", "count", "verbose"] {
             ensure!(required.contains(&json!(name)));
         }
-        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let discovered = server.response(3).await?;
         binding_public_only(&serde_json::to_vec(&discovered)?)?;
         let rows = discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("binding target rows")?;
@@ -3619,7 +3624,7 @@ async fn named_tools_publish_reviewed_metadata_and_freeze_startup_selection() ->
         )?;
         server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}})).await?;
         ensure!(server.response(4).await?["result"] == listed["result"]);
-        for (index, tool) in ["disabled_account", "ssh_exec", "ssh_run", "ssh_sudo"].into_iter().enumerate() {
+        for (index, tool) in ["disabled_account", "exec_command", "exec_argv", "exec_sudo"].into_iter().enumerate() {
             let arguments = if tool == "disabled_account" { json!({"host":"base"}) } else { profile_call_arguments(tool, "base") };
             let id = 10 + index as u64;
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).await?;
@@ -3705,7 +3710,7 @@ async fn named_tool_validation_and_target_policy_precede_ssh() -> Result<()> {
                 ensure!(response["error"]["code"] == -32602, "case {index}: {response}");
             }
         }
-        server.send(json!({"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         discovery_data(&server.response(200).await?["result"], "configured")?;
         Ok::<_, anyhow::Error>(())
     }.await;
@@ -3754,7 +3759,7 @@ async fn file_profiles_do_not_publish_enabled_native_bindings() -> Result<()> {
             }
             server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_account","arguments":{"host":"base","account":"root","count":0,"verbose":false}}})).await?;
             ensure!(server.response(3).await?["error"]["code"] == -32602);
-            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
             let response = server.response(4).await?;
             for row in discovery_data(&response["result"], "configured")?["targets"].as_array().context("profile rows")? {
                 let operations = row["permitted_operations"].as_array().context("profile operations")?;
@@ -3835,9 +3840,9 @@ async fn invalid_named_tool_definitions_fail_before_mcp_without_private_values()
             "account = { type = \"string\"",
             "account = { default = \"BINDING_CONFIG_SECRET\", type = \"string\"",
         ),
-        ("[tools.disabled_account]", "[tools.ssh_exec]"),
-        ("[tools.disabled_account]", "[tools.ssh_sudo]"),
-        ("[tools.disabled_account]", "[tools.ssh_targets]"),
+        ("[tools.disabled_account]", "[tools.exec_command]"),
+        ("[tools.disabled_account]", "[tools.exec_sudo]"),
+        ("[tools.disabled_account]", "[tools.observe_targets]"),
         (
             "program = \"/private/binding-disabled\"",
             "program = \"BINDING_CONFIG_SECRET\"",
@@ -3896,7 +3901,7 @@ async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<(
                 .context("baseline tools")?;
             let command_schema = &tools
                 .iter()
-                .find(|tool| tool["name"] == "ssh_run")
+                .find(|tool| tool["name"] == "exec_argv")
                 .context("actual command route")?["outputSchema"];
             ensure!(command_schema.is_object());
             for name in names {
@@ -3990,13 +3995,14 @@ async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Re
         let tools = listed["result"]["tools"].as_array().context("fixed sudo tools")?;
         let mut names: Vec<_> = tools.iter().map(|tool| tool["name"].as_str().context("tool name")).collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["clear_target_quarantine", "fixed_id", "fixed_printf", "ssh_read_output", "ssh_targets"]);
+        ensure!(names == ["change_target_quarantine_clear", "fixed_id", "fixed_printf", "inspect_output", "observe_targets"]);
         for (name, revision, effects, read_only, destructive) in [
             ("fixed_id", "id-1", json!(["read"]), true, false),
             ("fixed_printf", "printf-1", json!(["persistent_write"]), false, true),
         ] {
             let tool = tools.iter().find(|tool| tool["name"] == name).context("fixed sudo metadata")?;
             ensure!(tool["_meta"] == json!({
+                "risk_tier": "exec",
                 "revision": revision,
                 "authority": {"sudo": "root"},
                 "effects": effects,
@@ -4040,7 +4046,7 @@ async fn fixed_sudo_tools_publish_safe_authority_and_independent_effects() -> Re
             let public = serde_json::to_string(tool)?;
             ensure!(!public.contains("/usr/bin/id") && !public.contains("/usr/bin/printf"));
         }
-        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let discovered = server.response(3).await?;
         binding_public_only(&serde_json::to_vec(&discovered)?)?;
         let rows = discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("fixed sudo target rows")?;
@@ -4072,7 +4078,7 @@ async fn fixed_sudo_controls_and_target_policy_reject_before_ssh() -> Result<()>
     let scenario = async {
         server.initialize().await?;
         let mut id = 2;
-        for tool in ["ssh_exec", "ssh_run", "ssh_sudo"] {
+        for tool in ["exec_command", "exec_argv", "exec_sudo"] {
             server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":profile_call_arguments(tool, "base")}})).await?;
             ensure!(server.response(id).await?["error"]["code"] == -32602);
             id += 1;
@@ -4108,7 +4114,7 @@ async fn fixed_sudo_controls_and_target_policy_reject_before_ssh() -> Result<()>
                 id += 1;
             }
         }
-        server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         discovery_data(&server.response(id).await?["result"], "configured")?;
         Ok::<_, anyhow::Error>(())
     }.await;
@@ -4135,12 +4141,12 @@ async fn fixed_sudo_file_profiles_hide_routes_and_reject_direct_calls() -> Resul
             server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
             let listed = server.response(2).await?;
             let tools = listed["result"]["tools"].as_array().context("file profile tools")?;
-            for (index, name) in ["fixed_id", "fixed_printf", "ssh_sudo"].into_iter().enumerate() {
+            for (index, name) in ["fixed_id", "fixed_printf", "exec_sudo"].into_iter().enumerate() {
                 ensure!(!tools.iter().any(|tool| tool["name"] == name));
                 let id = 3 + index as u64;
                 let arguments = match name {
                     "fixed_printf" => json!({"host":"base","value":"BINDING_INPUT_SECRET"}),
-                    "ssh_sudo" => profile_call_arguments(name, "base"),
+                    "exec_sudo" => profile_call_arguments(name, "base"),
                     _ => json!({"host":"base"}),
                 };
                 server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await?;
@@ -4148,7 +4154,7 @@ async fn fixed_sudo_file_profiles_hide_routes_and_reject_direct_calls() -> Resul
                 ensure!(response["error"]["code"] == -32602);
                 binding_public_only(&serde_json::to_vec(&response)?)?;
             }
-            server.send(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
             let discovered = server.response(6).await?;
             for row in discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("file profile target rows")? {
                 let operations = row["permitted_operations"].as_array().context("file profile operations")?;
@@ -4558,6 +4564,7 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
             let tools = listed["result"]["tools"].as_array().context("controller tools")?;
             let tool = tools.iter().find(|tool| tool["name"] == "observe_controller").context("controller route")?;
             ensure!(tool["_meta"] == json!({
+                "risk_tier":"observe",
                 "revision":"review-controller-1", "authority":"controller", "effects":["read"],
                 "executor":"controller_script", "result":"controller_command", "execution_location":"controller",
                 "trusted_controller_code": true,
@@ -4615,11 +4622,11 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
                 ensure!(!schema_has_property(output, field), "remote schema field {field}");
             }
             if profile == "baseline" {
-                let native = tools.iter().find(|tool| tool["name"] == "ssh_run").context("native command")?;
+                let native = tools.iter().find(|tool| tool["name"] == "exec_argv").context("native command")?;
                 ensure!(native["outputSchema"] != *output);
                 ensure!(schema_has_property(&native["outputSchema"], "remote_may_still_be_running"));
             }
-            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
             let discovered = server.response(3).await?;
             fixture.public_only(&serde_json::to_vec(&discovered)?)?;
             let targets = discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("targets")?;
@@ -4791,13 +4798,13 @@ async fn controller_enablement_profiles_and_inactive_native_independence() -> Re
             let listed = server.response(2).await?;
             let tools = listed["result"]["tools"].as_array().context("inactive tools")?;
             ensure!(!tools.iter().any(|tool| tool["name"] == "observe_controller"));
-            ensure!(tools.iter().any(|tool| tool["name"] == "ssh_targets"));
+            ensure!(tools.iter().any(|tool| tool["name"] == "observe_targets"));
             if profile == "baseline" {
-                ensure!(tools.iter().any(|tool| tool["name"] == "ssh_run"), "native route depends on inactive controller");
+                ensure!(tools.iter().any(|tool| tool["name"] == "exec_argv"), "native route depends on inactive controller");
             }
             server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_controller","arguments":{"label":"CONTROLLER_INPUT_SECRET","count":1,"verbose":true}}})).await?;
             ensure!(server.response(3).await?["error"]["code"] == -32602);
-            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
             let discovered = server.response(4).await?;
             for row in discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("inactive targets")? {
                 ensure!(!row["permitted_operations"].as_array().context("operations")?.contains(&json!("observe_controller")));
@@ -4878,7 +4885,7 @@ async fn controller_malformed_definitions_fail_sanitized_startup_even_when_inact
             "MCP_APPLICATION =",
             "MCP_lowercase =",
         ),
-        ("built-in collision", "observe_controller", "ssh_run"),
+        ("built-in collision", "observe_controller", "exec_argv"),
         (
             "duplicate selection",
             "enabled_tools = [\"observe_controller\"]",
@@ -5123,14 +5130,17 @@ async fn remote_transport_failure_never_executes_controller_source_as_fallback()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_remove_file_validation_schema_and_private_inputs_reject_before_ssh_dispatch()
 -> Result<()> {
-    remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch("ssh_remove_file").await
+    remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch("change_file_remove")
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_remove_directory_validation_schema_and_private_inputs_reject_before_ssh_dispatch()
 -> Result<()> {
-    remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch("ssh_remove_directory")
-        .await
+    remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
+        "change_directory_remove",
+    )
+    .await
 }
 
 async fn remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
@@ -5376,7 +5386,7 @@ async fn remove_validation_schema_and_private_inputs_reject_before_ssh_dispatch(
                 );
                 ensure!(!serde_json::to_string(&rejected)?.contains("REMOVE_FILE_PRIVATE_"));
             }
-            let params = json!({"name":"ssh_targets","arguments":{}});
+            let params = json!({"name":"observe_targets","arguments":{}});
             let request = if modern {
                 modern_request(json!(300), "tools/call", params, MODERN_VERSION)
             } else {
@@ -5468,7 +5478,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
                 .as_array()
                 .context("tool catalog")?
                 .iter()
-                .find(|tool| tool["name"] == "ssh_replace_file")
+                .find(|tool| tool["name"] == "change_file_replace")
                 .context("replace route")?;
             ensure!(replace["annotations"]["readOnlyHint"] == false);
             ensure!(replace["annotations"]["destructiveHint"] == true);
@@ -5585,7 +5595,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
                 let id = 100 + index as u64;
                 let mut arguments = valid.clone();
                 arguments[field] = value;
-                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let params = json!({"name":"change_file_replace","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -5698,7 +5708,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
                     "host":host,"path":path,"content":content,"encoding":encoding,
                     "overwrite":true,"timeout_secs":requested_timeout
                 });
-                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let params = json!({"name":"change_file_replace","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -5757,7 +5767,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
                 let id = 200 + index as u64;
                 let mut arguments = valid.clone();
                 arguments[field] = value;
-                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let params = json!({"name":"change_file_replace","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -5781,7 +5791,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
                     .as_object_mut()
                     .context("replace arguments")?
                     .remove(field);
-                let params = json!({"name":"ssh_replace_file","arguments":arguments});
+                let params = json!({"name":"change_file_replace","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -5795,7 +5805,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
                 );
                 ensure!(!serde_json::to_string(&rejected)?.contains("REPLACE_PRIVATE_"));
             }
-            let params = json!({"name":"ssh_targets","arguments":{}});
+            let params = json!({"name":"observe_targets","arguments":{}});
             let request = if modern {
                 modern_request(json!(300), "tools/call", params, MODERN_VERSION)
             } else {
@@ -5828,7 +5838,7 @@ async fn ssh_replace_file_validation_schema_and_privacy_precede_ssh() -> Result<
         }
         for line in audit.lines() {
             let record: Value = serde_json::from_str(line)?;
-            ensure!(record["tool"] != "ssh_replace_file" || record["event"] == "reject");
+            ensure!(record["tool"] != "change_file_replace" || record["event"] == "reject");
             for field in [
                 "path",
                 "content",
@@ -5867,12 +5877,12 @@ async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result
                 .as_array()
                 .context("replace budget tool catalog")?
                 .iter()
-                .any(|tool| tool["name"] == "ssh_replace_file")
+                .any(|tool| tool["name"] == "change_file_replace")
         );
         let mut request = modern_request(
             json!(""),
             "tools/call",
-            json!({"name":"ssh_replace_file","arguments":{
+            json!({"name":"change_file_replace","arguments":{
                 "host":"127.0.0.1","path":"REPLACE_PRIVATE_PATH",
                 "content":"REPLACE_PRIVATE_CONTENT","overwrite":true
             }}),
@@ -5895,7 +5905,7 @@ async fn ssh_replace_file_modern_actual_id_budget_rejects_before_ssh() -> Result
             .send(modern_request(
                 json!(2),
                 "tools/call",
-                json!({"name":"ssh_targets","arguments":{}}),
+                json!({"name":"observe_targets","arguments":{}}),
                 MODERN_VERSION,
             ))
             .await?;
@@ -5945,7 +5955,7 @@ async fn ssh_output_read_contract_validation_and_privacy_need_no_ssh() -> Result
             server.send(request).await?;
             let listed = server.response(2).await?;
             let tools = listed["result"]["tools"].as_array().context("output catalog")?;
-            let tool = tools.iter().find(|tool| tool["name"] == "ssh_read_output").context("read output route")?;
+            let tool = tools.iter().find(|tool| tool["name"] == "inspect_output").context("read output route")?;
             ensure!(tool["annotations"]["readOnlyHint"] == true);
             ensure!(tool["annotations"]["destructiveHint"] == false);
             let schema = &tool["inputSchema"];
@@ -5989,7 +5999,7 @@ async fn ssh_output_read_contract_validation_and_privacy_need_no_ssh() -> Result
             }
             for (index, (arguments, code)) in cases.into_iter().enumerate() {
                 let id = 10 + index as u64;
-                let params = json!({"name":"ssh_read_output","arguments":arguments});
+                let params = json!({"name":"inspect_output","arguments":arguments});
                 let request = if modern {
                     modern_request(json!(id), "tools/call", params, MODERN_VERSION)
                 } else {
@@ -6015,7 +6025,7 @@ async fn ssh_output_read_contract_validation_and_privacy_need_no_ssh() -> Result
             // The range fits operator limits and an ordinary request ID, but not
             // this request's remaining response budget. Lookup must not mask it.
             let id = json!("r".repeat(16_777_216 - 2048));
-            let params = json!({"name":"ssh_read_output","arguments":{"handle":handle,"stream":"stdout","max_bytes":1024,"encoding":"base64"}});
+            let params = json!({"name":"inspect_output","arguments":{"handle":handle,"stream":"stdout","max_bytes":1024,"encoding":"base64"}});
             let request = if modern {
                 modern_request(id.clone(), "tools/call", params, MODERN_VERSION)
             } else {
@@ -6088,7 +6098,7 @@ async fn controller_output_optional_receipt_is_local_readable_and_private() -> R
             ensure!(receipt["stdout"] == json!({"bytes_retained":stdout.len(),"total_bytes":stdout.len(),"truncated":false}));
             ensure!(receipt["stderr"] == json!({"bytes_retained":0,"total_bytes":0,"truncated":false}));
             private_receipts.push(handle.to_owned());
-            server.send(json!({"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"ssh_read_output","arguments":{"handle":handle,"stream":"stdout","max_bytes":1024}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"inspect_output","arguments":{"handle":handle,"stream":"stdout","max_bytes":1024}}})).await?;
             let read = server.response(30).await?;
             ensure!(read["result"]["isError"] != true, "{read}");
             let read_data = &read["result"]["structuredContent"]["data"];
@@ -6096,7 +6106,7 @@ async fn controller_output_optional_receipt_is_local_readable_and_private() -> R
             ensure!(read_data["bytes_read"] == stdout.len());
             ensure!(read_data["next_offset"] == stdout.len() && read_data["eof"] == true);
             ensure!(read_data["content_sha256"] == hex::encode(Sha256::digest(stdout.as_bytes())));
-            server.send(json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"ssh_read_output","arguments":{"handle":handle,"stream":"stderr","max_bytes":1,"encoding":"base64"}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"inspect_output","arguments":{"handle":handle,"stream":"stderr","max_bytes":1,"encoding":"base64"}}})).await?;
             let empty = server.response(31).await?;
             ensure!(empty["result"]["isError"] != true);
             let empty_data = &empty["result"]["structuredContent"]["data"];
@@ -6118,7 +6128,7 @@ async fn controller_output_optional_receipt_is_local_readable_and_private() -> R
     }
     for line in audit.lines() {
         let record: Value = serde_json::from_str(line)?;
-        if record["tool"] == "ssh_read_output" {
+        if record["tool"] == "inspect_output" {
             for field in ["host", "path", "handle", "stdout", "stderr", "content"] {
                 ensure!(
                     record.get(field).is_none_or(Value::is_null),
@@ -6172,7 +6182,7 @@ async fn controller_output_actual_id_receipt_budget_precedes_dispatch() -> Resul
             }
         }
         server.send(modern_request(json!("usable"), "tools/call", json!({
-            "name":"ssh_read_output","arguments":{"handle":"0123456789abcdef0123456789abcdef","stream":"stdout","max_bytes":1}
+            "name":"inspect_output","arguments":{"handle":"0123456789abcdef0123456789abcdef","stream":"stdout","max_bytes":1}
         }), MODERN_VERSION)).await?;
         ensure!(server.response_with_id(&json!("usable")).await?.0["result"]["structuredContent"]["error"]["code"] == "not_found");
         Ok::<_, anyhow::Error>(())
@@ -6194,9 +6204,9 @@ async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() ->
         (
             builtin,
             vec![
-                ("ssh_exec", json!({"host":"base","command":"true"})),
-                ("ssh_run", json!({"host":"base","argv":["/usr/bin/true"]})),
-                ("ssh_sudo", json!({"host":"base","argv":["/usr/bin/true"]})),
+                ("exec_command", json!({"host":"base","command":"true"})),
+                ("exec_argv", json!({"host":"base","argv":["/usr/bin/true"]})),
+                ("exec_sudo", json!({"host":"base","argv":["/usr/bin/true"]})),
             ],
         ),
         (
@@ -6256,7 +6266,7 @@ async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() ->
                 ensure!(bytes <= 16_777_216);
                 ensure!(!directory.path().join("binding-must-not-probe").exists(), "{name}: rejected output request probed SSH");
             }
-            server.send(json!({"jsonrpc":"2.0","id":500,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+            server.send(json!({"jsonrpc":"2.0","id":500,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
             ensure!(server.response(500).await?["result"]["isError"] != true);
             Ok::<_, anyhow::Error>(())
         }.await;
@@ -6284,7 +6294,7 @@ async fn directory_cursor_discovery_and_output_schema_are_consumer_visible() -> 
     )?;
     let scenario = async {
         server.initialize().await?;
-        server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let response = server.response(2).await?;
         let data = discovery_data(&response["result"], "configured")?;
         ensure!(data["limits"]["max_directory_cursors"] == 1);
@@ -6292,7 +6302,7 @@ async fn directory_cursor_discovery_and_output_schema_are_consumer_visible() -> 
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})).await?;
         let response = server.response(3).await?;
         let tool = response["result"]["tools"].as_array().context("tools")?
-            .iter().find(|tool| tool["name"] == "ssh_list_directory").context("listing route")?;
+            .iter().find(|tool| tool["name"] == "inspect_directory").context("listing route")?;
         ensure!(tool["annotations"]["readOnlyHint"] == true);
         ensure!(tool["annotations"]["idempotentHint"] == false);
         let input = jsonschema::validator_for(&tool["inputSchema"])?;
@@ -6463,14 +6473,14 @@ fi
                 json!(100),
                 "tools/call",
                 json!({
-                    "name": "ssh_read_output",
+                    "name": "inspect_output",
                     "arguments": {"handle": handle, "stream": "stdout", "max_bytes": 1024}
                 }),
                 MODERN_VERSION,
             ))
             .await?;
         let read = server.response(100).await?;
-        ensure!(read["result"]["isError"] != true, "ssh_read_output failed: {read}");
+        ensure!(read["result"]["isError"] != true, "inspect_output failed: {read}");
         ensure!(
             read["result"]["structuredContent"]["data"]["content"] == data["stdout"],
             "read output mismatch"
@@ -6574,7 +6584,7 @@ done
             .send(modern_request(
                 json!(101),
                 "tools/call",
-                json!({"name": "ssh_exec", "arguments": {"host": "unconfigured", "command": "true"}}),
+                json!({"name": "exec_command", "arguments": {"host": "unconfigured", "command": "true"}}),
                 MODERN_VERSION,
             ))
             .await?;
@@ -6583,7 +6593,7 @@ done
             .send(modern_request(
                 json!(102),
                 "tools/call",
-                json!({"name": "ssh_read_file", "arguments": {"host": "unconfigured", "path": "/etc/hosts"}}),
+                json!({"name": "inspect_file", "arguments": {"host": "unconfigured", "path": "/etc/hosts"}}),
                 MODERN_VERSION,
             ))
             .await?;
@@ -6643,7 +6653,14 @@ async fn empty_config_defaults_to_headless_named_only() -> Result<()> {
             .map(|t| t["name"].as_str().context("tool name"))
             .collect::<Result<_>>()?;
         names.sort_unstable();
-        ensure!(names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"]);
+        ensure!(
+            names
+                == [
+                    "change_target_quarantine_clear",
+                    "inspect_output",
+                    "observe_targets"
+                ]
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -6678,8 +6695,8 @@ config_file = "replacement.conf"
 ssh_host = "prod-web.invalid"
 [rules."prod-*"]
 deny_tiers = ["exec", "change"]
-allow_tools = ["ssh_stat", "ssh_read_file"]
-[rules."*-web".constraints.ssh_read_file.path]
+allow_tools = ["observe_stat", "inspect_file"]
+[rules."*-web".constraints.inspect_file.path]
 enum = ["/etc/hosts"]
 "#,
     )?;
@@ -6687,10 +6704,10 @@ enum = ["/etc/hosts"]
     let scenario = async {
         server.initialize().await?;
         for (id, name, arguments) in [
-            (2, "ssh_exec", json!({"host": "prod-web", "command": "true"})),
-            (3, "ssh_write_file", json!({"host": "prod-web", "path": "/tmp/a", "content": "x"})),
-            (4, "ssh_list_directory", json!({"host": "prod-web", "path": "/etc"})),
-            (5, "ssh_read_file", json!({"host": "prod-web", "path": "/etc/shadow"})),
+            (2, "exec_command", json!({"host": "prod-web", "command": "true"})),
+            (3, "change_file_write", json!({"host": "prod-web", "path": "/tmp/a", "content": "x"})),
+            (4, "inspect_directory", json!({"host": "prod-web", "path": "/etc"})),
+            (5, "inspect_file", json!({"host": "prod-web", "path": "/etc/shadow"})),
         ] {
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}))

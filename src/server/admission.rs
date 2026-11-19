@@ -187,7 +187,7 @@ impl TargetAdmission {
         if gate.is_quarantined() {
             return Err(ToolError::new(
                 "target_quarantined",
-                "Target is quarantined after an uncertain remote mutation; inspect target state and run clear_target_quarantine after independent reconciliation",
+                "Target is quarantined after an uncertain remote mutation; inspect target state and run change_target_quarantine_clear after independent reconciliation",
                 false,
             ));
         }

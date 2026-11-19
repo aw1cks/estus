@@ -180,7 +180,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                     "invalid_argument",
                 ),
             ] {
-                rejected(&call(&mut wire, &mut id, "ssh_write_file", json!({
+                rejected(&call(&mut wire, &mut id, "change_file_write", json!({
                 "host":"plain","path":path,"content":content,"encoding":encoding,"overwrite":true
             }), &credentials).await?, code)?;
             }
@@ -200,7 +200,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let first = call(
                 &mut wire,
                 &mut id,
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"plain",
             "command":"/usr/bin/printf '%s' \"$SSH_CONNECTION\""}),
                 &credentials,
@@ -231,7 +231,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 let written = call(
                     &mut wire,
                     &mut id,
-                    "ssh_write_file",
+                    "change_file_write",
                     json!({
                         "host":"plain","path":path,"content":content,"encoding":encoding
                     }),
@@ -243,7 +243,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 let read = call(
                     &mut wire,
                     &mut id,
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({
                         "host":"plain","path":path,"encoding":encoding
                     }),
@@ -263,7 +263,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let unusual = call(
                 &mut wire,
                 &mut id,
-                "ssh_write_file",
+                "change_file_write",
                 json!({
                     "host":"plain","path":unusual_path,"content":FILE_MARKER
                 }),
@@ -275,7 +275,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let unusual = call(
                 &mut wire,
                 &mut id,
-                "ssh_read_file",
+                "inspect_file",
                 json!({
                     "host":"plain","path":unusual_path
                 }),
@@ -292,7 +292,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 (9, 2, &binary[6..], 9, true),
             ] {
                 let hash = digest(&fixture, bytes).await?;
-                let read = call(&mut wire, &mut id, "ssh_read_file", json!({
+                let read = call(&mut wire, &mut id, "inspect_file", json!({
                 "host":"plain","path":"/tmp/v03-files/binary","encoding":"base64",
                 "offset":offset,"max_bytes":limit,"expected_content_sha256":hash.to_uppercase()
             }), &credentials).await?;
@@ -307,7 +307,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let mismatch = call(
                 &mut wire,
                 &mut id,
-                "ssh_read_file",
+                "inspect_file",
                 json!({
                     "host":"plain","path":"/tmp/v03-files/binary","encoding":"base64",
                     "offset":2,"max_bytes":3,"expected_content_sha256":EMPTY_SHA256
@@ -320,7 +320,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 &call(
                     &mut wire,
                     &mut id,
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({
                         "host":"plain","path":"/tmp/v03-files/binary"
                     }),
@@ -334,7 +334,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 &call(
                     &mut wire,
                     &mut id,
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({
                         "host":"plain","path":"/tmp/v03-files/utf8",
                         "offset":unicode_offset,"max_bytes":1
@@ -347,7 +347,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let existing = call(
                 &mut wire,
                 &mut id,
-                "ssh_write_file",
+                "change_file_write",
                 json!({
                     "host":"plain","path":"/tmp/v03-files/preserved","content":FILE_MARKER
                 }),
@@ -360,7 +360,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 let written = call(
                     &mut wire,
                     &mut id,
-                    "ssh_write_file",
+                    "change_file_write",
                     json!({
                         "host":"plain","path":"/tmp/v03-files/preserved",
                         "content":std::str::from_utf8(bytes)?,"overwrite":true
@@ -373,7 +373,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 let read = call(
                     &mut wire,
                     &mut id,
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({
                         "host":"plain","path":"/tmp/v03-files/preserved"
                     }),
@@ -431,7 +431,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 } else {
                     json!({"host":"plain","path":"/tmp/v03-files/link"})
                 };
-                let stat = call(&mut wire, &mut id, "ssh_stat", args, &credentials).await?;
+                let stat = call(&mut wire, &mut id, "observe_stat", args, &credentials).await?;
                 let data = succeeded(&stat)?;
                 ensure!(data["kind"] == if follow { "file" } else { "symlink" });
                 ensure!(data["size"] == 6 && data["uid"] == 1000 && data["gid"] == 1000);
@@ -440,7 +440,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let names = call(
                 &mut wire,
                 &mut id,
-                "ssh_list_directory",
+                "inspect_directory",
                 json!({
                     "host":"plain","path":"/tmp/v03-files/names"
                 }),
@@ -477,7 +477,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                     args["max_entries"] = json!(limit);
                 }
                 let listed =
-                    call(&mut wire, &mut id, "ssh_list_directory", args, &credentials).await?;
+                    call(&mut wire, &mut id, "inspect_directory", args, &credentials).await?;
                 let data = succeeded(&listed)?;
                 let entries = data["entries"]
                     .as_array()
@@ -501,7 +501,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             id += 1;
             wire.send(
                 json!({"jsonrpc":"2.0","id":held_id,"method":"tools/call","params":{
-            "name":"ssh_exec","arguments":{"host":"plain","timeout_secs":30,
+            "name":"exec_command","arguments":{"host":"plain","timeout_secs":30,
             "command":indoc! {r#"
                 /usr/bin/printf '%s' "$SSH_CONNECTION" > /tmp/v03-files/started
                 i=0
@@ -539,7 +539,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let read = call(
                 &mut wire,
                 &mut id,
-                "ssh_read_file",
+                "inspect_file",
                 json!({
                     "host":"plain","path":"/tmp/v03-files/utf8"
                 }),
@@ -550,7 +550,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let stat = call(
                 &mut wire,
                 &mut id,
-                "ssh_stat",
+                "observe_stat",
                 json!({
                     "host":"plain","path":"/tmp/v03-files/binary"
                 }),
@@ -575,7 +575,7 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let after = call(
                 &mut wire,
                 &mut id,
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"plain",
             "command":"/usr/bin/printf '%s' \"$SSH_CONNECTION\""}),
                 &credentials,
@@ -610,19 +610,19 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
             let before = fixture.nosftp_logs().await?;
             for (tool, args) in [
                 (
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({"host":"nosftp","path":"/tmp/v03-files/source"}),
                 ),
                 (
-                    "ssh_write_file",
+                    "change_file_write",
                     json!({"host":"nosftp","path":"/tmp/v03-files/upload","content":FILE_MARKER}),
                 ),
                 (
-                    "ssh_stat",
+                    "observe_stat",
                     json!({"host":"nosftp","path":"/tmp/v03-files/source"}),
                 ),
                 (
-                    "ssh_list_directory",
+                    "inspect_directory",
                     json!({"host":"nosftp","path":"/tmp/v03-files"}),
                 ),
             ] {
@@ -690,10 +690,10 @@ async fn ssh_lossless_files_and_exec_sftp_multiplexing() -> Result<()> {
                 }
             }
             for tool in [
-                "ssh_write_file",
-                "ssh_read_file",
-                "ssh_stat",
-                "ssh_list_directory",
+                "change_file_write",
+                "inspect_file",
+                "observe_stat",
+                "inspect_directory",
             ] {
                 ensure!(
                     wire.log

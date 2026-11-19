@@ -22,6 +22,7 @@ mod validation;
 
 pub(crate) use discovery::{CleanupDiagnostics, TargetDiscovery};
 pub(crate) use loading::{Cli, CliCommand, DoctorArgs, RuntimeKind};
+pub(crate) use policy::{risk_tier_for_binding, risk_tier_for_builtin};
 pub(crate) use rules::HostRule;
 pub(crate) use validation::{account_name, destination};
 #[cfg(test)]
@@ -49,21 +50,21 @@ pub(crate) enum ToolId {
 impl ToolId {
     pub(crate) const fn wire_name(self) -> &'static str {
         match self {
-            Self::Targets => "ssh_targets",
-            Self::ReadOutput => "ssh_read_output",
-            Self::Exec => "ssh_exec",
-            Self::Run => "ssh_run",
-            Self::ReadFile => "ssh_read_file",
-            Self::WriteFile => "ssh_write_file",
-            Self::Mkdir => "ssh_mkdir",
-            Self::Rename => "ssh_rename",
-            Self::RemoveFile => "ssh_remove_file",
-            Self::RemoveDirectory => "ssh_remove_directory",
-            Self::ReplaceFile => "ssh_replace_file",
-            Self::Stat => "ssh_stat",
-            Self::ListDirectory => "ssh_list_directory",
-            Self::Sudo => "ssh_sudo",
-            Self::ClearTargetQuarantine => "clear_target_quarantine",
+            Self::Targets => "observe_targets",
+            Self::ReadOutput => "inspect_output",
+            Self::Exec => "exec_command",
+            Self::Run => "exec_argv",
+            Self::ReadFile => "inspect_file",
+            Self::WriteFile => "change_file_write",
+            Self::Mkdir => "change_mkdir",
+            Self::Rename => "change_rename",
+            Self::RemoveFile => "change_file_remove",
+            Self::RemoveDirectory => "change_directory_remove",
+            Self::ReplaceFile => "change_file_replace",
+            Self::Stat => "observe_stat",
+            Self::ListDirectory => "inspect_directory",
+            Self::Sudo => "exec_sudo",
+            Self::ClearTargetQuarantine => "change_target_quarantine_clear",
         }
     }
 }

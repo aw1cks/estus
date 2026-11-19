@@ -45,7 +45,7 @@ fn failed(reply: &Value, code: &str) -> Result<()> {
 
 async fn exec(client: &Client, command: &str) -> Result<Value> {
     client
-        .call("ssh_exec", json!({"host":"plain","command":command}))
+        .call("exec_command", json!({"host":"plain","command":command}))
         .await
 }
 
@@ -172,15 +172,15 @@ fn capacity_script(
 async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let listed = timeout(Duration::from_secs(5), client.service.list_tools(None)).await??;
     for name in [
-        "ssh_targets",
-        "ssh_exec",
-        "ssh_run",
-        "ssh_sudo",
-        "ssh_read_file",
-        "ssh_read_output",
-        "ssh_stat",
-        "ssh_list_directory",
-        "ssh_write_file",
+        "observe_targets",
+        "exec_command",
+        "exec_argv",
+        "exec_sudo",
+        "inspect_file",
+        "inspect_output",
+        "observe_stat",
+        "inspect_directory",
+        "change_file_write",
     ] {
         let tool = listed
             .tools
@@ -190,7 +190,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         ensure!(tool.output_schema.is_some(), "{name} missing outputSchema");
     }
     let initial_auth = fixture.authentications();
-    let targets = client.call("ssh_targets", json!({})).await?;
+    let targets = client.call("observe_targets", json!({})).await?;
     ensure!(succeeded(&targets)?["mode"] == "configured");
     for target in succeeded(&targets)?["targets"]
         .as_array()
@@ -200,69 +200,69 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
             .as_array()
             .context("target operations")?;
         ensure!(
-            !operations.contains(&json!("ssh_read_output")),
+            !operations.contains(&json!("inspect_output")),
             "hostless read listed per target"
         );
     }
     // Every policy-negative case runs before the first valid command. No sudo is executed.
     for (name, args, code) in [
         (
-            "ssh_exec",
+            "exec_command",
             json!({"host":"unknown-logical-target","command":"printf NEVER"}),
             "policy_denied",
         ),
         (
-            "ssh_exec",
+            "exec_command",
             json!({"host":"jump","command":"printf NEVER"}),
             "policy_denied",
         ),
         (
-            "ssh_sudo",
+            "exec_sudo",
             json!({"host":"plain","argv":["/usr/bin/true"]}),
             "policy_denied",
         ),
         (
-            "ssh_sudo",
+            "exec_sudo",
             json!({"host":"restricted","user":"not-allowed","argv":["/usr/bin/true"]}),
             "policy_denied",
         ),
         (
-            "ssh_sudo",
+            "exec_sudo",
             json!({"host":"restricted","argv":["/bin/sh","-c","printf NEVER"]}),
             "policy_denied",
         ),
         (
-            "ssh_sudo",
+            "exec_sudo",
             json!({"host":"restricted","argv":["relative"]}),
             "invalid_argument",
         ),
         (
-            "ssh_exec",
+            "exec_command",
             json!({"host":"plain","command":"true","timeout_secs":0}),
             "invalid_argument",
         ),
         (
-            "ssh_exec",
+            "exec_command",
             json!({"host":"plain","command":"true","timeout_secs":16}),
             "invalid_argument",
         ),
         (
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":[]}),
             "invalid_argument",
         ),
         (
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":[""]}),
             "invalid_argument",
         ),
         (
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":["bad\u{0000}program"]}),
             "invalid_argument",
         ),
         (
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":["/bin/sh","bad\u{0000}argument"]}),
             "invalid_argument",
         ),
@@ -321,7 +321,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     fs::create_dir_all(&unusual)?;
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"plain","command":"printf '%s' \"$PWD\"","cwd":unusual}),
         )
         .await?;
@@ -366,7 +366,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let stdin = "stdin before\0after\n日本語";
     let reply = client
         .call(
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":argv,"cwd":unusual,"stdin":stdin}),
         )
         .await?;
@@ -394,7 +394,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     );
     let reply = client
         .call(
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":["/bin/sh","-c","printf %s \"$PWD\""]}),
         )
         .await?;
@@ -403,7 +403,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         "ssh_run cwd carried over to a later channel"
     );
     let reply = client
-        .call("ssh_run", json!({"host":"plain","argv":["true"]}))
+        .call("exec_argv", json!({"host":"plain","argv":["true"]}))
         .await?;
     ensure!(
         succeeded(&reply)?["exit_code"] == 0,
@@ -415,7 +415,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         "-ESTUS_MISSING_EXECUTABLE_8f19",
     ] {
         let reply = client
-            .call("ssh_run", json!({"host":"plain","argv":[program]}))
+            .call("exec_argv", json!({"host":"plain","argv":[program]}))
             .await?;
         failed(&reply, "command_failed")?;
         ensure!(
@@ -427,7 +427,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         ensure!(reply["error"]["remote_state_unknown"] == false);
     }
     let secret = "SYNTHETIC_STDIN_PAYLOAD_77c940";
-    let reply = client.call("ssh_exec", json!({"host":"plain","command":"printf SYNTHETIC_COMMAND_MARKER_07b9; printf SYNTHETIC_STDERR_MARKER_319a >&2; cat","stdin":secret})).await?;
+    let reply = client.call("exec_command", json!({"host":"plain","command":"printf SYNTHETIC_COMMAND_MARKER_07b9; printf SYNTHETIC_STDERR_MARKER_319a >&2; cat","stdin":secret})).await?;
     let data = succeeded(&reply)?;
     ensure!(
         data["stdout"] == format!("SYNTHETIC_COMMAND_MARKER_07b9{secret}")
@@ -436,7 +436,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     // POSIX printf octal escapes generate invalid UTF-8 on both streams.
     let reply = client
         .call(
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":["/bin/sh","-c","printf '\\377'; printf '\\376' >&2"]}),
         )
         .await?;
@@ -446,7 +446,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         "binary output must disclose lossy decoding"
     );
     ensure!(data["stdout"] == "\u{fffd}" && data["stderr"] == "\u{fffd}");
-    let reply = client.call("ssh_run", json!({"host":"plain","argv":["/bin/sh","-c","i=0; while [ \"$i\" -lt 4096 ]; do printf x; printf y >&2; i=$((i+1)); done; cat; exit 7"],"stdin":"z".repeat(8192)})).await?;
+    let reply = client.call("exec_argv", json!({"host":"plain","argv":["/bin/sh","-c","i=0; while [ \"$i\" -lt 4096 ]; do printf x; printf y >&2; i=$((i+1)); done; cat; exit 7"],"stdin":"z".repeat(8192)})).await?;
     failed(&reply, "command_failed")?;
     let data = &reply["data"];
     ensure!(
@@ -463,7 +463,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     let before_jump = auth_after_first;
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"viajump","command":"printf JUMP_OK"}),
         )
         .await?;
@@ -471,7 +471,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     fixture.await_authentications(before_jump + 2).await?;
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"nosftp","command":"printf NO_SUBSYSTEM_NEEDED"}),
         )
         .await?;
@@ -500,7 +500,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     );
     let (timed, unaffected) = tokio::join!(
         client.call(
-            "ssh_run",
+            "exec_argv",
             json!({"host":"plain","argv":["/bin/sh","-c",command],"timeout_secs":1})
         ),
         async {
@@ -542,7 +542,7 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
         quote(&cancel_done.to_string_lossy())
     );
     let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
-        "ssh_run",
+        "exec_argv",
         json!({"host":"plain","argv":["/bin/sh","-c",command],"timeout_secs":10}),
     )));
     let handle = timeout(
@@ -619,14 +619,14 @@ fn audit_boundary(log: &Log) -> Result<()> {
         }
         if !matches!(
             record["tool"].as_str(),
-            Some("ssh_targets" | "ssh_read_output")
+            Some("observe_targets" | "inspect_output")
         ) {
             ensure!(
                 record.get("host").is_some(),
                 "remote request audit missing logical host"
             );
         }
-        if record["tool"] == "ssh_run" {
+        if record["tool"] == "exec_argv" {
             ensure!(record["identity_role"] == "ordinary");
             ensure!(
                 record.get("program").is_none() && record.get("user").is_none(),
@@ -714,10 +714,10 @@ async fn shutdown_case(fixture: &Fixture, sigterm: bool) -> Result<()> {
     let mut server = WireServer::start(&fixture.config)?;
     let scenario = async {
         server.initialize().await?;
-        let response = server.request(2, "tools/call", json!({"name":"ssh_exec","arguments":{"host":"plain","command":"printf SHUTDOWN_READY"}})).await?;
+        let response = server.request(2, "tools/call", json!({"name":"exec_command","arguments":{"host":"plain","command":"printf SHUTDOWN_READY"}})).await?;
         ensure!(response["result"]["structuredContent"]["data"]["stdout"] == "SHUTDOWN_READY", "shutdown setup did not run a real command: {response}");
         let command = format!("printf started > {}; sleep 3; printf done > {}", quote(&started.to_string_lossy()), quote(&done.to_string_lossy()));
-        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_exec","arguments":{"host":"plain","command":command,"timeout_secs":10}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"exec_command","arguments":{"host":"plain","command":command,"timeout_secs":10}}})).await?;
         dispatched = true;
         Fixture::await_file(&started).await?;
         masters(&server.log)
@@ -818,7 +818,7 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
     let calls = futures_util::future::join_all(
         requests
             .into_iter()
-            .map(|request| client.call("ssh_exec", request)),
+            .map(|request| client.call("exec_command", request)),
     );
     let rejection = async {
         let outcome = async {
@@ -828,7 +828,7 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
             ensure!(!expired.exists(), "channels expired before rejection");
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({
                         "host":"resource",
                         "command":format!("printf WRONG > {}", quote(&forbidden.to_string_lossy())),
@@ -864,7 +864,7 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
     observed_masters(&client.log, before_masters + 1).await?;
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"resource","command":"printf REUSED_AFTER_LIMIT"}),
         )
         .await?;
@@ -890,7 +890,7 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
         quote(&done.to_string_lossy()),
     );
     let request = client.call(
-        "ssh_run",
+        "exec_argv",
         json!({"host":"resource","argv":["/bin/sh","-c",command]}),
     );
     let disconnect = async {
@@ -922,7 +922,7 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
     assert_masters_gone(std::slice::from_ref(&owned)).await?;
     let recovered = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"resource","command":"printf RECONNECTED_WITHOUT_REPLAY"}),
         )
         .await?;
@@ -943,12 +943,12 @@ async fn independent_connection_deadlines(fixture: &Fixture, client: &Client) ->
     let before_auth = fixture.authentications();
     let proxy_started = fixture.root.path().join("delayed-started");
     let short = client.call(
-        "ssh_exec",
+        "exec_command",
         json!({"host":"delayed","command":"printf SHORT_MUST_NOT_RUN","timeout_secs":1}),
     );
     let follower = async {
         Fixture::await_file(&proxy_started).await?;
-        client.call("ssh_exec", json!({"host":"delayed","command":"printf LONG_FOLLOWER_SUCCEEDED","timeout_secs":10})).await
+        client.call("exec_command", json!({"host":"delayed","command":"printf LONG_FOLLOWER_SUCCEEDED","timeout_secs":10})).await
     };
     let (short, follower) = tokio::join!(short, follower);
     let short = short?;
@@ -992,7 +992,7 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
     let calls = futures_util::future::join_all(
         requests
             .into_iter()
-            .map(|request| client.call("ssh_exec", request)),
+            .map(|request| client.call("exec_command", request)),
     );
     let rejection = async {
         let outcome = async {
@@ -1000,7 +1000,7 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
                 Fixture::await_file(&path).await?;
             }
             ensure!(!expired.exists(), "operations expired before rejection");
-            let reply = client.call("ssh_targets", json!({})).await?;
+            let reply = client.call("observe_targets", json!({})).await?;
             failed(&reply, "resource_limit")?;
             ensure!(
                 reply["data"].is_null(),
@@ -1027,7 +1027,7 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
     );
     fixture.await_authentications(before_auth + 4).await?;
     observed_masters(&client.log, before_masters + 4).await?;
-    let targets = client.call("ssh_targets", json!({})).await?;
+    let targets = client.call("observe_targets", json!({})).await?;
     ensure!(
         succeeded(&targets)?["mode"] == "configured",
         "completed work did not release operation permits"
@@ -1108,7 +1108,7 @@ async fn ssh_master_eviction_across_twenty_targets_and_immediate_reacquire() -> 
                 let target = format!("sweep{i:02}");
                 let reply = client
                     .call(
-                        "ssh_exec",
+                        "exec_command",
                         json!({"host": target, "command": format!("printf %s {target}")}),
                     )
                     .await?;
@@ -1143,7 +1143,7 @@ async fn ssh_master_eviction_across_twenty_targets_and_immediate_reacquire() -> 
             ensure!(closed.status.success(), "failed to exit test master");
             let reacquired = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host": "sweep19", "command": "printf REACQUIRED"}),
                 )
                 .await?;
@@ -1233,7 +1233,7 @@ async fn ssh_channel_timeout() -> Result<()> {
                 Fixture::await_file(&sibling_started).await?;
                 let reply = client
                     .call(
-                        "ssh_run",
+                        "exec_argv",
                         json!({"host":"plain","argv":["/bin/sh","-c",quiet]}),
                     )
                     .await?;
@@ -1433,7 +1433,7 @@ async fn ssh_response_wire_budget() -> Result<()> {
                     id.clone(),
                     "tools/call",
                     json!({
-                        "name":"ssh_exec",
+                        "name":"exec_command",
                         "arguments":{"host":"plain","command":command},
                     }),
                 )
@@ -1481,7 +1481,7 @@ async fn ssh_response_wire_budget() -> Result<()> {
                 .request(
                     3,
                     "tools/call",
-                    json!({"name":"ssh_exec","arguments":{
+                    json!({"name":"exec_command","arguments":{
                         "host":"plain","command":"printf RAW_AFTER_BUDGET",
                     }}),
                 )
@@ -1584,16 +1584,16 @@ async fn ssh_encoded_command_budget() -> Result<()> {
             argv[0] = "/usr/bin/true";
             for (name, arguments) in [
                 (
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"plain","command":format!("#{}", "'".repeat(LIMIT - 1))}),
                 ),
                 (
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"plain","command":"true","cwd":format!("/{}", "'".repeat(8192))}),
                 ),
                 // This authorized target must never connect, much less run host sudo.
                 (
-                    "ssh_sudo",
+                    "exec_sudo",
                     json!({"host":"restricted","user":"root","argv":argv}),
                 ),
             ] {
@@ -1807,7 +1807,7 @@ async fn ssh_setenv_isolation() -> Result<()> {
         let commands = async {
             for &(host, _, _, _) in &controls {
                 let reply = client
-                    .call("ssh_exec", json!({"host":host,"command":probe}))
+                    .call("exec_command", json!({"host":host,"command":probe}))
                     .await?;
                 let data = succeeded(&reply)?;
                 ensure!(data["stdout"] == "1:::", "configured SetEnv reached {host}");
@@ -1817,16 +1817,16 @@ async fn ssh_setenv_isolation() -> Result<()> {
             fs::write(&path, b"SFTP_ENV_ISOLATED")?;
             for &(host, _, _, _) in &controls {
                 let reply = client
-                    .call("ssh_read_file", json!({"host":host,"path":path}))
+                    .call("inspect_file", json!({"host":host,"path":path}))
                     .await?;
                 ensure!(succeeded(&reply)?["content"] == "SFTP_ENV_ISOLATED");
                 let reply = client
-                    .call("ssh_stat", json!({"host":host,"path":path}))
+                    .call("observe_stat", json!({"host":host,"path":path}))
                     .await?;
                 ensure!(succeeded(&reply)? == &native_stat_data(&path, false)?);
                 let reply = client
                     .call(
-                        "ssh_list_directory",
+                        "inspect_directory",
                         json!({"host":host,"path":fixture.root.path()}),
                     )
                     .await?;
@@ -1844,7 +1844,7 @@ async fn ssh_setenv_isolation() -> Result<()> {
                     .join(format!("environment-write-{host}"));
                 let reply = client
                     .call(
-                        "ssh_write_file",
+                        "change_file_write",
                         json!({"host":host,"path":destination,"content":"WRITE_ENV_ISOLATED"}),
                     )
                     .await?;
@@ -1930,7 +1930,7 @@ async fn ssh_closed_stderr() -> Result<()> {
         cwd: &std::path::Path,
     ) -> Result<Value> {
         let response = server.request(id, "tools/call",
-            json!({"name":"ssh_exec","arguments":{"host":host,"command":command,"cwd":cwd,"timeout_secs":10}}))
+            json!({"name":"exec_command","arguments":{"host":host,"command":command,"cwd":cwd,"timeout_secs":10}}))
             .await?;
         ensure!(response["error"].is_null(), "wire call failed: {response}");
         ensure!(
@@ -2014,7 +2014,7 @@ async fn ssh_closed_stderr() -> Result<()> {
                                 quote(&work.path().to_string_lossy()),
                                 quote(&started.to_string_lossy()), quote(&done.to_string_lossy()));
                             server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-                                "params":{"name":"ssh_exec","arguments":{"host":"plain","command":command}}})).await?;
+                                "params":{"name":"exec_command","arguments":{"host":"plain","command":command}}})).await?;
                             Fixture::await_file(&started).await?;
                             server.close_stderr().await?;
                             let response = server.receive(json!(3)).await?.0;
@@ -2041,7 +2041,7 @@ async fn ssh_closed_stderr() -> Result<()> {
                             }).await.context("pool recovery exceeded deadline")??;
                         } else {
                             server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
-                                "params":{"name":"ssh_exec","arguments":{"host":"delayed",
+                                "params":{"name":"exec_command","arguments":{"host":"delayed",
                                     "command":"printf DELAYED_READY","cwd":work.path(),"timeout_secs":10}}})).await?;
                             Fixture::await_file(&proxy_started).await?;
                             timeout(support::CLEANUP, async {
@@ -2072,7 +2072,7 @@ async fn ssh_closed_stderr() -> Result<()> {
                             quote(&shutdown_started.to_string_lossy()),
                             quote(&shutdown_done.to_string_lossy()));
                         server.send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call",
-                            "params":{"name":"ssh_exec","arguments":{"host":host,"command":command}}})).await?;
+                            "params":{"name":"exec_command","arguments":{"host":host,"command":command}}})).await?;
                         Fixture::await_file(&shutdown_started).await?;
                         Ok::<_, anyhow::Error>(())
                     }.await;
@@ -2221,7 +2221,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         } else if content.is_empty() {
             args["expected_content_sha256"] = json!(EMPTY_SHA256);
         }
-        let reply = client.call("ssh_read_file", args).await?;
+        let reply = client.call("inspect_file", args).await?;
         ensure!(
             succeeded(&reply)?
                 == &json!({
@@ -2245,7 +2245,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     relative.push(root.strip_prefix("/")?);
     relative.push("read-text");
     let reply = client
-        .call("ssh_read_file", json!({"host":"plain","path":relative}))
+        .call("inspect_file", json!({"host":"plain","path":relative}))
         .await?;
     ensure!(
         succeeded(&reply)?["content"] == "abcdef",
@@ -2257,7 +2257,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     fs::write(&large, contents.as_bytes())?;
     let reply = client
         .call(
-            "ssh_read_file",
+            "inspect_file",
             json!({"host":"plain","path":large,"max_bytes":300_000}),
         )
         .await?;
@@ -2272,7 +2272,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     let binary_digest = local_sha256(&[0, 255, 128, 65]).await?;
     let reply = client
         .call(
-            "ssh_read_file",
+            "inspect_file",
             json!({"host":"plain","path":binary,"encoding":"base64",
                 "expected_content_sha256":binary_digest}),
         )
@@ -2291,7 +2291,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         json!({"host":"plain","path":unicode,"offset":1}),
         json!({"host":"plain","path":binary}),
     ] {
-        let reply = client.call("ssh_read_file", args).await?;
+        let reply = client.call("inspect_file", args).await?;
         failed(&reply, "invalid_encoding")?;
         ensure!(reply["data"].is_null(), "lossy or partial UTF8 success");
         ensure!(reply["error"]["remote_state_unknown"] == false);
@@ -2300,7 +2300,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     let unusual = root.join("quote' \" ; $(printf EVALUATED)\n*");
     fs::write(&unusual, b"LITERAL_PATH")?;
     let reply = client
-        .call("ssh_read_file", json!({"host":"plain","path":unusual}))
+        .call("inspect_file", json!({"host":"plain","path":unusual}))
         .await?;
     ensure!(succeeded(&reply)?["content"] == "LITERAL_PATH");
 
@@ -2314,7 +2314,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     };
     let reply = client
         .call(
-            "ssh_read_file",
+            "inspect_file",
             json!({"host":"plain","path":unusual,"expected_content_sha256":MISMATCH_SHA256}),
         )
         .await?;
@@ -2372,7 +2372,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         (denied, "permission_denied"),
     ] {
         let reply = client
-            .call("ssh_read_file", json!({"host":"plain","path":path}))
+            .call("inspect_file", json!({"host":"plain","path":path}))
             .await?;
         failed(&reply, code)?;
         ensure!(reply["data"].is_null());
@@ -2382,10 +2382,7 @@ async fn read_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     fs::write(&default_range, vec![b'a'; 65_537])?;
     let default_digest = local_sha256(&vec![b'a'; 65_536]).await?;
     let reply = client
-        .call(
-            "ssh_read_file",
-            json!({"host":"plain","path":default_range}),
-        )
+        .call("inspect_file", json!({"host":"plain","path":default_range}))
         .await?;
     ensure!(
         succeeded(&reply)?
@@ -2447,7 +2444,7 @@ async fn blocked_reads() -> Result<()> {
                 let result = async {
                     if cancel {
                         let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
-                            "ssh_read_file",
+                            "inspect_file",
                             args,
                         )));
                         let handle = timeout(
@@ -2474,7 +2471,7 @@ async fn blocked_reads() -> Result<()> {
                         let audit = await_audit(&client.log, "finish", "cancelled").await?;
                         ensure!(audit["remote_state_unknown"] == true);
                     } else {
-                        let blocked = client.call("ssh_read_file", args);
+                        let blocked = client.call("inspect_file", args);
                         let sibling = async {
                             Fixture::await_file(&started).await?;
                             let reply = exec(&client, "printf SFTP_SIBLING").await?;
@@ -2541,7 +2538,7 @@ async fn ssh_read_file() -> Result<()> {
             blocked_reads().await?;
             let reply = client
                 .call(
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({
                         "host":"nosftp","path":fixture.root.path().join("read-text")
                     }),
@@ -2558,7 +2555,7 @@ async fn ssh_read_file() -> Result<()> {
             let before = observed_masters(&client.log, 2).await?;
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"nosftp","command":"printf NO_FALLBACK_MASTER_ALIVE"}),
                 )
                 .await?;
@@ -2586,7 +2583,7 @@ async fn ssh_read_file() -> Result<()> {
         for record in log
             .final_records()?
             .iter()
-            .filter(|record| record["tool"] == "ssh_read_file")
+            .filter(|record| record["tool"] == "inspect_file")
         {
             ensure!(
                 record["identity_role"] == "ordinary",
@@ -2646,7 +2643,7 @@ async fn ssh_read_cleanup() -> Result<()> {
             fs::write(&path, b"X")?;
             let reply = client
                 .call(
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({"host":"plain","path":path,"max_bytes":1,"timeout_secs":10}),
                 )
                 .await?;
@@ -2751,7 +2748,7 @@ async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         if let Some(follow) = follow {
             args["follow_symlinks"] = json!(follow);
         }
-        let reply = client.call("ssh_stat", args).await?;
+        let reply = client.call("observe_stat", args).await?;
         ensure!(
             succeeded(&reply)? == &native_stat_data(path, follow.unwrap_or(false))?,
             "native metadata mismatch for {path:?}, follow={follow:?}: {reply}"
@@ -2769,7 +2766,7 @@ async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     }
     relative.push(file.strip_prefix("/")?);
     let reply = client
-        .call("ssh_stat", json!({"host":"plain","path":relative}))
+        .call("observe_stat", json!({"host":"plain","path":relative}))
         .await?;
     ensure!(
         succeeded(&reply)? == &native_stat_data(&file, false)?,
@@ -2796,7 +2793,7 @@ async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         ] {
             let reply = client
                 .call(
-                    "ssh_stat",
+                    "observe_stat",
                     json!({"host":"plain","path":path,"follow_symlinks":follow}),
                 )
                 .await?;
@@ -2817,7 +2814,7 @@ async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     restored?;
 
     let reply = client
-        .call("ssh_read_file", json!({"host":"plain","path":file}))
+        .call("inspect_file", json!({"host":"plain","path":file}))
         .await?;
     ensure!(succeeded(&reply)?["content"] == "STAT_SHARED_MASTER");
     ensure!(
@@ -2836,7 +2833,7 @@ async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     );
     let before = fixture.listeners[1].log.text();
     let reply = client
-        .call("ssh_stat", json!({"host":"nosftp","path":file}))
+        .call("observe_stat", json!({"host":"nosftp","path":file}))
         .await?;
     let code = reply["error"]["code"]
         .as_str()
@@ -2852,7 +2849,7 @@ async fn stat_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     let owned = observed_masters(&client.log, 2).await?;
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"nosftp","command":"printf STAT_NO_FALLBACK_MASTER_ALIVE"}),
         )
         .await?;
@@ -2896,7 +2893,7 @@ async fn ssh_stat() -> Result<()> {
         let records = log.final_records()?;
         let stats: Vec<_> = records
             .iter()
-            .filter(|record| record["tool"] == "ssh_stat")
+            .filter(|record| record["tool"] == "observe_stat")
             .collect();
         ensure!(!stats.is_empty(), "stat emitted no audit records");
         for record in stats {
@@ -2969,7 +2966,7 @@ async fn drain_directory(
         );
         let reply = client
             .call(
-                "ssh_list_directory",
+                "inspect_directory",
                 json!({
                     "host":host,"path":path,"max_entries":page_size,"continuation":token
                 }),
@@ -2978,7 +2975,7 @@ async fn drain_directory(
         data = succeeded(&reply)?.clone();
         let stale = client
             .call(
-                "ssh_list_directory",
+                "inspect_directory",
                 json!({
                     "host":host,"path":path,"max_entries":page_size,"continuation":token
                 }),
@@ -3054,27 +3051,27 @@ async fn ssh_directory_cursor_lifecycle() -> Result<()> {
         let client = Client::start(&fixture.config).await?;
         let mut private_tokens = Vec::new();
         let cases = async {
-            let first = client.call("ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
+            let first = client.call("inspect_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
             let token = directory_token(succeeded(&first)?)?;
             private_tokens.push(token.clone());
             for args in [
                 json!({"host":"resource","path":directory,"continuation":token}),
                 json!({"host":"plain","path":directory.join("."),"continuation":token}),
             ] {
-                failed(&client.call("ssh_list_directory", args).await?, "invalid_argument")?;
+                failed(&client.call("inspect_directory", args).await?, "invalid_argument")?;
             }
             let foreign = Client::start(&fixture.config).await?;
-            let denied = foreign.call("ssh_list_directory", json!({"host":"plain","path":directory,"continuation":token})).await;
+            let denied = foreign.call("inspect_directory", json!({"host":"plain","path":directory,"continuation":token})).await;
             let stopped = foreign.stop().await;
             failed(&denied?, "not_found")?;
             stopped?;
             ensure!(succeeded(&exec(&client, "printf CURSOR_PEER").await?)?["stdout"] == "CURSOR_PEER");
-            let stat = client.call("ssh_stat", json!({"host":"plain","path":directory})).await?;
+            let stat = client.call("observe_stat", json!({"host":"plain","path":directory})).await?;
             succeeded(&stat)?;
-            let next = client.call("ssh_list_directory", json!({
+            let next = client.call("inspect_directory", json!({
                 "host":"plain","path":directory,"max_entries":127,"timeout_secs":5,"continuation":token
             })).await?;
-            failed(&client.call("ssh_list_directory", json!({"host":"plain","path":directory,"continuation":token})).await?, "not_found")?;
+            failed(&client.call("inspect_directory", json!({"host":"plain","path":directory,"continuation":token})).await?, "not_found")?;
             let mut all = succeeded(&first)?["entries"].as_array().context("initial entries")?.clone();
             all.extend(drain_directory(&client, "plain", &directory, succeeded(&next)?.clone(), 127).await?);
             let mut actual = std::collections::BTreeSet::new();
@@ -3088,7 +3085,7 @@ async fn ssh_directory_cursor_lifecycle() -> Result<()> {
 
             // Mutation has no snapshot promise. Finish this same stream, bounding
             // progress, but deliberately do not compare it to either filesystem set.
-            let first = client.call("ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1000})).await?;
+            let first = client.call("inspect_directory", json!({"host":"plain","path":directory,"max_entries":1000})).await?;
             fs::remove_file(directory.join("entry-03200"))?;
             fs::write(directory.join("churn-new"), b"")?;
             let mut page = succeeded(&first)?.clone();
@@ -3097,7 +3094,7 @@ async fn ssh_directory_cursor_lifecycle() -> Result<()> {
                 if page["truncated"] == false { break; }
                 let token = directory_token(&page)?;
                 ensure!(seen_tokens.insert(token.clone()), "churn reused token");
-                let reply = client.call("ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1000,"continuation":token})).await?;
+                let reply = client.call("inspect_directory", json!({"host":"plain","path":directory,"max_entries":1000,"continuation":token})).await?;
                 page = succeeded(&reply)?.clone();
                 ensure!(page["entries"].as_array().context("churn entries")?.len() <= 1000);
             }
@@ -3123,23 +3120,23 @@ async fn ssh_directory_cursor_lifecycle() -> Result<()> {
             fs::create_dir(&empty)?;
             for (index, host) in ["plain", "resource", "slots-0", "slots-1"].into_iter().enumerate() {
                 for _ in 0..2 {
-                    let reply = capacity.call("ssh_list_directory", json!({"host":host,"path":directory,"max_entries":1})).await?;
+                    let reply = capacity.call("inspect_directory", json!({"host":host,"path":directory,"max_entries":1})).await?;
                     directory_token(succeeded(&reply)?)?;
                 }
                 if index == 0 {
-                    let denied = capacity.call("ssh_list_directory", json!({"host":host,"path":directory,"max_entries":1})).await?;
+                    let denied = capacity.call("inspect_directory", json!({"host":host,"path":directory,"max_entries":1})).await?;
                     failed(&denied, "resource_limit")?;
-                    let one_shot = capacity.call("ssh_list_directory", json!({"host":host,"path":empty,"max_entries":1})).await?;
+                    let one_shot = capacity.call("inspect_directory", json!({"host":host,"path":empty,"max_entries":1})).await?;
                     ensure!(succeeded(&one_shot)? == &json!({"entries":[],"truncated":false}));
                     let (command, read) = tokio::join!(
                         exec(&capacity, "printf IDLE_CURSORS_ALLOW_NATIVE_WORK"),
-                        capacity.call("ssh_read_file", json!({"host":"plain","path":directory.join("entry-00000"),"max_bytes":1}))
+                        capacity.call("inspect_file", json!({"host":"plain","path":directory.join("entry-00000"),"max_bytes":1}))
                     );
                     ensure!(succeeded(&command?)?["stdout"] == "IDLE_CURSORS_ALLOW_NATIVE_WORK");
                     succeeded(&read?)?;
                 }
             }
-            let denied = capacity.call("ssh_list_directory", json!({"host":"slots-2","path":directory,"max_entries":1})).await?;
+            let denied = capacity.call("inspect_directory", json!({"host":"slots-2","path":directory,"max_entries":1})).await?;
             failed(&denied, "resource_limit")?;
             Ok::<_, anyhow::Error>(())
         }.await;
@@ -3158,18 +3155,18 @@ async fn ssh_directory_cursor_lifecycle() -> Result<()> {
         let mut wire = WireServer::start(&config)?;
         let cases = async {
             wire.initialize().await?;
-            script_wire_call(&mut wire, 10, "ssh_exec", json!({"host":"resource","command":"printf WARM_CURSOR_PEER"})).await
+            script_wire_call(&mut wire, 10, "exec_command", json!({"host":"resource","command":"printf WARM_CURSOR_PEER"})).await
                 .and_then(|reply| succeeded(&reply).map(|_| ()))?;
-            let first = script_wire_call(&mut wire, 2, "ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
+            let first = script_wire_call(&mut wire, 2, "inspect_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
             let expired = directory_token(succeeded(&first)?)?;
             ensure!(succeeded(&first)?["expires_in_secs"] == 1);
-            let denied = script_wire_call(&mut wire, 3, "ssh_list_directory", json!({"host":"resource","path":directory,"max_entries":1})).await?;
+            let denied = script_wire_call(&mut wire, 3, "inspect_directory", json!({"host":"resource","path":directory,"max_entries":1})).await?;
             failed(&denied, "resource_limit")?;
             let launched = directory_log_count(&launches, "")?;
             await_directory_log(&closed, "closed", launched).await?;
-            let stale = script_wire_call(&mut wire, 4, "ssh_list_directory", json!({"host":"plain","path":directory,"continuation":expired})).await?;
+            let stale = script_wire_call(&mut wire, 4, "inspect_directory", json!({"host":"plain","path":directory,"continuation":expired})).await?;
             failed(&stale, "not_found")?;
-            let next = script_wire_call(&mut wire, 5, "ssh_list_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
+            let next = script_wire_call(&mut wire, 5, "inspect_directory", json!({"host":"plain","path":directory,"max_entries":1})).await?;
             directory_token(succeeded(&next)?)?;
             // Leave this retained cursor open: EOF below must close its channel
             // and reap the owned master, independently of idle expiry.
@@ -3254,7 +3251,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                 let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
                 let first = client
                     .call(
-                        "ssh_list_directory",
+                        "inspect_directory",
                         json!({
                             "host":"plain","path":directory,"max_entries":1
                         }),
@@ -3264,7 +3261,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                 private_tokens.push(dead.clone());
                 if cancel {
                     let request = ClientRequest::CallToolRequest(CallToolRequest::new(params(
-                        "ssh_list_directory",
+                        "inspect_directory",
                         json!({"host":"plain","path":directory,"max_entries":1000,
                             "continuation":dead,"timeout_secs":10}),
                     )));
@@ -3300,7 +3297,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                                 .into_iter()
                                 .filter(|record| {
                                     record["event"] == "start"
-                                        && record["tool"] == "ssh_list_directory"
+                                        && record["tool"] == "inspect_directory"
                                 })
                                 .nth(1)
                             {
@@ -3318,7 +3315,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                     .await??;
                     let finished = await_audit(&client.log, "finish", "cancelled").await?;
                     ensure!(
-                        finished["tool"] == "ssh_list_directory"
+                        finished["tool"] == "inspect_directory"
                             && finished["request_id"] == started["request_id"]
                             && !finished["request_id"].is_null(),
                         "cancellation audit was not correlated to the blocked page"
@@ -3334,7 +3331,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                 }
                 let (command, read) = tokio::join!(
                     exec(&client, "printf CONTROLLED_CURSOR_PEER"),
-                    client.call("ssh_read_file", json!({"host":"plain","path":peer}))
+                    client.call("inspect_file", json!({"host":"plain","path":peer}))
                 );
                 ensure!(succeeded(&command?)?["stdout"] == "CONTROLLED_CURSOR_PEER");
                 ensure!(succeeded(&read?)?["content"] == "CURSOR_NATIVE_PEER");
@@ -3345,7 +3342,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                 // Crucially acquire replacement credit BEFORE presenting dead.
                 let replacement = client
                     .call(
-                        "ssh_list_directory",
+                        "inspect_directory",
                         json!({
                             "host":"plain","path":directory,"max_entries":1000
                         }),
@@ -3359,7 +3356,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                     failed(
                         &client
                             .call(
-                                "ssh_list_directory",
+                                "inspect_directory",
                                 json!({
                                     "host":"plain","path":directory,"continuation":dead
                                 }),
@@ -3387,7 +3384,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                 // Exhaustion must return the sole credit as well.
                 let again = client
                     .call(
-                        "ssh_list_directory",
+                        "inspect_directory",
                         json!({
                             "host":"plain","path":directory,"max_entries":1000
                         }),
@@ -3448,8 +3445,7 @@ async fn ssh_directory_cursor_controlled_fault_cleanup() -> Result<()> {
                 );
             }
             for record in log.final_records()?.iter().filter(|record| {
-                record["tool"] == "ssh_list_directory"
-                    || record["event"] == "directory_cursor_error"
+                record["tool"] == "inspect_directory" || record["event"] == "directory_cursor_error"
             }) {
                 for field in ["path", "filename", "continuation", "target", "content"] {
                     ensure!(
@@ -3526,7 +3522,7 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
         if let Some(limit) = limit {
             args["max_entries"] = json!(limit);
         }
-        let reply = client.call("ssh_list_directory", args).await?;
+        let reply = client.call("inspect_directory", args).await?;
         let data = succeeded(&reply)?;
         ensure!(
             data["entries"] == json!(&expected[..count]) && data["truncated"] == truncated,
@@ -3546,7 +3542,7 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     fs::create_dir(&empty)?;
     let reply = client
         .call(
-            "ssh_list_directory",
+            "inspect_directory",
             json!({"host":"plain","path":empty,"max_entries":1}),
         )
         .await?;
@@ -3557,7 +3553,7 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     }
     let reply = client
         .call(
-            "ssh_list_directory",
+            "inspect_directory",
             json!({"host":"plain","path":directory,"max_entries":1000}),
         )
         .await?;
@@ -3592,7 +3588,7 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
             (denied.clone(), "permission_denied"),
         ] {
             let reply = client
-                .call("ssh_list_directory", json!({"host":"plain","path":path}))
+                .call("inspect_directory", json!({"host":"plain","path":path}))
                 .await?;
             failed(&reply, code)?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
@@ -3606,7 +3602,7 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     ensure!(live_transport(fixture, client, &owned[0], 1, 3).await? == transport);
     let reply = client
         .call(
-            "ssh_list_directory",
+            "inspect_directory",
             json!({"host":"nosftp","path":directory}),
         )
         .await?;
@@ -3621,7 +3617,7 @@ async fn list_cases(fixture: &Fixture, client: &Client) -> Result<()> {
     let owned = observed_masters(&client.log, 2).await?;
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"nosftp","command":"printf LIST_NO_FALLBACK"}),
         )
         .await?;
@@ -3645,7 +3641,7 @@ async fn ssh_list_directory() -> Result<()> {
         };
         cases?;
         let records = stopped?.final_records()?;
-        for record in records.iter().filter(|record| record["tool"] == "ssh_list_directory") {
+        for record in records.iter().filter(|record| record["tool"] == "inspect_directory") {
             ensure!(record["identity_role"] == "ordinary");
             for field in ["path", "name", "name_base64", "metadata", "entries", "continuation", "expires_in_secs"] {
                 ensure!(record.get(field).is_none(), "listing audit disclosed {field}");
@@ -3665,7 +3661,7 @@ async fn ssh_list_directory() -> Result<()> {
             let (frame, size) = wire.request_with_size(
                 json!("x".repeat(16_774_000)),
                 "tools/call",
-                json!({"name":"ssh_list_directory","arguments":{"host":"plain","path":directory,"max_entries":1000}}),
+                json!({"name":"inspect_directory","arguments":{"host":"plain","path":directory,"max_entries":1000}}),
             ).await?;
             ensure!(size <= 16_777_216);
             let result = &frame["result"];
@@ -3728,7 +3724,7 @@ async fn ssh_directory_cursor_byte_budget() -> Result<()> {
                     .request_with_size(
                         id.clone(),
                         "tools/call",
-                        json!({"name":"ssh_list_directory","arguments":args}),
+                        json!({"name":"inspect_directory","arguments":args}),
                     )
                     .await?;
                 ensure!(
@@ -3849,17 +3845,17 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 ensure!(
                     names
                         == [
-                            "ssh_list_directory",
-                            "ssh_mkdir",
-                            "ssh_read_file",
-                            "ssh_read_output",
-                            "ssh_remove_directory",
-                            "ssh_remove_file",
-                            "ssh_rename",
-                            "ssh_replace_file",
-                            "ssh_stat",
-                            "ssh_targets",
-                            "ssh_write_file",
+                            "change_directory_remove",
+                            "change_file_remove",
+                            "change_file_replace",
+                            "change_file_write",
+                            "change_mkdir",
+                            "change_rename",
+                            "inspect_directory",
+                            "inspect_file",
+                            "inspect_output",
+                            "observe_stat",
+                            "observe_targets",
                         ],
                     "files-only published an unexpected route: {names:?}"
                 );
@@ -3869,9 +3865,9 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 // configured sudo availability must not restore ssh_sudo either.
                 for host in ["allowed", "locked"] {
                     for (name, args) in [
-                        ("ssh_exec", json!({"host":host,"command":"printf NEVER"})),
-                        ("ssh_run", json!({"host":host,"argv":["/usr/bin/true"]})),
-                        ("ssh_sudo", json!({"host":host,"argv":["/usr/bin/true"]})),
+                        ("exec_command", json!({"host":host,"command":"printf NEVER"})),
+                        ("exec_argv", json!({"host":host,"argv":["/usr/bin/true"]})),
+                        ("exec_sudo", json!({"host":host,"argv":["/usr/bin/true"]})),
                     ] {
                         let result = timeout(
                             Duration::from_secs(5),
@@ -3889,7 +3885,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                         }
                     }
                 }
-                let reply = client.call("ssh_write_file", json!({
+                let reply = client.call("change_file_write", json!({
                 "host":"locked","path":file,"content":"MUST_NOT_REPLACE","overwrite":true,
             })).await?;
                 failed(&reply, "policy_denied")?;
@@ -3898,7 +3894,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     fs::read(&file)? == b"abc",
                     "read-only target changed existing bytes"
                 );
-                let reply = client.call("ssh_replace_file", json!({
+                let reply = client.call("change_file_replace", json!({
                     "host":"locked","path":file,"content":"MUST_NOT_REPLACE","overwrite":true,
                 })).await?;
                 failed(&reply, "policy_denied")?;
@@ -3907,7 +3903,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 let denied_directory = directory.join("mkdir-policy-denied");
                 let reply = client
                     .call(
-                        "ssh_mkdir",
+                        "change_mkdir",
                         json!({
                             "host":"locked","path":denied_directory,
                         }),
@@ -3920,7 +3916,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     "read-only target created a directory"
                 );
                 let denied_rename = directory.join("rename-policy-denied");
-                let reply = client.call("ssh_rename", json!({
+                let reply = client.call("change_rename", json!({
                     "host":"locked","source":file,"destination":denied_rename,"overwrite":true
                 })).await?;
                 failed(&reply, "policy_denied")?;
@@ -3928,7 +3924,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 ensure!(fs::read(&file)? == b"abc" && !denied_rename.exists());
                 let reply = client
                     .call(
-                        "ssh_remove_file",
+                        "change_file_remove",
                         json!({
                             "host":"locked","path":file
                         }),
@@ -3951,7 +3947,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
 
                 for host in ["locked", "allowed"] {
                     let reply = client
-                        .call("ssh_read_file", json!({"host":host,"path":file}))
+                        .call("inspect_file", json!({"host":host,"path":file}))
                         .await?;
                     ensure!(
                         succeeded(&reply)?
@@ -3961,12 +3957,12 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             })
                     );
                     let reply = client
-                        .call("ssh_stat", json!({"host":host,"path":file}))
+                        .call("observe_stat", json!({"host":host,"path":file}))
                         .await?;
                     ensure!(succeeded(&reply)? == &native_stat_data(&file, false)?);
                     let reply = client
                         .call(
-                            "ssh_list_directory",
+                            "inspect_directory",
                             json!({
                                 "host":host,"path":directory,
                             }),
@@ -3986,7 +3982,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 let created_directory = directory.join("mkdir-allowed");
                 let reply = client
                     .call(
-                        "ssh_mkdir",
+                        "change_mkdir",
                         json!({
                             "host":"allowed","path":created_directory,
                         }),
@@ -4003,14 +3999,14 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 ensure!(fs::read(&file)? == b"abc", "mkdir changed its sibling file");
                 let created_inode = fs::symlink_metadata(&created_directory)?.ino();
                 let reply = client
-                    .call("ssh_remove_directory", json!({"host":"locked","path":created_directory}))
+                    .call("change_directory_remove", json!({"host":"locked","path":created_directory}))
                     .await?;
                 failed(&reply, "policy_denied")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
                 ensure!(fs::symlink_metadata(&created_directory)?.ino() == created_inode);
                 ensure!(fs::read_dir(&created_directory)?.next().is_none());
                 let reply = client
-                    .call("ssh_remove_directory", json!({"host":"allowed","path":created_directory}))
+                    .call("change_directory_remove", json!({"host":"allowed","path":created_directory}))
                     .await?;
                 ensure!(succeeded(&reply)? == &json!({"removed":true}));
                 ensure!(
@@ -4021,7 +4017,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 let payload = "PROFILE_WRITE_é雪\0END";
                 let reply = client
                     .call(
-                        "ssh_write_file",
+                        "change_file_write",
                         json!({
                             "host":"allowed","path":file,"content":payload,"overwrite":true,
                         }),
@@ -4033,27 +4029,27 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                     "allowed write lost bytes"
                 );
                 let reply = client
-                    .call("ssh_read_file", json!({"host":"locked","path":file}))
+                    .call("inspect_file", json!({"host":"locked","path":file}))
                     .await?;
                 ensure!(
                     succeeded(&reply)?["content"] == payload,
                     "read-only target did not see the real allowed SFTP write"
                 );
                 let previous_inode = fs::metadata(&file)?.ino();
-                let reply = client.call("ssh_replace_file", json!({
+                let reply = client.call("change_file_replace", json!({
                     "host":"allowed","path":file,"content":payload,"overwrite":true,
                 })).await?;
                 ensure!(succeeded(&reply)? == &json!({"bytes_written":payload.len()}));
                 ensure!(fs::read(&file)? == payload.as_bytes());
                 ensure!(fs::metadata(&file)?.ino() != previous_inode);
                 ensure!(fs::metadata(&file)?.mode() & 0o7777 == 0o600);
-                let reply = client.call("ssh_read_file", json!({"host":"locked","path":file})).await?;
+                let reply = client.call("inspect_file", json!({"host":"locked","path":file})).await?;
                 ensure!(succeeded(&reply)?["content"] == payload);
                 let renamed = directory.join("renamed");
                 let before = fs::symlink_metadata(&file)?.ino();
                 let reply = client
                     .call(
-                        "ssh_rename",
+                        "change_rename",
                         json!({
                             "host":"allowed","source":file,"destination":renamed,"overwrite":true
                         }),
@@ -4063,18 +4059,18 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                 ensure!(!file.exists() && fs::symlink_metadata(&renamed)?.ino() == before);
                 ensure!(fs::read(&renamed)? == payload.as_bytes());
                 let reply = client
-                    .call("ssh_read_file", json!({"host":"locked","path":renamed}))
+                    .call("inspect_file", json!({"host":"locked","path":renamed}))
                     .await?;
                 ensure!(succeeded(&reply)?["content"] == payload);
                 let reply = client
-                    .call("ssh_remove_file", json!({"host":"locked","path":renamed}))
+                    .call("change_file_remove", json!({"host":"locked","path":renamed}))
                     .await?;
                 failed(&reply, "policy_denied")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
                 ensure!(fs::symlink_metadata(&renamed)?.ino() == before);
                 ensure!(fs::read(&renamed)? == payload.as_bytes());
                 let reply = client
-                    .call("ssh_remove_file", json!({"host":"allowed","path":renamed}))
+                    .call("change_file_remove", json!({"host":"allowed","path":renamed}))
                     .await?;
                 ensure!(succeeded(&reply)? == &json!({"removed":true}));
                 ensure!(
@@ -4122,7 +4118,7 @@ async fn ssh_write_file() -> Result<()> {
                 ("x".repeat(1_048_577), "utf8", "invalid_argument"),
                 ("YR==".to_owned(), "base64", "invalid_encoding"),
             ] {
-                let reply = client.call("ssh_write_file", json!({
+                let reply = client.call("change_file_write", json!({
                     "host":"plain","path":preserved,"content":content,"encoding":encoding,"overwrite":true,
                 })).await?;
                 failed(&reply, code)?;
@@ -4145,7 +4141,7 @@ async fn ssh_write_file() -> Result<()> {
                 ("write-'\";~$*\n$(printf EVALUATED)", "LITERAL_WRITE", "utf8", b"LITERAL_WRITE".as_slice()),
             ] {
                 let path = root.join(name);
-                let reply = client.call("ssh_write_file", json!({
+                let reply = client.call("change_file_write", json!({
                     "host":"plain","path":path,"content":content,"encoding":encoding
                 })).await?;
                 ensure!(succeeded(&reply)? == &json!({"bytes_written":expected.len()}), "{name}: {reply}");
@@ -4162,7 +4158,7 @@ async fn ssh_write_file() -> Result<()> {
             }
             relative.push(root.strip_prefix("/")?);
             relative.push("write-relative");
-            let reply = client.call("ssh_write_file", json!({
+            let reply = client.call("change_file_write", json!({
                 "host":"plain","path":relative,"content":"RELATIVE_WRITE"
             })).await?;
             ensure!(succeeded(&reply)? == &json!({"bytes_written":14}));
@@ -4176,7 +4172,7 @@ async fn ssh_write_file() -> Result<()> {
             let absent = root.join("write-dangling-target");
             symlink(&absent, &dangling)?;
             for path in [&existing, &link, &dangling] {
-                let reply = client.call("ssh_write_file", json!({
+                let reply = client.call("change_file_write", json!({
                     "host":"plain","path":path,"content":"MUST_NOT_REPLACE"
                 })).await?;
                 failed(&reply, "already_exists")?;
@@ -4185,24 +4181,24 @@ async fn ssh_write_file() -> Result<()> {
                 ensure!(fs::read_link(&link)? == existing);
                 ensure!(fs::read_link(&dangling)? == absent && !absent.exists());
             }
-            let reply = client.call("ssh_write_file", json!({
+            let reply = client.call("change_file_write", json!({
                 "host":"plain","path":existing,"content":"short","overwrite":true
             })).await?;
             ensure!(succeeded(&reply)? == &json!({"bytes_written":5}));
             ensure!(fs::read(&existing)? == b"short", "overwrite retained old tail");
-            let reply = client.call("ssh_write_file", json!({
+            let reply = client.call("change_file_write", json!({
                 "host":"plain","path":link,"content":"L","overwrite":true
             })).await?;
             ensure!(succeeded(&reply)? == &json!({"bytes_written":1}));
             ensure!(fs::read(&existing)? == b"L" && fs::read_link(&link)? == existing);
-            let reply = client.call("ssh_write_file", json!({
+            let reply = client.call("change_file_write", json!({
                 "host":"plain","path":dangling,"content":"NEW","overwrite":true
             })).await?;
             ensure!(succeeded(&reply)? == &json!({"bytes_written":3}));
             ensure!(fs::read(&absent)? == b"NEW" && fs::read_link(&dangling)? == absent);
 
             let parent = root.join("write-missing-parent");
-            let reply = client.call("ssh_write_file", json!({
+            let reply = client.call("change_file_write", json!({
                 "host":"plain","path":parent.join("child"),"content":"NO_MKDIR"
             })).await?;
             failed(&reply, "not_found")?;
@@ -4211,7 +4207,7 @@ async fn ssh_write_file() -> Result<()> {
             let denied = root.join("write-denied");
             fs::write(&denied, b"DENIED_OLD_BYTES")?;
             fs::set_permissions(&denied, fs::Permissions::from_mode(0o400))?;
-            let attempted = client.call("ssh_write_file", json!({
+            let attempted = client.call("change_file_write", json!({
                 "host":"plain","path":denied,"content":"DENIED_NEW_BYTES","overwrite":true
             })).await;
             let restored = fs::set_permissions(&denied, fs::Permissions::from_mode(0o600));
@@ -4221,22 +4217,22 @@ async fn ssh_write_file() -> Result<()> {
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
             ensure!(fs::read(&denied)? == b"DENIED_OLD_BYTES");
 
-            let reply = client.call("ssh_read_file", json!({"host":"plain","path":existing})).await?;
+            let reply = client.call("inspect_file", json!({"host":"plain","path":existing})).await?;
             ensure!(succeeded(&reply)?["content"] == "L");
-            let reply = client.call("ssh_stat", json!({"host":"plain","path":existing})).await?;
+            let reply = client.call("observe_stat", json!({"host":"plain","path":existing})).await?;
             ensure!(succeeded(&reply)? == &native_stat_data(&existing, false)?);
             ensure!(live_transport(&fixture, &client, &owned[0], 1, 3).await? == transport,
                 "exec/read/stat/write did not share the ordinary master");
 
             let unsupported = root.join("write-no-subsystem");
-            let reply = client.call("ssh_write_file", json!({
+            let reply = client.call("change_file_write", json!({
                 "host":"nosftp","path":unsupported,"content":"NO_FALLBACK"
             })).await?;
             ensure!(matches!(reply["error"]["code"].as_str(), Some("unsupported" | "io_error" | "connection_lost")));
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
             ensure!(!unsupported.exists(), "missing subsystem ran a write fallback");
             let before = observed_masters(&client.log, 2).await?;
-            let reply = client.call("ssh_exec", json!({
+            let reply = client.call("exec_command", json!({
                 "host":"nosftp","command":"printf WRITE_MASTER_HEALTHY"
             })).await?;
             ensure!(succeeded(&reply)?["stdout"] == "WRITE_MASTER_HEALTHY");
@@ -4257,7 +4253,7 @@ async fn ssh_write_file() -> Result<()> {
             ensure!(!log.text().contains(secret), "write audit disclosed path or content");
         }
         let records = log.final_records()?;
-        let writes: Vec<_> = records.iter().filter(|record| record["tool"] == "ssh_write_file").collect();
+        let writes: Vec<_> = records.iter().filter(|record| record["tool"] == "change_file_write").collect();
         ensure!(!writes.is_empty());
         for record in writes {
             ensure!(record["identity_role"] == "ordinary");
@@ -4294,7 +4290,7 @@ async fn ssh_write_close_and_write_failures() -> Result<()> {
                 fs::write(&path, b"OLD_BYTES_LONGER_THAN_NEW")?;
                 let reply = client
                     .call(
-                        "ssh_write_file",
+                        "change_file_write",
                         json!({
                             "host":"plain","path":path,"content":"NEW","overwrite":true
                         }),
@@ -4359,14 +4355,14 @@ async fn ssh_mkdir() -> Result<()> {
                 json!({"host":"plain","path":directory.join("zero"),"timeout_secs":0}),
                 json!({"host":"plain","path":directory.join("over-limit"),"timeout_secs":16}),
             ] {
-                let reply = client.call("ssh_mkdir", args).await?;
+                let reply = client.call("change_mkdir", args).await?;
                 failed(&reply, "invalid_argument")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
             }
             let denied = directory.join("policy-denied");
             let reply = client
                 .call(
-                    "ssh_mkdir",
+                    "change_mkdir",
                     json!({
                         "host":"mkdir-locked","path":denied
                     }),
@@ -4398,7 +4394,7 @@ async fn ssh_mkdir() -> Result<()> {
             for name in names {
                 let path = directory.join(name);
                 let reply = client
-                    .call("ssh_mkdir", json!({"host":"plain","path":path}))
+                    .call("change_mkdir", json!({"host":"plain","path":path}))
                     .await?;
                 succeeded(&reply)?;
                 ensure!(
@@ -4410,7 +4406,7 @@ async fn ssh_mkdir() -> Result<()> {
                     "{name:?}: directory not empty"
                 );
                 let reply = client
-                    .call("ssh_stat", json!({"host":"plain","path":path}))
+                    .call("observe_stat", json!({"host":"plain","path":path}))
                     .await?;
                 ensure!(succeeded(&reply)? == &native_stat_data(&path, false)?);
             }
@@ -4425,7 +4421,7 @@ async fn ssh_mkdir() -> Result<()> {
             for path in [&existing, &sibling, &live, &dangling] {
                 let before = fs::symlink_metadata(path)?;
                 let reply = client
-                    .call("ssh_mkdir", json!({"host":"plain","path":path}))
+                    .call("change_mkdir", json!({"host":"plain","path":path}))
                     .await?;
                 failed(&reply, "already_exists")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
@@ -4443,7 +4439,7 @@ async fn ssh_mkdir() -> Result<()> {
             let missing = directory.join("missing-parent");
             let reply = client
                 .call(
-                    "ssh_mkdir",
+                    "change_mkdir",
                     json!({
                         "host":"plain","path":missing.join("child")
                     }),
@@ -4480,7 +4476,7 @@ async fn ssh_mkdir() -> Result<()> {
             ensure!(fs::symlink_metadata(&sibling)?.ino() == sibling_inode);
             ensure!(fs::read(&sibling)? == b"MKDIR_KEEP_SIBLING");
             let reply = client
-                .call("ssh_read_file", json!({"host":"plain","path":sibling}))
+                .call("inspect_file", json!({"host":"plain","path":sibling}))
                 .await?;
             ensure!(succeeded(&reply)?["content"] == "MKDIR_KEEP_SIBLING");
             ensure!(
@@ -4490,7 +4486,7 @@ async fn ssh_mkdir() -> Result<()> {
 
             let unsupported = directory.join("no-subsystem");
             let reply = client
-                .call("ssh_mkdir", json!({"host":"nosftp","path":unsupported}))
+                .call("change_mkdir", json!({"host":"nosftp","path":unsupported}))
                 .await?;
             ensure!(
                 matches!(
@@ -4507,7 +4503,7 @@ async fn ssh_mkdir() -> Result<()> {
             let before = observed_masters(&client.log, 2).await?;
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({
                         "host":"nosftp","command":"printf MKDIR_NO_SUBSYSTEM_HEALTHY"
                     }),
@@ -4571,7 +4567,7 @@ async fn ssh_mkdir_dispatch_failure() -> Result<()> {
             fs::write(&sibling, b"KEEP_FAULT_SIBLING")?;
             let path = directory.join("denied");
             let reply = client
-                .call("ssh_mkdir", json!({"host":"plain","path":path}))
+                .call("change_mkdir", json!({"host":"plain","path":path}))
                 .await?;
             failed(&reply, "permission_denied")?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
@@ -4651,7 +4647,7 @@ async fn ssh_mkdir_prehandshake_timeout() -> Result<()> {
             let path = directory.join("never-dispatched");
             let reply = client
                 .call(
-                    "ssh_mkdir",
+                    "change_mkdir",
                     json!({
                         "host":"plain","path":path,"timeout_secs":1
                     }),
@@ -4807,8 +4803,8 @@ async fn ssh_named_bindings() -> Result<()> {
             let mut names: Vec<_> = listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
             names.sort_unstable();
             ensure!(names == [
-                "bounded_pause", "clear_target_quarantine", "literal_values", "missing_account",
-                "ordinary_identity", "ssh_read_output", "ssh_targets",
+                "bounded_pause", "change_target_quarantine_clear", "inspect_output", "literal_values",
+                "missing_account", "observe_targets", "ordinary_identity",
             ], "actions-only exposed an unexpected tool: {names:?}");
             let initial_auth = fixture.authentications();
             let valid = json!({"host":"plain","text":"VALID","number":1,"flag":true});
@@ -4828,9 +4824,9 @@ async fn ssh_named_bindings() -> Result<()> {
                 }
             }
             for (name,args) in [
-                ("ssh_exec",json!({"host":"plain","command":"printf NEVER"})),
-                ("ssh_run",json!({"host":"plain","argv":[id]})),
-                ("ssh_sudo",json!({"host":"plain","argv":[id]})),
+                ("exec_command",json!({"host":"plain","command":"printf NEVER"})),
+                ("exec_argv",json!({"host":"plain","argv":[id]})),
+                ("exec_sudo",json!({"host":"plain","argv":[id]})),
             ] {
                 let result = timeout(Duration::from_secs(5),client.service.call_tool(params(name,args))).await?;
                 match result {
@@ -5032,13 +5028,13 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
                 json!({"host":"plain","source":source,"destination":destination,"overwrite":true,"timeout_secs":0}),
                 json!({"host":"plain","source":source,"destination":destination,"overwrite":true,"timeout_secs":16}),
             ] {
-                let reply = client.call("ssh_rename", args).await?;
+                let reply = client.call("change_rename", args).await?;
                 failed(&reply, "invalid_argument")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
             }
             let reply = client
                 .call(
-                    "ssh_rename",
+                    "change_rename",
                     json!({"host":"rename-locked","source":source,"destination":destination,"overwrite":true}),
                 )
                 .await?;
@@ -5055,7 +5051,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
             let inode = fs::symlink_metadata(&source)?.ino();
             let reply = client
                 .call(
-                    "ssh_rename",
+                    "change_rename",
                     json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
                 )
                 .await?;
@@ -5071,7 +5067,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
             let replacement_inode = fs::symlink_metadata(&replacement)?.ino();
             let reply = client
                 .call(
-                    "ssh_rename",
+                    "change_rename",
                     json!({"host":"plain","source":replacement,"destination":destination,"overwrite":true}),
                 )
                 .await?;
@@ -5090,7 +5086,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
             let child_inode = fs::symlink_metadata(tree.join("child"))?.ino();
             let reply = client
                 .call(
-                    "ssh_rename",
+                    "change_rename",
                     json!({"host":"plain","source":tree,"destination":moved_tree,"overwrite":true}),
                 )
                 .await?;
@@ -5111,7 +5107,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
                 let link_inode = fs::symlink_metadata(&link)?.ino();
                 let reply = client
                     .call(
-                        "ssh_rename",
+                        "change_rename",
                         json!({"host":"plain","source":link,"destination":moved_link,"overwrite":true}),
                     )
                     .await?;
@@ -5135,7 +5131,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
                 let inode = fs::symlink_metadata(&source)?.ino();
                 let reply = client
                     .call(
-                        "ssh_rename",
+                        "change_rename",
                         json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
                     )
                     .await?;
@@ -5161,7 +5157,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
                 "rename replaced the shared healthy master"
             );
             let reply = client
-                .call("ssh_read_file", json!({"host":"plain","path":retained}))
+                .call("inspect_file", json!({"host":"plain","path":retained}))
                 .await?;
             ensure!(succeeded(&reply)?["content"] == "RENAME_SOURCE_BYTES");
             Ok::<_, anyhow::Error>(())
@@ -5238,7 +5234,7 @@ async fn ssh_rename_no_overwrite_preserves_entries() -> Result<()> {
                 let omitted_err = client
                     .service
                     .call_tool(params(
-                        "ssh_rename",
+                        "change_rename",
                         json!({"host":"plain","source":source,"destination":destination}),
                     ))
                     .await
@@ -5249,7 +5245,7 @@ async fn ssh_rename_no_overwrite_preserves_entries() -> Result<()> {
                 );
                 let reply = client
                     .call(
-                        "ssh_rename",
+                        "change_rename",
                         json!({"host":"plain","source":source,"destination":destination,"overwrite":false}),
                     )
                     .await?;
@@ -5365,7 +5361,7 @@ async fn ssh_rename_without_posix_extension_preserves_entries() -> Result<()> {
             for destination in [&existing, &live, &dangling, &absent] {
                 let reply = client
                     .call(
-                        "ssh_rename",
+                        "change_rename",
                         json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
                     )
                     .await?;
@@ -5453,7 +5449,7 @@ async fn ssh_rename_missing_source_is_not_replayed() -> Result<()> {
             let inode = fs::symlink_metadata(&destination)?.ino();
             let reply = client
                 .call(
-                    "ssh_rename",
+                    "change_rename",
                     json!({"host":"plain","source":source,"destination":destination,"overwrite":true}),
                 )
                 .await?;
@@ -5532,12 +5528,12 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
                 json!({"host":"plain","path":file,"timeout_secs":0}),
                 json!({"host":"plain","path":file,"timeout_secs":16}),
             ] {
-                let reply = client.call("ssh_remove_file", args).await?;
+                let reply = client.call("change_file_remove", args).await?;
                 failed(&reply, "invalid_argument")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
             }
             let reply = client
-                .call("ssh_remove_file", json!({"host":"remove-locked","path":file}))
+                .call("change_file_remove", json!({"host":"remove-locked","path":file}))
                 .await?;
             failed(&reply, "policy_denied")?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
@@ -5551,7 +5547,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
             let owned = observed_masters(&client.log, 1).await?;
             let transport = live_transport(&fixture, &client, &owned[0], 1, 3).await?;
             let reply = client
-                .call("ssh_remove_file", json!({"host":"plain","path":file}))
+                .call("change_file_remove", json!({"host":"plain","path":file}))
                 .await?;
             ensure!(succeeded(&reply)? == &json!({"removed":true}));
             ensure!(
@@ -5576,7 +5572,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
                 let link = directory.join(format!("final-link-{index}"));
                 symlink(target, &link)?;
                 let reply = client
-                    .call("ssh_remove_file", json!({"host":"plain","path":link}))
+                    .call("change_file_remove", json!({"host":"plain","path":link}))
                     .await?;
                 ensure!(succeeded(&reply)? == &json!({"removed":true}));
                 ensure!(
@@ -5603,7 +5599,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
                 let literal = directory.join(name);
                 fs::write(&literal, b"REMOVE_LITERAL_ONLY")?;
                 let reply = client
-                    .call("ssh_remove_file", json!({"host":"plain","path":literal}))
+                    .call("change_file_remove", json!({"host":"plain","path":literal}))
                     .await?;
                 ensure!(succeeded(&reply)? == &json!({"removed":true}), "{name:?}: {reply}");
                 ensure!(fs::symlink_metadata(&literal).is_err(), "{name:?}: entry survived");
@@ -5614,7 +5610,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
             // A real REMOVE must reject both directories, not walk or use RMDIR.
             for path in [&empty, &tree] {
                 let reply = client
-                    .call("ssh_remove_file", json!({"host":"plain","path":path}))
+                    .call("change_file_remove", json!({"host":"plain","path":path}))
                     .await?;
                 ensure!(
                     matches!(reply["error"]["code"].as_str(), Some("permission_denied" | "io_error")),
@@ -5630,7 +5626,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
             }
             // Missing is an acknowledged backend failure, never missing_ok.
             let reply = client
-                .call("ssh_remove_file", json!({"host":"plain","path":file}))
+                .call("change_file_remove", json!({"host":"plain","path":file}))
                 .await?;
             failed(&reply, "not_found")?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
@@ -5645,7 +5641,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
             ensure!(entries == expected, "unlink expanded literal paths or changed siblings");
             ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
             let reply = client
-                .call("ssh_read_file", json!({"host":"plain","path":retained}))
+                .call("inspect_file", json!({"host":"plain","path":retained}))
                 .await?;
             ensure!(succeeded(&reply)?["content"] == "REMOVE_KEEP_INODE_BYTES");
             ensure!(
@@ -5654,7 +5650,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
             );
 
             let reply = client
-                .call("ssh_remove_file", json!({"host":"nosftp","path":retained}))
+                .call("change_file_remove", json!({"host":"nosftp","path":retained}))
                 .await?;
             ensure!(
                 matches!(reply["error"]["code"].as_str(), Some("unsupported" | "io_error" | "connection_lost")),
@@ -5664,7 +5660,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
             ensure!(fs::symlink_metadata(&retained)?.ino() == inode);
             ensure!(fs::read(&retained)? == b"REMOVE_KEEP_INODE_BYTES");
             let before = observed_masters(&client.log, 2).await?;
-            let reply = client.call("ssh_exec", json!({
+            let reply = client.call("exec_command", json!({
                 "host":"nosftp","command":"printf REMOVE_NO_SUBSYSTEM_HEALTHY"
             })).await?;
             ensure!(succeeded(&reply)?["stdout"] == "REMOVE_NO_SUBSYSTEM_HEALTHY");
@@ -5722,7 +5718,7 @@ async fn ssh_remove_file_dispatch_refusal_is_not_replayed() -> Result<()> {
             let inode = fs::symlink_metadata(&file)?.ino();
             let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
             let reply = client
-                .call("ssh_remove_file", json!({"host":"plain","path":file}))
+                .call("change_file_remove", json!({"host":"plain","path":file}))
                 .await?;
             failed(&reply, "permission_denied")?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
@@ -5824,7 +5820,7 @@ async fn ssh_remove_file_prehandshake_timeout() -> Result<()> {
             let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
             let reply = client
                 .call(
-                    "ssh_remove_file",
+                    "change_file_remove",
                     json!({
                         "host":"plain","path":file,"timeout_secs":1
                     }),
@@ -5927,12 +5923,12 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
                 json!({"host":"plain","path":empty,"timeout_secs":0}),
                 json!({"host":"plain","path":empty,"timeout_secs":16}),
             ] {
-                let reply = client.call("ssh_remove_directory", args).await?;
+                let reply = client.call("change_directory_remove", args).await?;
                 failed(&reply, "invalid_argument")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
             }
             let reply = client
-                .call("ssh_remove_directory", json!({"host":"rmdir-locked","path":empty}))
+                .call("change_directory_remove", json!({"host":"rmdir-locked","path":empty}))
                 .await?;
             failed(&reply, "policy_denied")?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == false);
@@ -5948,7 +5944,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
             // OpenSSH also maps ENOTDIR (file/final-link operands) to NO_SUCH_FILE.
             for (link, target, inode) in &links {
                 let reply = client
-                    .call("ssh_remove_directory", json!({"host":"plain","path":link}))
+                    .call("change_directory_remove", json!({"host":"plain","path":link}))
                     .await?;
                 ensure!(
                     matches!(reply["error"]["code"].as_str(), Some("not_found" | "permission_denied" | "io_error")),
@@ -5970,7 +5966,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
             }
             for path in [&tree, &nested, &sibling] {
                 let reply = client
-                    .call("ssh_remove_directory", json!({"host":"plain","path":path}))
+                    .call("change_directory_remove", json!({"host":"plain","path":path}))
                     .await?;
                 ensure!(
                     matches!(reply["error"]["code"].as_str(), Some("not_found" | "permission_denied" | "io_error")),
@@ -5999,7 +5995,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
                 let literal = directory.join(name);
                 fs::create_dir(&literal)?;
                 let reply = client
-                    .call("ssh_remove_directory", json!({"host":"plain","path":literal}))
+                    .call("change_directory_remove", json!({"host":"plain","path":literal}))
                     .await?;
                 ensure!(succeeded(&reply)? == &json!({"removed":true}), "{name:?}: {reply}");
                 ensure!(
@@ -6010,7 +6006,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
                 ensure!(fs::read(&sibling)? == b"KEEP_LITERAL_SIBLING");
             }
             let reply = client
-                .call("ssh_remove_directory", json!({"host":"plain","path":empty}))
+                .call("change_directory_remove", json!({"host":"plain","path":empty}))
                 .await?;
             ensure!(succeeded(&reply)? == &json!({"removed":true}));
             ensure!(
@@ -6020,7 +6016,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
             // Neither a missing entry nor a repeated deletion is missing_ok.
             for path in [&empty, &missing] {
                 let reply = client
-                    .call("ssh_remove_directory", json!({"host":"plain","path":path}))
+                    .call("change_directory_remove", json!({"host":"plain","path":path}))
                     .await?;
                 failed(&reply, "not_found")?;
                 ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
@@ -6036,7 +6032,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
             expected.sort();
             ensure!(entries == expected, "rmdir expanded literal paths or removed siblings");
             let reply = client
-                .call("ssh_read_file", json!({"host":"plain","path":sibling}))
+                .call("inspect_file", json!({"host":"plain","path":sibling}))
                 .await?;
             ensure!(succeeded(&reply)?["content"] == "KEEP_LITERAL_SIBLING");
             ensure!(
@@ -6094,7 +6090,10 @@ async fn ssh_remove_directory_dispatch_refusal_is_not_replayed() -> Result<()> {
             let inode = fs::symlink_metadata(&empty)?.ino();
             let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
             let reply = client
-                .call("ssh_remove_directory", json!({"host":"plain","path":empty}))
+                .call(
+                    "change_directory_remove",
+                    json!({"host":"plain","path":empty}),
+                )
                 .await?;
             failed(&reply, "permission_denied")?;
             ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
@@ -6206,7 +6205,7 @@ async fn ssh_remove_directory_prehandshake_timeout() -> Result<()> {
             let sibling_inode = fs::symlink_metadata(&sibling)?.ino();
             let reply = client
                 .call(
-                    "ssh_remove_directory",
+                    "change_directory_remove",
                     json!({
                         "host":"plain","path":empty,"timeout_secs":1
                     }),
@@ -6350,7 +6349,7 @@ async fn ssh_replace_file_atomic_visibility_and_lost_ack() -> Result<()> {
                 });
                 let operation = async {
                     timeout(Duration::from_secs(5), ready_rx).await??;
-                    let reply = client.call("ssh_replace_file", json!({
+                    let reply = client.call("change_file_replace", json!({
                         "host":"plain","path":destination,"content":String::from_utf8(new.clone())?,
                         "overwrite":true,"timeout_secs":3,
                     })).await?;
@@ -6439,7 +6438,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
                 ("empty", "", "utf8", b"".as_slice()),
             ] {
                 let path = directory.join(name);
-                let reply = client.call("ssh_replace_file", json!({
+                let reply = client.call("change_file_replace", json!({
                     "host":"plain","path":path,"content":content,"encoding":encoding,"overwrite":true,
                 })).await?;
                 ensure!(succeeded(&reply)? == &json!({"bytes_written":expected.len()}));
@@ -6451,7 +6450,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
             fs::write(&target, b"SYMLINK_TARGET_UNCHANGED")?;
             let target_inode = fs::metadata(&target)?.ino();
             symlink(&target, &link)?;
-            let reply = client.call("ssh_replace_file", json!({
+            let reply = client.call("change_file_replace", json!({
                 "host":"plain","path":link,"content":"LINK_ENTRY_REPLACED","overwrite":true,
             })).await?;
             succeeded(&reply)?;
@@ -6462,7 +6461,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
             let missing_target = directory.join("missing-target");
             let dangling = directory.join("dangling");
             symlink(&missing_target, &dangling)?;
-            succeeded(&client.call("ssh_replace_file", json!({
+            succeeded(&client.call("change_file_replace", json!({
                 "host":"plain","path":dangling,"content":"NEW_ENTRY","overwrite":true,
             })).await?)?;
             ensure!(fs::read(&dangling)? == b"NEW_ENTRY" && !missing_target.exists());
@@ -6470,7 +6469,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
             let parent_link = fixture.root.path().join("replace-parent-link");
             symlink(&directory, &parent_link)?;
             let raw = format!("{}//through-parent", parent_link.display());
-            succeeded(&client.call("ssh_replace_file", json!({
+            succeeded(&client.call("change_file_replace", json!({
                 "host":"plain","path":raw,"content":"RAW_PARENT","overwrite":true,
             })).await?)?;
             ensure!(fs::read(directory.join("through-parent"))? == b"RAW_PARENT");
@@ -6478,7 +6477,7 @@ async fn ssh_replace_file_metadata_symlinks_and_literal_bytes() -> Result<()> {
             fs::create_dir(&tree)?;
             fs::write(tree.join("child"), b"TREE_UNCHANGED")?;
             let tree_inode = fs::metadata(&tree)?.ino();
-            let reply = client.call("ssh_replace_file", json!({
+            let reply = client.call("change_file_replace", json!({
                 "host":"plain","path":tree,"content":"NO_DIRECTORY_REPLACE","overwrite":true,
             })).await?;
             ensure!(reply["error"].is_object() && reply["error"]["remote_state_unknown"] == true);
@@ -6526,7 +6525,7 @@ async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
                 let path = directory.join("destination");
                 fs::write(&path, b"PRESERVED_DESTINATION")?;
                 let inode = fs::metadata(&path)?.ino();
-                let reply = client.call("ssh_replace_file", json!({
+                let reply = client.call("change_file_replace", json!({
                     "host":"plain","path":path,"content":"MUST_NOT_PUBLISH","overwrite":true,
                 })).await?;
                 failed(
@@ -6669,7 +6668,7 @@ async fn ssh_replace_file_unacknowledged_open_does_not_claim_stage() -> Result<(
             let path = directory.join("destination");
             fs::write(&path, b"UNACKNOWLEDGED_OLD")?;
             let inode = fs::metadata(&path)?.ino();
-            let reply = client.call("ssh_replace_file", json!({
+            let reply = client.call("change_file_replace", json!({
                 "host":"plain","path":path,"content":"NEVER_WRITE_UNOWNED","overwrite":true,"timeout_secs":2,
             })).await?;
             failed(&reply, "timeout")?;
@@ -6738,7 +6737,7 @@ async fn output_range(
     let reply = script_wire_call(
         server,
         id,
-        "ssh_read_output",
+        "inspect_output",
         json!({
             "handle":handle,"stream":stream,"offset":offset,"max_bytes":limit,"encoding":encoding,
         }),
@@ -6781,11 +6780,11 @@ async fn ssh_output_exact_ranges_permissions_and_local_reads() -> Result<()> {
         let mut server = WireServer::start_command(command)?;
         let cases = async {
             server.initialize().await?;
-            let reply = script_wire_call(&mut server, 2, "ssh_exec",
+            let reply = script_wire_call(&mut server, 2, "exec_command",
                 json!({"host":"plain","command":"printf abc"})).await?;
             ensure!(succeeded(&reply)?.get("output").is_none());
             ensure!(output_entries(&artifacts)?.is_empty(), "default call created artifacts");
-            let reply = script_wire_call(&mut server, 3, "ssh_exec", json!({
+            let reply = script_wire_call(&mut server, 3, "exec_command", json!({
                 "host":"plain","command":"printf 'abc\\000\\303\\251\\377Z'; printf 'err\\000\\376' >&2",
                 "retain_output":true,
             })).await?;
@@ -6816,7 +6815,7 @@ async fn ssh_output_exact_ranges_permissions_and_local_reads() -> Result<()> {
             output_range(&mut server, 8, &handle, "stdout", (8, 1), (b"", true), "utf8").await?;
             output_range(&mut server, 9, &handle, "stderr", (99, 1), (b"", true), "base64").await?;
             for (id, offset, count) in [(10, 4, 1), (11, 5, 1), (12, 6, 1)] {
-                let reply = script_wire_call(&mut server, id, "ssh_read_output", json!({
+                let reply = script_wire_call(&mut server, id, "inspect_output", json!({
                     "handle":handle,"stream":"stdout","offset":offset,"max_bytes":count,
                 })).await?;
                 failed(&reply, "invalid_encoding")?;
@@ -6826,7 +6825,7 @@ async fn ssh_output_exact_ranges_permissions_and_local_reads() -> Result<()> {
             let mut foreign = WireServer::start(&config)?;
             let foreign_case = async {
                 foreign.initialize().await?;
-                let reply = script_wire_call(&mut foreign, 2, "ssh_read_output",
+                let reply = script_wire_call(&mut foreign, 2, "inspect_output",
                     json!({"handle":handle,"stream":"stdout"})).await?;
                 failed(&reply, "not_found")?;
                 ensure!(masters(&foreign.log)?.is_empty());
@@ -6877,7 +6876,7 @@ async fn ssh_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result
             let mut server = WireServer::start_command(command)?;
             let cases = async {
                 server.initialize().await?;
-                let reply = script_wire_call(&mut server, 2, "ssh_exec", json!({
+                let reply = script_wire_call(&mut server, 2, "exec_command", json!({
                     "host":"plain","command":"printf 0123456789; printf abcdefghij >&2","retain_output":true,
                 })).await?;
                 let data = succeeded(&reply)?;
@@ -6893,7 +6892,7 @@ async fn ssh_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result
                             while !output_entries(&temporary)?.is_empty() { sleep(Duration::from_millis(10)).await; }
                             Ok::<_, anyhow::Error>(())
                         }).await??;
-                        let reply = script_wire_call(&mut server, 5, "ssh_read_output",
+                        let reply = script_wire_call(&mut server, 5, "inspect_output",
                             json!({"handle":handle,"stream":"stdout"})).await?;
                         failed(&reply, "not_found")?;
                         return Ok::<_, anyhow::Error>(());
@@ -6903,7 +6902,7 @@ async fn ssh_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result
                 }
                 // More than pipe capacity on both streams, followed by a real
                 // observed nonzero exit: failed retention must keep draining.
-                let reply = script_wire_call(&mut server, 6, "ssh_exec", json!({
+                let reply = script_wire_call(&mut server, 6, "exec_command", json!({
                     "host":"plain","retain_output":true,
                     "command":"x=oooooooooooooooo; y=eeeeeeeeeeeeeeee; i=0; while [ \"$i\" -lt 14 ]; do x=$x$x; y=$y$y; i=$((i+1)); done; printf '%s' \"$x\"; printf '%s' \"$y\" >&2; exit 23",
                 })).await?;
@@ -6919,7 +6918,7 @@ async fn ssh_output_prefix_quota_disabled_storage_failure_and_expiry() -> Result
                 if mode == "storage" { ensure!(fs::read(&temporary)? == b"not a directory"); }
                 let finished = fixture.root.path().join(format!("output-timeout-{mode}-done"));
                 let sleeper = binding_program("sleep")?;
-                let timed = script_wire_call(&mut server, 7, "ssh_exec", json!({
+                let timed = script_wire_call(&mut server, 7, "exec_command", json!({
                     "host":"plain","retain_output":true,"timeout_secs":1,
                     "command":format!("trap '' HUP; printf TIME; printf WAIT >&2; {} 2; printf done > {}",
                         quote(&sleeper.to_string_lossy()), quote(&finished.to_string_lossy())),
@@ -6991,7 +6990,7 @@ async fn ssh_output_argv_and_named_native() -> Result<()> {
             server.initialize().await?;
             let mut id = 2;
             for (name, args, stdout, stderr) in [
-                ("ssh_run", json!({"host":"plain","argv":["/bin/sh","-c","printf 'native\\000\\303\\251'; printf 'error\\000\\377' >&2"],"retain_output":true}), &b"native\0\xc3\xa9"[..], &b"error\0\xff"[..]),
+                ("exec_argv", json!({"host":"plain","argv":["/bin/sh","-c","printf 'native\\000\\303\\251'; printf 'error\\000\\377' >&2"],"retain_output":true}), &b"native\0\xc3\xa9"[..], &b"error\0\xff"[..]),
                 ("retained_native", json!({"host":"plain","retain_output":true}), &b"native\0\xc3\xa9"[..], &b""[..]),
             ] {
                 let reply = script_wire_call(&mut server, id, name, args).await?;
@@ -7481,7 +7480,7 @@ print(json.dumps({"ok": True}))
             let no_consent = script_wire_call(
                 &mut server,
                 33,
-                "clear_target_quarantine",
+                "change_target_quarantine_clear",
                 json!({"host": "plain", "acknowledge_remote_state_reconciled": false}),
             )
             .await?;
@@ -7490,7 +7489,7 @@ print(json.dumps({"ok": True}))
             let unknown_clear = script_wire_call(
                 &mut server,
                 34,
-                "clear_target_quarantine",
+                "change_target_quarantine_clear",
                 json!({"host": "unknown", "acknowledge_remote_state_reconciled": true}),
             )
             .await?;
@@ -7500,7 +7499,7 @@ print(json.dumps({"ok": True}))
             let cleared = script_wire_call(
                 &mut server,
                 35,
-                "clear_target_quarantine",
+                "change_target_quarantine_clear",
                 json!({"host": "plain", "acknowledge_remote_state_reconciled": true}),
             )
             .await?;
@@ -7511,7 +7510,7 @@ print(json.dumps({"ok": True}))
             let cleared_again = script_wire_call(
                 &mut server,
                 36,
-                "clear_target_quarantine",
+                "change_target_quarantine_clear",
                 json!({"host": "plain", "acknowledge_remote_state_reconciled": true}),
             )
             .await?;
@@ -7591,11 +7590,11 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
                 );
             }
             ensure!(
-                !tools.iter().any(|t| t["name"] == "ssh_sudo"),
+                !tools.iter().any(|t| t["name"] == "exec_sudo"),
                 "workstation mode without configured sudo exposed ssh_sudo"
             );
 
-            let targets = script_wire_call(&mut server, 3, "ssh_targets", json!({})).await?;
+            let targets = script_wire_call(&mut server, 3, "observe_targets", json!({})).await?;
             let targets_data = succeeded(&targets)?;
             ensure!(targets_data["mode"] == "open");
             ensure!(targets_data["targets"] == json!([]));

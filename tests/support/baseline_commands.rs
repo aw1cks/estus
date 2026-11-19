@@ -161,18 +161,18 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
         }).await.context("direct accepted-env log controls did not arrive")??;
         let client = Client::start(&fixture.config).await?;
         let calls = async {
-            let environment = client.call("ssh_exec", json!({"host":"plain","command":"/bin/env"})).await?;
+            let environment = client.call("exec_command", json!({"host":"plain","command":"/bin/env"})).await?;
             ensure!(environment["error"].is_null() && environment["data"]["exit_code"] == 0);
             let env = environment["data"]["stdout"].as_str().context("environment stdout")?;
             ensure!(env.lines().any(|line| line == "ESTUS=1"));
             private_boundary(&environment.to_string(), &markers)?;
             for host in ["same", "split"] {
-                let reply = client.call("ssh_sudo", json!({"host":host,"argv":["/usr/bin/id","-u"]})).await?;
+                let reply = client.call("exec_sudo", json!({"host":host,"argv":["/usr/bin/id","-u"]})).await?;
                 command_succeeded(&reply, "0\n")?;
                 private_boundary(&reply.to_string(), &markers)?;
             }
             fixture.primary_exec("printf V03_READ_CONTENT > /tmp/v03-environment-read; chmod 644 /tmp/v03-environment-read").await?;
-            let read = client.call("ssh_read_file", json!({"host":"plain","path":"/tmp/v03-environment-read"})).await?;
+            let read = client.call("inspect_file", json!({"host":"plain","path":"/tmp/v03-environment-read"})).await?;
             ensure!(read["error"].is_null() && read["data"]["content"] == "V03_READ_CONTENT");
             private_boundary(&read.to_string(), &markers)?;
             timeout(Duration::from_secs(5), async {
@@ -189,7 +189,7 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
                     sleep(Duration::from_millis(20)).await;
                 }
             }).await.context("each MCP exec/sudo/SFTP session must accept ESTUS=1")??;
-            let jump = client.call("ssh_exec", json!({"host":"viajump","command":"/usr/bin/id -u"})).await?;
+            let jump = client.call("exec_command", json!({"host":"viajump","command":"/usr/bin/id -u"})).await?;
             command_succeeded(&jump, "1000\n")?;
             private_boundary(&jump.to_string(), &markers)?;
             let keys = crate::fixture_fingerprints(&fixture).await?;
@@ -209,8 +209,8 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
             // the bad trust database during their own initial handshake. A
             // second call on a failed cached entry only proves it is unavailable.
             for (name, args) in [
-                ("ssh_exec", json!({"host":"plain","command":"printf V03_REJECTED_PAYLOAD > /tmp/v03-hostkey-dispatched"})),
-                ("ssh_read_file", json!({"host":"plain","path":"/tmp/v03-environment-read"})),
+                ("exec_command", json!({"host":"plain","command":"printf V03_REJECTED_PAYLOAD > /tmp/v03-hostkey-dispatched"})),
+                ("inspect_file", json!({"host":"plain","path":"/tmp/v03-environment-read"})),
             ] {
                 let client = Client::start(&config).await?;
                 let rejected = async {
@@ -228,7 +228,7 @@ async fn ssh_packaged_config_environment_and_privacy() -> Result<()> {
         }
         let client = Client::start(&fixture.config).await?;
         let trusted = async {
-            command_succeeded(&client.call("ssh_exec", json!({"host":"plain","command":"printf TRUSTED"})).await?, "TRUSTED")
+            command_succeeded(&client.call("exec_command", json!({"host":"plain","command":"printf TRUSTED"})).await?, "TRUSTED")
         }.await;
         finish_client(client, trusted, &markers).await
     }.await;
@@ -261,7 +261,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
         let commands = async {
             let rejected = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({
                         "host":"plain", "command":"'".repeat(20_000)
                     }),
@@ -283,7 +283,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
                 ("exit 255", "", "", 255),
             ] {
                 let reply = client
-                    .call("ssh_exec", json!({"host":"plain","command":command}))
+                    .call("exec_command", json!({"host":"plain","command":command}))
                     .await?;
                 ensure!(
                     reply["error"]["code"] == "command_failed"
@@ -329,7 +329,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
                 .await?;
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"plain","cwd":cwd,"command":"printf '%s' \"$PWD\""}),
                 )
                 .await?;
@@ -339,7 +339,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
             command_succeeded(
                 &client
                     .call(
-                        "ssh_exec",
+                        "exec_command",
                         json!({"host":"plain","command":format!("printf %s {}", quote(&literal))}),
                     )
                     .await?,
@@ -357,7 +357,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
             let command = "printf V03_COMMAND_SECRET; printf V03_STDERR_SECRET >&2; cat";
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"plain","command":command,"stdin":stdin}),
                 )
                 .await?;
@@ -369,7 +369,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
             );
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"plain","command":"printf '\\377'; printf '\\376' >&2"}),
                 )
                 .await?;
@@ -382,7 +382,7 @@ async fn ssh_packaged_command_fidelity() -> Result<()> {
             );
             let reply = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({
                         "host":"plain","timeout_secs":15,
                         "command":indoc! {"
@@ -460,7 +460,7 @@ async fn ssh_packaged_command_timeout_and_cancellation() -> Result<()> {
         let markers = fixture.credential_markers()?;
         let client = Client::start(&fixture.config).await?;
         let commands = async {
-            let warm = client.call("ssh_exec", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?;
+            let warm = client.call("exec_command", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?;
             ensure!(warm["error"].is_null() && warm["data"]["exit_code"] == 0);
             let transport = warm["data"]["stdout"].as_str().context("warm transport")?;
             ensure!(transport.split_ascii_whitespace().count() == 4);
@@ -479,7 +479,7 @@ async fn ssh_packaged_command_timeout_and_cancellation() -> Result<()> {
                     printf done > {prefix}-done
                 "};
                 let mut request = client.service.send_cancellable_request(
-                    ClientRequest::CallToolRequest(CallToolRequest::new(support::params("ssh_exec", json!({
+                    ClientRequest::CallToolRequest(CallToolRequest::new(support::params("exec_command", json!({
                         "host":"plain", "command":script, "timeout_secs":if cancel { 12 } else { 2 }
                     })))), PeerRequestOptions::default()).await?;
                 let id = serde_json::to_value(&request.id)?;
@@ -492,7 +492,7 @@ async fn ssh_packaged_command_timeout_and_cancellation() -> Result<()> {
                 }
                 // This is a second concurrently active channel on precisely the
                 // same logical target and original master, not another target.
-                command_succeeded(&client.call("ssh_exec", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?, transport)?;
+                command_succeeded(&client.call("exec_command", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?, transport)?;
                 if cancel {
                     timeout(Duration::from_secs(5), request.cancel(Some("V03 explicit cancellation".into()))).await??;
                 } else {
@@ -505,7 +505,7 @@ async fn ssh_packaged_command_timeout_and_cancellation() -> Result<()> {
                     private_boundary(&reply.to_string(), &markers)?;
                 }
                 await_finish(&client.log, &id, if cancel { "cancelled" } else { "timeout" }).await?;
-                command_succeeded(&client.call("ssh_exec", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?, transport)?;
+                command_succeeded(&client.call("exec_command", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?, transport)?;
                 check_master(&fixture, &owned[0]).await?;
                 wait_remote(&fixture, &format!("{prefix}-done")).await?;
                 ensure!(fixture.primary_exec(&format!("cat {prefix}-dispatch")).await? == b"dispatch", "uncertain command was replayed");
@@ -548,7 +548,7 @@ async fn shutdown_once(fixture: &isolated::Fixture, sigterm: bool, index: usize)
     let log = server.log.clone();
     let scenario = async {
         server.initialize().await?;
-        command_succeeded(&wire_tool(&mut server, 2, "ssh_exec", json!({"host":"plain","command":"printf SHUTDOWN_READY"}), &markers).await?, "SHUTDOWN_READY")?;
+        command_succeeded(&wire_tool(&mut server, 2, "exec_command", json!({"host":"plain","command":"printf SHUTDOWN_READY"}), &markers).await?, "SHUTDOWN_READY")?;
         let owned = observed_master_count(&log, 1).await?;
         check_master(fixture, &owned[0]).await?;
         let script = formatdoc! {"
@@ -558,7 +558,7 @@ async fn shutdown_once(fixture: &isolated::Fixture, sigterm: bool, index: usize)
             sleep 3
             printf done > /tmp/v03-shutdown-{index}-done
         "};
-        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_exec","arguments":{"host":"plain","command":script,"timeout_secs":10}}})).await?;
+        server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"exec_command","arguments":{"host":"plain","command":script,"timeout_secs":10}}})).await?;
         wait_remote(fixture, &format!("/tmp/v03-shutdown-{index}-started")).await?;
         Ok(())
     }.await;
@@ -719,7 +719,7 @@ async fn ssh_packaged_complete_wire_budget() -> Result<()> {
                     json!("V03-wire-'\\\n".repeat(128)),
                     "tools/call",
                     json!({
-                        "name":"ssh_exec","arguments":{
+                        "name":"exec_command","arguments":{
                             "host":"plain","timeout_secs":15,
                             "command":indoc! {"
                             /bin/printf V03_WIRE_PREFIX
@@ -806,7 +806,7 @@ async fn ssh_packaged_channel_loss_preserves_healthy_master() -> Result<()> {
         let channels = async {
             let warm = client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({
                         "host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""
                     }),
@@ -836,7 +836,7 @@ async fn ssh_packaged_channel_loss_preserves_healthy_master() -> Result<()> {
                 .service
                 .send_cancellable_request(
                     ClientRequest::CallToolRequest(CallToolRequest::new(support::params(
-                        "ssh_exec",
+                        "exec_command",
                         json!({
                             "host":"plain","timeout_secs":10,"command":indoc! {"
                         printf started > /tmp/v03-r1-active-started
@@ -857,7 +857,7 @@ async fn ssh_packaged_channel_loss_preserves_healthy_master() -> Result<()> {
                 .service
                 .send_cancellable_request(
                     ClientRequest::CallToolRequest(CallToolRequest::new(support::params(
-                        "ssh_exec",
+                        "exec_command",
                         json!({
                             "host":"plain","timeout_secs":10,"command":indoc! {"
                         trap '' HUP
@@ -902,7 +902,7 @@ async fn ssh_packaged_channel_loss_preserves_healthy_master() -> Result<()> {
             command_succeeded(
                 &client
                     .call(
-                        "ssh_exec",
+                        "exec_command",
                         json!({
                             "host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""
                         }),

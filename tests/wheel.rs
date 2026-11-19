@@ -283,7 +283,7 @@ async fn catalog(server: &mut WireServer) -> Result<Value> {
         .request(
             3,
             "tools/call",
-            json!({"name":"ssh_targets","arguments":{}}),
+            json!({"name":"observe_targets","arguments":{}}),
         )
         .await?;
     ensure!(
@@ -306,13 +306,13 @@ async fn ordinary_ssh(installed: &Installed) -> Result<()> {
             for (id, name, arguments, expected) in [
                 (
                     4,
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"plain","command":"printf portable-command"}),
                     "portable-command",
                 ),
                 (
                     5,
-                    "ssh_read_file",
+                    "inspect_file",
                     json!({"host":"plain","path":path}),
                     "portable-wheel\n",
                 ),
@@ -333,7 +333,7 @@ async fn ordinary_ssh(installed: &Installed) -> Result<()> {
                     reply["error"].is_null() && reply["data"].is_object(),
                     "{name}: {reply}"
                 );
-                let field = if name == "ssh_exec" {
+                let field = if name == "exec_command" {
                     "stdout"
                 } else {
                     "content"
@@ -605,7 +605,12 @@ async fn installed_wheel_channels() -> Result<()> {
                 .collect::<Result<_>>()?;
             names.sort_unstable();
             ensure!(
-                names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"],
+                names
+                    == [
+                        "change_target_quarantine_clear",
+                        "inspect_output",
+                        "observe_targets"
+                    ],
                 "{channel} omitted profile exposed native authority: {names:?}"
             );
             if let Some(expected) = &expected {

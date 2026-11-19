@@ -1132,7 +1132,7 @@ async fn projection_scenarios(a: &Acceptance) -> Result<()> {
         let facts = a.call(&mut server, 3, "facts", json!({"host":"plain","inputs":{}})).await?;
         projected_facts(&facts)?;
         // Observe facts independently over the existing native public tool path.
-        let native = server.request(4,"tools/call",json!({"name":"ssh_exec","arguments":{
+        let native = server.request(4,"tools/call",json!({"name":"exec_command","arguments":{
             "host":"plain","command":format!("{} -I -c 'import platform; print(platform.system()); print(platform.python_version())'",
                 support::quote(&text(&a.python)?))}})).await?;
         ensure!(native["error"].is_null());
@@ -1346,7 +1346,7 @@ async fn scenarios(a: &mut Acceptance) -> Result<()> {
         ("secret", "ansible_module", "automation"),
     ]).await?;
     a.private(&inspection.to_string())?;
-    for name in ["probe", "command", "secret", "ssh_exec"] {
+    for name in ["probe", "command", "secret", "exec_command"] {
         ensure!(
             listed["result"]["tools"]
                 .as_array()
@@ -1460,7 +1460,7 @@ async fn scenarios(a: &mut Acceptance) -> Result<()> {
     let reply = a.call(&mut server, 7, "command", args).await?;
     ensure!(reply["data"]["status"] == "successful");
     // A04 projections are intentionally absent: inspect the actual effect over native SSH.
-    let observed_reply = server.request(8,"tools/call",json!({"name":"ssh_exec","arguments":{"host":"plain","command":format!("cat {}",support::quote(&text(&observed)?))}})).await?;
+    let observed_reply = server.request(8,"tools/call",json!({"name":"exec_command","arguments":{"host":"plain","command":format!("cat {}",support::quote(&text(&observed)?))}})).await?;
     let stdout = observed_reply["result"]["structuredContent"]["data"]["stdout"]
         .as_str()
         .context("native observed contents")?;
@@ -1731,7 +1731,7 @@ async fn real_runner_isolated_fixture_smoke() -> Result<()> {
                 "real isolated Runner probe failed: {response}");
             // Observe the distinct Linux/Python target via the existing native MCP path.
             let native = server.request(3,"tools/call",json!({
-                "name":"ssh_exec","arguments":{"host":"plain",
+                "name":"exec_command","arguments":{"host":"plain",
                     "command":"uname -s; /usr/bin/python3 -I -c 'import sys; print(\"%s.%s\" % sys.version_info[:2])'"}
             })).await?;
             let observed = &native["result"]["structuredContent"];
@@ -3993,7 +3993,7 @@ async fn authority_scenarios(
             ensure!(!denied.status.success(), "native narrow policy elevated module Python");
         }
         let native_denied = server.request(301,"tools/call",json!({
-            "name":"ssh_sudo","arguments":{"host":"same","user":"root",
+            "name":"exec_sudo","arguments":{"host":"same","user":"root",
                 "argv":["/usr/bin/python3","-I","-c","print('forbidden')"]}
         })).await?;
         ensure!(!native_denied["result"]["structuredContent"]["error"].is_null(),

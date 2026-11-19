@@ -146,13 +146,13 @@ impl Drop for WriteRelay {
 async fn ordinary(client: &Client, command: &str) -> Result<Value> {
     let reply = client
         .call(
-            "ssh_exec",
+            "exec_command",
             json!({"host":"plain", "command":command, "timeout_secs":10}),
         )
         .await?;
     ensure!(
         reply["error"].is_null() && reply["data"]["exit_code"] == 0,
-        "ordinary ssh_exec failed: {reply}"
+        "ordinary exec_command failed: {reply}"
     );
     Ok(reply["data"].clone())
 }
@@ -278,7 +278,7 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
             chown root /tmp/f04-root-only
             chmod 600 /tmp/f04-root-only
         "}).await?;
-        let denied = client.call("ssh_write_file", json!({
+        let denied = client.call("change_file_write", json!({
             "host":"plain", "path":"/tmp/f04-root-only",
             "content":"MUST_NOT_REPLACE", "overwrite":true
         })).await?;
@@ -293,7 +293,7 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
                 == b"ROOT_ONLY0\n",
             "ordinary write changed root-owned denied data/ownership"
         );
-        let warm = client.call("ssh_exec", json!({
+        let warm = client.call("exec_command", json!({
             "host":"slowwrite", "command":"/usr/bin/id -u; /usr/bin/printf '%s' \"$SSH_CONNECTION\"", "timeout_secs":15
         })).await?;
         ensure!(
@@ -304,7 +304,7 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
             .and_then(|text| text.strip_prefix("1000\n"))
             .context("slow writer UID/transport")?;
         ensure!(slow_transport.split_ascii_whitespace().count() == 4);
-        let sibling = client.call("ssh_exec", json!({
+        let sibling = client.call("exec_command", json!({
             "host":"nosftp", "command":"/usr/bin/printf '%s' \"$SSH_CONNECTION\""
         })).await?;
         ensure!(
@@ -328,7 +328,7 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
             "timeout_secs": if matches!(fault, WriteFault::Timeout) { 8 } else { 30 },
         });
         let mut request = client.service.send_cancellable_request(
-            ClientRequest::CallToolRequest(CallToolRequest::new(support::params("ssh_write_file", arguments))),
+            ClientRequest::CallToolRequest(CallToolRequest::new(support::params("change_file_write", arguments))),
             PeerRequestOptions::default(),
         ).await?;
         let request_id = serde_json::to_value(&request.id)?;
@@ -401,7 +401,7 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
             // Remove the intentional bandwidth fault so new channel traffic is
             // not queued behind old encrypted bytes. This is not a replay.
             relay.throttled.store(false, Ordering::Relaxed);
-            let healthy = client.call("ssh_exec", json!({
+            let healthy = client.call("exec_command", json!({
                 "host":"slowwrite", "command":"/usr/bin/printf '%s' \"$SSH_CONNECTION\""
             })).await?;
             ensure!(
@@ -410,7 +410,7 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
             );
             fixture.kill_primary().await?;
         }
-        let survivor = client.call("ssh_exec", json!({
+        let survivor = client.call("exec_command", json!({
             "host":"nosftp", "command":"/usr/bin/printf '%s' \"$SSH_CONNECTION\""
         })).await?;
         ensure!(
@@ -632,15 +632,15 @@ async fn ssh_sudo_authority() -> Result<()> {
 
         for (tool, args) in [
             (
-                "ssh_sudo",
+                "exec_sudo",
                 json!({"host":"same-disabled","argv":["/usr/bin/id","-u"]}),
             ),
             (
-                "ssh_sudo",
+                "exec_sudo",
                 json!({"host":"split-admin","argv":["/usr/bin/id","-u"]}),
             ),
             (
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"split-admin","command":"/usr/bin/id -u"}),
             ),
         ] {
@@ -665,14 +665,14 @@ async fn ssh_sudo_authority() -> Result<()> {
 
         let ordinary = client
             .call(
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"split","command":"/usr/bin/id -u"}),
             )
             .await?;
         command_succeeded(&ordinary, "1000\n")?;
         let denied = client
             .call(
-                "ssh_exec",
+                "exec_command",
                 json!({
                     "host":"split","command":"/usr/bin/sudo -n -k -u root -- /usr/bin/id -u"
                 }),
@@ -687,7 +687,7 @@ async fn ssh_sudo_authority() -> Result<()> {
         let first = observed_master_count(&client.log, 1).await?;
         let root = client
             .call(
-                "ssh_sudo",
+                "exec_sudo",
                 json!({"host":"split","argv":["/usr/bin/id","-u"]}),
             )
             .await?;
@@ -711,12 +711,12 @@ async fn ssh_sudo_authority() -> Result<()> {
             json!({"host":"split","user":"mcp","argv":["/usr/bin/id","-u"]}),
             json!({"host":"split","argv":["/bin/sh","-c","/usr/bin/id -u"]}),
         ] {
-            policy_rejected(&client.call("ssh_sudo", args).await?)?;
+            policy_rejected(&client.call("exec_sudo", args).await?)?;
         }
         command_succeeded(
             &client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"split","command":"/usr/bin/id -u"}),
                 )
                 .await?,
@@ -725,7 +725,7 @@ async fn ssh_sudo_authority() -> Result<()> {
         command_succeeded(
             &client
                 .call(
-                    "ssh_sudo",
+                    "exec_sudo",
                     json!({"host":"split","argv":["/usr/bin/id","-u"]}),
                 )
                 .await?,
@@ -739,7 +739,7 @@ async fn ssh_sudo_authority() -> Result<()> {
         command_succeeded(
             &client
                 .call(
-                    "ssh_exec",
+                    "exec_command",
                     json!({"host":"same","command":"/usr/bin/id -u"}),
                 )
                 .await?,
@@ -749,7 +749,7 @@ async fn ssh_sudo_authority() -> Result<()> {
         command_succeeded(
             &client
                 .call(
-                    "ssh_sudo",
+                    "exec_sudo",
                     json!({"host":"same","argv":["/usr/bin/id","-u"]}),
                 )
                 .await?,
@@ -760,7 +760,7 @@ async fn ssh_sudo_authority() -> Result<()> {
             "same-account sudo created another identity/master"
         );
         // This succeeds despite the earlier structured sudo policy refusal.
-        command_succeeded(&client.call("ssh_exec", json!({
+        command_succeeded(&client.call("exec_command", json!({
             "host":"same-disabled","command":"/usr/bin/sudo -n -k -u root -- /usr/bin/id -u"
         })).await?, "0\n")?;
         let owned = observed_master_count(&client.log, 4).await?;
@@ -837,7 +837,7 @@ async fn ssh_sudo_authority() -> Result<()> {
             .iter()
             .filter(|record| {
                 record["event"] == "finish"
-                    && record["tool"] == "ssh_sudo"
+                    && record["tool"] == "exec_sudo"
                     && record["host"] == host
             })
             .collect();
@@ -911,7 +911,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
         let invalid = wire_tool(
             &mut wire,
             2,
-            "ssh_sudo",
+            "exec_sudo",
             json!({
                 "host":"split","argv":["/usr/bin/printf",format!("{REJECTED_SECRET}\0")]
             }),
@@ -965,7 +965,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
             let reply = wire_tool(
                 &mut wire,
                 id,
-                "ssh_sudo",
+                "exec_sudo",
                 json!({
                     "host":host,"user":"root","argv":argv,
                 }),
@@ -983,7 +983,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
             let reply = wire_tool(
                 &mut wire,
                 id,
-                "ssh_sudo",
+                "exec_sudo",
                 json!({
                     "host":host,"argv":["/usr/bin/id","-u"],"timeout_secs":3,
                 }),
@@ -1009,7 +1009,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
         let consumed = wire_tool(
             &mut wire,
             7,
-            "ssh_exec",
+            "exec_command",
             json!({
                 "host":"plain",
                 "command":indoc::indoc! {"
@@ -1062,7 +1062,7 @@ async fn ssh_sudo_fidelity_and_failures() -> Result<()> {
     let records = log.final_records()?;
     for record in records
         .iter()
-        .filter(|record| record["tool"] == "ssh_sudo" || record["tool"] == "ssh_exec")
+        .filter(|record| record["tool"] == "exec_sudo" || record["tool"] == "exec_command")
     {
         for field in [
             "argv",
@@ -1187,11 +1187,12 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
         ensure!(
             names
                 == [
+                    "change_target_quarantine_clear",
+                    "inspect_output",
+                    "observe_targets",
                     "ordinary_identity",
                     "root_identity",
                     "root_literal",
-                    "ssh_read_output",
-                    "ssh_targets"
                 ],
             "actions-only exposed an unrestricted tool: {names:?}"
         );
@@ -1240,15 +1241,15 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
         let mut request_id = 3;
         for (name, arguments) in [
             (
-                "ssh_exec",
+                "exec_command",
                 json!({"host":"split","command":"/usr/bin/id -u"}),
             ),
             (
-                "ssh_run",
+                "exec_argv",
                 json!({"host":"split","argv":["/usr/bin/id","-u"]}),
             ),
             (
-                "ssh_sudo",
+                "exec_sudo",
                 json!({"host":"split","argv":["/usr/bin/id","-u"]}),
             ),
         ] {

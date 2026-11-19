@@ -441,9 +441,9 @@ impl Binding {
             ensure!(
                 tools.len() == 4
                     && tools.iter().all(|tool| tool["name"] == self.name
-                        || tool["name"] == "clear_target_quarantine"
-                        || tool["name"] == "ssh_targets"
-                        || tool["name"] == "ssh_read_output"),
+                        || tool["name"] == "change_target_quarantine_clear"
+                        || tool["name"] == "observe_targets"
+                        || tool["name"] == "inspect_output"),
                 "workflow tools/list escape: {reply}"
             );
             let published = tools

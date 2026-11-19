@@ -222,7 +222,7 @@ async fn progress_native_correlation_clipping_suppression_and_terminal_outcomes(
             // Absence is checked on every raw frame, not a receive helper that filters notifications.
             for (index, token) in [None, Some(json!("x".repeat(300))), Some(json!({"invalid":"TOKEN_OBJECT_PRIVATE"})), Some(json!(["TOKEN_ARRAY_PRIVATE"]))].into_iter().enumerate() {
                 let id = 10 + index as u64;
-                call(&mut server, id, "ssh_exec", json!({"host":"plain","command":"printf SUPPRESSION_OK; sleep 0.6"}), token).await?;
+                call(&mut server, id, "exec_command", json!({"host":"plain","command":"printf SUPPRESSION_OK; sleep 0.6"}), token).await?;
                 let frame = response(&mut server, id, None).await?;
                 let result = envelope(&frame)?;
                 ensure!(result["error"].is_null() && result["data"]["stdout"] == "SUPPRESSION_OK" && result["data"]["exit_code"] == 0,
@@ -234,7 +234,7 @@ async fn progress_native_correlation_clipping_suppression_and_terminal_outcomes(
             for index in 0..2 {
                 let ready = fixture.root.path().join(format!("ready-{index}"));
                 let command = native_stream(&releases[index], &ready, 32 * (index + 1))?;
-                call(&mut server, 20 + index as u64, "ssh_exec", json!({"host":"plain","command":command}), Some(traces[index].token.clone())).await?;
+                call(&mut server, 20 + index as u64, "exec_command", json!({"host":"plain","command":command}), Some(traces[index].token.clone())).await?;
                 // Keep both request lifetimes overlapping, but do not require
                 // two simultaneously contending advisory writes to be delivered.
                 timeout(WAIT, async {
@@ -288,7 +288,7 @@ async fn progress_native_correlation_clipping_suppression_and_terminal_outcomes(
                 let command = format!("printf PARTIAL_OUT; printf PARTIAL_ERR >&2; printf ready > {}; i=0; while [ ! -f {} ] && [ \"$i\" -lt 500 ]; do sleep 0.02; i=$((i+1)); done; printf done > {}", quote(text(&ready)?), quote(text(&interrupted_release)?), quote(text(&done)?));
                 let id = if cancel { 31 } else { 30 };
                 let mut trace = Trace::new(json!(if cancel { "cancel-native" } else { "timeout-native" }));
-                call(&mut server, id, "ssh_exec", json!({"host":"plain","command":command,"timeout_secs":if cancel { 10 } else { 2 }}), Some(trace.token.clone())).await?;
+                call(&mut server, id, "exec_command", json!({"host":"plain","command":command,"timeout_secs":if cancel { 10 } else { 2 }}), Some(trace.token.clone())).await?;
                 if !fixture.eventual_markers.contains(&done) { fixture.eventual_markers.push(done.clone()); }
                 Fixture::await_file(&ready).await?;
                 while trace.values.last().copied().unwrap_or(0) == 0 {
@@ -779,7 +779,7 @@ async fn progress_sftp_channel_stage_preserves_exact_read_and_terminal_order() -
             call(
                 &mut server,
                 2,
-                "ssh_read_file",
+                "inspect_file",
                 json!({"host":"plain","path":path,"max_bytes":16}),
                 Some(json!(-17)),
             )

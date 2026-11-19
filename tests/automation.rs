@@ -291,7 +291,24 @@ impl Server {
         for tool in tools {
             let name = tool["name"].as_str().context("tool name")?;
             ensure!(
-                name.starts_with("ssh_") || name == "clear_target_quarantine",
+                matches!(
+                    name,
+                    "observe_targets"
+                        | "observe_stat"
+                        | "inspect_output"
+                        | "inspect_directory"
+                        | "inspect_file"
+                        | "change_file_write"
+                        | "change_file_replace"
+                        | "change_mkdir"
+                        | "change_rename"
+                        | "change_file_remove"
+                        | "change_directory_remove"
+                        | "exec_command"
+                        | "exec_argv"
+                        | "exec_sudo"
+                        | "change_target_quarantine_clear"
+                ),
                 "runtime auto-registered a tool"
             );
         }
@@ -328,7 +345,12 @@ async fn native_startup_ignores_absent_bad_and_disabled_runtime_references() -> 
         .collect::<Result<_>>()?;
     names.sort_unstable();
     ensure!(
-        names == ["clear_target_quarantine", "ssh_read_output", "ssh_targets"],
+        names
+            == [
+                "change_target_quarantine_clear",
+                "inspect_output",
+                "observe_targets"
+            ],
         "omitted profile exposed native authority: {names:?}"
     );
     for reference in [

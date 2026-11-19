@@ -58,7 +58,7 @@ An MCP stdio client uses:
       estus-service@service-host
 Initialize MCP and call record_identity with {"host":"target"}. No command,
 program, argv, authority or SSH alias is client-selectable. The reviewed fixed
-operation records target UID; generic ssh_exec/ssh_run/ssh_sudo are not exposed.
+operation records target UID; generic exec_command/exec_argv/exec_sudo are not exposed.
 The outbound identity still has OS rights on the target, so enforce any narrower
 remote-account policy there independently.
 

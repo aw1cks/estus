@@ -130,9 +130,9 @@ async fn separated_accounts_force_real_service_mcp_and_reap_owned_resources() ->
             ensure!(String::from_utf8_lossy(&process_denied.stderr).contains("Operation not permitted"));
 
             for (name, arguments) in [
-                ("ssh_exec", json!({"host":"target","command":"touch /tmp/generic-bypass"})),
-                ("ssh_run", json!({"host":"target","program":"/usr/bin/touch","argv":["/tmp/generic-bypass"]})),
-                ("ssh_sudo", json!({"host":"target","user":"root","program":"/usr/bin/id","argv":["-u"]})),
+                ("exec_command", json!({"host":"target","command":"touch /tmp/generic-bypass"})),
+                ("exec_argv", json!({"host":"target","program":"/usr/bin/touch","argv":["/tmp/generic-bypass"]})),
+                ("exec_sudo", json!({"host":"target","user":"root","program":"/usr/bin/id","argv":["-u"]})),
             ] {
                 let denied = timeout(Duration::from_secs(10), client.service.call_tool(
                     support::params(name, arguments),
@@ -302,41 +302,41 @@ async fn configuration_replacement_workflow() -> Result<()> {
             let listed = timeout(Duration::from_secs(10), client.service.list_tools(None)).await??;
             let names: std::collections::BTreeSet<_> =
                 listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
-            ensure!(names.contains("ssh_replace_file") && names.contains("ssh_read_file")
-                && names.contains("ssh_targets") && !names.contains("ssh_exec")
-                && !names.contains("ssh_run") && !names.contains("ssh_sudo"),
+            ensure!(names.contains("change_file_replace") && names.contains("inspect_file")
+                && names.contains("observe_targets") && !names.contains("exec_command")
+                && !names.contains("exec_argv") && !names.contains("exec_sudo"),
                 "file profile exposed unexpected command authority: {names:?}");
-            let targets = client.call("ssh_targets", json!({})).await?;
+            let targets = client.call("observe_targets", json!({})).await?;
             ensure!(targets["error"].is_null()
                 && targets["data"]["mode"] == "configured"
                 && targets["data"]["targets"].as_array().is_some_and(|rows|
                     rows.len() == 1 && rows[0]["name"] == "configuration"),
                 "discovery did not restrict authority to the reviewed target: {targets}");
             for (name, arguments) in [
-                ("ssh_exec", json!({"host":"configuration","command":"touch /tmp/replacement-generic"})),
-                ("ssh_run", json!({"host":"configuration","argv":["/usr/bin/touch","/tmp/replacement-generic"]})),
+                ("exec_command", json!({"host":"configuration","command":"touch /tmp/replacement-generic"})),
+                ("exec_argv", json!({"host":"configuration","argv":["/usr/bin/touch","/tmp/replacement-generic"]})),
             ] {
                 ensure!(timeout(Duration::from_secs(10),
                     client.service.call_tool(support::params(name, arguments))).await?.is_err(),
                     "generic shell escape published: {name}");
             }
-            let foreign = client.call("ssh_replace_file", json!({
+            let foreign = client.call("change_file_replace", json!({
                 "host":"foreign","path":"/config/service.conf","content":"NEVER","overwrite":true,
             })).await?;
             ensure!(foreign["error"]["code"] == "policy_denied", "foreign target accepted: {foreign}");
             for path in ["/.ssh/rc", "/.ssh/authorized_keys", "/etc/estus/server.toml"] {
-                let denied = client.call("ssh_replace_file", json!({
+                let denied = client.call("change_file_replace", json!({
                     "host":"configuration","path":path,"content":"NEVER","overwrite":true,
                 })).await?;
                 ensure!(denied["error"].is_object(), "writable authority escaped /config: {denied}");
             }
-            let read = client.call("ssh_read_file", json!({
+            let read = client.call("inspect_file", json!({
                 "host":"configuration","path":"/config/service.conf",
                 "expected_content_sha256":old_digest,
             })).await?;
             ensure!(read["error"].is_null() && read["data"]["content"] == "version=old\n"
                 && read["data"]["content_sha256"] == old_digest, "reviewed read failed: {read}");
-            let mismatch = client.call("ssh_read_file", json!({
+            let mismatch = client.call("inspect_file", json!({
                 "host":"configuration","path":"/config/service.conf",
                 "expected_content_sha256":"00".repeat(32),
             })).await?;
@@ -359,7 +359,7 @@ async fn configuration_replacement_workflow() -> Result<()> {
                     fixture.primary_exec(
                         "while test ! -e /tmp/replacement-reader-ready; do sleep 0.01; done",
                     ).await?;
-                    let replaced = client.call("ssh_replace_file", json!({
+                    let replaced = client.call("change_file_replace", json!({
                         "host":"configuration","path":"/config/service.conf",
                         "content":new_content,"overwrite":true,
                     })).await?;
@@ -391,7 +391,7 @@ async fn configuration_replacement_workflow() -> Result<()> {
                 sha256sum "$path"
             "#}).await?;
             ensure!(String::from_utf8(oracle)?.starts_with(&new_digest), "independent SHA256 differs");
-            let readback = client.call("ssh_read_file", json!({
+            let readback = client.call("inspect_file", json!({
                 "host":"configuration","path":"/config/service.conf",
                 "expected_content_sha256":new_digest,
             })).await?;
@@ -415,7 +415,7 @@ async fn configuration_replacement_workflow() -> Result<()> {
             "ssh", "-F", "/home/estus-client/ssh_config", "-T", "ingress",
         ])?).await?;
         let rejected = async {
-            let reply = client.call("ssh_replace_file", json!({
+            let reply = client.call("change_file_replace", json!({
                 "host":"configuration","path":"/config/blocked.conf",
                 "content":"version=rejected\n","overwrite":true,
             })).await?;

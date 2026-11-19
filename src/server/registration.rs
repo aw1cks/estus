@@ -49,78 +49,96 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
     let mut routes: [(ToolId, ToolRoute<Estus>); 15] = [
         (
             ToolId::Targets,
-            (Estus::ssh_targets_tool_attr(), Estus::ssh_targets).into_tool_route(),
+            (Estus::observe_targets_tool_attr(), Estus::observe_targets).into_tool_route(),
         ),
         (
             ToolId::ReadOutput,
-            (Estus::ssh_read_output_tool_attr(), Estus::ssh_read_output).into_tool_route(),
+            (Estus::inspect_output_tool_attr(), Estus::inspect_output).into_tool_route(),
         ),
         (
             ToolId::Exec,
-            (Estus::ssh_exec_tool_attr(), Estus::ssh_exec).into_tool_route(),
+            (Estus::exec_command_tool_attr(), Estus::exec_command).into_tool_route(),
         ),
         (
             ToolId::Run,
-            (Estus::ssh_run_tool_attr(), Estus::ssh_run).into_tool_route(),
+            (Estus::exec_argv_tool_attr(), Estus::exec_argv).into_tool_route(),
         ),
         (
             ToolId::ReadFile,
-            (Estus::ssh_read_file_tool_attr(), Estus::ssh_read_file).into_tool_route(),
+            (Estus::inspect_file_tool_attr(), Estus::inspect_file).into_tool_route(),
         ),
         (
             ToolId::WriteFile,
-            (Estus::ssh_write_file_tool_attr(), Estus::ssh_write_file).into_tool_route(),
+            (
+                Estus::change_file_write_tool_attr(),
+                Estus::change_file_write,
+            )
+                .into_tool_route(),
         ),
         (
             ToolId::Mkdir,
-            (Estus::ssh_mkdir_tool_attr(), Estus::ssh_mkdir).into_tool_route(),
+            (Estus::change_mkdir_tool_attr(), Estus::change_mkdir).into_tool_route(),
         ),
         (
             ToolId::Rename,
-            (Estus::ssh_rename_tool_attr(), Estus::ssh_rename).into_tool_route(),
+            (Estus::change_rename_tool_attr(), Estus::change_rename).into_tool_route(),
         ),
         (
             ToolId::RemoveFile,
-            (Estus::ssh_remove_file_tool_attr(), Estus::ssh_remove_file).into_tool_route(),
+            (
+                Estus::change_file_remove_tool_attr(),
+                Estus::change_file_remove,
+            )
+                .into_tool_route(),
         ),
         (
             ToolId::RemoveDirectory,
             (
-                Estus::ssh_remove_directory_tool_attr(),
-                Estus::ssh_remove_directory,
+                Estus::change_directory_remove_tool_attr(),
+                Estus::change_directory_remove,
             )
                 .into_tool_route(),
         ),
         (
             ToolId::ReplaceFile,
-            (Estus::ssh_replace_file_tool_attr(), Estus::ssh_replace_file).into_tool_route(),
+            (
+                Estus::change_file_replace_tool_attr(),
+                Estus::change_file_replace,
+            )
+                .into_tool_route(),
         ),
         (
             ToolId::Stat,
-            (Estus::ssh_stat_tool_attr(), Estus::ssh_stat).into_tool_route(),
+            (Estus::observe_stat_tool_attr(), Estus::observe_stat).into_tool_route(),
         ),
         (
             ToolId::ListDirectory,
             (
-                Estus::ssh_list_directory_tool_attr(),
-                Estus::ssh_list_directory,
+                Estus::inspect_directory_tool_attr(),
+                Estus::inspect_directory,
             )
                 .into_tool_route(),
         ),
         (
             ToolId::Sudo,
-            (Estus::ssh_sudo_tool_attr(), Estus::ssh_sudo).into_tool_route(),
+            (Estus::exec_sudo_tool_attr(), Estus::exec_sudo).into_tool_route(),
         ),
         (
             ToolId::ClearTargetQuarantine,
             (
-                Estus::clear_target_quarantine_tool_attr(),
-                Estus::clear_target_quarantine,
+                Estus::change_target_quarantine_clear_tool_attr(),
+                Estus::change_target_quarantine_clear,
             )
                 .into_tool_route(),
         ),
     ];
     for (id, route) in &mut routes {
+        let tier = crate::config::risk_tier_for_builtin(*id);
+        let meta = route
+            .attr
+            .meta
+            .get_or_insert_with(rmcp::model::MetaObject::default);
+        meta.insert("risk_tier".into(), serde_json::json!(tier));
         if *id == ToolId::Targets {
             continue;
         }
@@ -153,7 +171,7 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             properties
                 .get_mut("acknowledge_remote_state_reconciled")
                 .and_then(serde_json::Value::as_object_mut)
-                .expect("clear_target_quarantine requires explicit reconciliation consent")
+                .expect("change_target_quarantine_clear requires explicit reconciliation consent")
                 .insert("const".into(), true.into());
         }
     }
@@ -170,9 +188,12 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
         .then(schema_for_type::<ControllerReply>);
     let summary_output_schema = automation_output_schema(None);
     let binding_routes = config.bindings().entries().map(|(id, binding)| {
+        let tier = crate::config::risk_tier_for_binding(binding);
+        let read_only =
+            binding.read_only() && !matches!(tier, crate::config::RiskTier::Preview);
         let annotations = ToolAnnotations::new()
-            .read_only(binding.read_only())
-            .destructive(!binding.read_only())
+            .read_only(read_only)
+            .destructive(!read_only)
             .idempotent(false);
         let local = binding.is_controller();
         let description = if local {
@@ -183,6 +204,7 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             format!("{} Fixed remote execution with declared authority on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description)
         };
         let mut meta = JsonObject::from_iter([
+            ("risk_tier".into(), serde_json::json!(tier)),
             ("revision".into(), serde_json::json!(binding.revision)),
             ("result".into(), serde_json::json!(binding.result_kind())),
             ("effects".into(), serde_json::json!(binding.effects())),

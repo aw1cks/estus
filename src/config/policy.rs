@@ -1901,11 +1901,11 @@ ssh_host = "prod-web-01"
 ssh_host = "dev-01"
 [rules."prod-*"]
 deny_tiers = ["exec", "change"]
-allow_tools = ["ssh_stat", "ssh_read_file", "cpu_stats"]
-[rules."*-web-*".constraints.ssh_read_file.path]
+allow_tools = ["observe_stat", "inspect_file", "cpu_stats"]
+[rules."*-web-*".constraints.inspect_file.path]
 enum = ["/etc/nginx/nginx.conf", "/etc/hosts"]
 [rules."prod-web-*"]
-allow_tools = ["ssh_stat", "ssh_read_file"]
+allow_tools = ["observe_stat", "inspect_file"]
 "#,
             &[],
         )
@@ -1934,25 +1934,20 @@ allow_tools = ["ssh_stat", "ssh_read_file"]
             .clone();
         assert!(
             config
-                .check_builtin_params("prod-web-01", "ssh_read_file", ToolId::ReadFile, &ok_params)
+                .check_builtin_params("prod-web-01", "inspect_file", ToolId::ReadFile, &ok_params)
                 .is_ok()
         );
         assert!(
             config
-                .check_builtin_params(
-                    "prod-web-01",
-                    "ssh_read_file",
-                    ToolId::ReadFile,
-                    &bad_params
-                )
+                .check_builtin_params("prod-web-01", "inspect_file", ToolId::ReadFile, &bad_params,)
                 .is_err()
         );
         // Conflicting constraints across overlapping wildcard patterns reject configuration.
         let conflict = load_text(
             r#"
-[rules."prod-*".constraints.ssh_read_file.path]
+[rules."prod-*".constraints.inspect_file.path]
 enum = ["/etc/hosts"]
-[rules."*-web".constraints.ssh_read_file.path]
+[rules."*-web".constraints.inspect_file.path]
 enum = ["/etc/passwd"]
 "#,
             &[],
