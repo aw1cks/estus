@@ -16,8 +16,10 @@ use crate::{
 };
 
 use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot, SiteConstraints};
-use plans::AutomationPlan;
-pub(crate) use plans::{AutomationTransport, ControllerPlan, PreparedController, controller_root};
+pub(crate) use payload::ActivatedPayload;
+pub(crate) use plans::{
+    ActivatedAutomation, AutomationTransport, ControllerPlan, PreparedController, controller_root,
+};
 
 mod payload;
 mod plans;
@@ -325,36 +327,33 @@ pub(crate) struct ScriptSource {
 }
 
 #[derive(Debug)]
+enum ControllerState {
+    Disabled,
+    Activated(Arc<ControllerPlan>),
+}
+
+#[derive(Debug)]
+enum PayloadState {
+    Unactivated(payload::UnactivatedPayload),
+    Activated(Arc<ActivatedPayload>),
+}
+
+#[derive(Debug)]
+enum AnsibleState {
+    Unactivated(plans::UnactivatedAutomation),
+    Activated(Arc<ActivatedAutomation>),
+}
+
+#[derive(Debug)]
 enum Execution {
     NativeArgv {
         program: String,
         cwd: Option<String>,
         authority: Authority,
     },
-    ControllerScript {
-        plan: Option<Arc<ControllerPlan>>,
-    },
-    Payload {
-        plan: Option<Box<crate::native_payload::PayloadPlan>>,
-        authority: AutomationAuthority,
-        overlay: Value,
-        projection: Arc<crate::contracts::projection::Plan>,
-        snapshot: PathBuf,
-        source: PathBuf,
-        no_log: bool,
-    },
-    Ansible {
-        snapshot: PathBuf,
-        source: AnsibleSource,
-        authority: AutomationAuthority,
-        overlay: Value,
-        no_log: bool,
-        check_mode: bool,
-        diff: bool,
-        projection: Option<Arc<crate::contracts::projection::Plan>>,
-        // One startup allocation keeps native bindings from reserving the large plan.
-        plan: Option<Box<AutomationPlan>>,
-    },
+    ControllerScript(ControllerState),
+    Payload(PayloadState),
+    Ansible(AnsibleState),
 }
 
 #[derive(Clone, Debug)]
@@ -364,7 +363,7 @@ enum AnsibleSource {
     Playbook { project_root: PathBuf },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum AutomationAuthority {
     Ordinary,
     Named(String),
@@ -440,11 +439,36 @@ pub(crate) struct BindingRequest {
     pub retain_output: bool,
     values: Vec<Value>,
 }
+#[cfg(test)]
 pub(crate) enum BindingCall {
     Remote(BindingRequest),
     Controller(ControllerRequest),
     Automation(AutomationRequest),
-    Payload(AutomationRequest),
+    Payload,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ActivatedExecution {
+    NativeArgv,
+    Controller(Arc<ControllerPlan>),
+    Payload(Arc<ActivatedPayload>),
+    Automation(Arc<ActivatedAutomation>),
+}
+
+pub(crate) enum ActivatedCall {
+    Remote(BindingRequest),
+    Controller {
+        plan: Arc<ControllerPlan>,
+        request: ControllerRequest,
+    },
+    Automation {
+        activated: Arc<ActivatedAutomation>,
+        request: AutomationRequest,
+    },
+    Payload {
+        activated: Arc<ActivatedPayload>,
+        request: AutomationRequest,
+    },
 }
 
 pub(crate) struct AutomationRequest {
@@ -800,17 +824,18 @@ impl CompiledBinding {
             enabled,
             effects: raw.effects,
             inputs: Vec::new(),
-            execution: Execution::Ansible {
-                snapshot: PathBuf::from(snapshot),
-                source,
-                authority,
-                overlay,
-                no_log,
-                check_mode,
-                diff,
-                projection,
-                plan: None,
-            },
+            execution: Execution::Ansible(AnsibleState::Unactivated(
+                plans::UnactivatedAutomation {
+                    snapshot: PathBuf::from(snapshot),
+                    source,
+                    authority,
+                    overlay,
+                    no_log,
+                    check_mode,
+                    diff,
+                    projection,
+                },
+            )),
             argv: Vec::new(),
             timeout_secs,
             max_output_bytes: None,
@@ -952,7 +977,8 @@ impl CompiledBinding {
                     environment,
                     cwd,
                 )?;
-                (Execution::ControllerScript { plan }, Vec::new(), false)
+                let state = plan.map_or(ControllerState::Disabled, ControllerState::Activated);
+                (Execution::ControllerScript(state), Vec::new(), false)
             }
             RawExecution::NativePayload { .. }
             | RawExecution::AnsibleModule { .. }
@@ -1183,79 +1209,67 @@ impl CompiledBinding {
     }
 
     pub(crate) fn executor_kind(&self) -> &'static str {
-        match self.execution {
+        match &self.execution {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
-            Execution::ControllerScript { .. } => "controller_script",
-            Execution::Payload { .. } => "native_payload",
-            Execution::Ansible {
-                source: AnsibleSource::Role { .. },
-                ..
-            } => "ansible_role",
-            Execution::Ansible {
-                source: AnsibleSource::Playbook { .. },
-                ..
-            } => "ansible_playbook",
-            Execution::Ansible {
-                source: AnsibleSource::Module,
-                ..
-            } => "ansible_module",
+            Execution::ControllerScript(_) => "controller_script",
+            Execution::Payload(_) => "native_payload",
+            Execution::Ansible(state) => match state.source() {
+                AnsibleSource::Role { .. } => "ansible_role",
+                AnsibleSource::Playbook { .. } => "ansible_playbook",
+                AnsibleSource::Module => "ansible_module",
+            },
         }
     }
 
     pub(crate) fn is_controller(&self) -> bool {
-        matches!(self.execution, Execution::ControllerScript { .. })
+        matches!(self.execution, Execution::ControllerScript(_))
     }
 
     pub(crate) fn is_automation(&self) -> bool {
-        matches!(self.execution, Execution::Ansible { .. })
+        matches!(self.execution, Execution::Ansible(_))
     }
 
     pub(crate) fn is_payload(&self) -> bool {
-        matches!(self.execution, Execution::Payload { .. })
-    }
-
-    pub(crate) fn is_preview_check_mode(&self) -> bool {
-        matches!(
-            self.execution,
-            Execution::Ansible {
-                check_mode: true,
-                ..
-            }
-        )
-    }
-
-    pub(crate) fn automation_reviewed(
-        &self,
-    ) -> Option<&crate::contracts::schema_import::ReviewedModule> {
-        let Execution::Ansible {
-            plan: Some(plan), ..
-        } = &self.execution
-        else {
-            return None;
-        };
-        plan.reviewed_module()
+        matches!(self.execution, Execution::Payload(_))
     }
 
     pub(crate) fn automation_authority(&self) -> Option<&AutomationAuthority> {
         match &self.execution {
-            Execution::Ansible { authority, .. } | Execution::Payload { authority, .. } => {
-                Some(authority)
-            }
+            Execution::Ansible(state) => Some(state.authority()),
+            Execution::Payload(state) => Some(state.authority()),
             _ => None,
         }
     }
 
     pub(crate) fn automation_activated(&self) -> bool {
+        matches!(
+            self.execution,
+            Execution::Ansible(AnsibleState::Activated(_))
+        )
+    }
+
+    pub(crate) fn activated_execution(&self) -> Option<ActivatedExecution> {
         match &self.execution {
-            Execution::Ansible { plan, .. } => plan.is_some(),
-            _ => false,
+            Execution::NativeArgv { .. } => Some(ActivatedExecution::NativeArgv),
+            Execution::ControllerScript(ControllerState::Activated(plan)) => {
+                Some(ActivatedExecution::Controller(Arc::clone(plan)))
+            }
+            Execution::Payload(PayloadState::Activated(activated)) => {
+                Some(ActivatedExecution::Payload(Arc::clone(activated)))
+            }
+            Execution::Ansible(AnsibleState::Activated(activated)) => {
+                Some(ActivatedExecution::Automation(Arc::clone(activated)))
+            }
+            Execution::ControllerScript(ControllerState::Disabled)
+            | Execution::Payload(PayloadState::Unactivated(_))
+            | Execution::Ansible(AnsibleState::Unactivated(_)) => None,
         }
     }
 
     pub(crate) fn projection(&self) -> Option<&Arc<crate::contracts::projection::Plan>> {
         match &self.execution {
-            Execution::Ansible { projection, .. } => projection.as_ref(),
-            Execution::Payload { projection, .. } => Some(projection),
+            Execution::Ansible(state) => state.projection(),
+            Execution::Payload(state) => Some(state.projection()),
             _ => None,
         }
     }
@@ -1319,15 +1333,88 @@ impl CompiledBinding {
         self.parse_request_ref(&arguments)
     }
 
-    pub(crate) fn parse_request_ref(
+    pub(crate) fn parse_activated_call(
         &self,
+        activated: &ActivatedExecution,
         arguments: &JsonObject,
-    ) -> Result<BindingCall, ErrorData> {
-        if self.is_payload() {
-            return self.parse_payload(arguments);
+    ) -> Result<ActivatedCall, ErrorData> {
+        match activated {
+            ActivatedExecution::NativeArgv => {
+                let inputs = self.parse_native_inputs(false, arguments)?;
+                let Some(host) = inputs.host else {
+                    return Err(shape());
+                };
+                Ok(ActivatedCall::Remote(BindingRequest {
+                    host,
+                    timeout_secs: inputs.timeout_secs,
+                    retain_output: inputs.retain_output,
+                    values: inputs.values,
+                }))
+            }
+            ActivatedExecution::Controller(plan) => {
+                let inputs = self.parse_native_inputs(true, arguments)?;
+                Ok(ActivatedCall::Controller {
+                    plan: Arc::clone(plan),
+                    request: ControllerRequest {
+                        timeout_secs: inputs.timeout_secs,
+                        retain_output: inputs.retain_output,
+                        values: inputs.values,
+                    },
+                })
+            }
+            ActivatedExecution::Automation(activated) => {
+                let request = Self::parse_automation_inputs(&activated.overlay, arguments)?;
+                Ok(ActivatedCall::Automation {
+                    activated: Arc::clone(activated),
+                    request,
+                })
+            }
+            ActivatedExecution::Payload(activated) => {
+                let request = Self::parse_automation_inputs(&activated.overlay, arguments)?;
+                Ok(ActivatedCall::Payload {
+                    activated: Arc::clone(activated),
+                    request,
+                })
+            }
         }
+    }
+
+    fn parse_automation_inputs(
+        overlay: &Value,
+        arguments: &JsonObject,
+    ) -> Result<AutomationRequest, ErrorData> {
+        let mut matched = 1;
+        let Some(Value::String(host)) = arguments.get("host") else {
+            return Err(shape());
+        };
+        let timeout_secs = match arguments.get("timeout_secs") {
+            Some(value) => {
+                matched += 1;
+                Some(unsigned_integer(value).ok_or_else(shape)?)
+            }
+            None => None,
+        };
+        let inputs = arguments.get("inputs").ok_or_else(shape)?;
+        matched += 1;
+        if arguments.len() != matched {
+            return Err(shape());
+        }
+        crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], inputs)
+            .map_err(|_| shape())?;
+        Ok(AutomationRequest {
+            host: host.clone(),
+            timeout_secs,
+            inputs: inputs.clone(),
+        })
+    }
+
+    fn parse_native_inputs(
+        &self,
+        controller: bool,
+        arguments: &JsonObject,
+    ) -> Result<NativeInputs, ErrorData> {
         let mut matched = 0;
-        let host = if self.is_controller() {
+        let host = if controller {
             None
         } else {
             matched += 1;
@@ -1343,23 +1430,6 @@ impl CompiledBinding {
             }
             None => None,
         };
-        if self.is_automation() {
-            let inputs = arguments.get("inputs").ok_or_else(shape)?;
-            matched += 1;
-            if arguments.len() != matched {
-                return Err(shape());
-            }
-            let Execution::Ansible { overlay, .. } = &self.execution else {
-                unreachable!("module request selected");
-            };
-            crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], inputs)
-                .map_err(|_| shape())?;
-            return Ok(BindingCall::Automation(AutomationRequest {
-                host: host.ok_or_else(shape)?,
-                timeout_secs,
-                inputs: inputs.clone(),
-            }));
-        }
         let retain_output = match arguments.get("retain_output") {
             Some(value) => {
                 matched += 1;
@@ -1386,20 +1456,49 @@ impl CompiledBinding {
         if arguments.len() != matched {
             return Err(shape());
         }
-        Ok(match host {
+        Ok(NativeInputs {
+            host,
+            timeout_secs,
+            retain_output,
+            values,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_request_ref(
+        &self,
+        arguments: &JsonObject,
+    ) -> Result<BindingCall, ErrorData> {
+        if let Execution::Payload(state) = &self.execution {
+            Self::parse_automation_inputs(state.overlay(), arguments)?;
+            return Ok(BindingCall::Payload);
+        }
+        if let Execution::Ansible(state) = &self.execution {
+            return Self::parse_automation_inputs(state.overlay(), arguments)
+                .map(BindingCall::Automation);
+        }
+        let inputs = self.parse_native_inputs(self.is_controller(), arguments)?;
+        Ok(match inputs.host {
             Some(host) => BindingCall::Remote(BindingRequest {
                 host,
-                timeout_secs,
-                retain_output,
-                values,
+                timeout_secs: inputs.timeout_secs,
+                retain_output: inputs.retain_output,
+                values: inputs.values,
             }),
             None => BindingCall::Controller(ControllerRequest {
-                timeout_secs,
-                retain_output,
-                values,
+                timeout_secs: inputs.timeout_secs,
+                retain_output: inputs.retain_output,
+                values: inputs.values,
             }),
         })
     }
+}
+
+struct NativeInputs {
+    host: Option<String>,
+    timeout_secs: Option<u64>,
+    retain_output: bool,
+    values: Vec<Value>,
 }
 
 #[cfg(test)]

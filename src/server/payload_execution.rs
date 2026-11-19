@@ -14,6 +14,7 @@ impl Estus {
     pub(super) async fn payload_binding(
         &self,
         id: BindingId,
+        activated: Arc<crate::bindings::ActivatedPayload>,
         request: AutomationRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -24,18 +25,17 @@ impl Estus {
             .config
             .bindings()
             .get(id)
-            .expect("registered payload binding");
-        budget.automation_reserve(&request.host, binding.projection().map(|p| p.max_bytes))?;
+            .expect("registered binding exists");
+        budget.automation_reserve(&request.host, Some(activated.projection.max_bytes))?;
+        let identity_role = activated.authority.identity_role();
+        let authority = activated.authority.label().into_owned();
         let metadata = Metadata {
             request_id: &context.id,
             tool: self.state.binding_name(id),
             host: binding
                 .permits_host(&request.host)
                 .then_some(request.host.as_str()),
-            identity_role: binding
-                .automation_authority()
-                .expect("payload authority")
-                .identity_role(),
+            identity_role,
             sudo_mode: None,
             user: None,
             program: None,
@@ -53,7 +53,11 @@ impl Estus {
                 false,
             ));
         }
-        let prepared = match binding.prepare_payload(&request, self.state.config.limits()) {
+        let prepared = match binding.prepare_activated_payload(
+            &activated,
+            &request,
+            self.state.config.limits(),
+        ) {
             Ok(prepared) => prepared,
             Err(error) => return reject(error),
         };
@@ -75,17 +79,8 @@ impl Estus {
                 false,
             ));
         }
-        let Some(authority) = binding
-            .automation_authority()
-            .map(|a| a.label().into_owned())
-        else {
-            return reject(ToolError::new(
-                "policy_denied",
-                "Invalid payload authority",
-                false,
-            ));
-        };
         let shared_read = binding.is_shared_read();
+        let revision = binding.revision.clone();
         let argv = prepared.argv;
         let output_limit = prepared.output_limit;
         let Ok(operation) = Arc::clone(&self.state.operations).try_acquire_owned() else {
@@ -107,23 +102,15 @@ impl Estus {
         self.state.local_tasks.spawn(async move {
             // Dropping an MCP handler never relinquishes execution/admission ownership.
             let _permits = (operation, runtime);
-            let binding = state
-                .config
-                .bindings()
-                .get(id)
-                .expect("registered payload binding");
             let metadata = Metadata {
                 request_id: &context.id,
                 tool: state.binding_name(id),
                 host: Some(&request.host),
-                identity_role: binding
-                    .automation_authority()
-                    .expect("payload authority")
-                    .identity_role(),
+                identity_role,
                 sudo_mode: None,
                 user: None,
                 program: None,
-                binding_revision: Some(&binding.revision),
+                binding_revision: Some(&revision),
                 executor: Some("native_payload"),
             };
             let mut target_lease = match state
@@ -144,7 +131,6 @@ impl Estus {
                     return;
                 }
             };
-            let plan = binding.payload_plan().expect("activated payload plan");
             let target = state
                 .config
                 .automation_target(id, &request.host)
@@ -154,7 +140,7 @@ impl Estus {
             let reply = state
                 .payload
                 .run(crate::native_payload::PayloadRun {
-                    plan,
+                    plan: &activated.plan,
                     host: &request.host,
                     authority: &authority,
                     target,

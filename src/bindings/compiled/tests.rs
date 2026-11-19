@@ -1438,7 +1438,8 @@ result = { kind = "capability_projection", fields = { unit = ["mcp_result", "uni
         binding.input_schema["properties"]["inputs"]["properties"]["unit"]["enum"],
         json!(["nginx.service", "caddy.service"])
     );
-    if let Execution::Payload { overlay, .. } = &binding.execution {
+    if let Execution::Payload(state) = &binding.execution {
+        let overlay = state.overlay();
         assert_eq!(
             overlay["fixed_args"]["allowed_units"],
             json!(["nginx.service", "caddy.service"])

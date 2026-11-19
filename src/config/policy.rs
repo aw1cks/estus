@@ -183,9 +183,7 @@ impl Config {
             .bindings
             .entries()
             .filter(|(id, binding)| {
-                binding.is_payload()
-                    && self.binding_enabled(*id)
-                    && binding.payload_plan().is_none()
+                binding.is_payload() && self.binding_enabled(*id) && !binding.payload_activated()
             })
             .map(|(id, _)| id)
             .collect();
@@ -221,7 +219,11 @@ impl Config {
         let active: Vec<_> = self
             .bindings
             .entries()
-            .filter(|(id, binding)| binding.is_automation() && self.binding_enabled(*id))
+            .filter(|(id, binding)| {
+                binding.is_automation()
+                    && self.binding_enabled(*id)
+                    && !binding.automation_activated()
+            })
             .map(|(id, _)| id)
             .collect();
         if active.is_empty() {

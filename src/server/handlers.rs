@@ -15,7 +15,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::{
     audit::{Audit, Metadata},
-    bindings::{BindingCall, BindingId},
+    bindings::{ActivatedCall, ActivatedExecution, BindingId},
     command::{ExecRequest, RunRequest, SudoRequest},
     config::{IdentityRole, SudoMode, TargetDiscovery, ToolId},
     filesystem::{
@@ -237,6 +237,7 @@ impl Estus {
     pub(super) async fn binding(
         &self,
         id: BindingId,
+        activated: ActivatedExecution,
         arguments: JsonObject,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -251,18 +252,21 @@ impl Estus {
             .and_then(serde_json::Value::as_str)
             .filter(|host| binding.targets.iter().any(|allowed| allowed == host))
             .map(|host| self.state.config.sudo_mode(host));
-        match binding.parse_request_ref(&arguments) {
-            Ok(BindingCall::Remote(request)) => {
+        match binding.parse_activated_call(&activated, &arguments) {
+            Ok(ActivatedCall::Remote(request)) => {
                 self.command(Operation::Binding { id, request }, context)
                     .await
             }
-            Ok(BindingCall::Controller(request)) => {
-                self.controller_binding(id, request, context).await
+            Ok(ActivatedCall::Controller { plan, request }) => {
+                self.controller_binding(id, plan, request, context).await
             }
-            Ok(BindingCall::Automation(request)) => {
-                self.automation_binding(id, request, context).await
+            Ok(ActivatedCall::Automation { activated, request }) => {
+                self.automation_binding(id, activated, request, context)
+                    .await
             }
-            Ok(BindingCall::Payload(request)) => self.payload_binding(id, request, context).await,
+            Ok(ActivatedCall::Payload { activated, request }) => {
+                self.payload_binding(id, activated, request, context).await
+            }
             Err(_) => {
                 let value = serde_json::Value::Object(arguments);
                 let error = shape_error(

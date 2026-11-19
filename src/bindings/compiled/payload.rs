@@ -2,12 +2,54 @@ use super::*;
 use std::time::Duration;
 
 use crate::native_payload::PayloadPlan;
+
+#[derive(Debug)]
+pub(super) struct UnactivatedPayload {
+    authority: AutomationAuthority,
+    overlay: Value,
+    projection: Arc<crate::contracts::projection::Plan>,
+    snapshot: PathBuf,
+    source: PathBuf,
+    no_log: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActivatedPayload {
+    pub(crate) plan: PayloadPlan,
+    pub(crate) authority: AutomationAuthority,
+    pub(crate) overlay: Value,
+    pub(crate) projection: Arc<crate::contracts::projection::Plan>,
+}
+
+impl PayloadState {
+    pub(super) fn authority(&self) -> &AutomationAuthority {
+        match self {
+            Self::Unactivated(u) => &u.authority,
+            Self::Activated(a) => &a.authority,
+        }
+    }
+
+    pub(super) fn projection(&self) -> &Arc<crate::contracts::projection::Plan> {
+        match self {
+            Self::Unactivated(u) => &u.projection,
+            Self::Activated(a) => &a.projection,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn overlay(&self) -> &Value {
+        match self {
+            Self::Unactivated(u) => &u.overlay,
+            Self::Activated(a) => &a.overlay,
+        }
+    }
+}
+
 pub(crate) struct PreparedPayload {
     pub(crate) argv: Vec<String>,
     pub(crate) duration: Duration,
     pub(crate) output_limit: usize,
 }
-
 impl CompiledBinding {
     pub(super) fn compile_payload(
         name: String,
@@ -132,15 +174,14 @@ impl CompiledBinding {
             enabled,
             effects: raw.effects,
             inputs: Vec::new(),
-            execution: Execution::Payload {
-                plan: None,
+            execution: Execution::Payload(PayloadState::Unactivated(UnactivatedPayload {
                 authority,
                 overlay,
                 projection,
                 snapshot: snapshot.into(),
                 source: source.into(),
                 no_log,
-            },
+            })),
             argv: Vec::new(),
             timeout_secs,
             max_output_bytes,
@@ -153,92 +194,57 @@ impl CompiledBinding {
         manifest_bytes: &[u8],
     ) -> Result<(), ConfigError> {
         let revision = self.revision.clone();
-        let Execution::Payload {
-            plan,
-            overlay,
-            projection,
-            authority,
-            no_log,
-            ..
-        } = &mut self.execution
-        else {
-            return Err(invalid("Not a payload binding"));
+        let Execution::Payload(PayloadState::Unactivated(unactivated)) = &self.execution else {
+            return Err(invalid("Not an unactivated payload binding"));
         };
-        let authority = serde_json::to_value(&*authority)
+        let authority = serde_json::to_value(&unactivated.authority)
             .map_err(|_| invalid("Invalid payload authority"))?
             .as_str()
             .ok_or_else(|| invalid("Invalid payload authority"))?
             .to_owned();
         let result = json!({
             "kind": "capability_projection",
-            "fields": projection.fields,
-            "schema": projection.schema,
-            "max_bytes": projection.max_bytes,
-            "max_items": projection.max_items,
-            "max_depth": projection.max_depth,
+            "fields": unactivated.projection.fields,
+            "schema": unactivated.projection.schema,
+            "max_bytes": unactivated.projection.max_bytes,
+            "max_items": unactivated.projection.max_items,
+            "max_depth": unactivated.projection.max_depth,
         });
         let loaded = crate::native_payload::PayloadPlan::load_from_bytes(
             source,
             manifest_bytes,
             &crate::native_payload::PayloadApprovalInline {
-                overlay,
+                overlay: &unactivated.overlay,
                 result: &result,
                 authority: &authority,
                 revision: &revision,
-                no_log: *no_log,
-                projection: Some(Arc::clone(projection)),
+                no_log: unactivated.no_log,
+                projection: Some(Arc::clone(&unactivated.projection)),
             },
         )?;
-        *plan = Some(Box::new(loaded));
+        let activated = Arc::new(ActivatedPayload {
+            plan: loaded,
+            authority: unactivated.authority.clone(),
+            overlay: unactivated.overlay.clone(),
+            projection: Arc::clone(&unactivated.projection),
+        });
+        self.execution = Execution::Payload(PayloadState::Activated(activated));
         Ok(())
     }
 
-    pub(crate) fn payload_plan(&self) -> Option<&PayloadPlan> {
-        match &self.execution {
-            Execution::Payload { plan, .. } => plan.as_deref(),
-            _ => None,
-        }
+    pub(crate) fn payload_activated(&self) -> bool {
+        matches!(
+            self.execution,
+            Execution::Payload(PayloadState::Activated(_))
+        )
     }
 
-    pub(super) fn parse_payload(&self, arguments: &JsonObject) -> Result<BindingCall, ErrorData> {
-        let Execution::Payload { overlay, .. } = &self.execution else {
-            return Err(shape());
-        };
-        let mut matched = 1;
-        let Some(Value::String(host)) = arguments.get("host") else {
-            return Err(shape());
-        };
-        let timeout_secs = match arguments.get("timeout_secs") {
-            Some(value) => {
-                matched += 1;
-                Some(unsigned_integer(value).ok_or_else(shape)?)
-            }
-            None => None,
-        };
-        let Some(inputs) = arguments.get("inputs") else {
-            return Err(shape());
-        };
-        matched += 1;
-        if arguments.len() != matched {
-            return Err(shape());
-        }
-        crate::contracts::module_schema::validate_input_shape(&overlay["input_schema"], inputs)
-            .map_err(|_| shape())?;
-        Ok(BindingCall::Payload(AutomationRequest {
-            host: host.clone(),
-            timeout_secs,
-            inputs: inputs.clone(),
-        }))
-    }
-
-    pub(crate) fn prepare_payload(
+    pub(crate) fn prepare_activated_payload(
         &self,
+        activated: &ActivatedPayload,
         request: &AutomationRequest,
         limits: &Limits,
     ) -> Result<PreparedPayload, ToolError> {
-        let plan = self.payload_plan().ok_or_else(|| {
-            ToolError::new("policy_denied", "Native payload is not activated", false)
-        })?;
         let timeout = request
             .timeout_secs
             .unwrap_or(self.timeout_secs.unwrap_or(limits.operation_timeout_secs));
@@ -254,7 +260,7 @@ impl CompiledBinding {
             .unwrap_or(limits.max_output_bytes)
             .min(16_777_216);
         Ok(PreparedPayload {
-            argv: plan.arguments(&request.inputs)?,
+            argv: activated.plan.arguments(&request.inputs)?,
             duration: Duration::from_secs(timeout),
             output_limit: usize::try_from(output_limit)
                 .map_err(|_| bound("Invalid payload output ceiling"))?,
@@ -275,25 +281,16 @@ impl Bindings {
             .entries
             .get(id.0)
             .ok_or_else(|| invalid("Unknown payload binding"))?;
-        let Execution::Payload {
-            snapshot,
-            source,
-            overlay,
-            projection,
-            authority,
-            no_log,
-            ..
-        } = &binding.execution
-        else {
-            return Err(invalid("Not a payload binding"));
+        let Execution::Payload(PayloadState::Unactivated(unactivated)) = &binding.execution else {
+            return Err(invalid("Not an unactivated payload binding"));
         };
-        let snapshot = snapshot.clone();
-        let source = source.clone();
-        let overlay = overlay.clone();
-        let projection = Arc::clone(projection);
+        let snapshot = unactivated.snapshot.clone();
+        let source = unactivated.source.clone();
+        let overlay = unactivated.overlay.clone();
+        let projection = Arc::clone(&unactivated.projection);
         let revision = binding.revision.clone();
-        let no_log = *no_log;
-        let authority = serde_json::to_value(authority)
+        let no_log = unactivated.no_log;
+        let authority = serde_json::to_value(&unactivated.authority)
             .map_err(|_| invalid("Invalid payload authority"))?
             .as_str()
             .ok_or_else(|| invalid("Invalid payload authority"))?
@@ -324,10 +321,18 @@ impl Bindings {
         if ct.is_cancelled() {
             return Err(invalid("Payload activation cancelled"));
         }
-        let Execution::Payload { plan, .. } = &mut self.entries[id.0].execution else {
-            return Err(invalid("Not a payload binding"));
+        let Execution::Payload(PayloadState::Unactivated(unactivated)) =
+            &self.entries[id.0].execution
+        else {
+            return Err(invalid("Not an unactivated payload binding"));
         };
-        *plan = Some(Box::new(loaded));
+        let activated = Arc::new(ActivatedPayload {
+            plan: loaded,
+            authority: unactivated.authority.clone(),
+            overlay: unactivated.overlay.clone(),
+            projection: Arc::clone(&unactivated.projection),
+        });
+        self.entries[id.0].execution = Execution::Payload(PayloadState::Activated(activated));
         Ok(())
     }
 }

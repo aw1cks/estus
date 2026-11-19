@@ -28,21 +28,25 @@ pub(super) struct Registration {
 }
 
 pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
-    if config.bindings().entries().any(|(id, binding)| {
-        binding.is_automation() && config.binding_enabled(id) && !binding.automation_activated()
-    }) {
-        return Err(ConfigError::new(
-            "automation",
-            "Enabled module bindings require successful startup activation",
-        ));
-    }
-    if config.bindings().entries().any(|(id, binding)| {
-        binding.is_payload() && config.binding_enabled(id) && binding.payload_plan().is_none()
-    }) {
-        return Err(ConfigError::new(
-            "native_payload",
-            "Enabled payloads require successful startup activation",
-        ));
+    for (id, binding) in config.bindings().entries() {
+        if config.binding_enabled(id) && binding.activated_execution().is_none() {
+            if binding.is_automation() {
+                return Err(ConfigError::new(
+                    "automation",
+                    "Enabled module bindings require successful startup activation",
+                ));
+            }
+            if binding.is_payload() {
+                return Err(ConfigError::new(
+                    "native_payload",
+                    "Enabled payloads require successful startup activation",
+                ));
+            }
+            return Err(ConfigError::new(
+                "tools",
+                "Enabled binding is not activated",
+            ));
+        }
     }
     // This is the explicit publication inventory. Each entry binds native
     // SDK metadata and its callable handler to a target-policy identity.
@@ -230,10 +234,19 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
         .with_raw_output_schema(output_schema)
         .with_annotations(annotations)
         .with_meta(rmcp::model::MetaObject(meta));
+        let activated = binding.activated_execution();
         let route = ToolRoute::new_dyn(metadata, move |context: ToolCallContext<'_, Estus>| {
+            let activated = activated.clone();
             Box::pin(async move {
+                let Some(activated) = activated else {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "Tool binding is not activated",
+                        None,
+                    ));
+                };
                 context.service.binding(
                     id,
+                    activated,
                     context.arguments.unwrap_or_default(),
                     context.request_context,
                 ).await.map(Into::into)

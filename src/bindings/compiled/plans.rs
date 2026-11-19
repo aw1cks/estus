@@ -22,10 +22,12 @@ use crate::{
 };
 
 use super::super::raw::RawInterpreter;
+#[cfg(test)]
+use super::ControllerState;
 use super::{
-    AnsibleSource, Authority, AutomationRequest, BindingId, BindingRequest, Bindings,
-    CompiledBinding, ControllerActivation, ControllerRequest, Execution, Input, ScriptSource, Slot,
-    bound, invalid,
+    AnsibleSource, AnsibleState, Authority, AutomationAuthority, AutomationRequest, BindingId,
+    BindingRequest, Bindings, CompiledBinding, ControllerActivation, ControllerRequest, Execution,
+    Input, ScriptSource, Slot, bound, invalid,
 };
 
 pub(crate) fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigError> {
@@ -57,6 +59,69 @@ pub(crate) struct AutomationTransport<'a> {
     pub scratch_bytes: u64,
     pub scratch_files: usize,
     pub started: std::time::Instant,
+}
+
+#[derive(Debug)]
+pub(super) struct UnactivatedAutomation {
+    pub(super) snapshot: PathBuf,
+    pub(super) source: AnsibleSource,
+    pub(super) authority: AutomationAuthority,
+    pub(super) overlay: Value,
+    pub(super) no_log: bool,
+    pub(super) check_mode: bool,
+    pub(super) diff: bool,
+    pub(super) projection: Option<Arc<crate::contracts::projection::Plan>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActivatedAutomation {
+    plan: AutomationPlan,
+    source: AnsibleSource,
+    pub(crate) authority: AutomationAuthority,
+    pub(crate) overlay: Value,
+    no_log: bool,
+    pub(crate) check_mode: bool,
+    diff: bool,
+    pub(crate) projection: Option<Arc<crate::contracts::projection::Plan>>,
+}
+
+impl ActivatedAutomation {
+    pub(crate) fn reviewed_module(
+        &self,
+    ) -> Option<&crate::contracts::schema_import::ReviewedModule> {
+        self.plan.reviewed_module()
+    }
+}
+
+impl AnsibleState {
+    pub(super) fn source(&self) -> &AnsibleSource {
+        match self {
+            Self::Unactivated(u) => &u.source,
+            Self::Activated(a) => &a.source,
+        }
+    }
+
+    pub(super) fn authority(&self) -> &super::AutomationAuthority {
+        match self {
+            Self::Unactivated(u) => &u.authority,
+            Self::Activated(a) => &a.authority,
+        }
+    }
+
+    pub(super) fn projection(&self) -> Option<&Arc<crate::contracts::projection::Plan>> {
+        match self {
+            Self::Unactivated(u) => u.projection.as_ref(),
+            Self::Activated(a) => a.projection.as_ref(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn overlay(&self) -> &Value {
+        match self {
+            Self::Unactivated(u) => &u.overlay,
+            Self::Activated(a) => &a.overlay,
+        }
+    }
 }
 
 pub(super) struct AutomationPlan {
@@ -350,23 +415,15 @@ impl Bindings {
         check_interrupted()?;
         let binding = self
             .entries
-            .get_mut(id.0)
+            .get(id.0)
             .ok_or_else(|| invalid("Unknown automation binding"))?;
-        let Execution::Ansible {
-            snapshot,
-            overlay,
-            source,
-            check_mode,
-            plan,
-            ..
-        } = &mut binding.execution
-        else {
-            return Err(invalid("Not an automation binding"));
+        let Execution::Ansible(AnsibleState::Unactivated(unactivated)) = &binding.execution else {
+            return Err(invalid("Not an unactivated automation binding"));
         };
-        let check_mode = *check_mode;
-        let snapshot = snapshot.clone();
-        let overlay = overlay.clone();
-        let source = source.clone();
+        let check_mode = unactivated.check_mode;
+        let snapshot = unactivated.snapshot.clone();
+        let overlay = unactivated.overlay.clone();
+        let source = unactivated.source.clone();
         // Await started blocking work even when cancellation arrives, retaining its ownership.
         let prepared = tokio::task::spawn_blocking(move || {
             let reviewed = match source {
@@ -481,19 +538,52 @@ impl Bindings {
             invalid("Automation runtime preparation failed")
                 .with_cause("runtime_preparation_failed", "runtime_selection")
         })??;
-        *plan = Some(Box::new(AutomationPlan {
-            reviewed,
-            binding: compiled,
-            runtime: selected.payload,
-            controller: selected.plan,
-        }));
+        let Execution::Ansible(AnsibleState::Unactivated(unactivated)) =
+            &self.entries[id.0].execution
+        else {
+            return Err(invalid("Not an unactivated automation binding"));
+        };
+        let activated = Arc::new(ActivatedAutomation {
+            plan: AutomationPlan {
+                reviewed,
+                binding: compiled,
+                runtime: selected.payload,
+                controller: selected.plan,
+            },
+            source: unactivated.source.clone(),
+            authority: unactivated.authority.clone(),
+            overlay: unactivated.overlay.clone(),
+            no_log: unactivated.no_log,
+            check_mode: unactivated.check_mode,
+            diff: unactivated.diff,
+            projection: unactivated.projection.clone(),
+        });
+        self.entries[id.0].execution = Execution::Ansible(AnsibleState::Activated(activated));
         Ok(())
     }
 }
 
 impl CompiledBinding {
+    #[cfg(test)]
     pub(crate) fn prepare_automation(
         &self,
+        request: &AutomationRequest,
+        limits: &Limits,
+        transport: AutomationTransport<'_>,
+    ) -> Result<crate::automation::execution::PreparedAutomation, ToolError> {
+        let Execution::Ansible(AnsibleState::Activated(activated)) = &self.execution else {
+            return Err(ToolError::new(
+                "policy_denied",
+                "Operation is not authorized",
+                false,
+            ));
+        };
+        self.prepare_activated_automation(activated, request, limits, transport)
+    }
+
+    pub(crate) fn prepare_activated_automation(
+        &self,
+        activated: &ActivatedAutomation,
         request: &AutomationRequest,
         limits: &Limits,
         transport: AutomationTransport<'_>,
@@ -504,21 +594,7 @@ impl CompiledBinding {
             scratch_files,
             started,
         } = transport;
-        let Execution::Ansible {
-            plan: Some(plan),
-            no_log,
-            check_mode,
-            diff,
-            projection,
-            ..
-        } = &self.execution
-        else {
-            return Err(ToolError::new(
-                "policy_denied",
-                "Operation is not authorized",
-                false,
-            ));
-        };
+        let plan = &activated.plan;
         let timeout = request
             .timeout_secs
             .unwrap_or(self.timeout_secs.unwrap_or(limits.operation_timeout_secs));
@@ -549,10 +625,10 @@ impl CompiledBinding {
                 crate::config::AutomationAgent::Fixed(socket) => AgentReference::Fixed { socket },
             },
             arguments: &arguments,
-            no_log: *no_log,
-            check_mode: *check_mode,
-            diff: *diff,
-            projection: projection.as_deref(),
+            no_log: activated.no_log,
+            check_mode: activated.check_mode,
+            diff: activated.diff,
+            projection: activated.projection.as_deref(),
             timeout_secs: Duration::from_secs(timeout)
                 .saturating_sub(started.elapsed())
                 .as_secs_f64(),
@@ -582,7 +658,7 @@ impl CompiledBinding {
                 },
             },
             host: request.host.clone(),
-            projection: projection.clone(),
+            projection: activated.projection.clone(),
             module_name,
             arguments: prepared_args,
         })
@@ -608,9 +684,9 @@ impl CompiledBinding {
                 arguments,
                 cwd: cwd.as_deref(),
             },
-            Execution::ControllerScript { .. }
-            | Execution::Ansible { .. }
-            | Execution::Payload { .. }
+            Execution::ControllerScript(_)
+            | Execution::Ansible(_)
+            | Execution::Payload(_)
             | Execution::NativeArgv {
                 authority: Authority::Controller,
                 ..
@@ -673,18 +749,28 @@ impl CompiledBinding {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_controller(
         &self,
         request: &ControllerRequest,
         limits: &Limits,
     ) -> Result<PreparedController, ControllerError> {
-        let invalid = || ControllerError::new("invalid_argument", "Invalid controller tool inputs");
-        let Execution::ControllerScript { plan: Some(plan) } = &self.execution else {
+        let Execution::ControllerScript(ControllerState::Activated(plan)) = &self.execution else {
             return Err(ControllerError::new(
                 "policy_denied",
                 "Operation is not authorized",
             ));
         };
+        self.prepare_activated_controller(plan, request, limits)
+    }
+
+    pub(crate) fn prepare_activated_controller(
+        &self,
+        plan: &Arc<ControllerPlan>,
+        request: &ControllerRequest,
+        limits: &Limits,
+    ) -> Result<PreparedController, ControllerError> {
+        let invalid = || ControllerError::new("invalid_argument", "Invalid controller tool inputs");
         let timeout = request
             .timeout_secs
             .unwrap_or(self.timeout_secs.unwrap_or(limits.operation_timeout_secs));

@@ -15,6 +15,7 @@ impl Estus {
     pub(super) async fn automation_binding(
         &self,
         id: BindingId,
+        activated: Arc<bindings::ActivatedAutomation>,
         request: bindings::AutomationRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -26,11 +27,14 @@ impl Estus {
             .config
             .bindings()
             .get(id)
-            .expect("registered module binding");
+            .expect("registered binding exists");
         budget.automation_reserve(
             &request.host,
-            binding.projection().map(|plan| plan.max_bytes),
+            activated.projection.as_ref().map(|plan| plan.max_bytes),
         )?;
+        let authority_role = activated.authority.identity_role();
+        let authority_label = activated.authority.label().into_owned();
+        let executor = binding.executor_kind();
         let metadata = Metadata {
             request_id: &context.id,
             tool: self.state.binding_name(id),
@@ -39,15 +43,12 @@ impl Estus {
                 .iter()
                 .find(|host| **host == request.host)
                 .map(String::as_str),
-            identity_role: binding
-                .automation_authority()
-                .expect("automation binding")
-                .identity_role(),
+            identity_role: authority_role,
             sudo_mode: None,
             user: None,
             program: None,
             binding_revision: Some(&binding.revision),
-            executor: Some(binding.executor_kind()),
+            executor: Some(executor),
         };
         let reject = |code, message| {
             let error = ToolError::new(code, message, false);
@@ -64,19 +65,13 @@ impl Estus {
                 return budget.result(ToolReply::<AutomationData>::failure(error));
             }
         };
-        let is_preview = binding.is_preview_check_mode();
+        let is_preview = activated.check_mode;
         let requires_preview = !is_preview
             && matches!(
                 crate::config::risk_tier_for_binding(binding),
                 crate::config::RiskTier::Change | crate::config::RiskTier::Exec
             )
             && self.state.config.requires_preview(&request.host);
-        let Some(authority_label) = binding
-            .automation_authority()
-            .map(|a| a.label().into_owned())
-        else {
-            return reject("policy_denied", "Operation is not authorized");
-        };
         let authority_identity = if is_preview || requires_preview {
             let Ok(digest) = super::preview::authority_identity_digest(&authority_label, &target)
             else {
@@ -87,7 +82,8 @@ impl Estus {
             None
         };
         let (bytes, files) = self.state.config.automation_scratch();
-        let mut prepared = match binding.prepare_automation(
+        let mut prepared = match binding.prepare_activated_automation(
+            &activated,
             &request,
             self.state.config.limits(),
             bindings::AutomationTransport {
@@ -125,7 +121,7 @@ impl Estus {
             let (Some(module_name), Some(args), Some(reviewed), Some(authority_identity)) = (
                 prepared.module_name.take(),
                 prepared.arguments.take(),
-                binding.automation_reviewed(),
+                activated.reviewed_module(),
                 authority_identity,
             ) else {
                 return reject(
@@ -161,27 +157,19 @@ impl Estus {
             return reject("resource_limit", "Automation operation limit reached");
         };
         let state = self.state.clone();
+        let revision = binding.revision.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
             let _permits = (operation, runtime);
-            let binding = state
-                .config
-                .bindings()
-                .get(id)
-                .expect("registered module binding");
-            let executor = binding.executor_kind();
             let metadata = Metadata {
                 request_id: &context.id,
                 tool: state.binding_name(id),
                 host: Some(&request.host),
-                identity_role: binding
-                    .automation_authority()
-                    .expect("automation binding")
-                    .identity_role(),
+                identity_role: authority_role,
                 sudo_mode: None,
                 user: None,
                 program: None,
-                binding_revision: Some(&binding.revision),
+                binding_revision: Some(&revision),
                 executor: Some(executor),
             };
             let mut target_lease = match state
@@ -379,6 +367,7 @@ impl Estus {
     pub(super) async fn controller_binding(
         &self,
         id: BindingId,
+        plan: Arc<bindings::ControllerPlan>,
         request: ControllerRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -416,8 +405,12 @@ impl Estus {
                 .config
                 .bindings()
                 .get(id)
-                .expect("registered controller binding exists");
-            let prepared = binding.prepare_controller(&request, self.state.config.limits())?;
+                .expect("registered binding exists");
+            let prepared = binding.prepare_activated_controller(
+                &plan,
+                &request,
+                self.state.config.limits(),
+            )?;
             let deadline = request_deadline(started, prepared.duration).map_err(|error| {
                 ControllerError::new(error.code, "Controller request deadline expired")
             })?;
