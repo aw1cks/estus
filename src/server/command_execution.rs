@@ -6,7 +6,6 @@ use crate::{
     audit::{Audit, Metadata},
     command::Invocation,
     exec::{self, RunContext},
-    filesystem::operations::{self, FileContext},
     reply::{CommandData, Termination, ToolError, ToolReply},
     ssh::MasterHealth,
     wire::ReplyBudget,
@@ -88,7 +87,6 @@ impl State {
             PreparedCommand {
                 target,
                 invocation,
-                script,
                 stdin,
                 max_output_bytes,
                 ..
@@ -117,74 +115,20 @@ impl State {
             .await
         {
             Ok(lease) => {
-                let reply = async {
-                    let source = if let Some(script) = script {
-                        let outcome = operations::read_script(
-                            lease.session(),
-                            &script.path,
-                            &script.content_sha256,
-                            script.max_bytes,
-                            FileContext {
-                                deadline,
-                                ct: &ct,
-                                shutdown: &self.shutdown,
-                                // The reviewed-script fetch is preparation, not command output.
-                                progress: crate::progress::Reporter::default(),
-                            },
-                        )
-                        .await;
-                        if outcome.check_master
-                            && matches!(lease.check_health().await, MasterHealth::Lost)
-                        {
-                            lease.invalidate();
-                        }
-                        match outcome.reply.data {
-                            Some(source) => Some(source),
-                            None => {
-                                return ToolReply::failure(
-                                    outcome
-                                        .reply
-                                        .error
-                                        .expect("failed script preparation carries an error"),
-                                );
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    if source.is_some() {
-                        if ct.is_cancelled() || self.shutdown.is_cancelled() {
-                            return ToolReply::failure(ToolError::new(
-                                "cancelled",
-                                "Request cancelled before script dispatch",
-                                false,
-                            ));
-                        }
-                        if tokio::time::Instant::now() >= deadline {
-                            return ToolReply::failure(ToolError::new(
-                                "timeout",
-                                "Request deadline expired before script dispatch",
-                                false,
-                            ));
-                        }
-                    }
-                    // The checked snapshot owns stdin until the existing command owner finishes.
-                    exec::run(
-                        lease.session(),
-                        invocation,
-                        source.as_deref().or(stdin),
-                        RunContext {
-                            max_output_bytes: max_output_bytes.min(capture_limit),
-                            deadline,
-                            ct: &ct,
-                            shutdown: &self.shutdown,
-                            started,
-                            retention,
-                            progress,
-                        },
-                    )
-                    .await
-                }
+                let reply = exec::run(
+                    lease.session(),
+                    invocation,
+                    stdin,
+                    RunContext {
+                        max_output_bytes: max_output_bytes.min(capture_limit),
+                        deadline,
+                        ct: &ct,
+                        shutdown: &self.shutdown,
+                        started,
+                        retention,
+                        progress,
+                    },
+                )
                 .await;
                 if matches!(
                     reply.data.as_ref().map(|data| &data.termination),

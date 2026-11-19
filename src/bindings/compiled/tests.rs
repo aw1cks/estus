@@ -813,15 +813,16 @@ fn native_retention_stays_outside_fixed_command_inputs() {
     let ordinary = definition();
     let mut sudo = definition();
     sudo["authority"] = toml::from_str("sudo = 'root'").unwrap();
-    let mut script = definition();
-    script["execution"] = toml::Value::try_from(json!({
+    let mut remote_script = definition();
+    remote_script["execution"] = toml::Value::try_from(json!({
         "kind":"remote_script",
         "source":{"path":"/fixed/script","content_sha256":"00".repeat(32)},
         "interpreter":{"program":"/bin/sh","argv":[]},
         "argv":["--",{"input":"value"}]
     }))
     .unwrap();
-    for raw in [ordinary, sudo, script] {
+    assert!(compile(remote_script).is_err());
+    for raw in [ordinary, sudo] {
         let bindings = compile(raw).unwrap();
         let binding = bindings.get(BindingId(0)).unwrap();
         assert_eq!(

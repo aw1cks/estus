@@ -254,12 +254,6 @@ enum Execution {
         cwd: Option<String>,
         authority: Authority,
     },
-    RemoteScript {
-        source: ScriptSource,
-        program: String,
-        prefix: Vec<String>,
-        cwd: Option<String>,
-    },
     ControllerScript {
         plan: Option<Arc<ControllerPlan>>,
     },
@@ -711,60 +705,6 @@ impl CompiledBinding {
                     false,
                 )
             }
-            RawExecution::RemoteScript {
-                source,
-                interpreter,
-                argv,
-                cwd,
-            } => {
-                if !matches!(authority, Authority::Ordinary) {
-                    return Err(invalid("Remote scripts require ordinary authority"));
-                }
-                if !absolute(&source.path)
-                    || source.path.ends_with('/')
-                    || !absolute(&interpreter.program)
-                    || interpreter.program.ends_with('/')
-                    || cwd.as_deref().is_some_and(|v| !absolute(v))
-                    || interpreter.argv.len() > 64
-                    || argv.len() > 64 - interpreter.argv.len()
-                    || interpreter
-                        .argv
-                        .iter()
-                        .any(|v| v.len() > 4096 || v.contains('\0'))
-                {
-                    return Err(invalid("Invalid fixed remote script layout"));
-                }
-                let mut content_sha256 = [0; 32];
-                if source.content_sha256.len() != 64
-                    || hex::decode_to_slice(&source.content_sha256, &mut content_sha256).is_err()
-                {
-                    return Err(invalid(
-                        "Script content_sha256 requires exactly 64 hexadecimal ASCII characters",
-                    ));
-                }
-                let ceiling = limits.max_file_bytes.min(1_048_576);
-                let max_bytes = source.max_bytes.unwrap_or(ceiling);
-                if max_bytes == 0 || max_bytes > ceiling {
-                    return Err(invalid(
-                        "Script byte bound must be positive and within the server and 1 MiB ceilings",
-                    ));
-                }
-                let separator = interpreter.argv.iter().any(|v| v == "--");
-                (
-                    Execution::RemoteScript {
-                        source: ScriptSource {
-                            path: source.path,
-                            content_sha256,
-                            max_bytes: max_bytes as usize,
-                        },
-                        program: interpreter.program,
-                        prefix: interpreter.argv,
-                        cwd,
-                    },
-                    argv,
-                    separator,
-                )
-            }
             RawExecution::ControllerScript {
                 source,
                 interpreter,
@@ -986,11 +926,14 @@ impl CompiledBinding {
             max_output_bytes,
         };
         if !controller {
-            let mut arguments = binding.arguments();
-            arguments.extend(binding.argv.iter().filter_map(|v| match v {
-                Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
-                Slot::Input(_) => None,
-            }));
+            let arguments = binding
+                .argv
+                .iter()
+                .filter_map(|v| match v {
+                    Slot::Fixed(value) => Some(Cow::Borrowed(value.as_str())),
+                    Slot::Input(_) => None,
+                })
+                .collect();
             binding
                 .invocation(arguments)
                 .encoded_len()
@@ -1037,7 +980,6 @@ impl CompiledBinding {
     pub(crate) fn executor_kind(&self) -> &'static str {
         match self.execution {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
-            Execution::RemoteScript { .. } => "remote_script",
             Execution::ControllerScript { .. } => "controller_script",
             Execution::Generic { .. } => "ansible_generic",
             Execution::Payload { .. } => "native_payload",

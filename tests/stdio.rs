@@ -4179,476 +4179,50 @@ async fn fixed_sudo_invalid_or_unauthorized_definitions_fail_sanitized_startup()
     Ok(())
 }
 
-const REMOTE_SCRIPT_TOOL_CONFIG: &str = indoc::indoc! {r#"
-    profile = "actions-only"
-    enabled_tools = ["observe_script"]
-    [ssh]
-    config_file = "replacement.conf"
-    [limits]
-    connect_timeout_secs = 1
-    operation_timeout_secs = 3
-    max_timeout_secs = 5
-    max_output_bytes = 4096
-    max_file_bytes = 8192
-    [targets.base]
-    ssh_host = "private-binding-script-backend.invalid"
-    [targets.base.sudo]
-    mode = "separate-identity"
-    ssh_host = "private-binding-script-elevated.invalid"
-    users = ["root"]
-    programs = ["/private/binding-script-interpreter"]
-    [targets.read]
-    ssh_host = "private-binding-script-read.invalid"
-    profile = "read-only-files"
-    [targets.files]
-    ssh_host = "private-binding-script-files.invalid"
-    profile = "files-only"
-    [targets.other]
-    ssh_host = "private-binding-script-other.invalid"
-    [tools.observe_script]
-    description = "Observe a reviewed site script."
-    revision = "script-1"
-    targets = ["base", "read", "files"]
-    authority = "ordinary"
-    effects = ["read"]
-    execution = { kind = "remote_script", source = { path = "/private/binding-script-source", content_sha256 = "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF", max_bytes = 4096 }, interpreter = { program = "/private/binding-script-interpreter", argv = ["private-binding-script-prefix", "-s", "--"] }, argv = ["private-binding-script-fixed", { input = "value" }], cwd = "/private/binding-script-cwd" }
-    input_schema = { type = "object", additionalProperties = false, required = ["value"], properties = { value = { type = "string", maxLength = 64 } } }
-    result = { kind = "command" }
-    limits = { timeout_secs = 2, max_output_bytes = 1024 }
-"#};
-
-fn script_public_only(bytes: &[u8]) -> Result<()> {
-    binding_public_only(bytes)?;
-    let text = std::str::from_utf8(bytes)?;
-    for private in [
-        "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
-        "SCRIPT_CONFIG_SECRET",
-    ] {
-        ensure!(!text.contains(private), "script private content disclosed");
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_scripts_publish_private_ordinary_command_contracts() -> Result<()> {
-    // Neither publication nor discovery may load the nonexistent remote source.
-    for default_cap in [false, true] {
-        let config = REMOTE_SCRIPT_TOOL_CONFIG.replacen(
-            "profile = \"actions-only\"",
-            "profile = \"baseline\"",
-            1,
-        );
-        let config = if default_cap {
-            config.replace(", max_bytes = 4096", "")
-        } else {
-            config
-        };
-        let (mut server, directory) = named_tools_server(&config)?;
-        let scenario = async {
-            server.initialize().await?;
-            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
-            let listed = server.response(2).await?;
-            script_public_only(&serde_json::to_vec(&listed)?)?;
-            let tools = listed["result"]["tools"].as_array().context("script tools")?;
-            let tool = tools.iter().find(|tool| tool["name"] == "observe_script").context("script route")?;
-            ensure!(tool["_meta"] == json!({
-                "revision":"script-1", "authority":"ordinary", "effects":["read"],
-                "result":"command", "executor":"remote_script",
-                "execution_location": "remote", "trusted_controller_code": false,
-                "restriction_boundary": {
-                    "mcp": "request_policy", "os": "service_account_and_remote_identity",
-                    "service_account_separation": "operator_managed_not_observed",
-                    "sandbox": "not_provided_by_estus"
-                },
-            }));
-            ensure!(tool["annotations"]["readOnlyHint"] == true);
-            ensure!(tool["annotations"]["destructiveHint"] == false);
-            ensure!(tool["annotations"]["idempotentHint"] == false);
-            let schema = &tool["inputSchema"];
-            ensure!(schema["additionalProperties"] == false);
-            let properties = schema["properties"].as_object().context("script input properties")?;
-            ensure!(properties.len() == 4);
-            ensure!(properties.contains_key("host") && properties.contains_key("value"));
-            let required = schema["required"].as_array().context("script required inputs")?;
-            ensure!(required.len() == 2);
-            ensure!(required.contains(&json!("host")) && required.contains(&json!("value")));
-            ensure!(schema["properties"]["timeout_secs"]["maximum"] == 2);
-            output_control_schema(schema)?;
-            let command = tools.iter().find(|tool| tool["name"] == "ssh_run").context("native command route")?;
-            ensure!(tool["outputSchema"].is_object());
-            ensure!(tool["outputSchema"] == command["outputSchema"]);
-            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
-            let discovered = server.response(3).await?;
-            script_public_only(&serde_json::to_vec(&discovered)?)?;
-            for row in discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("script target rows")? {
-                let operations = row["permitted_operations"].as_array().context("script operations")?;
-                ensure!(operations.contains(&json!("observe_script")) == (row["name"] == "base"), "{row}");
-            }
-            Ok::<_, anyhow::Error>(())
-        }.await;
-        let finished = server.finish().await;
-        scenario?;
-        let (status, stderr) = finished?;
-        ensure!(status.success());
-        no_remote_dispatch(&stderr)?;
-        script_public_only(&stderr)?;
-        ensure!(!directory.path().join("binding-must-not-probe").exists());
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_script_source_execution_and_control_overrides_reject_before_ssh() -> Result<()> {
-    let (mut server, directory) = named_tools_server(REMOTE_SCRIPT_TOOL_CONFIG)?;
-    let scenario = async {
-        server.initialize().await?;
-        let valid = json!({"host":"base","value":"BINDING_INPUT_SECRET"});
-        let mut id = 2;
-        for (field, value) in [
-            ("source", json!({"path":"/private/binding-override","content_sha256":"BINDING_INPUT_SECRET"})),
-            ("path", json!("/private/binding-override")),
-            ("content_sha256", json!("BINDING_INPUT_SECRET")),
-            ("max_bytes", json!(1)),
-            ("interpreter", json!({"program":"/private/binding-override","argv":["--"]})),
-            ("program", json!("/private/binding-override")),
-            ("argv", json!(["BINDING_INPUT_SECRET"])),
-            ("cwd", json!("/private/binding-override")),
-            ("stdin", json!("BINDING_INPUT_SECRET")),
-            ("execution", json!({"kind":"native_argv"})),
-            ("authority", json!({"sudo":"root"})),
-            ("user", json!("root")),
-            ("role", json!("elevated")),
-            ("sudo", json!(true)),
-            ("profile", json!("baseline")),
-            ("enabled_tools", json!(["observe_script"])),
-            ("timeout_secs", json!("BINDING_INPUT_SECRET")),
-            ("retain_output", json!("BINDING_INPUT_SECRET")),
-            ("value", json!({"input":"BINDING_INPUT_SECRET"})),
-            ("extra", json!("BINDING_INPUT_SECRET")),
-        ] {
-            let mut arguments = valid.clone();
-            arguments[field] = value;
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_script","arguments":arguments}})).await?;
-            let response = server.response(id).await?;
-            ensure!(response["error"]["code"] == -32602, "{field}: {response}");
-            script_public_only(&serde_json::to_vec(&response)?)?;
-            id += 1;
-        }
-        for missing in ["host", "value"] {
-            let mut arguments = valid.clone();
-            arguments.as_object_mut().context("script arguments")?.remove(missing);
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_script","arguments":arguments}})).await?;
-            ensure!(server.response(id).await?["error"]["code"] == -32602, "missing {missing}");
-            id += 1;
-        }
-        for timeout_secs in [0, 3] {
-            let mut arguments = valid.clone();
-            arguments["timeout_secs"] = json!(timeout_secs);
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_script","arguments":arguments}})).await?;
-            let response = server.response(id).await?;
-            ensure!(response["result"]["isError"] == true);
-            let structured = &response["result"]["structuredContent"];
-            ensure!(structured["data"].is_null());
-            ensure!(structured["error"]["code"] == "invalid_argument");
-            ensure!(structured["error"]["remote_state_unknown"] == false);
-            script_public_only(&serde_json::to_vec(&response)?)?;
-            id += 1;
-        }
-        for host in ["read", "files", "other", "private-binding-script-elevated.invalid", "unconfigured.invalid"] {
-            server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"observe_script","arguments":{"host":host,"value":"BINDING_INPUT_SECRET"}}})).await?;
-            let response = server.response(id).await?;
-            profile_policy_denied(&response)?;
-            script_public_only(&serde_json::to_vec(&response)?)?;
-            id += 1;
-        }
-        server.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
-        discovery_data(&server.response(id).await?["result"], "configured")?;
-        Ok::<_, anyhow::Error>(())
-    }.await;
-    let finished = server.finish().await;
-    scenario?;
-    let (status, stderr) = finished?;
-    ensure!(status.success());
-    no_remote_dispatch(&stderr)?;
-    script_public_only(&stderr)?;
-    let mut rejections = 0;
-    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
-        let record: Value = serde_json::from_slice(line)?;
-        if record["tool"] == "observe_script" {
-            rejections += 1;
-            ensure!(record["event"] == "reject");
-            ensure!(record["identity_role"] == "ordinary");
-            ensure!(record["binding_revision"] == "script-1");
-            ensure!(record["executor"] == "remote_script");
-            ensure!(record["remote_state_unknown"] == false);
-        }
-    }
-    ensure!(rejections > 0, "script policy rejections were not audited");
-    ensure!(!directory.path().join("binding-must-not-probe").exists());
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_scripts_require_enablement_and_cannot_bypass_hidden_profiles() -> Result<()> {
-    for (label, config) in [
-        (
-            "unselected",
-            REMOTE_SCRIPT_TOOL_CONFIG
-                .replace("enabled_tools = [\"observe_script\"]", "enabled_tools = []"),
-        ),
-        (
-            "no selection",
-            REMOTE_SCRIPT_TOOL_CONFIG.replace("enabled_tools = [\"observe_script\"]\n", ""),
-        ),
-        (
-            "read-only",
-            REMOTE_SCRIPT_TOOL_CONFIG.replacen(
-                "profile = \"actions-only\"",
-                "profile = \"read-only-files\"",
-                1,
-            ),
-        ),
-        (
-            "files-only",
-            REMOTE_SCRIPT_TOOL_CONFIG.replacen(
-                "profile = \"actions-only\"",
-                "profile = \"files-only\"",
-                1,
-            ),
-        ),
-    ] {
-        let (mut server, directory) = named_tools_server(&config)?;
-        let scenario = async {
-            server.initialize().await?;
-            server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
-            let listed = server.response(2).await?;
-            script_public_only(&serde_json::to_vec(&listed)?)?;
-            ensure!(!listed["result"]["tools"].as_array().context("hidden script tools")?.iter().any(|tool| tool["name"] == "observe_script"), "{label}");
-            // Valid declared arguments prove route hiding, not shape rejection.
-            server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_script","arguments":{"host":"base","value":"BINDING_INPUT_SECRET"}}})).await?;
-            let response = server.response(3).await?;
-            ensure!(response["error"]["code"] == -32602, "{label}: {response}");
-            script_public_only(&serde_json::to_vec(&response)?)?;
-            server.send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_targets","arguments":{}}})).await?;
-            let discovered = server.response(4).await?;
-            script_public_only(&serde_json::to_vec(&discovered)?)?;
-            for row in discovery_data(&discovered["result"], "configured")?["targets"].as_array().context("hidden script targets")? {
-                ensure!(!row["permitted_operations"].as_array().context("hidden script operations")?.contains(&json!("observe_script")), "{label}: {row}");
-            }
-            Ok::<_, anyhow::Error>(())
-        }.await;
-        let finished = server.finish().await;
-        scenario?;
-        let (status, stderr) = finished?;
-        ensure!(status.success(), "{label}");
-        no_remote_dispatch(&stderr)?;
-        script_public_only(&stderr)?;
-        ensure!(!directory.path().join("binding-must-not-probe").exists());
-    }
-    Ok(())
-}
-
 #[tokio::test]
-async fn invalid_remote_script_definitions_fail_sanitized_startup_before_mcp() -> Result<()> {
+async fn remote_script_definitions_fail_sanitized_startup_before_mcp() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("private-binding-script-config.toml");
-    // This prerequisite must be valid, otherwise every compiler case can pass
-    // solely because SSH configuration loading failed first.
     std::fs::write(
         directory.path().join("replacement.conf"),
         "Host *\n  ProxyCommand false\n",
     )?;
-    let mut cases = Vec::new();
-    for (label, from, to) in [
-        ("missing source", "source = {", "SCRIPT_CONFIG_SECRET = {"),
-        (
-            "relative source",
-            "path = \"/private/binding-script-source\"",
-            "path = \"SCRIPT_CONFIG_SECRET\"",
-        ),
-        (
-            "NUL source",
-            "path = \"/private/binding-script-source\"",
-            "path = \"/SCRIPT_CONFIG_SECRET\\u0000\"",
-        ),
-        ("missing pin", "content_sha256 =", "SCRIPT_CONFIG_SECRET ="),
-        (
-            "short pin",
-            "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF",
-            "SCRIPT_CONFIG_SECRET",
-        ),
-        (
-            "nonhex pin",
-            "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF",
-            "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        ),
-        ("zero source cap", "max_bytes = 4096", "max_bytes = 0"),
-        ("negative source cap", "max_bytes = 4096", "max_bytes = -1"),
-        (
-            "cap above global file limit",
-            "max_bytes = 4096",
-            "max_bytes = 8193",
-        ),
-        (
-            "nonscalar source cap",
-            "max_bytes = 4096",
-            "max_bytes = \"SCRIPT_CONFIG_SECRET\"",
-        ),
-        (
-            "unknown source field",
-            "max_bytes = 4096",
-            "max_bytes = 4096, owner = \"SCRIPT_CONFIG_SECRET\"",
-        ),
-        (
-            "missing interpreter",
-            "interpreter = {",
-            "SCRIPT_CONFIG_SECRET = {",
-        ),
-        (
-            "missing interpreter argv",
-            "argv = [\"private-binding-script-prefix\", \"-s\", \"--\"]",
-            "SCRIPT_CONFIG_SECRET = []",
-        ),
-        (
-            "relative interpreter",
-            "program = \"/private/binding-script-interpreter\"",
-            "program = \"SCRIPT_CONFIG_SECRET\"",
-        ),
-        (
-            "directory interpreter",
-            "program = \"/private/binding-script-interpreter\"",
-            "program = \"/private/binding-script-interpreter/\"",
-        ),
-        (
-            "NUL interpreter",
-            "program = \"/private/binding-script-interpreter\"",
-            "program = \"/SCRIPT_CONFIG_SECRET\\u0000\"",
-        ),
-        (
-            "dynamic interpreter prefix",
-            "\"private-binding-script-prefix\", \"-s\", \"--\"",
-            "{ input = \"value\" }, \"--\"",
-        ),
-        (
-            "NUL interpreter prefix",
-            "\"private-binding-script-prefix\"",
-            "\"SCRIPT_CONFIG_SECRET\\u0000\"",
-        ),
-        (
-            "unbounded option input",
-            "\"private-binding-script-prefix\", \"-s\", \"--\"",
-            "\"-s\"",
-        ),
-        (
-            "unknown interpreter field",
-            "interpreter = { program",
-            "interpreter = { env = \"SCRIPT_CONFIG_SECRET\", program",
-        ),
-        (
-            "unknown execution field",
-            "kind = \"remote_script\", source",
-            "kind = \"remote_script\", stdin = \"SCRIPT_CONFIG_SECRET\", source",
-        ),
-        (
-            "unknown mapped input",
-            "{ input = \"value\" }",
-            "{ input = \"SCRIPT_CONFIG_SECRET\" }",
-        ),
-        (
-            "interpolated input",
-            "{ input = \"value\" }",
-            "{ template = \"SCRIPT_CONFIG_SECRET\" }",
-        ),
-        (
-            "sudo despite interpreter allowlist",
-            "authority = \"ordinary\"",
-            "authority = { sudo = \"root\" }",
-        ),
-        (
-            "unsupported executor",
-            "kind = \"remote_script\"",
-            "kind = \"SCRIPT_CONFIG_SECRET\"",
-        ),
-        (
-            "missing enabled definition",
-            "enabled_tools = [\"observe_script\"]",
-            "enabled_tools = [\"SCRIPT_CONFIG_SECRET\"]",
-        ),
-        (
-            "duplicate enablement",
-            "enabled_tools = [\"observe_script\"]",
-            "enabled_tools = [\"observe_script\", \"observe_script\"]",
-        ),
-        ("built-in name collision", "observe_script", "ssh_run"),
+    let config = indoc::indoc! {r#"
+        profile = "actions-only"
+        enabled_tools = ["observe_script"]
+        [ssh]
+        config_file = "replacement.conf"
+        [targets.base]
+        ssh_host = "private-binding-script-host.invalid"
+        [tools.observe_script]
+        description = "Retired remote script."
+        revision = "script-1"
+        targets = ["base"]
+        authority = "ordinary"
+        effects = ["read"]
+        execution = { kind = "remote_script", source = { path = "/private/binding-script-source", content_sha256 = "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF", max_bytes = 4096 }, interpreter = { program = "/private/binding-script-interpreter", argv = ["-s", "--"] }, argv = [{ input = "value" }] }
+        input_schema = { type = "object", additionalProperties = false, required = ["value"], properties = { value = { type = "string", maxLength = 64 } } }
+        result = { kind = "command" }
+    "#};
+    std::fs::write(&path, config)?;
+    let output = timeout(
+        Duration::from_secs(5),
+        command(&["--config", path.to_str().context("config path")?]).output(),
+    )
+    .await??;
+    ensure!(!output.status.success(), "accepted retired remote_script");
+    ensure!(output.stdout.is_empty());
+    let stderr = std::str::from_utf8(&output.stderr)?;
+    for secret in [
+        path.to_str().context("config path")?,
+        "/private/binding-script-source",
+        "/private/binding-script-interpreter",
+        "0123456789abcdef0123456789ABCDEF",
     ] {
-        cases.push((label, REMOTE_SCRIPT_TOOL_CONFIG.replace(from, to)));
+        ensure!(!stderr.contains(secret));
     }
-    cases.push((
-        "sudo on an otherwise fully authorized target",
-        REMOTE_SCRIPT_TOOL_CONFIG
-            .replace(
-                "targets = [\"base\", \"read\", \"files\"]",
-                "targets = [\"base\"]",
-            )
-            .replace(
-                "authority = \"ordinary\"",
-                "authority = { sudo = \"root\" }",
-            ),
-    ));
-    cases.push((
-        "combined interpreter and script slot limit",
-        REMOTE_SCRIPT_TOOL_CONFIG.replace(
-            "\"private-binding-script-prefix\", \"-s\", \"--\"",
-            &format!(
-                "{}, \"--\"",
-                vec!["\"private-binding-script-prefix\""; 63].join(", ")
-            ),
-        ),
-    ));
-    cases.push((
-        "source above absolute ceiling",
-        REMOTE_SCRIPT_TOOL_CONFIG
-            .replace("max_file_bytes = 8192", "max_file_bytes = 2097152")
-            .replace("max_bytes = 4096", "max_bytes = 1048577"),
-    ));
-    for (label, selection) in [
-        ("disabled malformed source", "enabled_tools = []"),
-        (
-            "profile-hidden malformed source",
-            "enabled_tools = [\"observe_script\"]",
-        ),
-    ] {
-        cases.push((
-            label,
-            REMOTE_SCRIPT_TOOL_CONFIG
-                .replace("enabled_tools = [\"observe_script\"]", selection)
-                .replacen("profile = \"actions-only\"", "profile = \"files-only\"", 1)
-                .replace("max_bytes = 4096", "max_bytes = 0"),
-        ));
-    }
-    for (label, config) in cases {
-        std::fs::write(&path, config)?;
-        let output = timeout(
-            Duration::from_secs(5),
-            command(&["--config", path.to_str().context("config path")?]).output(),
-        )
-        .await??;
-        ensure!(!output.status.success(), "accepted {label}");
-        ensure!(output.stdout.is_empty(), "started MCP for {label}");
-        script_public_only(&output.stderr)?;
-        let stderr = std::str::from_utf8(&output.stderr)?;
-        ensure!(
-            !stderr.contains(path.to_str().context("config path")?),
-            "{label}"
-        );
-        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
-        ensure!(
-            diagnostic["code"] == "invalid_config",
-            "{label}: {diagnostic}"
-        );
-    }
+    let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
+    ensure!(diagnostic["code"] == "invalid_config");
     Ok(())
 }
 
@@ -5349,24 +4923,39 @@ async fn active_controller_requires_secure_explicit_root_source_and_interpreter(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_transport_failure_never_executes_controller_source_as_fallback() -> Result<()> {
-    use sha2::{Digest, Sha256};
-
     let fixture = ControllerProtocolFixture::new()?;
     let marker = fixture.directory.path().join("remote-must-not-run-locally");
     let marker_quoted = format!("'{}'", marker.to_string_lossy().replace('\'', "'\\''"));
-    let source = format!("printf forbidden > {marker_quoted}\n");
-    std::fs::write(&fixture.source, source.as_bytes())?;
-    let pin = hex::encode(Sha256::digest(std::fs::read(&fixture.source)?));
-    let config = fixture.config
-        .replace(&fixture.hash, &pin)
-        .replace("enabled_tools = [\"observe_controller\"]", "enabled_tools = [\"remote_only\"]")
-        .replace("[tools.observe_controller]", "[tools.remote_only]")
-        .replace("authority = \"controller\"", "targets = [\"base\"]\nauthority = \"ordinary\"")
-        .replace("profile = \"read-only-files\"", "profile = \"baseline\"")
-        .replace("kind = \"controller_script\"", "kind = \"remote_script\"")
+    let script = format!("printf forbidden > {marker_quoted}");
+    let interpreter = serde_json::to_string(
+        fixture
+            .interpreter
+            .to_str()
+            .context("fixture interpreter UTF-8")?,
+    )?;
+    let script_json = serde_json::to_string(&script)?;
+    let execution = format!(
+        "kind = \"native_argv\", program = {interpreter}, argv = [\"-c\", {script_json}, \"--\", {{ input = \"label\" }}, {{ input = \"count\" }}, {{ input = \"verbose\" }}]"
+    );
+    let config = fixture
+        .config
         .replace(
-            "argv = [] }, environment = { MCP_APPLICATION = \"CONTROLLER_CONFIG_SECRET\" }",
-            "argv = [\"-s\", \"--\"] }, argv = [{ input = \"label\" }, { input = \"count\" }, { input = \"verbose\" }]",
+            "enabled_tools = [\"observe_controller\"]",
+            "enabled_tools = [\"remote_only\"]",
+        )
+        .replace("[tools.observe_controller]", "[tools.remote_only]")
+        .replace(
+            "authority = \"controller\"",
+            "targets = [\"base\"]\nauthority = \"ordinary\"",
+        )
+        .replace("profile = \"read-only-files\"", "profile = \"baseline\"")
+        .replace(
+            &format!(
+                "kind = \"controller_script\", source = {{ path = {}, content_sha256 = \"{}\", max_bytes = 4096 }}, interpreter = {{ program = {interpreter}, argv = [] }}, environment = {{ MCP_APPLICATION = \"CONTROLLER_CONFIG_SECRET\" }}",
+                serde_json::to_string(fixture.source.to_str().context("source UTF-8")?)?,
+                fixture.hash
+            ),
+            &execution,
         )
         .replace("kind = \"controller_command\"", "kind = \"command\"");
     let mut server = fixture.start(&config)?;
@@ -6490,13 +6079,6 @@ async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() ->
                     json!({"host":"base","value":"BINDING_INPUT_SECRET"}),
                 ),
             ],
-        ),
-        (
-            REMOTE_SCRIPT_TOOL_CONFIG,
-            vec![(
-                "observe_script",
-                json!({"host":"base","value":"BINDING_INPUT_SECRET"}),
-            )],
         ),
     ] {
         let (mut server, directory) = named_tools_server(config)?;

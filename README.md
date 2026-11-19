@@ -889,8 +889,7 @@ with a typed contract, fixed policy, argument adapter, requirements and authorit
 Delivery uses interpreter stdin, not a target source installation or cache.
 Positive discovery is process/config/SSH-generation/authority scoped; explicit
 interpreter failure never falls back. Target capability fingerprints are advisory,
-not immutable attestation. Existing `remote_script` still means predeployed remote
-source fetched through SFTP and is not reinterpreted.
+not immutable attestation.
 
 Native revisions have the `_native1` suffix. Domain data remains at
 `data.projection.value`; `runner_rc` now carries the actual collector exit code

@@ -4,7 +4,7 @@ use rmcp::model::RequestId;
 
 use crate::{
     audit::Metadata,
-    bindings::{self, BindingId, BindingRequest},
+    bindings::{BindingId, BindingRequest},
     command::{ExecRequest, Invocation, RunRequest, SudoRequest},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, ToolId, ToolKey},
     reply::ToolError,
@@ -26,7 +26,6 @@ pub(super) struct PreparedCommand<'a> {
     pub(super) target: ResolvedTarget<'a>,
     pub(super) duration: Duration,
     pub(super) invocation: Invocation<'a>,
-    pub(super) script: Option<&'a bindings::ScriptSource>,
     pub(super) stdin: Option<&'a str>,
     pub(super) max_output_bytes: u64,
 }
@@ -169,7 +168,6 @@ impl Operation {
                     target,
                     duration: prepared.duration,
                     invocation: prepared.invocation,
-                    script: prepared.script,
                     stdin: None,
                     max_output_bytes: prepared.max_output_bytes,
                 });
@@ -179,7 +177,6 @@ impl Operation {
             target,
             duration: config.timeout(seconds)?,
             invocation,
-            script: None,
             stdin,
             max_output_bytes: config.limits().max_output_bytes,
         })

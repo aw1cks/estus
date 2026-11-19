@@ -48,7 +48,6 @@ pub(crate) fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigErr
 
 pub(crate) struct PreparedBinding<'a> {
     pub(crate) invocation: Invocation<'a>,
-    pub(crate) script: Option<&'a ScriptSource>,
     pub(crate) duration: Duration,
     pub(crate) max_output_bytes: u64,
 }
@@ -561,20 +560,6 @@ impl CompiledBinding {
         })
     }
 
-    pub(super) fn arguments(&self) -> Vec<Cow<'_, str>> {
-        let prefix = match &self.execution {
-            Execution::NativeArgv { .. }
-            | Execution::ControllerScript { .. }
-            | Execution::Ansible { .. }
-            | Execution::Generic { .. }
-            | Execution::Payload { .. } => &[][..],
-            Execution::RemoteScript { prefix, .. } => prefix.as_slice(),
-        };
-        let mut arguments = Vec::with_capacity(prefix.len() + self.argv.len());
-        arguments.extend(prefix.iter().map(|v| Cow::Borrowed(v.as_str())));
-        arguments
-    }
-
     pub(super) fn invocation<'a>(&'a self, arguments: Vec<Cow<'a, str>>) -> Invocation<'a> {
         match &self.execution {
             Execution::NativeArgv {
@@ -590,8 +575,7 @@ impl CompiledBinding {
                 program,
                 cwd,
                 authority: Authority::Ordinary,
-            }
-            | Execution::RemoteScript { program, cwd, .. } => Invocation::BoundArgv {
+            } => Invocation::BoundArgv {
                 program,
                 arguments,
                 cwd: cwd.as_deref(),
@@ -628,7 +612,7 @@ impl CompiledBinding {
         for (input, value) in self.inputs.iter().zip(&request.values) {
             input.validate(value)?;
         }
-        let mut arguments = self.arguments();
+        let mut arguments: Vec<Cow<'_, str>> = Vec::with_capacity(self.argv.len());
         // Reused integer slots copy their already formatted bounded representation, never reformat.
         let mut numeric_slots: [Option<usize>; 16] = [None; 16];
         for slot in &self.argv {
@@ -650,20 +634,13 @@ impl CompiledBinding {
             };
             arguments.push(value);
         }
+        if !matches!(self.execution, Execution::NativeArgv { .. }) {
+            return Err(bound("Controller requires local preparation"));
+        }
         let invocation = self.invocation(arguments);
         invocation.encoded_len()?;
         Ok(PreparedBinding {
             invocation,
-            script: match &self.execution {
-                Execution::RemoteScript { source, .. } => Some(source),
-                Execution::NativeArgv { .. } => None,
-                Execution::ControllerScript { .. }
-                | Execution::Ansible { .. }
-                | Execution::Generic { .. }
-                | Execution::Payload { .. } => {
-                    return Err(bound("Controller requires local preparation"));
-                }
-            },
             duration: Duration::from_secs(timeout),
             max_output_bytes: self.max_output_bytes.unwrap_or(limits.max_output_bytes),
         })

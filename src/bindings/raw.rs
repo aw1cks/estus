@@ -29,12 +29,6 @@ pub(super) enum RawExecution {
         argv: Vec<RawSlot>,
         cwd: Option<String>,
     },
-    RemoteScript {
-        source: RawScriptSource,
-        interpreter: RawInterpreter,
-        argv: Vec<RawSlot>,
-        cwd: Option<String>,
-    },
     ControllerScript {
         source: RawScriptSource,
         interpreter: RawInterpreter,

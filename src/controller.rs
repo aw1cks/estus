@@ -218,7 +218,7 @@ struct CliLease {
 
 impl CliLease {
     fn open(path: &Path) -> io::Result<Self> {
-        let flags = nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW;
+        let flags = nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
         let reader = OpenOptions::new()
             .read(true)
             .custom_flags(flags)
@@ -1412,7 +1412,13 @@ mod tests {
             "a completion byte is not process-exit evidence"
         );
         drop(writer);
-        lease.poll().unwrap();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while lease.active() && Instant::now() < deadline {
+            lease.poll().unwrap();
+            if lease.active() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
         assert!(!lease.active());
         assert!(lease.clean());
         lease.poll().unwrap();
@@ -1436,7 +1442,14 @@ mod tests {
             let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
             writer.write_all(bytes).unwrap();
             drop(writer);
-            lease.poll().unwrap();
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                lease.poll().unwrap();
+                if !lease.active() || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
             assert!(!lease.active());
             assert!(!lease.clean());
         }
