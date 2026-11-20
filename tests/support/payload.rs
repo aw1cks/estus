@@ -1,34 +1,45 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write, read_to_string};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
-// This bridge only imports and calls the shipped module. Cases and assertions belong to Rust.
+// One long-lived bridge per test thread. Each request line carries the collector
+// source path; the bridge re-executes every collector in a fresh module namespace
+// so cases stay isolated, and reuses bootstrap's COLLECTOR_RUNTIME exactly as the
+// shipped collector harness does, so parser behaviour is identical to production.
 const BRIDGE: &str = r#"import importlib.util, json, sys, types
 sys.dont_write_bytecode = True
-request = json.loads(sys.stdin.buffer.read(2097153))
-runtime_spec = importlib.util.spec_from_file_location('estus_bootstrap', sys.argv[2])
+runtime_spec = importlib.util.spec_from_file_location('estus_bootstrap', sys.argv[1])
 bootstrap = importlib.util.module_from_spec(runtime_spec)
 runtime_spec.loader.exec_module(bootstrap)
-namespace = {'types': types}
-exec(compile(bootstrap.COLLECTOR_RUNTIME, '<estus_runtime>', 'exec'), namespace)
-sys.modules['estus_runtime'] = namespace['_make_runtime'](request.get('request', []))
-spec = importlib.util.spec_from_file_location('catalog_payload', sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
 def decode(value):
     if isinstance(value, dict):
         if set(value) == {'$bytes'}: return bytes(value['$bytes'])
         return {key: decode(item) for key, item in value.items()}
     if isinstance(value, list): return [decode(item) for item in value]
     return value
-try:
-    result = {'ok': getattr(module, request['function'])(*decode(request['args']))}
-except Exception as error:
-    result = {'error': type(error).__name__}
-encoded = json.dumps(result, allow_nan=False, separators=(',', ':'))
-if len(encoded.encode()) > 65536: raise ValueError('bridge result bound')
-print(encoded)
+while True:
+    line = sys.stdin.buffer.readline(2097153)
+    if not line or not line.endswith(b'\n'):
+        break
+    request = json.loads(line[:-1])
+    source_spec = importlib.util.spec_from_file_location('catalog_payload', request['source'])
+    module = importlib.util.module_from_spec(source_spec)
+    try:
+        namespace = {'types': types}
+        exec(compile(bootstrap.COLLECTOR_RUNTIME, '<estus_runtime>', 'exec'), namespace)
+        sys.modules['estus_runtime'] = namespace['_make_runtime'](request.get('request', []))
+        source_spec.loader.exec_module(module)
+    except Exception as error:
+        print(json.dumps({'error': type(error).__name__}, allow_nan=False, separators=(',', ':')))
+        continue
+    try:
+        result = {'ok': getattr(module, request['function'])(*decode(request['args']))}
+    except Exception as error:
+        result = {'error': type(error).__name__}
+    encoded = json.dumps(result, allow_nan=False, separators=(',', ':'))
+    if len(encoded.encode()) > 65536: raise ValueError('bridge result bound')
+    print(encoded, flush=True)
 "#;
 
 pub fn bytes(value: &[u8]) -> Value {
@@ -61,34 +72,135 @@ pub fn call_with_request(
         Some("native_payload") => bundle.join("collector.py"),
         _ => anyhow::bail!("executor has no standalone collector"),
     };
-    let request = serde_json::to_vec(&json!({
+    let line = serde_json::to_vec(&json!({
+        "source": source.to_string_lossy(),
         "function": function,
         "args": args,
         "request": request,
     }))?;
-    ensure!(request.len() <= 2097152, "payload request bound");
-    let bootstrap =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_payload/bootstrap.py");
-    let mut child =
-        Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
-            .args(["-I", "-B", "-c", BRIDGE])
-            .arg(source)
-            .arg(bootstrap)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-    child
-        .stdin
-        .take()
-        .context("bridge stdin")?
-        .write_all(&request)?;
-    let output = child.wait_with_output()?;
-    ensure!(
-        output.status.success(),
-        "{role}.{function}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    ensure!(output.stdout.len() <= 65536, "payload response bound");
-    serde_json::from_slice(&output.stdout).context("payload bridge response")
+    ensure!(line.len() <= 2097152, "payload request bound");
+    let mut request_line = line;
+    request_line.push(b'\n');
+    BRIDGE_SLOT
+        .with_borrow_mut(|slot| {
+            if slot.is_none() {
+                *slot = Some(Bridge::spawn()?);
+            }
+            let bridge = slot.as_mut().context("payload bridge slot")?;
+            match bridge.transact(&request_line) {
+                Transact::Answer(response) => {
+                    ensure!(response.len() <= 65536, "payload response bound");
+                    let result: Value =
+                        serde_json::from_slice(&response).context("payload bridge response")?;
+                    ensure!(
+                        result.as_object().is_some_and(|fields| {
+                            fields.len() == 1
+                                && (fields.contains_key("ok") || fields.contains_key("error"))
+                        }),
+                        "{role}.{function}: {result}"
+                    );
+                    Ok(result)
+                }
+                Transact::Dead(stderr) => {
+                    *slot = None;
+                    Err(anyhow::anyhow!("payload bridge exited: {stderr}"))
+                }
+            }
+        })
+        .context("payload bridge slot")
+}
+
+/// One exchange with the bridge: a request line, then exactly one answer line.
+enum Transact {
+    Answer(Vec<u8>),
+    Dead(String),
+}
+
+struct Bridge {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    stderr: Option<ChildStderr>,
+}
+
+thread_local! {
+    static BRIDGE_SLOT: std::cell::RefCell<Option<Bridge>> = const { std::cell::RefCell::new(None) };
+}
+
+impl Bridge {
+    fn spawn() -> Result<Bridge> {
+        let mut child =
+            Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
+                .args(["-I", "-B", "-c", BRIDGE])
+                .arg(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("src/native_payload/bootstrap.py"),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("spawning payload bridge")?;
+        let stdin = child.stdin.take().context("bridge stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .map(BufReader::new)
+            .context("bridge stdout")?;
+        let stderr = child.stderr.take().context("bridge stderr")?;
+        Ok(Bridge {
+            child,
+            stdin,
+            stdout,
+            stderr: Some(stderr),
+        })
+    }
+
+    fn transact(&mut self, line: &[u8]) -> Transact {
+        for attempt in 0..2 {
+            if self.stdin.write_all(line).is_err() {
+                // The bridge died between calls; respawn once and retry the request.
+                if attempt == 0 {
+                    if self.respawn().is_err() {
+                        return Transact::Dead("cannot respawn payload bridge".into());
+                    }
+                    continue;
+                }
+                return Transact::Dead("writing to payload bridge failed".into());
+            }
+            let mut response = String::new();
+            match self.stdout.read_line(&mut response) {
+                Ok(0) => return Transact::Dead(self.drain_stderr()),
+                Ok(_) => return Transact::Answer(response.into_bytes()),
+                Err(_) => return Transact::Dead("reading from payload bridge failed".into()),
+            }
+        }
+        Transact::Dead("payload bridge write retry exhausted".into())
+    }
+
+    fn respawn(&mut self) -> Result<()> {
+        self.drain_stderr();
+        let _ = self.child.kill();
+        let fresh = Bridge::spawn()?;
+        *self = fresh;
+        Ok(())
+    }
+
+    /// The bridge has exited (or its pipe broke); its stderr holds the reason.
+    fn drain_stderr(&mut self) -> String {
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|mut stream| read_to_string(&mut stream).ok())
+            .unwrap_or_default();
+        let _ = self.child.wait();
+        stderr.trim().to_owned()
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.try_wait();
+    }
 }
