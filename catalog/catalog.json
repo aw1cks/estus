@@ -1,6 +1,6 @@
 {
   "schema": 3,
-  "version": "8",
+  "version": "9",
   "presets": {
     "linux-health": [
       "observe_cpu",
@@ -422,34 +422,6 @@
         "path": "payloads/change_sysctl_runtime"
       }
     },
-    "change_systemd_disable": {
-      "definition": "change_systemd_disable.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_disable"
-      }
-    },
-    "change_systemd_enable": {
-      "definition": "change_systemd_enable.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_enable"
-      }
-    },
     "change_systemd_manager_reload": {
       "definition": "change_systemd_manager_reload.toml",
       "qualification": "site_policy_template",
@@ -462,62 +434,6 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/change_systemd_manager_reload"
-      }
-    },
-    "change_systemd_mask": {
-      "definition": "change_systemd_mask.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_mask"
-      }
-    },
-    "change_systemd_reload": {
-      "definition": "change_systemd_reload.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_reload"
-      }
-    },
-    "change_systemd_reset_failed": {
-      "definition": "change_systemd_reset_failed.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_reset_failed"
-      }
-    },
-    "change_systemd_restart": {
-      "definition": "change_systemd_restart.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_restart"
       }
     },
     "change_systemd_runtime_limits": {
@@ -548,8 +464,8 @@
         "path": "payloads/change_systemd_signal"
       }
     },
-    "change_systemd_start": {
-      "definition": "change_systemd_start.toml",
+    "change_systemd_unit": {
+      "definition": "change_systemd_unit.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
@@ -559,11 +475,11 @@
       ],
       "executor": {
         "kind": "native_payload",
-        "path": "payloads/change_systemd_start"
+        "path": "payloads/change_systemd_unit"
       }
     },
-    "change_systemd_stop": {
-      "definition": "change_systemd_stop.toml",
+    "change_systemd_unit_file": {
+      "definition": "change_systemd_unit_file.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
@@ -573,35 +489,7 @@
       ],
       "executor": {
         "kind": "native_payload",
-        "path": "payloads/change_systemd_stop"
-      }
-    },
-    "change_systemd_try_restart": {
-      "definition": "change_systemd_try_restart.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_try_restart"
-      }
-    },
-    "change_systemd_unmask": {
-      "definition": "change_systemd_unmask.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "systemd"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_systemd_unmask"
+        "path": "payloads/change_systemd_unit_file"
       }
     },
     "inspect_boot_entry": {

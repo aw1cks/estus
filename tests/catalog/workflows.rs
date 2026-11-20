@@ -133,12 +133,16 @@ async fn reviewed_service_restart_workflow() -> Result<()> {
         let binding = catalog::Binding::enable_workflow(&guest.config, RESTART)?;
         binding.inspect_workflow_list().await?;
         let before = unit_state(&guest, UNIT).await?;
-        binding.reject(json!({"unit":"ssh.service"})).await?;
+        binding
+            .reject(json!({"unit": "ssh.service", "operation": "restart"}))
+            .await?;
         ensure!(
             before == unit_state(&guest, UNIT).await?,
             "denial altered selected unit"
         );
-        let reply = binding.call(json!({"unit":UNIT})).await?;
+        let reply = binding
+            .call(json!({"unit": UNIT, "operation": "restart"}))
+            .await?;
         let value = catalog::projection(&reply)?;
         let after = unit_state(&guest, UNIT).await?;
         ensure!(
@@ -200,7 +204,7 @@ systemctl daemon-reload
     let result: Result<()> = async {
         server.initialize().await?;
         server.send(json!({"jsonrpc":"2.0","id":40,"method":"tools/call","params":{
-            "name":"change_systemd_restart","arguments":{"host":"plain","inputs":{"unit":UNIT},"timeout_secs":60}
+            "name":"change_systemd_unit","arguments":{"host":"plain","inputs":{"unit":UNIT,"operation":"restart"},"timeout_secs":60}
         }})).await?;
         timeout(WAIT, async {
             loop {

@@ -426,9 +426,9 @@ class Execution(unittest.TestCase):
         self.assertEqual(json.loads(evidence['stdout']), {'estus_error': {'code': 'timeout'}})
 
     def test_collector_allowlist_fails_closed_and_wildcard_is_explicit(self):
-        # The shipped systemd restart collector is the regression the audit found:
+        # The shipped systemd unit collector is the regression the audit found:
         # an absent allowed_units must deny instead of permitting any unit.
-        source = pathlib.Path(__file__).parents[2] / 'catalog/payloads/change_systemd_restart/collector.py'
+        source = pathlib.Path(__file__).parents[2] / 'catalog/payloads/change_systemd_unit/collector.py'
         probe = (
             b"import importlib.util, json, sys, types\n"
             b"bootstrap = types.ModuleType('b')\n"

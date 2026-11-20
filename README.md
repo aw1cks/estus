@@ -962,7 +962,7 @@ materialized from the installed definition, and the table's keys override the
 installed ones:
 
 ```toml
-[tools.change_systemd_restart]
+[tools.change_systemd_unit]
 targets = ["server"]
 authority = "automation:catalog"
 constraints = { allowed_units = ["site-app.service"] }
@@ -1041,7 +1041,7 @@ recipe.
 | --- | --- | --- |
 | Host inspection | `examples/workflows/health.toml` / `observe_host_summary` | Actual boot identity, kernel, architecture and bounded uptime; no application-health or isolation assertion |
 | Service diagnosis | `examples/workflows/service-diagnosis.toml` / `observe_systemd_unit` | Active/inactive/failed manager state and selected properties; state is not application health |
-| Controlled restart | `examples/workflows/service-restart.toml` / `change_systemd_restart` | Selected unit PID/invocation changes; completion reports health not checked; cancellation is not rollback/replay |
+| Controlled restart | `examples/workflows/service-restart.toml` / `change_systemd_unit` | Selected unit PID/invocation changes; completion reports health not checked; cancellation is not rollback/replay |
 | Configuration replacement | `examples/workflows/config-replacement.toml` | Restricted SFTP, expected-digest read, complete old/new visibility, independent SHA-256 and new mode0600 inode |
 
 Catalog workflows expose only their reviewed named tool and non-executing

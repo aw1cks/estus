@@ -1,0 +1,39 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/change_systemd_unit_file/manifest.json and the fixed policy here, then enable it by name.
+# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
+# Named catalog authority uses a separate reviewed SSH identity and sudo root.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_systemd_unit_file"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+[automation.authorities.catalog.become]
+method = "sudo"
+user = "root"
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+
+[tools.change_systemd_unit_file]
+description = "Enable, disable, mask or unmask one allowed unit's unit file with --no-reload and return the on-disk state. Never starts or stops it; manager configuration stays stale until change_systemd_manager_reload, and manager_reload_required reports that."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["persistent_write", "read"]
+execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_unit_file/collector.py", no_log = false }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_operations" = ["enable", "disable", "mask", "unmask"], "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+input_map = { "unit" = "unit", "operation" = "operation" }
+limits = { timeout_secs = 60 }
+input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 }, "operation" = { "type" = "string", "enum" = ["enable", "disable", "mask", "unmask"] } }, "required" = ["unit", "operation"], "additionalProperties" = false }
+[tools.change_systemd_unit_file.result]
+kind = "capability_projection"
+fields = { "scope" = ["mcp_result", "scope"], "operation" = ["mcp_result", "operation"], "operation_completed" = ["mcp_result", "operation_completed"], "health" = ["mcp_result", "health"], "unit" = ["mcp_result", "unit"], "properties" = ["mcp_result", "properties"], "manager_reload_performed" = ["mcp_result", "manager_reload_performed"], "manager_reload_required" = ["mcp_result", "manager_reload_required"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 6
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "operation" = { "type" = "string", "enum" = ["enable", "disable", "mask", "unmask"], "maxLength" = 7 }, "operation_completed" = { "type" = "boolean", "const" = true }, "health" = { "type" = "string", "const" = "not_checked", "maxLength" = 11 }, "unit" = { "type" = "string", "maxLength" = 128 }, "properties" = { "type" = "object", "properties" = { "Id" = { "type" = "string", "maxLength" = 4096 }, "LoadState" = { "type" = "string", "maxLength" = 4096 }, "ActiveState" = { "type" = "string", "maxLength" = 4096 }, "SubState" = { "type" = "string", "maxLength" = 4096 }, "UnitFileState" = { "type" = "string", "maxLength" = 4096 }, "MainPID" = { "type" = "string", "maxLength" = 4096 }, "Result" = { "type" = "string", "maxLength" = 4096 } }, "required" = [], "additionalProperties" = false }, "manager_reload_performed" = { "type" = "boolean", "const" = false }, "manager_reload_required" = { "type" = "boolean", "const" = true } }, "required" = ["scope", "operation", "operation_completed", "health", "unit", "properties", "manager_reload_performed", "manager_reload_required"], "additionalProperties" = false }

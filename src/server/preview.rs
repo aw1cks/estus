@@ -436,39 +436,48 @@ impl PreviewSpec {
                     state: "present",
                 }
             }
-            "change_systemd_start"
-            | "change_systemd_stop"
-            | "change_systemd_restart"
-            | "change_systemd_reload"
-            | "change_systemd_enable"
-            | "change_systemd_disable"
-            | "change_systemd_mask"
-            | "change_systemd_unmask" => Change::Systemd {
-                unit: args.get("unit").and_then(Value::as_str)?.to_owned(),
-                scope: args
-                    .get("manager_scope")
-                    .and_then(Value::as_str)
-                    .unwrap_or("system")
-                    .to_owned(),
-                state: match binding_name {
-                    "change_systemd_start" => Some("started"),
-                    "change_systemd_stop" => Some("stopped"),
-                    "change_systemd_restart" => Some("restarted"),
-                    "change_systemd_reload" => Some("reloaded"),
-                    _ => None,
-                },
-                enabled: match binding_name {
-                    "change_systemd_enable" => Some(true),
-                    "change_systemd_disable" => Some(false),
-                    _ => None,
-                },
-                masked: match binding_name {
-                    "change_systemd_mask" => Some(true),
-                    "change_systemd_unmask" => Some(false),
-                    _ => None,
-                },
-                daemon_reload: false,
-            },
+            // The merged systemd tools carry the operation as data, so the
+            // fields it sets — and therefore the digest the preview records —
+            // depend on the argument, not only on the binding name.
+            "change_systemd_unit" | "change_systemd_unit_file" => {
+                let operation = args.get("operation").and_then(Value::as_str)?;
+                // `try_restart` and `reset_failed` have no field in the shared
+                // systemd intent, so they would collide with one another. As
+                // before the merge, they have no qualified preview.
+                if !matches!(
+                    operation,
+                    "start" | "stop" | "restart" | "reload" | "enable" | "disable" | "mask"
+                        | "unmask"
+                ) {
+                    return None;
+                }
+                Change::Systemd {
+                    unit: args.get("unit").and_then(Value::as_str)?.to_owned(),
+                    scope: args
+                        .get("manager_scope")
+                        .and_then(Value::as_str)
+                        .unwrap_or("system")
+                        .to_owned(),
+                    state: match operation {
+                        "start" => Some("started"),
+                        "stop" => Some("stopped"),
+                        "restart" => Some("restarted"),
+                        "reload" => Some("reloaded"),
+                        _ => None,
+                    },
+                    enabled: match operation {
+                        "enable" => Some(true),
+                        "disable" => Some(false),
+                        _ => None,
+                    },
+                    masked: match operation {
+                        "mask" => Some(true),
+                        "unmask" => Some(false),
+                        _ => None,
+                    },
+                    daemon_reload: false,
+                }
+            }
             _ => return None,
         };
         Self::from_change(change)
@@ -569,14 +578,51 @@ mod tests {
         )
         .unwrap();
         let native_systemd = PreviewSpec::for_payload(
-            "change_systemd_restart",
+            "change_systemd_unit",
             false,
-            &json!({"unit": "sshd.service", "manager_scope": "system"}),
+            &json!({"unit": "sshd.service", "operation": "restart", "manager_scope": "system"}),
         )
         .unwrap();
         assert_eq!(ansible_systemd.domain, native_systemd.domain);
         assert_eq!(ansible_systemd.intent_digest, native_systemd.intent_digest);
         assert_eq!(ansible_systemd.prestate_args, native_systemd.prestate_args);
+
+        // A different operation on the same unit is a different intent.
+        let native_stop = PreviewSpec::for_payload(
+            "change_systemd_unit",
+            false,
+            &json!({"unit": "sshd.service", "operation": "stop", "manager_scope": "system"}),
+        )
+        .unwrap();
+        assert_ne!(native_stop.intent_digest, native_systemd.intent_digest);
+
+        // The unit-file tool shares the preview lowering: enable derives the
+        // same intent as the Ansible form with `enabled: true`.
+        let ansible_enabled = PreviewSpec::for_ansible(
+            "ansible.builtin.systemd_service",
+            &json!({"name": "sshd.service", "enabled": true, "daemon_reload": false}),
+        )
+        .unwrap();
+        let native_enabled = PreviewSpec::for_payload(
+            "change_systemd_unit_file",
+            false,
+            &json!({"unit": "sshd.service", "operation": "enable", "manager_scope": "system"}),
+        )
+        .unwrap();
+        assert_eq!(ansible_enabled.intent_digest, native_enabled.intent_digest);
+
+        // Operations with no field in the shared intent cannot be previewed.
+        for operation in ["try_restart", "reset_failed"] {
+            assert!(
+                PreviewSpec::for_payload(
+                    "change_systemd_unit",
+                    false,
+                    &json!({"unit": "sshd.service", "operation": operation}),
+                )
+                .is_none(),
+                "{operation} must not lower to a colliding digest"
+            );
+        }
 
         let preview_pkg = PreviewSpec::for_ansible(
             "ansible.builtin.package",

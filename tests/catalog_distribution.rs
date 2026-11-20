@@ -226,7 +226,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     );
     let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listing["schema"], 3);
-    assert_eq!(listing["version"], "8");
+    assert_eq!(listing["version"], "9");
     let canonical: Value = serde_json::from_slice(
         &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json")).unwrap(),
     )
@@ -443,7 +443,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
     let path = output.join("catalog-selection.json");
     let selection: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(selection["schema"], 3);
-    assert_eq!(selection["version"], "8");
+    assert_eq!(selection["version"], "9");
     assert_eq!(selection["scope"], "catalog_templates");
     assert_eq!(selection.as_object().unwrap().len(), 4);
     assert_eq!(
@@ -471,7 +471,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
 #[test]
 fn all_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail() {
     let catalog = canonical_catalog();
-    assert_eq!(catalog.manifest().tools.len(), 120);
+    assert_eq!(catalog.manifest().tools.len(), 112);
     for name in catalog.manifest().tools.keys() {
         let definition = catalog.definition(name).unwrap();
         let effects = definition["tools"][name]["effects"]

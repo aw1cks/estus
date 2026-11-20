@@ -1190,7 +1190,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["runtime_write", "read"]
-execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_restart/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_unit/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3", manager_scope = "system" }
 input_map = { unit = "unit" }
 constraints = { allowed_units = ["nginx.service", "caddy.service"] }
@@ -1200,8 +1200,8 @@ result = { kind = "capability_projection", fields = { unit = ["mcp_result", "uni
     )
     .unwrap();
     let compiled = Bindings::compile(
-        BTreeMap::from([("change_systemd_restart".into(), raw.clone())]),
-        &["change_systemd_restart".into()],
+        BTreeMap::from([("change_systemd_unit".into(), raw.clone())]),
+        &["change_systemd_unit".into()],
         &Limits::default(),
         |target| target == "server",
         None,

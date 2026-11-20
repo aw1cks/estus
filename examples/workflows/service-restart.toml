@@ -1,16 +1,16 @@
 # Reviewed disposable Linux system-manager restart, separate catalog identity
 # with noninteractive sudo root. Dependencies/activation may affect other units.
 # Restate this unit set as constraints.allowed_units in the site's
-# [tools.change_systemd_restart] table.
+# [tools.change_systemd_unit] table.
 # Successful completion is NOT application health. Interrupted work is uncertain:
 # independently inspect the manager before deciding anything; NEVER auto-replay.
-# MCP: change_systemd_restart {"host":"plain","inputs":{"unit":"estus-fixture.service"}}
-tool = "change_systemd_restart"
+# MCP: change_systemd_unit {"host":"plain","inputs":{"unit":"estus-fixture.service","operation":"restart"}}
+tool = "change_systemd_unit"
 authority = "automation:catalog"
 allowed_units = ["estus-fixture.service"]
 #
-# enabled_tools = ["change_systemd_restart"]
-# [tools.change_systemd_restart]
+# enabled_tools = ["change_systemd_unit"]
+# [tools.change_systemd_unit]
 # targets = ["plain"]
 # authority = "automation:catalog"
 # constraints = { allowed_units = ["estus-fixture.service"] }

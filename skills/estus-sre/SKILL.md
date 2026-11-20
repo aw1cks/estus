@@ -40,8 +40,8 @@ description: Safe observation-first Linux triage, journal inspection, and change
 - **Prompts**: `triage_host`, `diagnose_service`, `safe_change`, `network_triage`.
 - **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/preview`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
 
-## 7. Exact-Name Client Approval Policy (135 Published Tools)
-Published tools are the 15 builtin names plus the 120 bundled catalog tools. Which catalog tools exist depends on the selected configuration and, in zero-config workstation mode, on the installed catalog and bundle. Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies).
+## 7. Exact-Name Client Approval Policy (127 Published Tools)
+Published tools are the 15 builtin names plus the 112 bundled catalog tools. Which catalog tools exist depends on the selected configuration and, in zero-config workstation mode, on the installed catalog and bundle. Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies).
 
 ### Allow (`observe_*` — 61 tools)
 ```json
@@ -146,19 +146,11 @@ Published tools are the 15 builtin names plus the 120 bundled catalog tools. Whi
   "change_rename",
   "change_sysctl_config",
   "change_sysctl_runtime",
-  "change_systemd_disable",
-  "change_systemd_enable",
   "change_systemd_manager_reload",
-  "change_systemd_mask",
-  "change_systemd_reload",
-  "change_systemd_reset_failed",
-  "change_systemd_restart",
   "change_systemd_runtime_limits",
   "change_systemd_signal",
-  "change_systemd_start",
-  "change_systemd_stop",
-  "change_systemd_try_restart",
-  "change_systemd_unmask",
+  "change_systemd_unit",
+  "change_systemd_unit_file",
   "change_target_quarantine_clear",
   "exec_argv",
   "exec_command",

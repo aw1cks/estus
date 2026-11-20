@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "4f5618ec5818eb1e0928214ee725636d753caee4484150486cd21be85c21546e",
+  "source_sha256": "f9201befec374b682d638baa84bd629fb8814be05255091f5bed10dd12c07e04",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -17,6 +17,12 @@
         },
         "allowed_units": {
           "name": "allowed_units"
+        },
+        "allowed_operations": {
+          "name": "allowed_operations"
+        },
+        "operation": {
+          "name": "operation"
         },
         "unit": {
           "name": "unit"
@@ -33,10 +39,7 @@
       "json",
       "os",
       "re",
-      "selectors",
-      "subprocess",
-      "sys",
-      "time"
+      "sys"
     ],
     "executables": [],
     "paths": [],
@@ -67,6 +70,27 @@
             "type": "string"
           }
         },
+        "allowed_operations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "enable",
+              "disable",
+              "mask",
+              "unmask"
+            ]
+          }
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "enable",
+            "disable",
+            "mask",
+            "unmask"
+          ]
+        },
         "unit": {
           "type": "string"
         }
@@ -74,6 +98,7 @@
       "required": [
         "target_python",
         "manager_scope",
+        "operation",
         "unit"
       ],
       "additionalProperties": false
@@ -96,6 +121,18 @@
             "aliases": {},
             "properties": {}
           }
+        },
+        "allowed_operations": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
+        },
+        "operation": {
+          "aliases": {},
+          "properties": {}
         },
         "unit": {
           "aliases": {},

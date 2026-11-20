@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "2c9838f1800e2196e695762550e1cb50594b986aae1e0d2cf9f52f4023fa0961",
+  "source_sha256": "a7edc572972135a16affdfce058acd662a752bcdab9f1424d61f086ae1e8010a",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -17,6 +17,12 @@
         },
         "allowed_units": {
           "name": "allowed_units"
+        },
+        "allowed_operations": {
+          "name": "allowed_operations"
+        },
+        "operation": {
+          "name": "operation"
         },
         "unit": {
           "name": "unit"
@@ -33,10 +39,7 @@
       "json",
       "os",
       "re",
-      "selectors",
-      "subprocess",
-      "sys",
-      "time"
+      "sys"
     ],
     "executables": [],
     "paths": [],
@@ -67,6 +70,31 @@
             "type": "string"
           }
         },
+        "allowed_operations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop",
+              "restart",
+              "try_restart",
+              "reload",
+              "reset_failed"
+            ]
+          }
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "start",
+            "stop",
+            "restart",
+            "try_restart",
+            "reload",
+            "reset_failed"
+          ]
+        },
         "unit": {
           "type": "string"
         }
@@ -74,6 +102,7 @@
       "required": [
         "target_python",
         "manager_scope",
+        "operation",
         "unit"
       ],
       "additionalProperties": false
@@ -96,6 +125,18 @@
             "aliases": {},
             "properties": {}
           }
+        },
+        "allowed_operations": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
+        },
+        "operation": {
+          "aliases": {},
+          "properties": {}
         },
         "unit": {
           "aliases": {},

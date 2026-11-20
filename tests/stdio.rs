@@ -346,7 +346,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         // have no per-target sudo grant to check.
         for denied in [
             "change_sysctl_runtime",
-            "change_systemd_restart",
+            "change_systemd_unit",
             "observe_filesystem_usage",
             "observe_network_links",
             "inspect_sockets",

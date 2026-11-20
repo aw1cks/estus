@@ -4,7 +4,8 @@ import re
 
 import estus_runtime
 
-OPERATION = 'restart'
+OPERATIONS = ['start', 'stop', 'restart', 'try_restart', 'reload', 'reset_failed']
+VERBS = {'try_restart': 'try-restart', 'reset_failed': 'reset-failed'}
 PROPERTIES = ['Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState', 'MainPID', 'Result']
 UNIT_PATTERN = re.compile(r'[A-Za-z0-9_@.:-]{1,128}')
 PROJECTION_BOUND = 4096
@@ -49,11 +50,14 @@ def main():
     unit = request.get('unit')
     if not unit_allowed(unit, request.get('allowed_units')):
         raise ValueError('unit is outside operator policy')
+    operation = request.get('operation')
+    if operation not in OPERATIONS or not estus_runtime.allowed(operation, request.get('allowed_operations')):
+        raise ValueError('operation is outside operator policy')
 
-    systemctl(scope, [OPERATION, '--', unit])
+    systemctl(scope, [VERBS.get(operation, operation), '--', unit])
     result = {
         'scope': scope,
-        'operation': OPERATION,
+        'operation': operation,
         'operation_completed': True,
         'health': 'not_checked',
         'unit': unit,

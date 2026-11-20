@@ -4,8 +4,13 @@ import re
 
 import estus_runtime
 
-OPERATION = 'start'
+OPERATIONS = ['enable', 'disable', 'mask', 'unmask']
 PROPERTIES = ['Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState', 'MainPID', 'Result']
+UNIT_FILE_STATES = [
+    'enabled', 'enabled-runtime', 'linked', 'linked-runtime', 'alias',
+    'static', 'indirect', 'disabled', 'generated', 'transient',
+    'masked', 'masked-runtime',
+]
 UNIT_PATTERN = re.compile(r'[A-Za-z0-9_@.:-]{1,128}')
 PROJECTION_BOUND = 4096
 
@@ -16,7 +21,7 @@ def unit_allowed(unit, allowed):
     return estus_runtime.allowed(unit, allowed)
 
 
-def systemctl(scope, args):
+def systemctl(scope, args, accepted=(0,)):
     executable = os.environ.get('ESTUS_EXEC_SYSTEMCTL')
     if not executable:
         raise ValueError('systemctl is unavailable')
@@ -24,8 +29,9 @@ def systemctl(scope, args):
         [executable, '--' + scope, '--no-pager', '--no-ask-password'] + args,
         timeout=20,
         max_bytes=262144,
+        accepted=accepted,
     )
-    if result['returncode'] != 0:
+    if result['returncode'] not in accepted:
         raise ValueError('systemctl failed with exit ' + str(result['returncode']))
     return result['stdout']
 
@@ -49,16 +55,25 @@ def main():
     unit = request.get('unit')
     if not unit_allowed(unit, request.get('allowed_units')):
         raise ValueError('unit is outside operator policy')
+    operation = request.get('operation')
+    if operation not in OPERATIONS or not estus_runtime.allowed(operation, request.get('allowed_operations')):
+        raise ValueError('operation is outside operator policy')
 
-    systemctl(scope, [OPERATION, '--', unit])
+    systemctl(scope, [operation, '--no-reload', '--', unit])
+    file_state = systemctl(scope, ['is-enabled', '--', unit], (0, 1)).strip()
+    if file_state not in UNIT_FILE_STATES:
+        raise ValueError('unsupported unit-file state readback')
     result = {
         'scope': scope,
-        'operation': OPERATION,
+        'operation': operation,
         'operation_completed': True,
         'health': 'not_checked',
         'unit': unit,
         'properties': show(scope, unit),
+        'manager_reload_performed': False,
+        'manager_reload_required': True,
     }
+    result['properties']['UnitFileState'] = file_state
     encoded = json.dumps(result, separators=(',', ':'), allow_nan=False)
     if len(encoded.encode('utf-8')) > PROJECTION_BOUND:
         raise ValueError('projection output bound exceeded')
