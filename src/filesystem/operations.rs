@@ -9,7 +9,8 @@
 //!
 //! Atomic replacement uses a new mode-0600 inode, not destination metadata, and
 //! promises atomic visibility rather than durability or concurrent-writer safety.
-//! The exclusive OPEN creates the sibling stage with mode 0600.
+//! The exclusive OPEN creates the sibling stage with the server's creation
+//! default; the first handle chmod reaches mode 0600 before any content.
 //! Cancellation or uncertain acknowledgements can leave `.estus-replace-*`
 //! orphans: never replay replacement or remove an unproven staging pathname.
 //!
@@ -453,18 +454,15 @@ async fn replace_sftp(
             return Err(Failure::io());
         }
         let mut options = sftp.options();
-        options
-            .write(true)
-            .create_new(true)
-            .create_permissions(Permissions::from(0o600));
+        options.write(true).create_new(true);
         // Only an acknowledged EXCL OPEN establishes ownership. An uncertain
         // OPEN or collision must never cause pathname cleanup.
         *phase = ReplacePhase::Opening;
         let mut file = options.open(&path).await.map_err(sftp_failure)?;
         *phase = ReplacePhase::Staging;
         let written = async {
-            // Defensive confirmation only: confidentiality already holds at
-            // the exclusive OPEN, even if another user observes the empty stage.
+            // The exclusive empty stage briefly has the server's creation
+            // default before this chmod; no content is written until after it.
             file.set_permissions(Permissions::from(0o600))
                 .await
                 .map_err(sftp_failure)?;

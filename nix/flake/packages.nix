@@ -23,7 +23,6 @@
                 && pkgs.lib.hasSuffix ".py" path)
               || pkgs.lib.hasPrefix "${toString sourceRoot}/examples/" path
               || pkgs.lib.hasPrefix "${toString sourceRoot}/catalog/" path
-              || pkgs.lib.hasPrefix "${toString sourceRoot}/vendor/openssh-sftp-client/" path
               || path == "${toString sourceRoot}/skills/estus-sre/SKILL.md"
               || path == "${toString sourceRoot}/python/estus/__init__.py"
               || path == "${toString sourceRoot}/setup.py"

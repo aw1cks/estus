@@ -1,6 +1,5 @@
 include Cargo.toml Cargo.lock setup.py
 recursive-include src *.rs *.py
-graft vendor/openssh-sftp-client
 include catalog/catalog.json
 # Selected executor-specific catalog assets come from BuildPy.get_source_files().
 global-exclude *.py[cod] .DS_Store *~
@@ -11,6 +10,6 @@ prune target
 prune build
 prune dist
 prune nix
-# Markdown is opt-in, including files added by the vendor graft above.
+# Markdown is opt-in.
 global-exclude *.[mM][dD]
-include README.md vendor/openssh-sftp-client/README.md
+include README.md

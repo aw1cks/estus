@@ -35,7 +35,6 @@ let
       && !lib.hasPrefix "tests/" relative && (
         craneLib.filterCargoSources path type
         || builtins.elem relative [ "pyproject.toml" "setup.py" "MANIFEST.in" "README.md" ]
-        || lib.hasPrefix "vendor/openssh-sftp-client/" relative
         || (lib.hasPrefix "catalog/" relative
           && !lib.hasInfix "/__pycache__/" relative
           && !lib.hasSuffix ".pyc" relative

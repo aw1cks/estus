@@ -95,12 +95,8 @@ separately below.
 
 Source archives select catalog definitions/roles/payloads through the manifest-driven
 build hook, not a second tool-name list in `MANIFEST.in`. They include required Rust
-sources, embedded helpers and the path-vendored SFTP client (`openssh-sftp-client`
-`0.15.12` from upstream commit `1633973b6591d9ba3d34ee442919ec94472669ec`, with local
-`OpenOptions::create_permissions` delta recorded in
-`vendor/openssh-sftp-client/README.md`; remove only after identifying an exact
-upstream release containing that fix), while excluding generated caches,
-demonstrations, test fixtures, local plans and build outputs.
+sources and embedded helpers, while excluding generated caches, demonstrations,
+test fixtures, local plans and build outputs.
 
 The opt-in `source_distribution_roundtrip_preserves_manifest_selected_assets`
 wheel test builds sdists from a clean tracked-source export, extracts them outside
@@ -368,15 +364,12 @@ before SSH. A missing destination may be created, but `overwrite=true` is still
 required.
 
 The server must advertise POSIX rename before any filesystem mutation. Estus
-exclusively creates a random `.estus-replace-<32 hex digits>` sibling with mode0600
-in the original OPEN, confirms permissions by handle, completes the full write
-and CLOSE, then atomically renames it over the destination. Another account
-cannot gain a readable descriptor through permissive server creation defaults.
-The minimal high-level SFTP API extension is vendored from 0.15.12; provenance
-and the local delta are recorded in `vendor/openssh-sftp-client/README.md`.
-Upstream submission is deferred until the integration has settled.
-Unsupported atomicity never falls back to standard rename, destination truncate,
-unlink/copy/delete, sudo or shell/SCP.
+exclusively creates a random `.estus-replace-<32 hex digits>` sibling in the
+original OPEN, chmods it to mode0600 by handle before writing any content,
+completes the full write and CLOSE, then atomically renames it over the
+destination. The empty stage briefly has the server's creation default mode
+before that chmod. Unsupported atomicity never falls back to standard rename,
+destination truncate, unlink/copy/delete, sudo or shell/SCP.
 
 A final destination symlink entry is replaced, not its target. The new inode uses
 mode0600 and the SSH account/server parent-group inheritance rules; old

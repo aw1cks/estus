@@ -66,8 +66,9 @@ use anyhow::{Context, Result, ensure};
 use openssh_sftp_client::{Sftp, SftpOptions, metadata::Permissions};
 use tokio::{process::Command, time::timeout};
 
-/// This direct-client slice proves filesystem isolation at OPEN, not Tool wiring.
-/// No chmod or payload write occurs before the independent observer's attempt.
+/// This direct-client slice mirrors the replace staging sequence: exclusive
+/// OPEN, handle chmod, payload write. The observer must be denied while the
+/// stage is still empty, before any content is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires native ESTUS_TEST_FIXTURE, explicit DOCKER_HOST and Docker CLI"]
 async fn sftp_private_stage_denies_observer_before_payload() -> Result<()> {
@@ -135,11 +136,11 @@ async fn private_stage_acceptance(fixture: &isolated::Fixture) -> Result<()> {
             .options()
             .write(true)
             .create_new(true)
-            .create_permissions(Permissions::from(0o600_u16))
             .open(&private)
             .await?;
-        // Fresh options intentionally retain empty creation attrs. Under the
-        // very same server and parent this must create a world-readable 0666.
+        stage.set_permissions(Permissions::from(0o600_u16)).await?;
+        // Fresh options without any chmod. Under the very same server and
+        // parent this must create a world-readable 0666.
         let mut readable = sftp
             .options()
             .write(true)
