@@ -8,144 +8,21 @@ const MAX_LABEL_KEY_BYTES: usize = 64;
 const MAX_LABEL_VALUE_BYTES: usize = 256;
 const MAX_METADATA_BYTES: usize = 65_536;
 
-fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
-    let authorities = value
-        .as_table()
-        .ok_or_else(|| invalid("automation.authorities", "must be a table"))?;
-    if authorities.len() > 16 {
-        return Err(invalid(
-            "automation.authorities",
-            "must contain at most 16 authorities",
-        ));
-    }
-    for (name, value) in authorities {
-        if name.is_empty()
-            || name.len() > 64
-            || !name.bytes().enumerate().all(|(index, byte)| {
-                byte.is_ascii_alphabetic()
-                    || byte == b'_'
-                    || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
-            })
-        {
-            return Err(invalid(
-                "automation.authorities",
-                "invalid authority identifier",
-            ));
-        }
-        let authority = table(
-            value,
-            "automation.authorities.*",
-            &[
-                "ssh_config_file",
-                "bundle",
-                "ssh_auth_sock",
-                "become",
-                "targets",
-            ],
-        )?;
-        for (key, field, required) in [
-            (
-                "ssh_config_file",
-                "automation.authorities.*.ssh_config_file",
-                true,
-            ),
-            ("bundle", "automation.authorities.*.bundle", false),
-            (
-                "ssh_auth_sock",
-                "automation.authorities.*.ssh_auth_sock",
-                false,
-            ),
-        ] {
-            match authority.get(key) {
-                Some(value) => {
-                    let path = value
-                        .as_str()
-                        .ok_or_else(|| invalid(field, "must be a string"))?;
-                    authority_path(path, field)?;
-                }
-                None if required => return Err(invalid(field, "required field is missing")),
-                None => {}
-            }
-        }
-        let r#become = authority.get("become").ok_or_else(|| {
-            invalid(
-                "automation.authorities.*.become",
-                "required field is missing",
-            )
-        })?;
-        let r#become = table(
-            r#become,
-            "automation.authorities.*.become",
-            &["method", "user", "executable"],
-        )?;
-        if r#become.get("method").and_then(toml::Value::as_str) != Some("sudo") {
-            return Err(invalid(
-                "automation.authorities.*.become.method",
-                "must be sudo",
-            ));
-        }
-        if !r#become
-            .get("user")
-            .and_then(toml::Value::as_str)
-            .is_some_and(account_name)
-        {
-            return Err(invalid(
-                "automation.authorities.*.become.user",
-                "must be a named POSIX account",
-            ));
-        }
-        if let Some(value) = r#become.get("executable") {
-            let field = "automation.authorities.*.become.executable";
-            let path = value
-                .as_str()
-                .ok_or_else(|| invalid(field, "must be a string"))?;
-            authority_path(path, field)?;
-        }
-        let mappings = authority
-            .get("targets")
-            .and_then(toml::Value::as_table)
-            .ok_or_else(|| {
-                invalid(
-                    "automation.authorities.*.targets",
-                    "required target table is missing or invalid",
-                )
-            })?;
-        for value in mappings.values() {
-            let mapping = table(
-                value,
-                "automation.authorities.*.targets.*",
-                &["destination", "python"],
-            )?;
-            let destination_value = mapping
-                .get("destination")
-                .and_then(toml::Value::as_str)
-                .ok_or_else(|| {
-                    invalid(
-                        "automation.authorities.*.targets.*.destination",
-                        "required string field is missing or invalid",
-                    )
-                })?;
-            destination(
-                destination_value,
-                "automation.authorities.*.targets.*.destination",
-            )?;
-            if let Some(python) = mapping.get("python") {
-                let python = python.as_str().ok_or_else(|| {
-                    invalid(
-                        "automation.authorities.*.targets.*.python",
-                        "must be a string",
-                    )
-                })?;
-                authority_path(python, "automation.authorities.*.targets.*.python")?;
-            }
-        }
+fn authority_path(value: &str, field: &'static str) -> Result<(), ConfigError> {
+    if !Path::new(value).is_absolute() || value.len() > 4096 || value.contains('\0') {
+        return Err(invalid(field, "must be a bounded absolute path"));
     }
     Ok(())
 }
 
-fn authority_path(value: &str, field: &'static str) -> Result<(), ConfigError> {
-    if !Path::new(value).is_absolute() || value.len() > 4096 || value.contains('\0') {
-        return Err(invalid(field, "must be a bounded absolute path"));
+/// Retired sections need their own message: serde would report them as an
+/// unknown field, which is true but does not tell an operator what to do.
+pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
+    if value.get("directory").is_some() {
+        return Err(invalid(
+            "directory",
+            "is no longer supported; remove the [directory] section",
+        ));
     }
     Ok(())
 }
@@ -295,408 +172,21 @@ pub(crate) fn destination(value: &str, field: &'static str) -> Result<(), Config
     Ok(())
 }
 
-// Check shapes before serde conversion to report fixed, precise schema paths without
-// ever formatting parser errors (which include source, values, and unknown keys).
-fn table<'a>(
-    value: &'a toml::Value,
-    field: &'static str,
-    allowed: &[&str],
-) -> Result<&'a toml::Table, ConfigError> {
-    let table = value
-        .as_table()
-        .ok_or_else(|| invalid(field, "must be a table"))?;
-    if table.keys().any(|key| !allowed.contains(&key.as_str())) {
-        return Err(invalid(field, "unknown field in table"));
-    }
-    Ok(table)
-}
-
-fn string(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
-    if value.as_str().is_none() {
-        return Err(invalid(field, "must be a string"));
-    }
-    Ok(())
-}
-
-fn validate_mode(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
-    let value = value
-        .as_str()
-        .ok_or_else(|| invalid(field, "must be a string"))?;
-    match value {
-        "workstation" | "headless" => Ok(()),
-        _ => Err(invalid(field, "must be workstation or headless")),
-    }
-}
-
-fn validate_capabilities(value: &toml::Value, field: &'static str) -> Result<(), ConfigError> {
-    let capabilities = table(
-        value,
-        field,
-        &["named", "file_read", "file_write", "exec", "sudo"],
-    )?;
-    for value in capabilities.values() {
-        if !value.is_bool() {
-            return Err(invalid(field, "capabilities must be booleans"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_rules_schema(value: &toml::Value) -> Result<(), ConfigError> {
-    let rules = value
-        .as_table()
-        .ok_or_else(|| invalid("rules", "must be a table"))?;
-    if rules.len() > 64 {
-        return Err(invalid("rules", "exceeds maximum host rule count"));
-    }
-    for (pattern, entry) in rules {
-        if pattern.is_empty() || pattern.len() > 256 || pattern.chars().any(char::is_control) {
-            return Err(invalid(
-                "rules",
-                "host rule pattern must be nonempty, bounded, and contain no control characters",
-            ));
-        }
-        let rule = table(
-            entry,
-            "rules.*",
-            &[
-                "deny_tiers",
-                "allow_tools",
-                "constraints",
-                "require_preview",
-            ],
-        )?;
-        if let Some(tiers) = rule.get("deny_tiers") {
-            let tiers = tiers
-                .as_array()
-                .ok_or_else(|| invalid("rules.*.deny_tiers", "must be an array"))?;
-            for tier in tiers {
-                if !matches!(
-                    tier.as_str(),
-                    Some("observe" | "inspect" | "preview" | "change" | "exec")
-                ) {
-                    return Err(invalid("rules.*.deny_tiers", "must name valid risk tiers"));
-                }
-            }
-        }
-        if let Some(tools) = rule.get("allow_tools") {
-            let tools = tools
-                .as_array()
-                .ok_or_else(|| invalid("rules.*.allow_tools", "must be an array of strings"))?;
-            for tool in tools {
-                string(tool, "rules.*.allow_tools")?;
-            }
-        }
-        if let Some(require_preview) = rule.get("require_preview")
-            && !require_preview.is_bool()
-        {
-            return Err(invalid("rules.*.require_preview", "must be a boolean"));
-        }
-        if let Some(constraints) = rule.get("constraints") {
-            let tools = constraints
-                .as_table()
-                .ok_or_else(|| invalid("rules.*.constraints", "must be a table"))?;
-            for params in tools.values() {
-                let params = params
-                    .as_table()
-                    .ok_or_else(|| invalid("rules.*.constraints.*", "must be a table"))?;
-                for constraint in params.values() {
-                    table(
-                        constraint,
-                        "rules.*.constraints.*.*",
-                        &[
-                            "enum",
-                            "const",
-                            "min_length",
-                            "max_length",
-                            "minimum",
-                            "maximum",
-                        ],
-                    )?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_tool_selection(table: &toml::Table, field: &'static str) -> Result<(), ConfigError> {
-    for key in ["enabled_tools", "disabled_tools", "tool_presets"] {
-        if let Some(value) = table.get(key) {
-            let entries = value
-                .as_array()
-                .ok_or_else(|| invalid(field, "must be arrays of strings"))?;
-            for entry in entries {
-                string(entry, field)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
-    let root = table(
-        value,
-        "config",
-        &[
-            "mode",
-            "capabilities",
-            "disclose_sudo_policy",
-            "destination_policy",
-            "ssh",
-            "limits",
-            "targets",
-            "rules",
-            "tools",
-            "enabled_tools",
-            "disabled_tools",
-            "tool_presets",
-            "catalog",
-            "controller",
-            "automation",
-            "output",
-            "directory",
-            "quarantine",
-        ],
-    )?;
-    if let Some(value) = root.get("tools")
-        && !value.is_table()
-    {
-        return Err(invalid("tools", "must be a table"));
-    }
-    validate_tool_selection(root, "enabled_tools")?;
-    if let Some(value) = root.get("catalog") {
-        let catalog = table(value, "catalog", &["root", "version"])?;
-        for value in catalog.values() {
-            string(value, "catalog")?;
-        }
-    }
-    if let Some(value) = root.get("mode") {
-        validate_mode(value, "mode")?;
-    }
-    if let Some(value) = root.get("capabilities") {
-        validate_capabilities(value, "capabilities")?;
-    }
-    if let Some(value) = root.get("disclose_sudo_policy")
-        && !value.is_bool()
-    {
-        return Err(invalid("disclose_sudo_policy", "must be a boolean"));
-    }
-    if let Some(value) = root.get("rules") {
-        validate_rules_schema(value)?;
-    }
-    if let Some(value) = root.get("destination_policy")
-        && !matches!(value.as_str(), Some("configured" | "open"))
-    {
-        return Err(invalid("destination_policy", "must be configured or open"));
-    }
-    if let Some(value) = root.get("output") {
-        let output = table(
-            value,
-            "output",
-            &[
-                "enabled",
-                "per_stream_bytes",
-                "total_bytes",
-                "max_handles",
-                "ttl_secs",
-            ],
-        )?;
-        if output.get("enabled").is_some_and(|value| !value.is_bool()) {
-            return Err(invalid("output.enabled", "must be a boolean"));
-        }
-        for (key, field) in [
-            ("per_stream_bytes", "output.per_stream_bytes"),
-            ("total_bytes", "output.total_bytes"),
-            ("max_handles", "output.max_handles"),
-            ("ttl_secs", "output.ttl_secs"),
-        ] {
-            if output
-                .get(key)
-                .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
-            {
-                return Err(invalid(field, "must be a strictly positive integer"));
-            }
-        }
-    }
-    if root.get("directory").is_some() {
-        return Err(invalid(
-            "directory",
-            "is no longer supported; remove the [directory] section",
-        ));
-    }
-    if let Some(value) = root.get("quarantine") {
-        let quarantine = table(value, "quarantine", &["state_dir"])?;
-        if let Some(state_dir) = quarantine.get("state_dir") {
-            let path = state_dir
-                .as_str()
-                .ok_or_else(|| invalid("quarantine.state_dir", "must be a string"))?;
-            if path.is_empty() || path.len() > 4096 || path.contains('\0') {
-                return Err(invalid(
-                    "quarantine.state_dir",
-                    "must be a nonempty bounded path",
-                ));
-            }
-        }
-    }
-    if let Some(value) = root.get("automation") {
-        let automation = table(
-            value,
-            "automation",
-            &[
-                "required",
-                "bundle",
-                "max_concurrent",
-                "targets",
-                "authorities",
-            ],
-        )?;
-        if let Some(value) = automation.get("required")
-            && !value.is_bool()
-        {
-            return Err(invalid("automation.required", "must be a boolean"));
-        }
-        if let Some(value) = automation.get("bundle") {
-            let value = value
-                .as_str()
-                .ok_or_else(|| invalid("automation.bundle", "must be a string"))?;
-            validate_runtime_path(value)?;
-        }
-        if let Some(value) = automation.get("authorities") {
-            validate_authorities_schema(value)?;
-        }
-    }
-    if let Some(value) = root.get("controller") {
-        let controller = table(value, "controller", &["workspace_root"])?;
-        if let Some(value) = controller.get("workspace_root") {
-            string(value, "controller.workspace_root")?;
-        }
-    }
-    if let Some(value) = root.get("ssh") {
-        let ssh = table(value, "ssh", &["config_file", "executable"])?;
-        if let Some(value) = ssh.get("config_file") {
-            string(value, "ssh.config_file")?;
-        }
-        if let Some(value) = ssh.get("executable") {
-            string(value, "ssh.executable")?;
-        }
-    }
-    if let Some(value) = root.get("limits") {
-        let fields = [
-            ("connect_timeout_secs", "limits.connect_timeout_secs"),
-            ("operation_timeout_secs", "limits.operation_timeout_secs"),
-            ("max_timeout_secs", "limits.max_timeout_secs"),
-            ("max_output_bytes", "limits.max_output_bytes"),
-            ("max_file_bytes", "limits.max_file_bytes"),
-        ];
-        let limits = table(value, "limits", &fields.map(|(key, _)| key))?;
-        for (key, field) in fields {
-            if let Some(value) = limits.get(key)
-                && value.as_integer().is_none_or(|number| number <= 0)
-            {
-                return Err(invalid(field, "must be a strictly positive integer"));
-            }
-        }
-    }
-    if let Some(value) = root.get("targets") {
-        let targets = value
-            .as_table()
-            .ok_or_else(|| invalid("targets", "must be a table"))?;
-        for (name, value) in targets {
-            if name.is_empty() || name.chars().any(char::is_control) {
-                return Err(invalid(
-                    "targets",
-                    "logical names must be nonempty and contain no control characters",
-                ));
-            }
-            let target = table(
-                value,
-                "targets.*",
-                &[
-                    "ssh_host",
-                    "capabilities",
-                    "sudo",
-                    "description",
-                    "labels",
-                    "tool_presets",
-                    "enabled_tools",
-                    "disabled_tools",
-                ],
-            )?;
-            validate_tool_selection(target, "targets.*.enabled_tools")?;
-            string(
-                target
-                    .get("ssh_host")
-                    .ok_or_else(|| invalid("targets.*.ssh_host", "required field is missing"))?,
-                "targets.*.ssh_host",
-            )?;
-            if let Some(value) = target.get("capabilities") {
-                validate_capabilities(value, "targets.*.capabilities")?;
-            }
-            if let Some(value) = target.get("description") {
-                string(value, "targets.*.description")?;
-            }
-            if let Some(value) = target.get("labels") {
-                let labels = value
-                    .as_table()
-                    .ok_or_else(|| invalid("targets.*.labels", "must be a table"))?;
-                for value in labels.values() {
-                    string(value, "targets.*.labels.*")?;
-                }
-            }
-            if let Some(value) = target.get("sudo") {
-                let sudo = value
-                    .as_table()
-                    .ok_or_else(|| invalid("targets.*.sudo", "must be a table"))?;
-                let mode = sudo
-                    .get("mode")
-                    .and_then(toml::Value::as_str)
-                    .ok_or_else(|| {
-                        invalid(
-                            "targets.*.sudo.mode",
-                            "required string field is missing or invalid",
-                        )
-                    })?;
-                let allowed: &[&str] = match mode {
-                    "disabled" => &["mode"],
-                    "same-account" => &["mode", "users", "programs"],
-                    "separate-identity" => &["mode", "ssh_host", "users", "programs"],
-                    _ => {
-                        return Err(invalid(
-                            "targets.*.sudo.mode",
-                            "must be disabled, same-account, or separate-identity",
-                        ));
-                    }
-                };
-                table(value, "targets.*.sudo", allowed)?;
-                if mode == "separate-identity" {
-                    string(
-                        sudo.get("ssh_host").ok_or_else(|| {
-                            invalid("targets.*.sudo.ssh_host", "required field is missing")
-                        })?,
-                        "targets.*.sudo.ssh_host",
-                    )?;
-                }
-                for (key, field) in [
-                    ("users", "targets.*.sudo.users"),
-                    ("programs", "targets.*.sudo.programs"),
-                ] {
-                    if let Some(value) = sudo.get(key) {
-                        let entries = value
-                            .as_array()
-                            .ok_or_else(|| invalid(field, "must be an array of strings"))?;
-                        for entry in entries {
-                            string(entry, field)?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn validate_limits(limits: &Limits) -> Result<(), ConfigError> {
+    for (field, value) in [
+        ("limits.connect_timeout_secs", limits.connect_timeout_secs),
+        (
+            "limits.operation_timeout_secs",
+            limits.operation_timeout_secs,
+        ),
+        ("limits.max_timeout_secs", limits.max_timeout_secs),
+        ("limits.max_output_bytes", limits.max_output_bytes),
+        ("limits.max_file_bytes", limits.max_file_bytes),
+    ] {
+        if value == 0 {
+            return Err(invalid(field, "must be strictly positive"));
+        }
+    }
     for (field, timeout) in [
         ("limits.connect_timeout_secs", limits.connect_timeout_secs),
         (
@@ -726,6 +216,59 @@ pub(super) fn validate_automation(
     }
     if !(1..=16).contains(&automation.max_concurrent) {
         return Err(invalid("automation", "invalid concurrency bounds"));
+    }
+    if let Some(bundle) = &automation.bundle {
+        let bundle = bundle
+            .to_str()
+            .ok_or_else(|| invalid("automation.bundle", "must be a bounded absolute path"))?;
+        validate_runtime_path(bundle)?;
+    }
+    if automation.authorities.len() > 16 {
+        return Err(invalid(
+            "automation.authorities",
+            "must contain at most 16 authorities",
+        ));
+    }
+    for (name, authority) in &automation.authorities {
+        if name.is_empty()
+            || name.len() > 64
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || byte == b'_'
+                    || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
+            })
+        {
+            return Err(invalid(
+                "automation.authorities",
+                "invalid authority identifier",
+            ));
+        }
+        let config = authority.ssh_config_file.to_str().ok_or_else(|| {
+            invalid(
+                "automation.authorities.*.ssh_config_file",
+                "must be a bounded absolute path",
+            )
+        })?;
+        authority_path(config, "automation.authorities.*.ssh_config_file")?;
+        if let Some(socket) = &authority.ssh_auth_sock {
+            let socket = socket.to_str().ok_or_else(|| {
+                invalid(
+                    "automation.authorities.*.ssh_auth_sock",
+                    "must be a bounded absolute path",
+                )
+            })?;
+            authority_path(socket, "automation.authorities.*.ssh_auth_sock")?;
+        }
+        // The only authority kind today is sudo; a new variant must be
+        // validated here or the compiler will flag this destructure.
+        let AutomationBecome::Sudo { user, executable } = &authority.r#become;
+        if user.len() > 64 || !account_name(user) {
+            return Err(invalid(
+                "automation.authorities.*.become.user",
+                "must be a named POSIX account",
+            ));
+        }
+        authority_path(executable, "automation.authorities.*.become.executable")?;
     }
     for (name, target) in &automation.targets {
         if !targets
@@ -840,7 +383,13 @@ mod tests {
             )),
         ] {
             let error = load_text(&invalid_text, &[]).err().unwrap();
-            assert!(error.field.starts_with("automation.authorities"));
+            // Missing members and unknown keys are serde's; only the typed
+            // bounds keep their own paths.
+            assert!(
+                error.field == "config" || error.field.starts_with("automation."),
+                "{:?}",
+                error.field
+            );
             assert!(!error.to_string().contains("private-authority"));
         }
     }
@@ -924,7 +473,11 @@ mod tests {
                 .err()
                 .unwrap();
             let diagnostic = error.to_string();
-            assert!(diagnostic.starts_with("automation.authorities"));
+            assert!(
+                error.field == "config" || error.field.starts_with("automation."),
+                "{:?}",
+                error.field
+            );
             assert!(!diagnostic.contains("private-secret"));
             assert!(!diagnostic.contains("private-authority"));
         }
@@ -1053,33 +606,33 @@ mod tests {
             ("profile='baseline'".to_owned(), "config"),
             (
                 "[targets.secret_target]\nssh_host='secret_alias'\nprofile='baseline'".to_owned(),
-                "targets.*",
+                "config",
             ),
-            ("mode='secret_payload'".to_owned(), "mode"),
-            ("mode=42".to_owned(), "mode"),
+            ("mode='secret_payload'".to_owned(), "config"),
+            ("mode=42".to_owned(), "config"),
             (
                 "capabilities={secret_payload=true}".to_owned(),
-                "capabilities",
+                "config",
             ),
             (
                 "capabilities={exec='secret_payload'}".to_owned(),
-                "capabilities",
+                "config",
             ),
             (
                 "[targets.secret_target]\nssh_host='secret_alias'\ncapabilities={exec='secret_payload'}".to_owned(),
-                "targets.*.capabilities",
+                "config",
             ),
             (
                 "[rules.'*']\nunknown_rule_key=true".to_owned(),
-                "rules.*",
+                "config",
             ),
             (
                 "[rules.'*']\nrequire_preview='secret_payload'".to_owned(),
-                "rules.*.require_preview",
+                "config",
             ),
             (
                 "[rules.'*']\ndeny_tiers=['secret_payload']".to_owned(),
-                "rules.*.deny_tiers",
+                "config",
             ),
         ] {
             let error = load_text(&text, &[]).err().unwrap();
@@ -1159,12 +712,13 @@ mod tests {
 
     #[test]
     fn metadata_schema_and_bound_failures_never_echo_operator_content() {
+        // Wrong types are serde's; byte bounds stay in the typed pass.
         for (metadata, field) in [
-            ("description=42".to_owned(), "targets.*.description"),
-            ("labels='secret_payload'".to_owned(), "targets.*.labels"),
+            ("description=42".to_owned(), "config"),
+            ("labels='secret_payload'".to_owned(), "config"),
             (
                 "labels={secret_payload=['secret_payload']}".to_owned(),
-                "targets.*.labels.*",
+                "config",
             ),
             (
                 format!("description='secret_payload{}'", "é".repeat(512)),
@@ -1190,7 +744,7 @@ mod tests {
                  [targets.secret_payload.sudo]\nmode='disabled'"
             );
             let error = load_text(&text, &[]).err().unwrap();
-            assert_eq!(error.field, field);
+            assert_eq!(error.field, field, "{metadata}");
             for secret in ["secret_payload", "private_alias"] {
                 assert!(!error.to_string().contains(secret));
                 assert!(!format!("{error:?}").contains(secret));
@@ -1223,16 +777,10 @@ mod tests {
     #[test]
     fn automation_schema_rejects_private_invalid_shapes_without_disclosure() {
         for (text, field) in [
-            ("automation='secret_payload'", "automation"),
-            ("[automation]\nsecret_payload=true", "automation"),
-            (
-                "[automation]\nrequired='secret_payload'",
-                "automation.required",
-            ),
-            (
-                "[automation]\nbundle=['secret_payload']",
-                "automation.bundle",
-            ),
+            ("automation='secret_payload'", "config"),
+            ("[automation]\nsecret_payload=true", "config"),
+            ("[automation]\nrequired='secret_payload'", "config"),
+            ("[automation]\nbundle=['secret_payload']", "config"),
             ("[automation]\nbundle='secret_payload'", "automation.bundle"),
             ("[automation]\nbundle=''", "automation.bundle"),
             (
@@ -1241,7 +789,7 @@ mod tests {
             ),
         ] {
             let error = load_text(text, &[]).err().unwrap();
-            assert_eq!(error.field, field);
+            assert_eq!(error.field, field, "{text}");
             assert!(!error.to_string().contains("secret_payload"));
             assert!(!format!("{error:?}").contains("secret_payload"));
             assert!(std::error::Error::source(&error).is_none());

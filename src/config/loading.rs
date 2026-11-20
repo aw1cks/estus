@@ -928,7 +928,8 @@ mod tests {
         let error = load_text("[automation]\nssh_executable='/private-old-setting'", &[])
             .err()
             .unwrap();
-        assert_eq!(error.field, "automation");
+        assert_eq!(error.field, "config");
+        assert!(!error.to_string().contains("private-old-setting"));
     }
 
     #[test]

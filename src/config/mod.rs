@@ -448,19 +448,16 @@ struct Target {
     selected_bindings: Option<BTreeSet<String>>,
 }
 
-#[derive(Default, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Default)]
 enum Sudo {
     #[default]
     Disabled,
     SameAccount {
-        #[serde(default = "root_users")]
         users: Vec<String>,
         programs: Option<Vec<String>>,
     },
     SeparateIdentity {
         ssh_host: String,
-        #[serde(default = "root_users")]
         users: Vec<String>,
         programs: Option<Vec<String>>,
     },
@@ -468,6 +465,66 @@ enum Sudo {
 
 fn root_users() -> Vec<String> {
     vec!["root".to_owned()]
+}
+
+/// Serde cannot combine `deny_unknown_fields` with an internally tagged enum,
+/// so the tag is resolved here and every variant's own members are enforced.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawSudoMode {
+    Disabled,
+    SameAccount,
+    SeparateIdentity,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSudo {
+    mode: RawSudoMode,
+    #[serde(default)]
+    ssh_host: Option<String>,
+    #[serde(default)]
+    users: Option<Vec<String>>,
+    #[serde(default)]
+    programs: Option<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for Sudo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = RawSudo::deserialize(deserializer)?;
+        let sudo = match raw.mode {
+            RawSudoMode::Disabled => {
+                if raw.ssh_host.is_some() {
+                    return Err(D::Error::unknown_field(
+                        "ssh_host",
+                        &["mode", "users", "programs"],
+                    ));
+                }
+                Self::Disabled
+            }
+            RawSudoMode::SameAccount => {
+                if raw.ssh_host.is_some() {
+                    return Err(D::Error::unknown_field(
+                        "ssh_host",
+                        &["mode", "users", "programs"],
+                    ));
+                }
+                Self::SameAccount {
+                    users: raw.users.unwrap_or_else(root_users),
+                    programs: raw.programs,
+                }
+            }
+            RawSudoMode::SeparateIdentity => Self::SeparateIdentity {
+                ssh_host: raw
+                    .ssh_host
+                    .ok_or_else(|| D::Error::missing_field("ssh_host"))?,
+                users: raw.users.unwrap_or_else(root_users),
+                programs: raw.programs,
+            },
+        };
+        Ok(sudo)
+    }
 }
 
 #[derive(Default, Deserialize, Serialize, schemars::JsonSchema)]
