@@ -51,9 +51,10 @@
             groups.setdefault(f"{maj}.{mino}", []).append(p / "collector.py")
         for py_min, files in sorted(groups.items()):
             check(py_min, files)
-        import ast
+        import ast, re
         guarded = [src / "src/native_payload/prestate.py", src / "python/estus/__init__.py", src / "setup.py"]
         guarded.extend(sorted((src / "catalog/payloads").glob("*/collector.py")))
+        binpath = re.compile(r"^(?:/(?:usr/)?s?bin/[^/:]+$)")
         for path in guarded:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
@@ -64,6 +65,26 @@
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
                             raise SystemExit(f"forbidden shell=True in {path}")
         ast.parse((src / "src/native_payload/bootstrap.py").read_text(encoding="utf-8"))
+        collectors = sorted((src / "catalog/payloads").glob("*/collector.py"))
+        if not collectors:
+            raise SystemExit("no catalog payload collectors found")
+        for path in collectors:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            parents = {}
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    parents[child] = node
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if not binpath.match(node.value):
+                    continue
+                parent = parents.get(node)
+                if isinstance(parent, (ast.Tuple, ast.List)):
+                    siblings = [e.value for e in parent.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+                    if len(siblings) >= 2 and len(set(siblings)) == len(siblings) and all(binpath.match(s) for s in siblings):
+                        continue
+                raise SystemExit(f"hardcoded single-location binary path in {path}")
         PY
         touch "$out"
       '';

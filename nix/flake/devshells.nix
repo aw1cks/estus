@@ -2,14 +2,16 @@
 {
   perSystem = { pkgs, estusBuild, ... }:
     let
-      inherit (estusBuild) craneLib fuzzLib package;
+      inherit (estusBuild) craneLib fuzzLib package directModuleBundle;
       devMcp = pkgs.writeShellScriptBin "estus-dev-mcp" ''
         unset ESTUS_CONFIG ESTUS_SSH_CONFIG ESTUS_SSH ESTUS_CATALOG_ROOT \
-          ESTUS_ANSIBLE_RUNTIME ESTUS_PYTHON_RUNTIME
-        exec ${package}/bin/estus --config ${../../examples/dev-no-targets.toml} "$@"
+          ESTUS_ANSIBLE_BUNDLE ESTUS_PYTHON_RUNTIME
+        export ESTUS_ANSIBLE_BUNDLE=${directModuleBundle}
+        exec ${package}/bin/estus "$@"
       '';
     in
     {
+      packages.dev-mcp = devMcp;
       apps.dev-mcp = {
         type = "app";
         program = "${devMcp}/bin/estus-dev-mcp";

@@ -52,7 +52,7 @@
       } ''
         mkdir -p "$out/bin"
         makeWrapper ${native}/bin/estus "$out/bin/estus" \
-          --set ESTUS_ANSIBLE_RUNTIME ${automationRuntime}
+          --set ESTUS_ANSIBLE_BUNDLE ${directModuleBundle}
       '';
       automation = withAutomation package;
       automationMsrv = withAutomation msrvBuild.package;

@@ -2,24 +2,20 @@
 let
   python = pkgs.python3;
   core = python.pkgs.ansible-core;
-  runner = python.pkgs.ansible-runner;
   bundle = python.pkgs.ansible;
-  environment = python.withPackages (_: [ core runner ]);
+  environment = python.withPackages (_: [ core ]);
   selectedCollections = [
     "ansible.posix"
     "community.general"
     "community.library_inventory_filtering_v1"
   ];
-  healthSha256 = builtins.hashFile "sha256" (sourceRoot + "/src/automation/python/health.py");
+  builderSha256 = builtins.hashFile "sha256" (sourceRoot + "/src/bundle/builder.py");
   platform = pkgs.stdenv.hostPlatform.system;
-  # Output and source identities pin the complete upstream provisioning choice.
-  # Only the digest, never these store paths, is exposed in the public identity.
   runtimeId = builtins.hashString "sha256" (builtins.toJSON {
     schema = 1;
-    inherit platform healthSha256 selectedCollections;
+    inherit platform builderSha256 selectedCollections;
     python = { output = toString python; source = toString python.src; };
     ansible_core = { output = toString core; source = toString core.src; };
-    ansible_runner = { output = toString runner; source = toString runner.src; };
     collection_bundle = { output = toString bundle; source = toString bundle.src; };
     environment = toString environment;
   });
@@ -63,18 +59,17 @@ pkgs.runCommand "estus-automation-runtime" {
       '$previous + [{name: $name, version: $version, manifest_sha256: $hash}]')
   done
 
-  jq -n --arg health ${pkgs.lib.escapeShellArg healthSha256} \
+  jq -n --arg builder ${pkgs.lib.escapeShellArg builderSha256} \
     --arg runtime ${pkgs.lib.escapeShellArg runtimeId} \
     --arg platform ${pkgs.lib.escapeShellArg platform} \
     --arg python ${pkgs.lib.escapeShellArg python.version} \
     --arg core ${pkgs.lib.escapeShellArg core.version} \
-    --arg runner ${pkgs.lib.escapeShellArg runner.version} \
     --arg bundle ${pkgs.lib.escapeShellArg bundle.version} \
     --arg site ${pkgs.lib.escapeShellArg "python/${python.sitePackages}"} \
     --argjson collections "$collections" '
-    {schema: 1, health_sha256: $health, site_packages: $site,
+    {schema: 1, builder_sha256: $builder, site_packages: $site,
      identity: {runtime_id: $runtime, platform: $platform, python: $python,
-       ansible_core: $core, ansible_runner: $runner, collection_bundle: $bundle,
+       ansible_core: $core, collection_bundle: $bundle,
        collections: ($collections | sort_by(.name))}}
   ' > "$out/runtime.json"
   test "$(wc -c < "$out/runtime.json")" -le 16384

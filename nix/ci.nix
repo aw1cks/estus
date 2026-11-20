@@ -96,17 +96,10 @@
                 '';
               }
               {
-                name = "Run packaged MSRV Ansible acceptance";
+                name = "Run packaged MSRV bundle acceptance";
                 shell = "bash";
                 run = ''
-                  runtime=$(mktemp -d "$HOME/.estus-ansible.XXXXXXXX")
-                  trap 'rm -rf -- "$runtime"' EXIT
-                  export XDG_RUNTIME_DIR="$runtime"
-                  for suite in automation runner projection role playbook runner-progress; do
-                    echo "::group::$suite acceptance"
-                    nix run -L --no-update-lock-file ".#$suite-acceptance-msrv"
-                    echo "::endgroup::"
-                  done
+                  nix run -L --no-update-lock-file .#bundle-acceptance-msrv
                 '';
               }
               {
@@ -116,21 +109,6 @@
                 run = ''
                   nix run -L --no-update-lock-file .#ci
                   nix run -L --no-update-lock-file .#ci-msrv
-                '';
-              }
-              {
-                name = "Run packaged MSRV Linux Ansible acceptance";
-                "if" = "runner.os == 'Linux'";
-                shell = "bash";
-                env.DOCKER_HOST = "unix:///var/run/docker.sock";
-                run = ''
-                  ESTUS_TEST_FIXTURE=$(nix build -L --no-update-lock-file --no-link --print-out-paths .#ssh-automation-fixture-image)
-                  export ESTUS_TEST_FIXTURE
-                  for suite in isolated-runner authority host-summary cpu-stats memory-stats; do
-                    echo "::group::$suite acceptance"
-                    nix run -L --no-update-lock-file ".#$suite-acceptance-msrv"
-                    echo "::endgroup::"
-                  done
                 '';
               }
             ];
@@ -221,7 +199,7 @@
                 shell = "bash";
                 run = ''
                   set -euo pipefail
-                  for target in wire_budget file_encoding filename_metadata adapter_protocol binding_schema command_encoding; do
+                  for target in wire_budget file_encoding filename_metadata binding_schema command_encoding; do
                     echo "::group::$target"
                     nix develop --no-update-lock-file .#fuzz --command cargo fuzz run "$target" "fuzz/corpus/$target" -- -runs=0
                     echo "::endgroup::"

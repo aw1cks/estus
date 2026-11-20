@@ -10,12 +10,12 @@ let
     nativeCheckInputs = controllerTestPrograms ++ [ pkgs.openssh pkgs.python314 ];
     postInstall = ''
       catalog="$out/share/estus/catalog"
-      mkdir -p "$catalog/roles" "$catalog/payloads"
+      mkdir -p "$catalog/payloads"
       install -m644 catalog/catalog.json "$catalog/catalog.json"
       for entry in catalog/*; do
         base=$(basename "$entry")
         case "$base" in
-          catalog.json|roles|payloads) ;;
+          catalog.json|payloads) ;;
           *.toml)
             tool="''${base%.toml}"
             if ! jq -e --arg name "$tool" '.tools | has($name)' catalog/catalog.json >/dev/null; then
@@ -29,24 +29,21 @@ let
             ;;
         esac
       done
-      for group in roles payloads; do
-        if [ ! -d "catalog/$group" ]; then continue; fi
-        kind=$([ "$group" = roles ] && echo ansible_role || echo native_payload)
-        for dir in "catalog/$group"/*; do
+      if [ -d "catalog/payloads" ]; then
+        for dir in "catalog/payloads"/*; do
           [ -e "$dir" ] || continue
           name=$(basename "$dir")
           if [ -L "$dir" ] || [ ! -d "$dir" ] || \
-             ! jq -e --arg name "$name" --arg kind "$kind" --arg path "$group/$name" \
-               '.tools[$name] | .executor.kind == $kind and .executor.path == $path' catalog/catalog.json >/dev/null; then
+             ! jq -e --arg name "$name" --arg path "payloads/$name" \
+               '.tools[$name] | .executor.kind == "native_payload" and .executor.path == $path' catalog/catalog.json >/dev/null; then
             echo "unexpected catalog asset directory: $dir" >&2
             exit 1
           fi
         done
-      done
+      fi
       for name in $(jq -r '.tools | keys[]' catalog/catalog.json); do
         install -m644 "catalog/$name.toml" "$catalog/$name.toml"
         assets=$(jq -r --arg name "$name" '.tools[$name].executor.path // empty' catalog/catalog.json)
-        kind=$(jq -r --arg name "$name" '.tools[$name].executor.kind' catalog/catalog.json)
         if [ -z "$assets" ]; then continue; fi
         while IFS= read -r source; do
           relative="''${source#catalog/}"
@@ -62,21 +59,6 @@ let
           if [ ! -f "$source" ]; then
             echo "unexpected non-regular catalog asset: $source" >&2
             exit 1
-          fi
-          if [ "$kind" = "ansible_role" ]; then
-            top="''${sub%%/*}"
-            case "$top" in
-              tasks|meta|files|defaults|vars|handlers)
-                if [ "$top" = "$sub" ]; then
-                  echo "unexpected top-level role file: $source" >&2
-                  exit 1
-                fi
-                ;;
-              *)
-                echo "unexpected role subdirectory in $source" >&2
-                exit 1
-                ;;
-            esac
           fi
           case "$source" in
             *.yml|*.yaml|*.py|*.json|*.toml) ;;

@@ -33,7 +33,7 @@ jobs:
     - name: Replay committed seed corpora
       run: |
         set -euo pipefail
-        for target in wire_budget file_encoding filename_metadata adapter_protocol binding_schema command_encoding; do
+        for target in wire_budget file_encoding filename_metadata binding_schema command_encoding; do
           echo "::group::$target"
           nix develop --no-update-lock-file .#fuzz --command cargo fuzz run "$target" "fuzz/corpus/$target" -- -runs=0
           echo "::endgroup::"
