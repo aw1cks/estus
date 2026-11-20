@@ -505,6 +505,10 @@ async fn ssh_packaged_command_timeout_and_cancellation() -> Result<()> {
                     private_boundary(&reply.to_string(), &markers)?;
                 }
                 await_finish(&client.log, &id, if cancel { "cancelled" } else { "timeout" }).await?;
+                let blocked = client.call("exec_command", json!({"host":"plain","command":"printf BLOCKED"})).await?;
+                ensure!(blocked["error"]["code"] == "target_quarantined");
+                let cleared = client.call("change_target_quarantine_clear", json!({"host":"plain","acknowledge_remote_state_reconciled":true})).await?;
+                ensure!(cleared["error"].is_null() && cleared["data"]["cleared"] == true);
                 command_succeeded(&client.call("exec_command", json!({"host":"plain","command":"printf '%s' \"$SSH_CONNECTION\""})).await?, transport)?;
                 check_master(&fixture, &owned[0]).await?;
                 wait_remote(&fixture, &format!("{prefix}-done")).await?;

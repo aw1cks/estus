@@ -106,21 +106,32 @@ impl Estus {
             host,
             ToolId::ReadFile,
             context,
-            |_, budget| {
-                request.validate(max_file_bytes, budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
-            },
-            |state, host, request, context, started, deadline, budget| async move {
+            |_, budget| request.take_validated(max_file_bytes, budget),
+            |state, host, validated, context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::ReadFile, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::ReadFile,
+                        super::admission::AdmissionMode::SharedRead,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
-                        let spec = request
-                            .validate(state.config.limits().max_file_bytes, budget)
-                            .expect("read request already validated");
-                        let outcome = operations::read(lease.session(), spec, file_ctx).await;
+                    Ok((audit, _target_lease, lease, file_ctx)) => {
+                        let outcome = operations::read(
+                            lease.session(),
+                            crate::filesystem::data::ReadSpec {
+                                path: &validated.path,
+                                offset: validated.offset,
+                                max_bytes: validated.max_bytes,
+                                encoding: validated.encoding,
+                                expected_content_sha256: validated.expected_content_sha256,
+                            },
+                            file_ctx,
+                        )
+                        .await;
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -141,20 +152,31 @@ impl Estus {
             ToolId::Stat,
             context,
             |_, budget| {
-                request.validate(budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
+                let (path, follow_symlinks, timeout_secs) = request.take_validated(budget)?;
+                Ok(((path, follow_symlinks), timeout_secs))
             },
-            |state, host, request, context, started, deadline, budget| async move {
+            |state, host, (path, follow_symlinks), context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::Stat, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::Stat,
+                        super::admission::AdmissionMode::SharedRead,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
-                        let spec = request
-                            .validate(budget)
-                            .expect("stat request already validated");
-                        let outcome = operations::stat(lease.session(), spec, file_ctx).await;
+                    Ok((audit, _target_lease, lease, file_ctx)) => {
+                        let outcome = operations::stat(
+                            lease.session(),
+                            crate::filesystem::data::StatSpec {
+                                path: &path,
+                                follow_symlinks,
+                            },
+                            file_ctx,
+                        )
+                        .await;
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -174,14 +196,19 @@ impl Estus {
             host,
             ToolId::ListDirectory,
             context,
-            |_, budget| {
-                request.validate(budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
-            },
-            |state, host, request, context, started, deadline, budget| async move {
+            |_, budget| request.take_validated(budget),
+            |state, host, validated, context, started, deadline, _| async move {
                 state
-                    .list_directory(&host, request, context, started, deadline, budget)
+                    .list_directory(
+                        &host,
+                        &validated.path,
+                        validated.max_entries,
+                        validated.remaining_bytes,
+                        validated.continuation.as_deref(),
+                        context,
+                        started,
+                        deadline,
+                    )
                     .await
             },
         )
@@ -206,10 +233,22 @@ impl Estus {
             },
             |state, host, (path, content, overwrite), context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::WriteFile, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::WriteFile,
+                        super::admission::AdmissionMode::ExclusiveWrite,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
+                    Ok((audit, mut target_lease, lease, file_ctx)) => {
+                        target_lease.mark_dispatched(
+                            host.clone(),
+                            "ordinary".into(),
+                            "native_sftp",
+                        );
                         let outcome = operations::write(
                             lease.session(),
                             crate::filesystem::data::WriteSpec {
@@ -220,6 +259,10 @@ impl Estus {
                             file_ctx,
                         )
                         .await;
+                        target_lease.finish(
+                            outcome.lost_ack,
+                            outcome.reply.error().map_or("ok", ToolError::code),
+                        );
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -239,21 +282,35 @@ impl Estus {
             host,
             ToolId::Mkdir,
             context,
-            |_, budget| {
-                request.validate(budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
-            },
-            |state, host, request, context, started, deadline, budget| async move {
+            |_, budget| request.take_validated(budget),
+            |state, host, path, context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::Mkdir, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::Mkdir,
+                        super::admission::AdmissionMode::ExclusiveWrite,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
-                        let spec = request
-                            .validate(budget)
-                            .expect("mkdir request already validated");
-                        let outcome = operations::mkdir(lease.session(), spec, file_ctx).await;
+                    Ok((audit, mut target_lease, lease, file_ctx)) => {
+                        target_lease.mark_dispatched(
+                            host.clone(),
+                            "ordinary".into(),
+                            "native_sftp",
+                        );
+                        let outcome = operations::mkdir(
+                            lease.session(),
+                            crate::filesystem::data::MkdirSpec { path: &path },
+                            file_ctx,
+                        )
+                        .await;
+                        target_lease.finish(
+                            outcome.lost_ack,
+                            outcome.reply.error().map_or("ok", ToolError::code),
+                        );
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -274,20 +331,42 @@ impl Estus {
             ToolId::Rename,
             context,
             |_, budget| {
-                request.validate(budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
+                let (source, destination, overwrite, timeout_secs) =
+                    request.take_validated(budget)?;
+                Ok(((source, destination, overwrite), timeout_secs))
             },
-            |state, host, request, context, started, deadline, budget| async move {
+            |state, host, (source, destination, overwrite), context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::Rename, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::Rename,
+                        super::admission::AdmissionMode::ExclusiveWrite,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
-                        let spec = request
-                            .validate(budget)
-                            .expect("rename request already validated");
-                        let outcome = operations::rename(lease.session(), spec, file_ctx).await;
+                    Ok((audit, mut target_lease, lease, file_ctx)) => {
+                        target_lease.mark_dispatched(
+                            host.clone(),
+                            "ordinary".into(),
+                            "native_sftp",
+                        );
+                        let outcome = operations::rename(
+                            lease.session(),
+                            crate::filesystem::data::RenameSpec {
+                                source: &source,
+                                destination: &destination,
+                                overwrite,
+                            },
+                            file_ctx,
+                        )
+                        .await;
+                        target_lease.finish(
+                            outcome.lost_ack,
+                            outcome.reply.error().map_or("ok", ToolError::code),
+                        );
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -307,22 +386,35 @@ impl Estus {
             host,
             ToolId::RemoveFile,
             context,
-            |_, budget| {
-                request.validate(budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
-            },
-            |state, host, request, context, started, deadline, budget| async move {
+            |_, budget| request.take_validated(budget),
+            |state, host, path, context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::RemoveFile, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::RemoveFile,
+                        super::admission::AdmissionMode::ExclusiveWrite,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
-                        let spec = request
-                            .validate(budget)
-                            .expect("remove_file request already validated");
-                        let outcome =
-                            operations::remove_file(lease.session(), spec, file_ctx).await;
+                    Ok((audit, mut target_lease, lease, file_ctx)) => {
+                        target_lease.mark_dispatched(
+                            host.clone(),
+                            "ordinary".into(),
+                            "native_sftp",
+                        );
+                        let outcome = operations::remove_file(
+                            lease.session(),
+                            crate::filesystem::data::RemoveFileSpec { path: &path },
+                            file_ctx,
+                        )
+                        .await;
+                        target_lease.finish(
+                            outcome.lost_ack,
+                            outcome.reply.error().map_or("ok", ToolError::code),
+                        );
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -342,22 +434,35 @@ impl Estus {
             host,
             ToolId::RemoveDirectory,
             context,
-            |_, budget| {
-                request.validate(budget)?;
-                let timeout_secs = request.timeout_secs;
-                Ok((request, timeout_secs))
-            },
-            |state, host, request, context, started, deadline, budget| async move {
+            |_, budget| request.take_validated(budget),
+            |state, host, path, context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::RemoveDirectory, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::RemoveDirectory,
+                        super::admission::AdmissionMode::ExclusiveWrite,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
-                        let spec = request
-                            .validate(budget)
-                            .expect("remove_directory request already validated");
-                        let outcome =
-                            operations::remove_directory(lease.session(), spec, file_ctx).await;
+                    Ok((audit, mut target_lease, lease, file_ctx)) => {
+                        target_lease.mark_dispatched(
+                            host.clone(),
+                            "ordinary".into(),
+                            "native_sftp",
+                        );
+                        let outcome = operations::remove_directory(
+                            lease.session(),
+                            crate::filesystem::data::RemoveDirectorySpec { path: &path },
+                            file_ctx,
+                        )
+                        .await;
+                        target_lease.finish(
+                            outcome.lost_ack,
+                            outcome.reply.error().map_or("ok", ToolError::code),
+                        );
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -385,10 +490,22 @@ impl Estus {
             },
             |state, host, (path, content), context, started, deadline, _| async move {
                 match state
-                    .acquire_sftp(&host, ToolId::ReplaceFile, &context, started, deadline)
+                    .acquire_sftp(
+                        &host,
+                        ToolId::ReplaceFile,
+                        super::admission::AdmissionMode::ExclusiveWrite,
+                        &context,
+                        started,
+                        deadline,
+                    )
                     .await
                 {
-                    Ok((audit, lease, file_ctx)) => {
+                    Ok((audit, mut target_lease, lease, file_ctx)) => {
+                        target_lease.mark_dispatched(
+                            host.clone(),
+                            "ordinary".into(),
+                            "native_sftp",
+                        );
                         let outcome = operations::replace_file(
                             lease.session(),
                             crate::filesystem::data::ReplaceSpec {
@@ -398,6 +515,10 @@ impl Estus {
                             file_ctx,
                         )
                         .await;
+                        target_lease.finish(
+                            outcome.lost_ack,
+                            outcome.reply.error().map_or("ok", ToolError::code),
+                        );
                         State::finish_sftp(audit, lease, outcome).await
                     }
                     Err(reply) => reply,
@@ -413,10 +534,19 @@ impl State {
         &'a self,
         host: &'a str,
         tool: ToolId,
+        admission_mode: super::admission::AdmissionMode,
         context: &'a RequestContext<RoleServer>,
         started: Instant,
         deadline: tokio::time::Instant,
-    ) -> Result<(Audit<'a>, crate::ssh::Lease, FileContext<'a>), ToolReply<T>> {
+    ) -> Result<
+        (
+            Audit<'a>,
+            super::admission::TargetLease,
+            crate::ssh::Lease,
+            FileContext<'a>,
+        ),
+        ToolReply<T>,
+    > {
         let progress = crate::progress::Reporter::from_context(context);
         let metadata = file_metadata(host, tool, self, &context.id);
         if self.shutdown.is_cancelled() || context.ct.is_cancelled() {
@@ -426,6 +556,23 @@ impl State {
         }
         let target = match self.config.resolve(host, tool) {
             Ok(target) => target,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return Err(ToolReply::failure(error));
+            }
+        };
+        let target_lease = match self
+            .admission
+            .acquire(
+                target.name,
+                admission_mode,
+                deadline,
+                &context.ct,
+                &self.shutdown,
+            )
+            .await
+        {
+            Ok(lease) => lease,
             Err(error) => {
                 metadata.reject(started, &error);
                 return Err(ToolReply::failure(error));
@@ -451,6 +598,7 @@ impl State {
         };
         Ok((
             audit,
+            target_lease,
             lease,
             FileContext {
                 deadline,
@@ -473,14 +621,17 @@ impl State {
         outcome.reply
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_directory(
         &self,
         host: &str,
-        request: ListRequest,
+        path: &str,
+        max_entries: usize,
+        remaining_bytes: usize,
+        continuation: Option<&str>,
         context: RequestContext<RoleServer>,
         started: Instant,
         deadline: tokio::time::Instant,
-        budget: ReplyBudget,
     ) -> ToolReply<ListData> {
         let progress = crate::progress::Reporter::from_context(&context);
         let request_id = context.id;
@@ -491,11 +642,25 @@ impl State {
             metadata.reject(started, &error);
             return ToolReply::failure(error);
         }
-        let (spec, target) = match request
-            .validate(budget)
-            .and_then(|spec| Ok((spec, self.config.resolve(host, ToolId::ListDirectory)?)))
+        let target = match self.config.resolve(host, ToolId::ListDirectory) {
+            Ok(target) => target,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
+        let _target_lease = match self
+            .admission
+            .acquire(
+                target.name,
+                super::admission::AdmissionMode::SharedRead,
+                deadline,
+                &ct,
+                &self.shutdown,
+            )
+            .await
         {
-            Ok(validated) => validated,
+            Ok(lease) => lease,
             Err(error) => {
                 metadata.reject(started, &error);
                 return ToolReply::failure(error);
@@ -509,8 +674,12 @@ impl State {
             .page(
                 &self.pool,
                 target,
-                spec,
-                request.continuation.as_deref(),
+                crate::filesystem::data::ListSpec {
+                    path,
+                    max_entries,
+                    remaining_bytes,
+                },
+                continuation,
                 FileContext {
                     deadline,
                     ct: &ct,

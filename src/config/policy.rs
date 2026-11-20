@@ -56,7 +56,9 @@ impl Capabilities {
             | ToolId::RemoveDirectory => self.file_write,
             ToolId::Exec | ToolId::Run => self.exec,
             ToolId::Sudo => self.sudo,
-            ToolId::ClearTargetQuarantine => self.permits_bindings(),
+            ToolId::ClearTargetQuarantine => {
+                self.named || self.file_write || self.exec || self.sudo
+            }
         }
     }
 
@@ -475,6 +477,10 @@ impl Config {
 
     pub(crate) fn ssh_executable(&self) -> &Path {
         &self.ssh_executable
+    }
+
+    pub(crate) fn quarantine_state_dir(&self) -> Option<&Path> {
+        self.quarantine_state_dir.as_deref()
     }
 
     pub(crate) fn limits(&self) -> &Limits {

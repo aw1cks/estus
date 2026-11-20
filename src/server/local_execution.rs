@@ -160,7 +160,13 @@ impl Estus {
         } else {
             None
         };
-        let shared_read = binding.is_shared_read();
+        let admission_mode = if binding.is_shared_read() {
+            super::admission::AdmissionMode::SharedRead
+        } else if binding.is_probe_only() {
+            super::admission::AdmissionMode::ExclusiveProbe
+        } else {
+            super::admission::AdmissionMode::ExclusiveWrite
+        };
         let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
             return reject(ToolError::resource_limit(
                 "Tool operation limit reached",
@@ -193,7 +199,7 @@ impl Estus {
                 .admission
                 .acquire(
                     &request.host,
-                    shared_read,
+                    admission_mode,
                     deadline,
                     &context.ct,
                     &state.shutdown,

@@ -40,6 +40,47 @@ impl Operation {
         }
     }
 
+    pub(super) fn admission_policy(
+        &self,
+        config: &Config,
+    ) -> (super::admission::AdmissionMode, &'static str, String) {
+        use super::admission::AdmissionMode;
+        match self {
+            Self::Exec(_) => (
+                AdmissionMode::MultiplexedExec,
+                "native_shell",
+                "ordinary".into(),
+            ),
+            Self::Run(_) => (
+                AdmissionMode::MultiplexedExec,
+                "native_argv",
+                "ordinary".into(),
+            ),
+            Self::Sudo(req) => (
+                AdmissionMode::MultiplexedExec,
+                "native_sudo",
+                format!("sudo:{}", req.user),
+            ),
+            Self::Binding { id, .. } => {
+                let binding = config
+                    .bindings()
+                    .get(*id)
+                    .expect("registered binding exists");
+                let mode = if binding.is_shared_read() {
+                    AdmissionMode::SharedRead
+                } else if binding.is_probe_only() {
+                    AdmissionMode::ExclusiveProbe
+                } else {
+                    AdmissionMode::ExclusiveWrite
+                };
+                let authority = binding
+                    .sudo()
+                    .map_or_else(|| "ordinary".to_owned(), |(user, _)| format!("sudo:{user}"));
+                (mode, "native_argv", authority)
+            }
+        }
+    }
+
     // Safe before validation, authorization, admission or cancellation checks.
     // Caller-supplied sudo identifiers are added only from a prepared invocation.
     pub(super) fn metadata<'a>(

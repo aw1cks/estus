@@ -77,7 +77,13 @@ impl Estus {
                 false,
             ));
         }
-        let shared_read = binding.is_shared_read();
+        let admission_mode = if binding.is_shared_read() {
+            super::admission::AdmissionMode::SharedRead
+        } else if binding.is_probe_only() {
+            super::admission::AdmissionMode::ExclusiveProbe
+        } else {
+            super::admission::AdmissionMode::ExclusiveWrite
+        };
         let revision = binding.revision.clone();
         let argv = prepared.argv;
         let output_limit = prepared.output_limit;
@@ -113,7 +119,7 @@ impl Estus {
                 .admission
                 .acquire(
                     &request.host,
-                    shared_read,
+                    admission_mode,
                     deadline,
                     &context.ct,
                     &state.shutdown,

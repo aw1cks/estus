@@ -91,6 +91,7 @@ struct Document {
     limits: Limits,
     output: crate::output::Limits,
     directory: crate::filesystem::data::DirectoryLimits,
+    quarantine: QuarantineSettings,
     targets: Option<BTreeMap<String, Target>>,
     rules: BTreeMap<String, rules::RawHostRule>,
     tools: BTreeMap<String, toml::Value>,
@@ -113,6 +114,7 @@ impl Default for Document {
             limits: Limits::default(),
             output: crate::output::Limits::default(),
             directory: crate::filesystem::data::DirectoryLimits::default(),
+            quarantine: QuarantineSettings::default(),
             targets: None,
             rules: BTreeMap::new(),
             tools: BTreeMap::new(),
@@ -130,6 +132,11 @@ impl Default for Document {
 struct CatalogSettings {
     root: Option<PathBuf>,
     version: Option<String>,
+}
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct QuarantineSettings {
+    state_dir: Option<PathBuf>,
 }
 
 fn resolve_catalog_selection(
@@ -537,12 +544,18 @@ impl Config {
                 .transpose()?,
         };
         let ssh_executable = resolve_ssh_executable(selected, || env("PATH"))?;
+        let quarantine_state_dir = document
+            .quarantine
+            .state_dir
+            .map(|path| resolve_path(path, &base, "quarantine.state_dir"))
+            .transpose()?;
         Ok(Self {
             mode: document.mode,
             capabilities,
             disclose_sudo_policy: document.disclose_sudo_policy,
             ssh_config,
             ssh_executable,
+            quarantine_state_dir,
             limits: document.limits,
             output: document.output,
             directory: document.directory,

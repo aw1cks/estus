@@ -159,6 +159,15 @@ impl MkdirRequest {
         Ok(MkdirSpec { path: &self.path })
     }
 }
+impl MkdirRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        budget: ReplyBudget,
+    ) -> Result<(String, Option<u64>), ToolError> {
+        self.validate(budget)?;
+        Ok((std::mem::take(&mut self.path), self.timeout_secs))
+    }
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +220,20 @@ impl RenameRequest {
         })
     }
 }
+impl RenameRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        budget: ReplyBudget,
+    ) -> Result<(String, String, bool, Option<u64>), ToolError> {
+        self.validate(budget)?;
+        Ok((
+            std::mem::take(&mut self.source),
+            std::mem::take(&mut self.destination),
+            self.overwrite,
+            self.timeout_secs,
+        ))
+    }
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -247,6 +270,15 @@ impl RemoveFileRequest {
             ))
             .map_err(|_| invalid("Request leaves insufficient response budget for file removal"))?;
         Ok(RemoveFileSpec { path: &self.path })
+    }
+}
+impl RemoveFileRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        budget: ReplyBudget,
+    ) -> Result<(String, Option<u64>), ToolError> {
+        self.validate(budget)?;
+        Ok((std::mem::take(&mut self.path), self.timeout_secs))
     }
 }
 
@@ -290,6 +322,15 @@ impl RemoveDirectoryRequest {
                 invalid("Request leaves insufficient response budget for directory removal")
             })?;
         Ok(RemoveDirectorySpec { path: &self.path })
+    }
+}
+impl RemoveDirectoryRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        budget: ReplyBudget,
+    ) -> Result<(String, Option<u64>), ToolError> {
+        self.validate(budget)?;
+        Ok((std::mem::take(&mut self.path), self.timeout_secs))
     }
 }
 
@@ -513,6 +554,33 @@ impl ListRequest {
         })
     }
 }
+pub(crate) struct ValidatedList {
+    pub(crate) path: String,
+    pub(crate) max_entries: usize,
+    pub(crate) remaining_bytes: usize,
+    pub(crate) continuation: Option<String>,
+}
+
+impl ListRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        budget: ReplyBudget,
+    ) -> Result<(ValidatedList, Option<u64>), ToolError> {
+        let (max_entries, remaining_bytes) = {
+            let spec = self.validate(budget)?;
+            (spec.max_entries, spec.remaining_bytes)
+        };
+        Ok((
+            ValidatedList {
+                path: std::mem::take(&mut self.path),
+                max_entries,
+                remaining_bytes,
+                continuation: self.continuation.take(),
+            },
+            self.timeout_secs,
+        ))
+    }
+}
 
 impl WriteRequest {
     pub fn validate(
@@ -670,6 +738,19 @@ impl StatRequest {
         })
     }
 }
+impl StatRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        budget: ReplyBudget,
+    ) -> Result<(String, bool, Option<u64>), ToolError> {
+        self.validate(budget)?;
+        Ok((
+            std::mem::take(&mut self.path),
+            self.follow_symlinks,
+            self.timeout_secs,
+        ))
+    }
+}
 
 fn invalid(message: &'static str) -> ToolError {
     ToolError::invalid_argument(message, false)
@@ -708,6 +789,41 @@ impl ReadRequest {
             encoding: self.encoding,
             expected_content_sha256,
         })
+    }
+}
+pub(crate) struct ValidatedRead {
+    pub(crate) path: String,
+    pub(crate) offset: u64,
+    pub(crate) max_bytes: usize,
+    pub(crate) encoding: Encoding,
+    pub(crate) expected_content_sha256: Option<[u8; 32]>,
+}
+
+impl ReadRequest {
+    pub(crate) fn take_validated(
+        &mut self,
+        max_file_bytes: u64,
+        budget: ReplyBudget,
+    ) -> Result<(ValidatedRead, Option<u64>), ToolError> {
+        let (offset, max_bytes, encoding, expected_content_sha256) = {
+            let spec = self.validate(max_file_bytes, budget)?;
+            (
+                spec.offset,
+                spec.max_bytes,
+                spec.encoding,
+                spec.expected_content_sha256,
+            )
+        };
+        Ok((
+            ValidatedRead {
+                path: std::mem::take(&mut self.path),
+                offset,
+                max_bytes,
+                encoding,
+                expected_content_sha256,
+            },
+            self.timeout_secs,
+        ))
     }
 }
 

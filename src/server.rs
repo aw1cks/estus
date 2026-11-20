@@ -72,10 +72,11 @@ impl Estus {
             tool_router,
             state: Arc::new(State {
                 automation: Arc::new(Semaphore::new(config.automation_concurrency())),
-                admission: admission::TargetAdmission::new(
+                admission: admission::TargetAdmission::new_with_persistence(
                     config.automation_hosts(),
                     config.allows_dynamic_hosts(),
-                ),
+                    config.quarantine_state_dir(),
+                )?,
                 payload: crate::native_payload::Engine::new(shutdown.clone()),
                 config,
                 tools,

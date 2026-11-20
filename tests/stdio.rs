@@ -3032,7 +3032,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                         .collect();
                     expected_operations.sort_unstable();
                     let mut expected_routes = expected_operations.clone();
-                    if matches!(profile, "baseline" | "actions-only") {
+                    if matches!(profile, "baseline" | "files-only" | "actions-only") {
                         expected_routes.push("change_target_quarantine_clear");
                     }
                     expected_routes.push("observe_targets");

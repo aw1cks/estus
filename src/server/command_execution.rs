@@ -110,6 +110,19 @@ impl State {
                 return ToolReply::failure(error);
             }
         };
+        let (admission_mode, admission_executor, admission_authority) =
+            request.admission_policy(&self.config);
+        let mut target_lease = match self
+            .admission
+            .acquire(target.name, admission_mode, deadline, &ct, &self.shutdown)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return ToolReply::failure(error);
+            }
+        };
         let metadata = match (&request, &invocation) {
             (Operation::Sudo(_), Invocation::Sudo { user, argv }) => Metadata {
                 user: Some(user),
@@ -126,6 +139,11 @@ impl State {
             .await
         {
             Ok(lease) => {
+                target_lease.mark_dispatched(
+                    target.name.to_owned(),
+                    admission_authority,
+                    admission_executor,
+                );
                 let reply = exec::run(
                     lease.session(),
                     invocation,
@@ -141,6 +159,10 @@ impl State {
                     },
                 )
                 .await;
+                target_lease.finish(
+                    reply.error().is_some_and(|e| e.remote_state_unknown),
+                    reply.error().map_or("ok", ToolError::code),
+                );
                 if matches!(
                     reply.data().map(|data| &data.termination),
                     Some(Termination::ConnectionLost)
@@ -150,7 +172,10 @@ impl State {
                 }
                 reply
             }
-            Err(error) => ToolReply::failure(error),
+            Err(error) => {
+                target_lease.finish(false, error.code());
+                ToolReply::failure(error)
+            }
         };
         audit.finish(reply.data().and_then(|data| data.exit_code), reply.error());
         reply

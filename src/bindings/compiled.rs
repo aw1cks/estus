@@ -1324,6 +1324,13 @@ impl CompiledBinding {
                 .iter()
                 .any(|effect| matches!(effect, Effect::Probe | Effect::Unknown))
     }
+    pub(crate) fn is_probe_only(&self) -> bool {
+        !self.is_shared_read()
+            && !self.effects.is_empty()
+            && self.effects.iter().all(|effect| {
+                matches!(effect, Effect::Read | Effect::SensitiveRead | Effect::Probe)
+            })
+    }
     #[cfg(test)]
     pub(crate) fn parse_request(&self, arguments: JsonObject) -> Result<BindingCall, ErrorData> {
         self.parse_request_ref(&arguments)

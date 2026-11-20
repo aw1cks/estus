@@ -456,6 +456,7 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "automation",
             "output",
             "directory",
+            "quarantine",
         ],
     )?;
     if let Some(value) = root.get("tools")
@@ -529,6 +530,20 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
             {
                 return Err(invalid(field, "must be a strictly positive integer"));
+            }
+        }
+    }
+    if let Some(value) = root.get("quarantine") {
+        let quarantine = table(value, "quarantine", &["state_dir"])?;
+        if let Some(state_dir) = quarantine.get("state_dir") {
+            let path = state_dir
+                .as_str()
+                .ok_or_else(|| invalid("quarantine.state_dir", "must be a string"))?;
+            if path.is_empty() || path.len() > 4096 || path.contains('\0') {
+                return Err(invalid(
+                    "quarantine.state_dir",
+                    "must be a nonempty bounded path",
+                ));
             }
         }
     }

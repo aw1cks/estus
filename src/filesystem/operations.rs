@@ -63,6 +63,7 @@ pub(crate) struct FileContext<'a> {
 pub(crate) struct FileOutcome<T> {
     pub(crate) reply: ToolReply<T>,
     pub(crate) check_master: bool,
+    pub(crate) lost_ack: bool,
 }
 
 struct Failure {
@@ -675,6 +676,7 @@ pub(crate) async fn read(
     FileOutcome {
         reply: outcome.reply.map_ok(|raw| encode(raw, &spec)),
         check_master: outcome.check_master,
+        lost_ack: false,
     }
 }
 
@@ -693,6 +695,7 @@ pub(crate) async fn write(
         // Handshake/preflight failures cannot have dispatched a mutating OPEN.
         error.remote_state_unknown = mutation_started;
     }
+    outcome.lost_ack &= mutation_started;
     outcome
 }
 
@@ -711,6 +714,7 @@ pub(crate) async fn replace_file(
         // acknowledged pre-rename cleanup or a later local channel-close error.
         error.remote_state_unknown = !matches!(phase, ReplacePhase::NotStarted);
     }
+    outcome.lost_ack &= !matches!(phase, ReplacePhase::NotStarted);
     outcome
 }
 
@@ -727,6 +731,7 @@ pub(crate) async fn mkdir(
     if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
+    outcome.lost_ack &= mutation_started;
     outcome
 }
 
@@ -743,6 +748,7 @@ pub(crate) async fn rename(
     if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
+    outcome.lost_ack &= mutation_started;
     outcome
 }
 
@@ -759,6 +765,7 @@ pub(crate) async fn remove_file(
     if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
+    outcome.lost_ack &= mutation_started;
     outcome
 }
 
@@ -775,6 +782,7 @@ pub(crate) async fn remove_directory(
     if let Some(error) = outcome.reply.error_mut() {
         error.remote_state_unknown = mutation_started;
     }
+    outcome.lost_ack &= mutation_started;
     outcome
 }
 
@@ -1544,24 +1552,28 @@ where
         Ok(data) if !cleanup_timed_out => FileOutcome {
             reply: ToolReply::success(data),
             check_master: false,
+            lost_ack: false,
         },
         Ok(_) => FileOutcome {
             reply: ToolReply::failure(Failure::cleanup().error),
             check_master: false,
+            lost_ack: true,
         },
         Err(mut failure) => {
-            if cleanup_timed_out
+            let lost_ack = cleanup_timed_out
+                || failure.error.remote_state_unknown
                 || (dispatched
                     && matches!(
                         failure.error.code(),
                         "timeout" | "cancelled" | "connection_lost"
-                    ))
-            {
+                    ));
+            if lost_ack {
                 failure.error.remote_state_unknown = true;
             }
             FileOutcome {
                 reply: ToolReply::failure(failure.error),
                 check_master: failure.check_master,
+                lost_ack,
             }
         }
     }

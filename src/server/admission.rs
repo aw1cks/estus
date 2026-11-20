@@ -1,18 +1,99 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    fs::File,
+    io::{Read, Write},
+    os::fd::AsFd,
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
+use nix::{
+    dir::Dir,
+    errno::Errno,
+    fcntl::{OFlag, openat, renameat},
+    sys::stat::{Mode, SFlag, fstat},
+    unistd::{UnlinkatFlags, unlinkat},
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore},
     time::{Instant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{audit, reply::ToolError};
+use crate::{audit, config::ConfigError, reply::ToolError, strict_json};
 
 const READ_SLOTS: usize = 4;
 const MAX_DYNAMIC_GATES: usize = 256;
+const MAX_PERSISTED_RECORD_BYTES: usize = 4096;
+static PERSIST_NONCE: AtomicU64 = AtomicU64::new(1);
+
+const KNOWN_EXECUTORS: &[&str] = &[
+    "native_sftp",
+    "native_shell",
+    "native_argv",
+    "native_sudo",
+    "native_payload",
+    "ansible_module",
+    "ansible_role",
+    "ansible_playbook",
+    "unknown",
+];
+
+const KNOWN_CAUSES: &[&str] = &[
+    "already_exists",
+    "automation_failed",
+    "cancelled",
+    "checksum_mismatch",
+    "cleanup_incomplete",
+    "command_failed",
+    "connection_lost",
+    "controller_resource_limit",
+    "discovery_failed",
+    "invalid_argument",
+    "invalid_encoding",
+    "invalid_projection",
+    "invalid_result",
+    "io_error",
+    "not_found",
+    "payload_failed",
+    "payload_rejected",
+    "permission_denied",
+    "policy_denied",
+    "preview_required",
+    "resource_limit",
+    "resource_unavailable",
+    "shutdown",
+    "spawn_failed",
+    "ssh_connect_failed",
+    "ssh_spawn_failed",
+    "target_quarantined",
+    "timeout",
+    "unsupported",
+    "unsupported_workspace_entry",
+    "worker_lost",
+    "unknown",
+];
+
+fn intern_known(table: &[&'static str], value: &str) -> Option<&'static str> {
+    table.iter().copied().find(|candidate| *candidate == value)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionMode {
+    /// Shared 4-slot read; allowed while quarantined; never quarantines target.
+    SharedRead,
+    /// Exclusive non-mutating probe; allowed while quarantined; never quarantines target.
+    ExclusiveProbe,
+    /// Multiplexed channel execution; blocked while quarantined; quarantines target on lost ack/owner.
+    MultiplexedExec,
+    /// Exclusive target mutation; blocked while quarantined; quarantines target on lost ack/owner.
+    ExclusiveWrite,
+}
 
 #[derive(Clone)]
 struct QuarantineState {
@@ -33,6 +114,179 @@ struct DispatchContext {
     executor: &'static str,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedRecord {
+    schema: u32,
+    host: String,
+    authority: String,
+    executor: String,
+    cause: String,
+}
+
+struct Persistence {
+    dir: File,
+}
+
+fn record_stem(host: &str) -> String {
+    hex::encode(Sha256::digest(host.as_bytes()))
+}
+
+impl Persistence {
+    fn open(path: &Path) -> Result<(Self, BTreeMap<String, QuarantineState>), ConfigError> {
+        let invalid = |reason: &'static str| ConfigError::new("quarantine.state_dir", reason);
+        let dir = File::from(
+            openat(
+                nix::fcntl::AT_FDCWD,
+                path,
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| invalid("cannot open private quarantine state directory"))?,
+        );
+        let st = fstat(&dir).map_err(|_| invalid("cannot inspect quarantine state directory"))?;
+        if !SFlag::from_bits_truncate(st.st_mode).contains(SFlag::S_IFDIR)
+            || st.st_uid != nix::unistd::geteuid().as_raw()
+            || (st.st_mode & 0o077) != 0
+        {
+            return Err(invalid(
+                "quarantine state directory must be owned by the current UID with mode 0700",
+            ));
+        }
+        let mut stream = Dir::openat(
+            &dir,
+            c".",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| invalid("cannot enumerate quarantine state directory"))?;
+        let mut restored = BTreeMap::new();
+        for entry in stream.iter() {
+            let entry = entry.map_err(|_| invalid("cannot read quarantine state entry"))?;
+            let name_bytes = entry.file_name().to_bytes();
+            if name_bytes == b"." || name_bytes == b".." || name_bytes.starts_with(b".tmp-") {
+                continue;
+            }
+            let name = std::str::from_utf8(name_bytes)
+                .map_err(|_| invalid("invalid entry in quarantine state directory"))?;
+            let Some(stem) = name.strip_suffix(".json") else {
+                return Err(invalid("unexpected entry in quarantine state directory"));
+            };
+            if stem.len() != 64 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(invalid("invalid quarantine state filename"));
+            }
+            if restored.len() >= MAX_DYNAMIC_GATES {
+                return Err(invalid("quarantine state directory exceeds entry bound"));
+            }
+            let file = File::from(
+                openat(
+                    &dir,
+                    entry.file_name(),
+                    OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+                    Mode::empty(),
+                )
+                .map_err(|_| invalid("cannot open quarantine state record"))?,
+            );
+            let meta = fstat(&file).map_err(|_| invalid("cannot stat quarantine state record"))?;
+            if !SFlag::from_bits_truncate(meta.st_mode).contains(SFlag::S_IFREG)
+                || meta.st_uid != nix::unistd::geteuid().as_raw()
+            {
+                return Err(invalid(
+                    "quarantine state record must be an owned regular file",
+                ));
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_PERSISTED_RECORD_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| invalid("cannot read quarantine state record"))?;
+            if bytes.len() > MAX_PERSISTED_RECORD_BYTES {
+                return Err(invalid("quarantine state record exceeds size bound"));
+            }
+            let record: PersistedRecord = strict_json::parse(&bytes)
+                .and_then(serde_json::from_value)
+                .map_err(|_| invalid("malformed quarantine state record"))?;
+            if record.schema != 1
+                || record.host.is_empty()
+                || record.host.len() > 256
+                || record.host.chars().any(char::is_control)
+                || record.authority.is_empty()
+                || record.authority.len() > 128
+                || record_stem(&record.host) != stem
+            {
+                return Err(invalid("invalid quarantine state record identity"));
+            }
+            let executor = intern_known(KNOWN_EXECUTORS, &record.executor)
+                .ok_or_else(|| invalid("unknown executor in quarantine state record"))?;
+            let cause = intern_known(KNOWN_CAUSES, &record.cause)
+                .ok_or_else(|| invalid("unknown cause in quarantine state record"))?;
+            restored.insert(
+                record.host,
+                QuarantineState {
+                    authority: record.authority,
+                    executor,
+                    cause,
+                },
+            );
+        }
+        Ok((Self { dir }, restored))
+    }
+
+    fn save(&self, host: &str, state: &QuarantineState) -> std::io::Result<()> {
+        let stem = record_stem(host);
+        let final_name = std::ffi::CString::new(format!("{stem}.json"))
+            .map_err(|_| std::io::Error::other("invalid cstring"))?;
+        let nonce = PERSIST_NONCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_name = std::ffi::CString::new(format!(".tmp-{stem}-{nonce}"))
+            .map_err(|_| std::io::Error::other("invalid cstring"))?;
+        let payload = serde_json::to_vec(&PersistedRecord {
+            schema: 1,
+            host: host.to_owned(),
+            authority: state.authority.clone(),
+            executor: state.executor.to_owned(),
+            cause: state.cause.to_owned(),
+        })
+        .map_err(std::io::Error::other)?;
+        let mut file = File::from(
+            openat(
+                &self.dir,
+                tmp_name.as_c_str(),
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+                Mode::S_IRUSR | Mode::S_IWUSR,
+            )
+            .map_err(std::io::Error::from)?,
+        );
+        if let Err(err) = file.write_all(&payload).and_then(|()| file.sync_data()) {
+            let _ = unlinkat(&self.dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir);
+            return Err(err);
+        }
+        drop(file);
+        if let Err(err) = renameat(
+            self.dir.as_fd(),
+            tmp_name.as_c_str(),
+            self.dir.as_fd(),
+            final_name.as_c_str(),
+        ) {
+            let _ = unlinkat(&self.dir, tmp_name.as_c_str(), UnlinkatFlags::NoRemoveDir);
+            return Err(std::io::Error::from(err));
+        }
+        Ok(())
+    }
+
+    fn remove(&self, host: &str) -> std::io::Result<()> {
+        let stem = record_stem(host);
+        let final_name = std::ffi::CString::new(format!("{stem}.json"))
+            .map_err(|_| std::io::Error::other("invalid cstring"))?;
+        match unlinkat(&self.dir, final_name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => Ok(()),
+            Err(err) => Err(std::io::Error::from(err)),
+        }
+    }
+}
+
 struct TargetGate {
     rw: Arc<RwLock<()>>,
     reads: Arc<Semaphore>,
@@ -41,29 +295,43 @@ struct TargetGate {
 
 impl TargetGate {
     fn new() -> Arc<Self> {
+        Self::with_quarantine(None)
+    }
+
+    fn with_quarantine(initial: Option<QuarantineState>) -> Arc<Self> {
         Arc::new(Self {
             rw: Arc::new(RwLock::new(())),
             reads: Arc::new(Semaphore::new(READ_SLOTS)),
-            quarantine: Mutex::new(None),
+            quarantine: Mutex::new(initial),
         })
     }
 
     fn set_quarantine(
         &self,
+        persistence: Option<&Persistence>,
         host: &str,
         authority: String,
         executor: &'static str,
         cause: &'static str,
     ) {
+        let state = QuarantineState {
+            authority: authority.clone(),
+            executor,
+            cause,
+        };
         let mut guard = self
             .quarantine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(QuarantineState {
-            authority: authority.clone(),
-            executor,
-            cause,
-        });
+        if let Some(persistence) = persistence
+            && persistence.save(host, &state).is_err()
+        {
+            audit::emit(&serde_json::json!({
+                "event": "quarantine_persist_failed",
+                "target": host,
+            }));
+        }
+        *guard = Some(state);
         drop(guard);
         audit::target_quarantine("quarantined", host, Some(&authority), Some(executor), cause);
     }
@@ -75,17 +343,32 @@ impl TargetGate {
             .is_some()
     }
 
-    fn clear_quarantine(&self) -> Option<ClearedQuarantine> {
-        let previous = self
+    fn clear_quarantine(
+        &self,
+        persistence: Option<&Persistence>,
+        host: &str,
+    ) -> Result<Option<ClearedQuarantine>, ToolError> {
+        let mut guard = self
             .quarantine
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()?;
-        Some(ClearedQuarantine {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_none() {
+            return Ok(None);
+        }
+        if let Some(persistence) = persistence {
+            persistence.remove(host).map_err(|_| {
+                ToolError::io_error(
+                    "Persistent target quarantine state could not be cleared",
+                    false,
+                )
+            })?;
+        }
+        let previous = guard.take().expect("checked quarantine is_some");
+        Ok(Some(ClearedQuarantine {
             authority: previous.authority,
             executor: previous.executor,
             cause: previous.cause,
-        })
+        }))
     }
 }
 
@@ -101,28 +384,63 @@ struct AdmissionState {
 
 pub(super) struct TargetAdmission {
     dynamic_hosts: bool,
+    persistence: Option<Arc<Persistence>>,
     state: Mutex<AdmissionState>,
 }
 
 impl TargetAdmission {
+    #[cfg(test)]
     pub(super) fn new<'a>(hosts: impl Iterator<Item = &'a String>, dynamic_hosts: bool) -> Self {
+        Self::new_with_persistence(hosts, dynamic_hosts, None)
+            .expect("in-memory target admission cannot fail")
+    }
+
+    pub(super) fn new_with_persistence<'a>(
+        hosts: impl Iterator<Item = &'a String>,
+        dynamic_hosts: bool,
+        state_dir: Option<&Path>,
+    ) -> Result<Self, ConfigError> {
+        let (persistence, mut restored) = match state_dir {
+            Some(path) => {
+                let (p, map) = Persistence::open(path)?;
+                (Some(Arc::new(p)), map)
+            }
+            None => (None, BTreeMap::new()),
+        };
         let mut seq = 0u64;
-        let gates = hosts
+        let mut gates: BTreeMap<String, GateEntry> = hosts
             .map(|host| {
                 seq += 1;
+                let initial = restored.remove(host);
                 (
                     host.clone(),
                     GateEntry {
-                        gate: TargetGate::new(),
+                        gate: TargetGate::with_quarantine(initial),
                         last_used: seq,
                     },
                 )
             })
             .collect();
-        Self {
-            dynamic_hosts,
-            state: Mutex::new(AdmissionState { gates, seq }),
+        if dynamic_hosts {
+            for (host, initial) in restored {
+                if gates.len() >= MAX_DYNAMIC_GATES {
+                    break;
+                }
+                seq += 1;
+                gates.insert(
+                    host,
+                    GateEntry {
+                        gate: TargetGate::with_quarantine(Some(initial)),
+                        last_used: seq,
+                    },
+                );
+            }
         }
+        Ok(Self {
+            dynamic_hosts,
+            persistence,
+            state: Mutex::new(AdmissionState { gates, seq }),
+        })
     }
 
     pub(super) fn contains(&self, host: &str) -> bool {
@@ -132,6 +450,7 @@ impl TargetAdmission {
             .gates
             .contains_key(host)
     }
+
     pub(super) fn quarantine_info(
         &self,
         host: &str,
@@ -150,19 +469,27 @@ impl TargetAdmission {
     pub(super) async fn acquire(
         &self,
         host: &str,
-        shared_read: bool,
+        mode: AdmissionMode,
         deadline: Instant,
         ct: &CancellationToken,
         shutdown: &CancellationToken,
     ) -> Result<TargetLease, ToolError> {
-        if shared_read {
-            self.acquire_read(host, deadline, ct, shutdown)
+        match mode {
+            AdmissionMode::SharedRead => self
+                .acquire_read(host, deadline, ct, shutdown)
                 .await
-                .map(TargetLease::Read)
-        } else {
-            self.acquire_write(host, deadline, ct, shutdown)
+                .map(TargetLease::Read),
+            AdmissionMode::ExclusiveProbe => self
+                .acquire_probe(host, deadline, ct, shutdown)
                 .await
-                .map(TargetLease::Write)
+                .map(TargetLease::Probe),
+            AdmissionMode::MultiplexedExec => self
+                .acquire_exec(host, deadline, ct, shutdown)
+                .map(TargetLease::Exec),
+            AdmissionMode::ExclusiveWrite => self
+                .acquire_write(host, deadline, ct, shutdown)
+                .await
+                .map(TargetLease::Write),
         }
     }
 
@@ -189,6 +516,48 @@ impl TargetAdmission {
         })
     }
 
+    async fn acquire_probe(
+        &self,
+        host: &str,
+        deadline: Instant,
+        ct: &CancellationToken,
+        shutdown: &CancellationToken,
+    ) -> Result<ProbeLease, ToolError> {
+        let gate = self.gate(host)?;
+        let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).write_owned()).await?;
+        Ok(ProbeLease { _guard: guard })
+    }
+
+    fn acquire_exec(
+        &self,
+        host: &str,
+        deadline: Instant,
+        ct: &CancellationToken,
+        shutdown: &CancellationToken,
+    ) -> Result<ExecLease, ToolError> {
+        if ct.is_cancelled() || shutdown.is_cancelled() {
+            return Err(ToolError::cancelled(
+                "Request cancelled before dispatch",
+                false,
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(ToolError::timeout(
+                "Operation deadline expired waiting for target gate",
+                false,
+            ));
+        }
+        let gate = self.gate(host)?;
+        if gate.is_quarantined() {
+            return Err(quarantined_error());
+        }
+        Ok(ExecLease {
+            gate,
+            persistence: self.persistence.clone(),
+            dispatched: None,
+        })
+    }
+
     pub(super) async fn acquire_write(
         &self,
         host: &str,
@@ -199,24 +568,27 @@ impl TargetAdmission {
         let gate = self.gate(host)?;
         let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).write_owned()).await?;
         if gate.is_quarantined() {
-            return Err(ToolError::target_quarantined(
-                "Target is quarantined after an uncertain remote mutation; inspect target state and run change_target_quarantine_clear after independent reconciliation",
-                false,
-            ));
+            return Err(quarantined_error());
         }
         Ok(WriteLease {
             gate,
+            persistence: self.persistence.clone(),
             _guard: guard,
             dispatched: None,
         })
     }
 
-    pub(super) fn clear_quarantine(&self, host: &str) -> Option<ClearedQuarantine> {
-        let gate = {
+    pub(super) fn clear_quarantine(
+        &self,
+        host: &str,
+    ) -> Result<Option<ClearedQuarantine>, ToolError> {
+        let Some(gate) = ({
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.gates.get(host).map(|entry| Arc::clone(&entry.gate))
-        }?;
-        gate.clear_quarantine()
+        }) else {
+            return Ok(None);
+        };
+        gate.clear_quarantine(self.persistence.as_deref(), host)
     }
 
     fn gate(&self, host: &str) -> Result<Arc<TargetGate>, ToolError> {
@@ -265,6 +637,13 @@ impl TargetAdmission {
     }
 }
 
+fn quarantined_error() -> ToolError {
+    ToolError::target_quarantined(
+        "Target is quarantined after an uncertain remote mutation; inspect target state and run change_target_quarantine_clear after independent reconciliation",
+        false,
+    )
+}
+
 async fn wait_for<F>(
     deadline: Instant,
     ct: &CancellationToken,
@@ -309,8 +688,58 @@ pub(super) struct ReadLease {
     _permit: OwnedSemaphorePermit,
 }
 
+pub(super) struct ProbeLease {
+    _guard: OwnedRwLockWriteGuard<()>,
+}
+
+pub(super) struct ExecLease {
+    gate: Arc<TargetGate>,
+    persistence: Option<Arc<Persistence>>,
+    dispatched: Option<DispatchContext>,
+}
+
+impl ExecLease {
+    fn mark_dispatched(&mut self, host: String, authority: String, executor: &'static str) {
+        self.dispatched = Some(DispatchContext {
+            host,
+            authority,
+            executor,
+        });
+    }
+
+    fn finish(&mut self, quarantine_target: bool, cause: &'static str) {
+        if let Some(ctx) = self.dispatched.take()
+            && quarantine_target
+        {
+            let cause = intern_known(KNOWN_CAUSES, cause).unwrap_or("unknown");
+            self.gate.set_quarantine(
+                self.persistence.as_deref(),
+                &ctx.host,
+                ctx.authority,
+                ctx.executor,
+                cause,
+            );
+        }
+    }
+}
+
+impl Drop for ExecLease {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.dispatched.take() {
+            self.gate.set_quarantine(
+                self.persistence.as_deref(),
+                &ctx.host,
+                ctx.authority,
+                ctx.executor,
+                "worker_lost",
+            );
+        }
+    }
+}
+
 pub(super) struct WriteLease {
     gate: Arc<TargetGate>,
+    persistence: Option<Arc<Persistence>>,
     _guard: OwnedRwLockWriteGuard<()>,
     dispatched: Option<DispatchContext>,
 }
@@ -329,12 +758,18 @@ impl WriteLease {
         });
     }
 
-    pub(super) fn finish(&mut self, remote_state_unknown: bool, cause: &'static str) {
+    pub(super) fn finish(&mut self, quarantine_target: bool, cause: &'static str) {
         if let Some(ctx) = self.dispatched.take()
-            && remote_state_unknown
+            && quarantine_target
         {
-            self.gate
-                .set_quarantine(&ctx.host, ctx.authority, ctx.executor, cause);
+            let cause = intern_known(KNOWN_CAUSES, cause).unwrap_or("unknown");
+            self.gate.set_quarantine(
+                self.persistence.as_deref(),
+                &ctx.host,
+                ctx.authority,
+                ctx.executor,
+                cause,
+            );
         }
     }
 }
@@ -342,14 +777,21 @@ impl WriteLease {
 impl Drop for WriteLease {
     fn drop(&mut self) {
         if let Some(ctx) = self.dispatched.take() {
-            self.gate
-                .set_quarantine(&ctx.host, ctx.authority, ctx.executor, "worker_lost");
+            self.gate.set_quarantine(
+                self.persistence.as_deref(),
+                &ctx.host,
+                ctx.authority,
+                ctx.executor,
+                "worker_lost",
+            );
         }
     }
 }
 
 pub(super) enum TargetLease {
     Read(#[allow(dead_code)] ReadLease),
+    Probe(#[allow(dead_code)] ProbeLease),
+    Exec(ExecLease),
     Write(WriteLease),
 }
 
@@ -360,18 +802,21 @@ impl TargetLease {
         authority: String,
         executor: &'static str,
     ) {
-        if let Self::Write(lease) = self {
-            lease.mark_dispatched(host, authority, executor);
+        match self {
+            Self::Read(_) | Self::Probe(_) => {}
+            Self::Exec(lease) => lease.mark_dispatched(host, authority, executor),
+            Self::Write(lease) => lease.mark_dispatched(host, authority, executor),
         }
     }
 
-    pub(super) fn finish(&mut self, remote_state_unknown: bool, cause: &'static str) {
-        if let Self::Write(lease) = self {
-            lease.finish(remote_state_unknown, cause);
+    pub(super) fn finish(&mut self, quarantine_target: bool, cause: &'static str) {
+        match self {
+            Self::Read(_) | Self::Probe(_) => {}
+            Self::Exec(lease) => lease.finish(quarantine_target, cause),
+            Self::Write(lease) => lease.finish(quarantine_target, cause),
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -580,11 +1025,79 @@ mod tests {
             .unwrap();
         drop(_r);
 
+        // Exclusive probes also remain open while quarantined and never quarantine on failure.
+        let mut p = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::ExclusiveProbe,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+        p.mark_dispatched("alpha".into(), "ordinary".into(), "native_payload");
+        p.finish(true, "timeout");
+        drop(p);
+
+        // Multiplexed exec is blocked while quarantined.
+        let blocked_exec = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(blocked_exec.code(), "target_quarantined");
+
         // Unknown or non-quarantined targets return None.
-        assert!(admission.clear_quarantine("missing").is_none());
-        let cleared = admission.clear_quarantine("alpha").unwrap();
+        assert!(admission.clear_quarantine("missing").unwrap().is_none());
+        let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
         assert_eq!(cleared.cause, "timeout");
-        assert!(admission.clear_quarantine("alpha").is_none());
+        assert!(admission.clear_quarantine("alpha").unwrap().is_none());
+
+        // Multiplexed exec overlaps concurrently and quarantines on uncertain completion.
+        let mut e1 = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+        let mut e2 = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+        e1.mark_dispatched("alpha".into(), "ordinary".into(), "native_shell");
+        e2.mark_dispatched("alpha".into(), "ordinary".into(), "native_shell");
+        e1.finish(false, "ok");
+        e2.finish(true, "timeout");
+        drop((e1, e2));
+        assert_eq!(
+            admission
+                .acquire_write("alpha", deadline, &ct, &shutdown)
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            "target_quarantined"
+        );
+        let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
+        assert_eq!(cleared.executor, "native_shell");
+        assert_eq!(cleared.cause, "timeout");
 
         // Owner lost after dispatch without finish() also quarantines atomically on Drop.
         let mut w2 = admission
@@ -600,7 +1113,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(blocked.code(), "target_quarantined");
-        let cleared = admission.clear_quarantine("alpha").unwrap();
+        let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
         assert_eq!(cleared.cause, "worker_lost");
     }
 
@@ -665,5 +1178,56 @@ mod tests {
         );
         drop(r256);
         drop(active_reads);
+    }
+
+    #[tokio::test]
+    async fn persistent_quarantine_survives_restart_and_rejects_unsafe_state_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("quarantine");
+        std::fs::create_dir(&state_dir).unwrap();
+
+        // World/group-accessible directory fails closed.
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hosts = ["alpha".to_owned()];
+        assert!(
+            TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).is_err()
+        );
+
+        // Private 0700 directory loads, persists across restarts, and unlinks on clear.
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ct = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        {
+            let adm1 = TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir))
+                .unwrap();
+            let mut w = adm1
+                .acquire_write("alpha", deadline, &ct, &shutdown)
+                .await
+                .unwrap();
+            w.mark_dispatched("alpha".into(), "ordinary".into(), "native_sftp");
+            w.finish(true, "timeout");
+        }
+        let adm2 =
+            TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
+        assert_eq!(
+            adm2.quarantine_info("alpha"),
+            Some(("ordinary".into(), "native_sftp", "timeout"))
+        );
+        let blocked = adm2
+            .acquire_write("alpha", deadline, &ct, &shutdown)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(blocked.code(), "target_quarantined");
+        let cleared = adm2.clear_quarantine("alpha").unwrap().unwrap();
+        assert_eq!(cleared.executor, "native_sftp");
+        assert_eq!(cleared.cause, "timeout");
+        drop(adm2);
+
+        let adm3 =
+            TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
+        assert!(adm3.quarantine_info("alpha").is_none());
     }
 }

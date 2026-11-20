@@ -650,7 +650,14 @@ impl Estus {
             ));
         };
         let audit = Audit::start(metadata, started);
-        let data = match self.state.admission.clear_quarantine(&request.host) {
+        let cleared = match self.state.admission.clear_quarantine(&request.host) {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                audit.finish(None, Some(&error));
+                return budget.result(ToolReply::<ClearTargetQuarantineData>::failure(error));
+            }
+        };
+        let data = match cleared {
             Some(previous) => {
                 crate::audit::target_quarantine(
                     "cleared",

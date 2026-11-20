@@ -309,6 +309,7 @@ pub(crate) struct Config {
     disclose_sudo_policy: bool,
     ssh_config: Option<PathBuf>,
     ssh_executable: PathBuf,
+    quarantine_state_dir: Option<PathBuf>,
     limits: Limits,
     output: crate::output::Limits,
     directory: crate::filesystem::data::DirectoryLimits,

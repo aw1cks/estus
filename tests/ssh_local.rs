@@ -520,6 +520,18 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     ensure!(timed["error"]["remote_state_unknown"] == true);
     await_audit(&client.log, "finish", "timeout").await?;
     Fixture::await_file(&timeout_done).await?;
+    failed(&exec(client, "printf BLOCKED").await?, "target_quarantined")?;
+    ensure!(
+        succeeded(
+            &client
+                .call(
+                    "change_target_quarantine_clear",
+                    json!({"host":"plain","acknowledge_remote_state_reconciled":true}),
+                )
+                .await?
+        )?["cleared"]
+            == true
+    );
     ensure!(
         live_transport(
             fixture,
@@ -565,6 +577,18 @@ async fn command_cases(fixture: &mut Fixture, client: &Client) -> Result<()> {
     ensure!(
         audit["remote_state_unknown"] == true,
         "cancel audit must acknowledge remote uncertainty"
+    );
+    failed(&exec(client, "printf BLOCKED").await?, "target_quarantined")?;
+    ensure!(
+        succeeded(
+            &client
+                .call(
+                    "change_target_quarantine_clear",
+                    json!({"host":"plain","acknowledge_remote_state_reconciled":true}),
+                )
+                .await?
+        )?["cleared"]
+            == true
     );
     ensure!(
         succeeded(&exec(client, "printf CANCEL_CHANNEL_UNAFFECTED").await?)?["stdout"]
@@ -1266,6 +1290,21 @@ async fn ssh_channel_timeout() -> Result<()> {
             ensure!(
                 fs::read(&effects)? == b"effect",
                 "uncertain command was replayed"
+            );
+            failed(
+                &exec(&client, "printf BLOCKED").await?,
+                "target_quarantined",
+            )?;
+            ensure!(
+                succeeded(
+                    &client
+                        .call(
+                            "change_target_quarantine_clear",
+                            json!({"host":"plain","acknowledge_remote_state_reconciled":true}),
+                        )
+                        .await?
+                )?["cleared"]
+                    == true
             );
             ensure!(succeeded(&exec(&client, "printf REUSED").await?)?["stdout"] == "REUSED");
             let checked = support::run(
@@ -3851,6 +3890,7 @@ async fn ssh_startup_file_profiles() -> Result<()> {
                             "change_file_write",
                             "change_mkdir",
                             "change_rename",
+                            "change_target_quarantine_clear",
                             "inspect_directory",
                             "inspect_file",
                             "inspect_output",
@@ -4905,6 +4945,21 @@ async fn ssh_named_bindings() -> Result<()> {
             ensure!(timed["data"]["termination"] == "timeout" && timed["data"]["exit_code"].is_null());
             ensure!(timed["data"]["remote_may_still_be_running"] == true);
             ensure!(timed["error"]["remote_state_unknown"] == true);
+            failed(
+                &client.call("bounded_pause", json!({"host":"plain"})).await?,
+                "target_quarantined",
+            )?;
+            ensure!(
+                succeeded(
+                    &client
+                        .call(
+                            "change_target_quarantine_clear",
+                            json!({"host":"plain","acknowledge_remote_state_reconciled":true}),
+                        )
+                        .await?
+                )?["cleared"]
+                    == true
+            );
             let session_count = || fixture.listeners[0].log.text().lines()
                 .filter(|line| line.contains("Starting session: command")).count();
             let before = session_count();
@@ -6356,6 +6411,18 @@ async fn ssh_replace_file_atomic_visibility_and_lost_ack() -> Result<()> {
                     if drop_ack {
                         failed(&reply, "timeout")?;
                         ensure!(reply["data"].is_null() && reply["error"]["remote_state_unknown"] == true);
+                        let blocked = client
+                            .call(
+                                "change_file_replace",
+                                json!({
+                                    "host":"plain",
+                                    "path":destination,
+                                    "content":"BLOCKED",
+                                    "overwrite":true,
+                                }),
+                            )
+                            .await?;
+                        failed(&blocked, "target_quarantined")?;
                     } else {
                         ensure!(succeeded(&reply)? == &json!({"bytes_written":new.len()}));
                     }
