@@ -7127,8 +7127,8 @@ async fn ssh_native_payload_read_concurrency_and_write_quarantine() -> Result<()
     let scenario = async {
         let marker_dir = fixture.root.path().join("payload-markers");
         fs::create_dir(&marker_dir)?;
-        let read_source_code = r#"import json, os, sys, time
-cfg = json.loads(sys.argv[1])
+        let read_source_code = r#"import estus_runtime, json, os, time
+cfg = estus_runtime.request()[0]
 marker = cfg["marker"]
 release = cfg["release"]
 with open(marker, "w", encoding="utf-8") as handle:
@@ -7138,8 +7138,8 @@ while not os.path.exists(release) and time.monotonic() < deadline:
     time.sleep(0.02)
 print(json.dumps({"ok": True}))
 "#;
-        let write_source_code = r#"import json, os, sys, time
-cfg = json.loads(sys.argv[1])
+        let write_source_code = r#"import estus_runtime, json, os, time
+cfg = estus_runtime.request()[0]
 marker = cfg["marker"]
 release = cfg["release"]
 with open(marker, "w", encoding="utf-8") as handle:

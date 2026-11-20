@@ -18,6 +18,10 @@ def invoke(raw):
     return subprocess.run([sys.executable, '-I', '-c', BOOTSTRAP], input=raw,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
 
+def collector_frame(source, request=()):
+    raw = json.dumps(list(request), separators=(',', ':')).encode()
+    return b'ESTUSCL1' + struct.pack('!II', len(source), len(raw)) + source + raw
+
 class Framing(unittest.TestCase):
     def test_rejects_ambiguous_or_incomplete_frame_before_source(self):
         duplicate = b'{"schema":1,"schema":1}'
@@ -40,19 +44,74 @@ class Execution(unittest.TestCase):
     def execute(self, source, **overrides):
         spec = {'schema': 1, 'operation': 'execute', 'id': 'owned-call', 'requirements': REQ,
                 'identity': self.identity, 'sha256': hashlib.sha256(source).hexdigest(),
-                'argv': ['{{ literal }}; \n☃'], 'timeout': 2, 'output_limit': 4096}
+                'request': ['{{ literal }}; \n☃'], 'timeout': 2, 'output_limit': 4096}
         spec.update(overrides)
         result = invoke(frame(spec, source))
         return result.returncode, json.loads(result.stdout)
 
-    def test_isolated_stdin_source_and_literal_argv(self):
-        source = b'import json,sys; print(json.dumps({"arg":sys.argv[1],"isolated":sys.flags.isolated}))'
+    def test_isolated_source_and_request_arrive_on_stdin(self):
+        source = (
+            b'import estus_runtime, json, sys\n'
+            b'print(json.dumps({"request": estus_runtime.request(), "argv": sys.argv,'
+            b' "isolated": sys.flags.isolated}))\n'
+        )
         exit_code, evidence = self.execute(source)
         self.assertEqual(exit_code, 0)
         self.assertEqual(evidence['id'], 'owned-call')
         self.assertEqual(evidence['phase'], 'complete')
         self.assertEqual(evidence['rc'], 0)
-        self.assertEqual(json.loads(evidence['stdout']), {'arg': '{{ literal }}; \n☃', 'isolated': 1})
+        self.assertEqual(
+            json.loads(evidence['stdout']),
+            {'request': ['{{ literal }}; \n☃'], 'argv': ['-'], 'isolated': 1},
+        )
+
+    def test_request_values_decode_without_argv_exposure(self):
+        source = (
+            b'import estus_runtime, json\n'
+            b'req = estus_runtime.request()\n'
+            b'print(json.dumps([req[0]["unit"], req[1], req[2]]))\n'
+        )
+        exit_code, evidence = self.execute(
+            source,
+            request=['{"unit": "demo.service"}', '"approved"', 'plain'],
+            argv=None,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(evidence['phase'], 'complete')
+        self.assertEqual(json.loads(evidence['stdout']), ['demo.service', 'approved', 'plain'])
+
+    def test_request_frame_rejects_non_list_oversize_and_nul(self):
+        for request in ('not-a-list', ['a', 'b'] * 40, ['a\x00b']):
+            with self.subTest(request=request):
+                exit_code, evidence = self.execute(
+                    b'raise SystemExit("must not run")', request=request
+                )
+                self.assertEqual(exit_code, 70)
+                self.assertEqual(evidence['phase'], 'rejected')
+
+    def test_collector_harness_rejects_truncation_magic_and_trailing_bytes(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'bootstrap_mod', pathlib.Path(__file__).with_name('bootstrap.py')
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = b'print("must not run")\n'
+        valid = collector_frame(source)
+        for raw in (
+            b'ESTUSXX1' + valid[8:],
+            valid[:-1],
+            valid + b'x',
+            b'ESTUSCL1' + struct.pack('!II', 0, 0),
+            collector_frame(source, ['ok']) + b'',
+        )[:4]:
+            with self.subTest(raw=raw[:20]):
+                result = subprocess.run(
+                    [sys.executable, '-I', '-c', module.COLLECTOR_HARNESS], input=raw,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0, 'malformed collector frame executed')
+                self.assertEqual(result.stdout, b'')
 
     def test_digest_and_identity_drift_reject_before_source(self):
         source = b'raise Exception("must not execute")'
@@ -130,7 +189,7 @@ class Execution(unittest.TestCase):
             'requirements': req,
             'identity': ident,
             'sha256': hashlib.sha256(source).hexdigest(),
-            'argv': [],
+            'request': [],
             'timeout': 5,
             'output_limit': 65536,
         }
@@ -226,8 +285,12 @@ class Execution(unittest.TestCase):
             b"bid = estus_runtime.boot_id()\n"
             b"txt = estus_runtime.check_text('ok', 16)\n"
             b"missing = estus_runtime.read_bytes('/nonexistent-estus-runtime-path', 64, optional=True)\n"
-            b"res = estus_runtime.run_bounded([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.1)\n"
-            b"print(json.dumps({'boot_len': len(bid), 'txt': txt, 'missing': missing, 'timed_out': res['timed_out']}))\n"
+            b"try:\n"
+            b"    estus_runtime.run_bounded([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.1)\n"
+            b"    timed_out = False\n"
+            b"except TimeoutError:\n"
+            b"    timed_out = True\n"
+            b"print(json.dumps({'boot_len': len(bid), 'txt': txt, 'missing': missing, 'timed_out': timed_out}))\n"
         )
         exit_code, evidence = self.execute(source, timeout=3)
         self.assertEqual(exit_code, 0)
@@ -249,6 +312,77 @@ class Execution(unittest.TestCase):
         self.assertEqual(out['rc'], 0)
         self.assertFalse(out['timed_out'])
         self.assertEqual(out['len'], 600000)
+
+    def test_allowlist_helper_denies_absent_empty_non_list_and_allows_explicit_wildcard(self):
+        source = (
+            b"import estus_runtime, json\n"
+            b"cases = [\n"
+            b"    estus_runtime.allowed('demo.service', ['demo.service']),\n"
+            b"    estus_runtime.allowed('other.service', ['demo.service']),\n"
+            b"    estus_runtime.allowed('demo.service', ['*']),\n"
+            b"    estus_runtime.allowed('demo.service', None),\n"
+            b"    estus_runtime.allowed('demo.service', []),\n"
+            b"    estus_runtime.allowed('demo.service', ''),\n"
+            b"    estus_runtime.allowed('demo.service', 'demo.service'),\n"
+            b"    estus_runtime.allowed('demo.service', {'demo.service': True}),\n"
+            b"    estus_runtime.allowed('', ['*']),\n"
+            b"    estus_runtime.allowed(None, ['*']),\n"
+            b"]\n"
+            b"print(json.dumps(cases))\n"
+        )
+        exit_code, evidence = self.execute(source)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(evidence['stdout']),
+            [True, False, True, False, False, False, False, False, False, False],
+        )
+
+    def test_run_bounded_classifies_failures_timeouts_and_accepted_statuses(self):
+        source = (
+            b"import estus_runtime, json, sys\n"
+            b"def code(fn):\n"
+            b"    try:\n"
+            b"        return fn()\n"
+            b"    except Exception as error:\n"
+            b"        return type(error).__name__\n"
+            b"ok = estus_runtime.run_bounded([sys.executable, '-c', 'print(\"fine\")'])\n"
+            b"tolerant = estus_runtime.run_bounded(\n"
+            b"    [sys.executable, '-c', 'import sys; sys.stderr.write(\"noise\"); sys.exit(3)'],\n"
+            b"    accepted=(0, 3))\n"
+            b"print(json.dumps({\n"
+            b"    'stdout': ok['stdout'].strip(),\n"
+            b"    'rc': tolerant['returncode'],\n"
+            b"    'stderr': tolerant['stderr'],\n"
+            b"    'rejected': code(lambda: estus_runtime.run_bounded([sys.executable, '-c', 'import sys; sys.exit(4)'])),\n"
+            b"    'timeout': code(lambda: estus_runtime.run_bounded([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.1)),\n"
+            b"    'oversize': code(lambda: estus_runtime.run_bounded([sys.executable, '-c', 'print(\"y\" * 5000)'], max_bytes=64)),\n"
+            b"    'bad_utf8': code(lambda: estus_runtime.run_bounded([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b\"\\\\xff\")'])),\n"
+            b"    'empty_argv': code(lambda: estus_runtime.run_bounded([])),\n"
+            b"    'nul_argv': code(lambda: estus_runtime.run_bounded(['/bin/sh', 'a' + chr(0) + 'b'])),\n"
+            b"}))\n"
+        )
+        exit_code, evidence = self.execute(source, timeout=10)
+        self.assertEqual(exit_code, 0)
+        out = json.loads(evidence['stdout'])
+        self.assertEqual(out['stdout'], 'fine')
+        self.assertEqual(out['rc'], 3)
+        self.assertEqual(out['stderr'], 'noise')
+        self.assertEqual(out['rejected'], 'RuntimeError')
+        self.assertEqual(out['timeout'], 'TimeoutError')
+        self.assertEqual(out['oversize'], 'ValueError')
+        self.assertEqual(out['bad_utf8'], 'UnicodeDecodeError')
+        self.assertEqual(out['empty_argv'], 'ValueError')
+        self.assertEqual(out['nul_argv'], 'ValueError')
+
+    def test_run_or_exit_publishes_classified_error_document(self):
+        source = (
+            b"import estus_runtime, sys\n"
+            b"estus_runtime.run_or_exit([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.1)\n"
+        )
+        exit_code, evidence = self.execute(source, timeout=10)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(evidence['rc'], 1)
+        self.assertEqual(json.loads(evidence['stdout']), {'estus_error': {'code': 'timeout'}})
 
     def test_ansiballz_execution_cleans_tmpdir_and_classifies_missing_deps(self):
         import glob, os, tempfile

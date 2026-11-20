@@ -15,10 +15,24 @@ import time
 MAX_JSON = 262144
 MAX_SOURCE = 4194304
 
-COLLECTOR_HARNESS = r"""import os, re, resource, signal, subprocess, sys, tempfile, types
+COLLECTOR_RUNTIME = r"""
+def _exact(stream, count):
+    data = stream.read(count)
+    if len(data) != count:
+        raise ValueError('truncated collector frame')
+    return data
 
-def _make_runtime():
+def _decode_request(raw):
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+def _make_runtime(request_values):
     mod = types.ModuleType('estus_runtime')
+
+    def request():
+        return list(request_values)
     def read_bytes(path, maximum=4096, optional=False):
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -39,20 +53,46 @@ def _make_runtime():
             raise ValueError('invalid or oversized source string')
         return value
 
+    def allowed(value, allowlist):
+        if not isinstance(allowlist, list) or not allowlist:
+            return False
+        if not isinstance(value, str) or not value:
+            return False
+        return '*' in allowlist or value in allowlist
+
     def boot_id():
         raw = read_bytes('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
         if not re.fullmatch(r'[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}', raw):
             raise ValueError('invalid boot_id')
         return raw
 
-    def run_bounded(argv, timeout=15, max_bytes=262144):
-        fsize_cap = max(262144, int(max_bytes) + 65536)
+    def emit(value, maximum=4096):
+        raw = json.dumps(value, separators=(',', ':'), allow_nan=False)
+        if len(raw.encode('utf-8')) > maximum:
+            raise ValueError('projection bound exceeded')
+        print(raw)
+
+    def run_bounded(argv, timeout=15, max_bytes=262144, accepted=(0,)):
+        # One bounded-subprocess implementation: session leader, deadline killpg,
+        # both streams bounded, strict UTF-8 stdout, classified failures.
+        if not isinstance(argv, (list, tuple)) or not argv:
+            raise ValueError('invalid argv')
+        for value in argv:
+            if not isinstance(value, str) or not value or '\x00' in value:
+                raise ValueError('invalid argv entry')
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 600:
+            raise ValueError('invalid timeout')
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 0 < max_bytes <= 16777216:
+            raise ValueError('invalid output bound')
+        if accepted is not None and not isinstance(accepted, (list, tuple)):
+            raise ValueError('invalid accepted statuses')
+        fsize_cap = max(262144, max_bytes + 65536)
         def _limits():
             os.setsid()
             resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_cap, fsize_cap))
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             proc = subprocess.Popen(
-                argv,
+                list(argv),
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,
@@ -70,28 +110,70 @@ def _make_runtime():
                     pass
                 rc = proc.wait()
             out.seek(0)
+            err.seek(0)
             data = out.read(max_bytes + 1)
+            errors = err.read(max_bytes + 1)
             if len(data) > max_bytes:
                 raise ValueError('subprocess output exceeds bound')
-            return {
-                'returncode': rc,
-                'timed_out': timed_out,
-                'stdout': data.decode('utf-8', 'strict'),
-            }
+            if len(errors) > max_bytes:
+                errors = errors[:max_bytes]
+            stdout = data.decode('utf-8', 'strict')
+            stderr = errors.decode('utf-8', 'replace')
+        if timed_out:
+            raise TimeoutError('subprocess deadline exceeded')
+        if accepted is not None and rc not in accepted:
+            raise RuntimeError('subprocess failed with exit ' + str(rc) + ': ' + stderr.strip()[:1024])
+        return {'returncode': rc, 'timed_out': timed_out, 'stdout': stdout, 'stderr': stderr}
 
+    def run_or_exit(argv, timeout=15, max_bytes=262144, accepted=(0,)):
+        # Published collectors report a closed estus_error document instead of a traceback.
+        try:
+            return run_bounded(argv, timeout=timeout, max_bytes=max_bytes, accepted=accepted)
+        except TimeoutError:
+            code = 'timeout'
+        except RuntimeError:
+            code = 'dependency_unavailable'
+        except ValueError:
+            code = 'policy_violation'
+        print(json.dumps({'estus_error': {'code': code}}, separators=(',', ':')))
+        sys.exit(1)
+
+    mod.request = request
+    mod.read = read_bytes
     mod.read_bytes = read_bytes
     mod.check_text = check_text
+    mod.allowed = allowed
     mod.boot_id = boot_id
+    mod.emit = emit
     mod.run_bounded = run_bounded
+    mod.run_or_exit = run_or_exit
     return mod
-
-sys.modules['estus_runtime'] = _make_runtime()
-del _make_runtime
-sys.argv[0] = '-'
-_src = sys.stdin.buffer.read()
-sys.stdin.close()
-exec(compile(_src, '<estus_collector>', 'exec'), {'__name__': '__main__'})
 """
+COLLECTOR_HARNESS = (
+    "import json, os, re, resource, signal, struct, subprocess, sys, tempfile, types\n"
+    "FRAME_MAGIC = b'ESTUSCL1'\n"
+    "MAX_REQUEST = 65536\n"
+    + COLLECTOR_RUNTIME
+    + r"""_header = _exact(sys.stdin.buffer, 16)
+if _header[:8] != FRAME_MAGIC:
+    raise ValueError('collector frame')
+_source_len, _request_len = struct.unpack('!II', _header[8:])
+if not 0 < _source_len <= 4194304 or _request_len > MAX_REQUEST:
+    raise ValueError('collector frame bounds')
+_source = _exact(sys.stdin.buffer, _source_len)
+_request_raw = _exact(sys.stdin.buffer, _request_len)
+if sys.stdin.buffer.read(1):
+    raise ValueError('trailing collector frame')
+sys.stdin.close()
+_request = json.loads(_request_raw.decode('utf-8', 'strict')) if _request_raw else []
+if (not isinstance(_request, list) or len(_request) > 64
+        or any(not isinstance(value, str) or not value for value in _request)):
+    raise ValueError('invalid collector request')
+sys.modules['estus_runtime'] = _make_runtime([_decode_request(value) for value in _request])
+sys.argv = ['-']
+exec(compile(_source, '<estus_collector>', 'exec'), {'__name__': '__main__'})
+"""
+)
 ANSIBALLZ_HARNESS = r"""import datetime, json, os, shutil, sys, tempfile
 payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))
 sys.stdin = open(os.devnull, 'r')
@@ -286,6 +368,15 @@ def build_child_env(selected_execs, utf8_locale=False):
     for norm, selected_path in selected_execs.items():
         env['ESTUS_EXEC_' + norm] = selected_path
     return env
+MAX_REQUEST = 65536
+COLLECTOR_FRAME = b'ESTUSCL1'
+
+def collector_frame(source, request):
+    raw = json.dumps(request, ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('utf-8')
+    if len(raw) > MAX_JSON:
+        raise ValueError('request frame bounds')
+    return COLLECTOR_FRAME + struct.pack('!II', len(source), len(raw)) + source + raw
+
 def run():
     if exact(8) != b'ESTUSNP1':
         raise ValueError('protocol')
@@ -318,12 +409,14 @@ def run():
         if spec['operation'] == 'execute':
             if hashlib.sha256(source).hexdigest() != spec['sha256']:
                 raise ValueError('source drift')
-            argv = spec['argv']
-            if not isinstance(argv, list) or len(argv) > 64 or any(not isinstance(x, str) or '\0' in x for x in argv):
-                raise ValueError('argv')
+            request = spec['request']
+            if (not isinstance(request, list) or len(request) > 64
+                    or any(not isinstance(x, str) or not x or len(x) > 8192 or '\0' in x for x in request)
+                    or len(json.dumps(request)) > MAX_REQUEST):
+                raise ValueError('request')
             child_env = build_child_env(selected_execs, utf8_locale=False)
-            stdin_bytes = source
-            cmd = [sys.executable, '-I', '-c', COLLECTOR_HARNESS, *argv]
+            stdin_bytes = collector_frame(source, request)
+            cmd = [sys.executable, '-I', '-c', COLLECTOR_HARNESS]
         else:
             wlen = spec['wrapper_len']
             if not isinstance(wlen, int) or wlen <= 0 or wlen > len(source):

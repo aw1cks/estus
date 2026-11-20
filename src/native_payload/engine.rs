@@ -398,7 +398,7 @@ impl Engine {
                 let spec = json!({
                     "schema": 1, "operation": "execute", "id": id,
                     "requirements": requirements, "identity": identity,
-                    "sha256": plan.manifest.source_sha256, "argv": argv,
+                    "sha256": plan.manifest.source_sha256, "request": argv,
                     "timeout": remaining.min(600.0), "output_limit": output_limit,
                 });
                 let input = frame(&spec, &plan.source).map_err(Failure::tool)?;

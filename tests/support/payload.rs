@@ -4,8 +4,17 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 // This bridge only imports and calls the shipped module. Cases and assertions belong to Rust.
-const BRIDGE: &str = r#"import importlib.util, json, sys
+const BRIDGE: &str = r#"import importlib.util, json, sys, types
 sys.dont_write_bytecode = True
+request = json.loads(sys.stdin.buffer.read(2097153))
+runtime_spec = importlib.util.spec_from_file_location('estus_bootstrap', sys.argv[2])
+bootstrap = importlib.util.module_from_spec(runtime_spec)
+runtime_spec.loader.exec_module(bootstrap)
+namespace = {'types': types}
+exec(compile(bootstrap.COLLECTOR_RUNTIME, '<estus_runtime>', 'exec'), namespace)
+sys.modules['estus_runtime'] = namespace['_make_runtime'](
+    [namespace['_decode_request'](value) for value in request.get('request', [])]
+)
 spec = importlib.util.spec_from_file_location('catalog_payload', sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -15,7 +24,6 @@ def decode(value):
         return {key: decode(item) for key, item in value.items()}
     if isinstance(value, list): return [decode(item) for item in value]
     return value
-request = json.loads(sys.stdin.buffer.read(2097153))
 try:
     result = {'ok': getattr(module, request['function'])(*decode(request['args']))}
 except Exception as error:
@@ -30,6 +38,17 @@ pub fn bytes(value: &[u8]) -> Value {
 }
 
 pub fn call(role: &str, function: &str, args: Value) -> Result<Value> {
+    call_with_request(role, function, args, Vec::new())
+}
+
+/// Parser tests reach pure functions directly; collectors read the request through the
+/// same `estus_runtime.request()` seam the harness injects, so tests never touch argv.
+pub fn call_with_request(
+    role: &str,
+    function: &str,
+    args: Value,
+    request: Vec<&str>,
+) -> Result<Value> {
     let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"));
@@ -44,12 +63,19 @@ pub fn call(role: &str, function: &str, args: Value) -> Result<Value> {
         Some("native_payload") => bundle.join("collector.py"),
         _ => anyhow::bail!("executor has no standalone collector"),
     };
-    let request = serde_json::to_vec(&json!({"function": function, "args": args}))?;
+    let request = serde_json::to_vec(&json!({
+        "function": function,
+        "args": args,
+        "request": request,
+    }))?;
     ensure!(request.len() <= 2097152, "payload request bound");
+    let bootstrap =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_payload/bootstrap.py");
     let mut child =
         Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
-            .args(["-I", "-c", BRIDGE])
+            .args(["-I", "-B", "-c", BRIDGE])
             .arg(source)
+            .arg(bootstrap)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
