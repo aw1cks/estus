@@ -65,30 +65,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[derive(Clone, Copy)]
 struct Failure {
-    make: fn(&'static str, bool) -> ToolError,
+    code: ErrorCode,
     message: &'static str,
     unknown: bool,
 }
 
 impl Failure {
-    fn tool(self) -> ToolError {
-        (self.make)(self.message, self.unknown)
+    fn into_tool(self) -> ToolError {
+        ToolError::new(self.code, self.message, self.unknown)
     }
 
-    fn code(self) -> ErrorCode {
-        self.tool().code()
-    }
-}
-
-fn failed(
-    make: fn(&'static str, bool) -> ToolError,
-    message: &'static str,
-    unknown: bool,
-) -> Failure {
-    Failure {
-        make,
-        message,
-        unknown,
+    fn into_code(self) -> ErrorCode {
+        self.code
     }
 }
 
@@ -334,7 +322,7 @@ impl Engine {
                     "sha256": plan.manifest.source_sha256, "request": request,
                     "timeout": remaining.min(600.0), "output_limit": output_limit,
                 });
-                let input = frame(&spec, &plan.source).map_err(Failure::tool)?;
+                let input = frame(&spec, &plan.source).map_err(Failure::into_tool)?;
                 let out = match channel(ChannelRequest {
                     session: lease.session(),
                     python,
@@ -354,14 +342,14 @@ impl Engine {
                     // interpreter; a collector outcome is final for this call.
                     Err(error)
                         if matches!(
-                            error.code(),
+                            error.into_code(),
                             ErrorCode::IoError | ErrorCode::ConnectionLost | ErrorCode::SpawnFailed
                         ) =>
                     {
-                        last = Some(error.tool());
+                        last = Some(error.into_tool());
                         continue;
                     }
-                    Err(error) => return Err(error.tool()),
+                    Err(error) => return Err(error.into_tool()),
                 };
                 return terminal(out, &id);
             }
@@ -524,8 +512,8 @@ impl Engine {
                     "timeout": remaining.min(600.0),
                     "output_limit": output_limit,
                 });
-                let input =
-                    frame_bounded(&spec, &combined, MAX_BUNDLE_FRAME).map_err(Failure::tool)?;
+                let input = frame_bounded(&spec, &combined, MAX_BUNDLE_FRAME)
+                    .map_err(Failure::into_tool)?;
                 let out = match channel(ChannelRequest {
                     session: lease.session(),
                     python,
@@ -543,14 +531,14 @@ impl Engine {
                     Ok(out) => out,
                     Err(error)
                         if matches!(
-                            error.code(),
+                            error.into_code(),
                             ErrorCode::IoError | ErrorCode::ConnectionLost | ErrorCode::SpawnFailed
                         ) =>
                     {
-                        last = Some(error.tool());
+                        last = Some(error.into_tool());
                         continue;
                     }
-                    Err(error) => return Err(error.tool()),
+                    Err(error) => return Err(error.into_tool()),
                 };
                 return terminal(out, &id);
             }
@@ -1225,19 +1213,17 @@ fn frame_bounded<'a>(
     source: &'a [u8],
     max_source: usize,
 ) -> Result<Frame<'a>, Failure> {
-    let data = serde_json::to_vec(spec).map_err(|_| {
-        failed(
-            |m, u| ToolError::new(ErrorCode::InvalidArgument, m, u),
-            "Invalid payload frame",
-            false,
-        )
+    let data = serde_json::to_vec(spec).map_err(|_| Failure {
+        code: ErrorCode::InvalidArgument,
+        message: "Invalid payload frame",
+        unknown: false,
     })?;
     if data.len() > MAX_INPUT || source.len() > max_source {
-        return Err(failed(
-            |m, u| ToolError::new(ErrorCode::ResourceLimit, m, u),
-            "Payload frame exceeds bounds",
-            false,
-        ));
+        return Err(Failure {
+            code: ErrorCode::ResourceLimit,
+            message: "Payload frame exceeds bounds",
+            unknown: false,
+        });
     }
     let mut header = Vec::with_capacity(16 + data.len());
     header.extend_from_slice(b"ESTUSNP1");
@@ -1348,33 +1334,25 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().await.map_err(|_| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::ConnectionLost, m, u),
-                "Payload channel failed; remote state is unknown",
-                true,
-            )
+        let mut child = command.spawn().await.map_err(|_| Failure {
+            code: ErrorCode::ConnectionLost,
+            message: "Payload channel failed; remote state is unknown",
+            unknown: true,
         })?;
-        let mut stdin = child.stdin().take().ok_or_else(|| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::IoError, m, u),
-                "Missing payload input pipe",
-                true,
-            )
+        let mut stdin = child.stdin().take().ok_or(Failure {
+            code: ErrorCode::IoError,
+            message: "Missing payload input pipe",
+            unknown: true,
         })?;
-        let stdout = child.stdout().take().ok_or_else(|| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::IoError, m, u),
-                "Missing payload output pipe",
-                true,
-            )
+        let stdout = child.stdout().take().ok_or(Failure {
+            code: ErrorCode::IoError,
+            message: "Missing payload output pipe",
+            unknown: true,
         })?;
-        let stderr = child.stderr().take().ok_or_else(|| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::IoError, m, u),
-                "Missing payload error pipe",
-                true,
-            )
+        let stderr = child.stderr().take().ok_or(Failure {
+            code: ErrorCode::IoError,
+            message: "Missing payload error pipe",
+            unknown: true,
         })?;
         let (out, err, write) =
             tokio::join!(bounded(stdout, limit), bounded(stderr, 0), async move {
@@ -1387,40 +1365,30 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
                 stdin.write_all(input.source).await?;
                 stdin.shutdown().await
             },);
-        let (stdout, overflow) = out.map_err(|_| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::IoError, m, u),
-                "Payload output failed; remote state is unknown",
-                true,
-            )
+        let (stdout, overflow) = out.map_err(|_| Failure {
+            code: ErrorCode::IoError,
+            message: "Payload output failed; remote state is unknown",
+            unknown: true,
         })?;
-        err.map_err(|_| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::IoError, m, u),
-                "Payload error stream failed; remote state is unknown",
-                true,
-            )
+        err.map_err(|_| Failure {
+            code: ErrorCode::IoError,
+            message: "Payload error stream failed; remote state is unknown",
+            unknown: true,
         })?;
-        write.map_err(|_| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::IoError, m, u),
-                "Payload input failed; remote state is unknown",
-                true,
-            )
+        write.map_err(|_| Failure {
+            code: ErrorCode::IoError,
+            message: "Payload input failed; remote state is unknown",
+            unknown: true,
         })?;
-        let status = child.wait().await.map_err(|_| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::ConnectionLost, m, u),
-                "Payload channel lost; remote state is unknown",
-                true,
-            )
+        let status = child.wait().await.map_err(|_| Failure {
+            code: ErrorCode::ConnectionLost,
+            message: "Payload channel lost; remote state is unknown",
+            unknown: true,
         })?;
-        let rc = status.code().ok_or_else(|| {
-            failed(
-                |m, u| ToolError::new(ErrorCode::ConnectionLost, m, u),
-                "Payload exit unavailable; remote state is unknown",
-                true,
-            )
+        let rc = status.code().ok_or(Failure {
+            code: ErrorCode::ConnectionLost,
+            message: "Payload exit unavailable; remote state is unknown",
+            unknown: true,
         })?;
         Ok(Output {
             stdout,
@@ -1430,12 +1398,9 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
     };
     tokio::select! {
         biased;
-        _ = ct.cancelled() => Err(failed(
-            |m, u| ToolError::new(ErrorCode::Cancelled, m, u), "Payload cancelled; remote execution may continue", true)),
-        _ = shutdown.cancelled() => Err(failed(
-            |m, u| ToolError::new(ErrorCode::Cancelled, m, u), "Server stopped; remote execution may continue", true)),
-        _ = sleep_until(deadline) => Err(failed(
-            |m, u| ToolError::new(ErrorCode::Timeout, m, u), "Payload deadline exceeded; remote execution may continue", true)),
+        _ = ct.cancelled() => Err(Failure { code: ErrorCode::Cancelled, message: "Payload cancelled; remote execution may continue", unknown: true }),
+        _ = shutdown.cancelled() => Err(Failure { code: ErrorCode::Cancelled, message: "Server stopped; remote execution may continue", unknown: true }),
+        _ = sleep_until(deadline) => Err(Failure { code: ErrorCode::Timeout, message: "Payload deadline exceeded; remote execution may continue", unknown: true }),
         result = operation => result,
     }
 }
