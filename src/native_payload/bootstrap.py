@@ -14,6 +14,84 @@ import time
 MAX_JSON = 262144
 MAX_SOURCE = 1048576
 
+
+COLLECTOR_HARNESS = r"""import os, re, resource, signal, subprocess, sys, tempfile, types
+
+def _make_runtime():
+    mod = types.ModuleType('estus_runtime')
+    def read_bytes(path, maximum=4096, optional=False):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if optional:
+                return None
+            raise
+        try:
+            data = os.read(fd, maximum + 1)
+        finally:
+            os.close(fd)
+        if len(data) > maximum:
+            raise ValueError('source exceeds bound')
+        return data
+
+    def check_text(value, maximum=4096):
+        if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
+            raise ValueError('invalid or oversized source string')
+        return value
+
+    def boot_id():
+        raw = read_bytes('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
+        if not re.fullmatch(r'[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}', raw):
+            raise ValueError('invalid boot_id')
+        return raw
+
+    def _child_limits():
+        os.setsid()
+        resource.setrlimit(resource.RLIMIT_FSIZE, (262144, 262144))
+
+    def run_bounded(argv, timeout=15, max_bytes=262144):
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                preexec_fn=_child_limits,
+                close_fds=True,
+            )
+            timed_out = False
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                rc = proc.wait()
+            out.seek(0)
+            data = out.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ValueError('subprocess output exceeds bound')
+            return {
+                'returncode': rc,
+                'timed_out': timed_out,
+                'stdout': data.decode('utf-8', 'strict'),
+            }
+
+    mod.read_bytes = read_bytes
+    mod.check_text = check_text
+    mod.boot_id = boot_id
+    mod.run_bounded = run_bounded
+    return mod
+
+sys.modules['estus_runtime'] = _make_runtime()
+del _make_runtime
+sys.argv[0] = '-'
+_src = sys.stdin.buffer.read()
+sys.stdin.close()
+exec(compile(_src, '<estus_collector>', 'exec'), {'__name__': '__main__'})
+"""
 def pairs(items):
     result = {}
     for key, value in items:
@@ -161,7 +239,7 @@ def run():
         for norm, selected_path in selected_execs.items():
             child_env['ESTUS_EXEC_' + norm] = selected_path
         # Source is immutable verified bytes, never a pathname reopened after approval.
-        child = subprocess.Popen([sys.executable, '-I', '-', *argv], stdin=subprocess.PIPE,
+        child = subprocess.Popen([sys.executable, '-I', '-c', COLLECTOR_HARNESS, *argv], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env,
                                  start_new_session=True)
         response['phase'] = 'started'

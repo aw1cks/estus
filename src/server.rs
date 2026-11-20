@@ -80,7 +80,10 @@ impl Estus {
                     config.allows_dynamic_hosts(),
                     config.quarantine_state_dir(),
                 )?,
-                payload: crate::native_payload::Engine::new(shutdown.clone()),
+                payload: crate::native_payload::Engine::new_with_shared_pool(
+                    shutdown.clone(),
+                    Some(Arc::clone(&pool)),
+                ),
                 config,
                 tools,
                 sudo_name,
@@ -114,14 +117,15 @@ impl Estus {
         self.state.tasks.close();
         // Local owners must reap before runtime teardown; native cleanup keeps
         // its existing independent bound. An unkillable OS child can delay shutdown.
-        tokio::join!(self.state.local_tasks.wait(), async {
-            let _ = tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()).await;
-            if let Some(directories) = &self.state.directories {
-                directories.shutdown().await;
-            }
-            self.state.pool.shutdown().await;
-        },);
+        let (_, _) = tokio::join!(
+            self.state.local_tasks.wait(),
+            tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()),
+        );
+        if let Some(directories) = &self.state.directories {
+            directories.shutdown().await;
+        }
         self.state.payload.shutdown().await;
+        self.state.pool.shutdown().await;
         self.state.outputs.shutdown().await;
     }
 }

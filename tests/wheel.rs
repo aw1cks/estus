@@ -1262,9 +1262,8 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
     let first = tags.next().context("WHEEL has no compatibility tag")?;
     for tag in std::iter::once(first).chain(tags) {
         ensure!(
-            tag.rsplit_once('-')
-                .is_some_and(|(_, value)| value == platform),
-            "wheel metadata declares an unexpected platform: {tag}"
+            tag == format!("py3-none-{platform}"),
+            "wheel metadata declares an unexpected tag (expected py3-none-{platform}): {tag}"
         );
     }
 

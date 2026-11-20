@@ -43,6 +43,7 @@
             if res.returncode != 0:
                 sys.exit(res.returncode)
         check("3.8", [src / "src/native_payload/bootstrap.py", src / "src/native_payload/prestate.py"])
+        check("3.10", [src / "python/estus/__init__.py", src / "setup.py"])
         groups = {}
         for p in sorted((src / "catalog/payloads").iterdir()):
             manifest = json.loads((p / "manifest.json").read_text())
@@ -50,6 +51,19 @@
             groups.setdefault(f"{maj}.{mino}", []).append(p / "collector.py")
         for py_min, files in sorted(groups.items()):
             check(py_min, files)
+        import ast
+        guarded = [src / "src/native_payload/prestate.py", src / "python/estus/__init__.py", src / "setup.py"]
+        guarded.extend(sorted((src / "catalog/payloads").glob("*/collector.py")))
+        for path in guarded:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec"):
+                        raise SystemExit(f"forbidden dynamic {node.func.id}() in {path}")
+                    for kw in node.keywords:
+                        if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                            raise SystemExit(f"forbidden shell=True in {path}")
+        ast.parse((src / "src/native_payload/bootstrap.py").read_text(encoding="utf-8"))
         PY
         touch "$out"
       '';

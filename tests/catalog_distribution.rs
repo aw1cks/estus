@@ -703,3 +703,33 @@ fn sre_skill_lists_every_published_builtin_and_catalog_tool() {
     assert_eq!(actual, expected);
     actual.clear();
 }
+
+#[test]
+fn python_sources_pass_ast_and_dangerous_call_guard() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let status = std::process::Command::new("python3")
+        .args([
+            "-I",
+            "-c",
+            r#"
+import ast, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+guarded = [root / "src/native_payload/prestate.py", root / "python/estus/__init__.py", root / "setup.py"]
+guarded.extend(sorted((root / "catalog/payloads").glob("*/collector.py")))
+for path in guarded:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec"):
+                raise SystemExit(f"forbidden {node.func.id}() in {path}")
+            for kw in node.keywords:
+                if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                    raise SystemExit(f"forbidden shell=True in {path}")
+ast.parse((root / "src/native_payload/bootstrap.py").read_text(encoding="utf-8"))
+"#,
+        ])
+        .arg(root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

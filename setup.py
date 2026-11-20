@@ -6,7 +6,10 @@ import shutil
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
-
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel
+except ImportError:
+    from wheel.bdist_wheel import bdist_wheel  # type: ignore[no-redef]
 
 def catalog_sources():
     root = Path(__file__).resolve().parent / "catalog"
@@ -80,6 +83,12 @@ class BuildPy(build_py):
         return super().get_source_files() + [str(source.relative_to(root)) for source, _ in catalog_sources()]
 
 
+class BdistWheel(bdist_wheel):
+    def get_tag(self):
+        _, _, plat = super().get_tag()
+        return "py3", "none", plat
+
+
 # Register before setuptools-rust finalizes the Distribution. A TOML cmdclass
 # table replaces the plugin's complete command map, including build_ext.
-setup(cmdclass={"build_py": BuildPy})
+setup(cmdclass={"build_py": BuildPy, "bdist_wheel": BdistWheel})

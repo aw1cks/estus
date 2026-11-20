@@ -25,7 +25,7 @@ let
     "manylinux_2_17_${pkgs.stdenv.hostPlatform.uname.processor}"
   else
     "macosx_11_0_arm64";
-  wheelName = "${lib.replaceStrings [ "-" ] [ "_" ] metadata.name}-${metadata.version}-cp314-cp314-${platformTag}.whl";
+  wheelName = "${lib.replaceStrings [ "-" ] [ "_" ] metadata.name}-${metadata.version}-py3-none-${platformTag}.whl";
   wheelSrc = lib.cleanSourceWith {
     src = sourceRoot;
     filter = path: type:

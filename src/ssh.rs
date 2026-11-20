@@ -29,12 +29,12 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 const CHANNELS: usize = 4;
 const IDLE: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(2);
+const SOCKET_POLL: Duration = Duration::from_millis(5);
 const READINESS_POLL: Duration = Duration::from_millis(25);
 const MAX_SOCKET_BYTES: usize = 100;
 const SOCKET_ENTRY_RESERVE_BYTES: usize = 12;
 
-type Key = (String, IdentityRole);
-
+type Key = (String, String, IdentityRole);
 #[derive(Clone, Copy)]
 enum Policy {
     Native,
@@ -215,6 +215,17 @@ impl Pool {
         )
     }
 
+    pub(crate) fn matches_native_transport(
+        &self,
+        executable: &Path,
+        ssh_config: Option<&Path>,
+    ) -> bool {
+        matches!(self.policy, Policy::Native)
+            && self.agent.is_none()
+            && self.executable == executable
+            && self.ssh_config.as_deref() == ssh_config
+    }
+
     fn with_policy(
         executable: PathBuf,
         ssh_config: Option<PathBuf>,
@@ -252,7 +263,7 @@ impl Pool {
             }
         };
         check_control()?;
-        let key = (target.to_owned(), role);
+        let key = (target.to_owned(), destination.to_owned(), role);
         enum AcquireStep {
             Ready {
                 entry: Arc<Entry>,
@@ -779,7 +790,24 @@ async fn ready(
     entry: &Entry,
     control: &EntryControl,
 ) -> Result<(), Failure> {
+    let socket = master
+        .directory
+        .as_ref()
+        .map(|dir| dir.path().join("c"))
+        .ok_or(Failure::Connect)?;
     let child = master.child.as_mut().ok_or(Failure::Connect)?;
+    // Wait for OpenSSH to bind the Unix control socket before spawning `ssh -O check`.
+    while tokio::fs::symlink_metadata(&socket).await.is_err() {
+        tokio::select! {
+            biased;
+            _ = entry.stop.cancelled() => return Err(Failure::Cancelled),
+            _ = control.shutdown.cancelled() => return Err(Failure::Cancelled),
+            _ = control.stopping.cancelled() => return Err(Failure::Cancelled),
+            _ = connect_deadline(control.deadline) => return Err(Failure::Timeout),
+            _ = child.wait() => return Err(Failure::Connect),
+            _ = sleep(SOCKET_POLL) => {}
+        }
+    }
     loop {
         tokio::select! {
             biased;
@@ -889,7 +917,7 @@ async fn run_entry(
     destination: String,
     control: EntryControl,
 ) {
-    let role = key.1;
+    let role = key.2;
     let mut finalizer = Some(EntryFinalizer {
         owner,
         key,
@@ -1009,7 +1037,11 @@ mod tests {
             Duration::from_secs(1),
             CancellationToken::new(),
         );
-        let key = ("unwind-owned".to_owned(), IdentityRole::Ordinary);
+        let key = (
+            "unwind-owned".to_owned(),
+            "unwind-owned".to_owned(),
+            IdentityRole::Ordinary,
+        );
         let entry = Arc::new(Entry {
             generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             state: Mutex::new(State {
@@ -1092,7 +1124,11 @@ mod tests {
             Duration::from_secs(1),
             CancellationToken::new(),
         );
-        let key = ("reacquire-target".to_owned(), IdentityRole::Ordinary);
+        let key = (
+            "reacquire-target".to_owned(),
+            "reacquire-target".to_owned(),
+            IdentityRole::Ordinary,
+        );
         let old = test_entry(0, Instant::now());
         let old_gen = old.generation;
         old.stop.cancel();
@@ -1140,7 +1176,11 @@ mod tests {
         let now = Instant::now();
         let mut entries_list = Vec::new();
         for i in 0..MAX_MASTERS {
-            let key = (format!("host-{i:02}"), IdentityRole::Ordinary);
+            let key = (
+                format!("host-{i:02}"),
+                format!("host-{i:02}"),
+                IdentityRole::Ordinary,
+            );
             let idle_at = now - Duration::from_secs((MAX_MASTERS - i) as u64);
             let entry = test_entry(0, idle_at);
             if i == 5 {
@@ -1186,7 +1226,11 @@ mod tests {
             CancellationToken::new(),
         );
         for i in 0..MAX_MASTERS {
-            let key = (format!("busy-{i:02}"), IdentityRole::Ordinary);
+            let key = (
+                format!("busy-{i:02}"),
+                format!("busy-{i:02}"),
+                IdentityRole::Ordinary,
+            );
             lock(&busy_pool.entries).insert(key, test_entry(1, Instant::now()));
         }
         let err = busy_pool
@@ -1211,7 +1255,11 @@ mod tests {
             Duration::from_secs(1),
             CancellationToken::new(),
         );
-        let key = ("race-target".to_owned(), IdentityRole::Ordinary);
+        let key = (
+            "race-target".to_owned(),
+            "race-target".to_owned(),
+            IdentityRole::Ordinary,
+        );
         let old = test_entry(0, Instant::now());
         lock(&pool.entries).insert(key.clone(), Arc::clone(&old));
 

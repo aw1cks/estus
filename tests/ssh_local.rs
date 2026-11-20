@@ -7673,6 +7673,14 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
             ensure!(targets_data["mode"] == "open");
             ensure!(targets_data["targets"] == json!([]));
 
+            let stat = script_wire_call(
+                &mut server,
+                30,
+                "observe_stat",
+                json!({"host": "plain", "path": "/"}),
+            )
+            .await?;
+            ensure!(stat["error"].is_null(), "observe_stat failed: {stat}");
             for (id, name, inputs) in [
                 (4, "observe_cpu", json!({"limit": 4})),
                 (5, "observe_memory", json!({})),
@@ -7714,7 +7722,14 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
             anyhow::bail!("{err}; stderr: {}", log.text());
         }
         let gone = match owned {
-            Ok(owned) => assert_masters_gone(&owned).await,
+            Ok(owned) => {
+                ensure!(
+                    owned.len() == 1,
+                    "expected native SFTP and native payloads to share 1 SSH ControlMaster, saw {}: {owned:?}",
+                    owned.len()
+                );
+                assert_masters_gone(&owned).await
+            }
             Err(error) => Err(error),
         };
         let _ = stopped?;

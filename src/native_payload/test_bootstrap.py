@@ -218,5 +218,23 @@ class Execution(unittest.TestCase):
                 self.assertEqual(evidence['error_reason'], expected)
                 self.assertNotIn(secret, json.dumps(evidence))
                 self.assertNotIn('stderr', evidence)
+
+    def test_estus_runtime_helper_module_provides_bounded_reads_and_subprocess_supervision(self):
+        source = (
+            b"from __future__ import annotations\n"
+            b"import estus_runtime, json, sys\n"
+            b"bid = estus_runtime.boot_id()\n"
+            b"txt = estus_runtime.check_text('ok', 16)\n"
+            b"missing = estus_runtime.read_bytes('/nonexistent-estus-runtime-path', 64, optional=True)\n"
+            b"res = estus_runtime.run_bounded([sys.executable, '-c', 'import time; time.sleep(5)'], timeout=0.1)\n"
+            b"print(json.dumps({'boot_len': len(bid), 'txt': txt, 'missing': missing, 'timed_out': res['timed_out']}))\n"
+        )
+        exit_code, evidence = self.execute(source, timeout=3)
+        self.assertEqual(exit_code, 0)
+        out = json.loads(evidence['stdout'])
+        self.assertEqual(out['boot_len'], 36)
+        self.assertEqual(out['txt'], 'ok')
+        self.assertIsNone(out['missing'])
+        self.assertTrue(out['timed_out'])
 if __name__ == '__main__':
     unittest.main()

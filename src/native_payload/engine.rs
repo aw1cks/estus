@@ -96,20 +96,29 @@ impl Drop for ProbeCompletion {
 
 /// One engine belongs to one activated config generation, never a process-global pool.
 pub(crate) struct Engine {
+    shared_pool: Option<Arc<Pool>>,
     pools: Mutex<HashMap<String, Arc<Pool>>>,
     probes: Mutex<HashMap<String, Arc<Probe>>>,
     shutdown: CancellationToken,
 }
 
 impl Engine {
+    #[cfg(test)]
     pub(crate) fn new(shutdown: CancellationToken) -> Arc<Self> {
+        Self::new_with_shared_pool(shutdown, None)
+    }
+
+    pub(crate) fn new_with_shared_pool(
+        shutdown: CancellationToken,
+        shared_pool: Option<Arc<Pool>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            shared_pool,
             pools: Mutex::new(HashMap::new()),
             probes: Mutex::new(HashMap::new()),
             shutdown,
         })
     }
-
     pub(crate) async fn shutdown(&self) {
         let pools: Vec<_> = lock(&self.pools).values().cloned().collect();
         let probes: Vec<_> = lock(&self.probes).values().cloned().collect();
@@ -147,6 +156,12 @@ impl Engine {
             "python": target.target.python,
         }))
         .map_err(|_| ToolError::invalid_argument("Invalid transport identity", false))?;
+        if matches!(target.agent, AutomationAgent::Inherit)
+            && let Some(shared) = &self.shared_pool
+            && shared.matches_native_transport(target.ssh_executable, target.ssh_config)
+        {
+            return Ok((key, Arc::clone(shared)));
+        }
         let mut pools = lock(&self.pools);
         if let Some(pool) = pools.get(&key) {
             return Ok((key, Arc::clone(pool)));
