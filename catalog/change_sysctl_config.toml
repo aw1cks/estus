@@ -23,7 +23,7 @@ targets = ["server"]
 authority = "automation:catalog"
 effects = ["persistent_write", "runtime_write", "read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/change_sysctl_config.payload.json", source = "/etc/estus/payloads/change_sysctl_config/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3" }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_keys" = ["kernel.printk_ratelimit"] }
 constraints = { allowed_keys = ["kernel.printk_ratelimit"] }
 input_map = { "key" = "key", "value" = "value" }
 limits = { timeout_secs = 40 }

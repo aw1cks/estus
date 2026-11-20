@@ -3,9 +3,15 @@ def main():
     import json, time, ipaddress, socket
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    for field in ('destinations'):
+        value = policy.get(field)
+        if not (isinstance(value, list) and value):
+            raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
+        if any(not isinstance(entry, str) for entry in value):
+            raise ValueError('operator policy allowlist entries must be strings')
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
-        if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')
+        if not estus_runtime.allowed(value, policy['destinations']): raise ValueError('destination outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):
@@ -27,7 +33,7 @@ def main():
         print(raw)
 
     dest=destination()
-    if policy['ports'] and '*' not in policy['ports'] and p['destination_port'] not in policy['ports']: raise ValueError('port outside operator policy')
+    if not estus_runtime.allowed(str(p['destination_port']), [str(v) for v in policy['ports']]): raise ValueError('port outside operator policy')
     start=time.monotonic()
     connected=False
     try:

@@ -3,6 +3,12 @@ def main():
     import json, os, re
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    for field in ('interfaces'):
+        value = policy.get(field)
+        if not (isinstance(value, list) and value):
+            raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
+        if any(not isinstance(entry, str) for entry in value):
+            raise ValueError('operator policy allowlist entries must be strings')
     SCOPE = 'approved_interfaces'
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
@@ -14,7 +20,7 @@ def main():
         return rows
     def interface():
         value=p.get('interface',policy.get('interface'))
-        if (policy['interfaces'] and '*' not in policy['interfaces'] and (not value or value not in policy['interfaces'])) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
+        if not estus_runtime.allowed(value, policy['interfaces']) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
         return value
     def emit(value):
         if 'entries' in value:
@@ -47,7 +53,7 @@ def main():
     if 'interface' in p: args+=['dev',interface()]
     out=[]
     for r in ip(args):
-        if '*' not in policy['interfaces'] and r['ifname'] not in policy['interfaces']: continue
+        if not estus_runtime.allowed(r['ifname'], policy['interfaces']): continue
         for a in r.get('addr_info',[]):
             if p.get('family',a['family'])!=a['family'] or p.get('scope',a['scope'])!=a['scope']: continue
             out.append({'interface':r['ifname'],'family':a['family'],'address':a['local'],'prefix_length':a['prefixlen'],'scope':a['scope']})

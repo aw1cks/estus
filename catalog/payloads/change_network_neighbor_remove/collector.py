@@ -3,6 +3,12 @@ def main():
     import json, os, ipaddress, re
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    for field in ('interfaces', 'destinations', 'neighbors'):
+        value = policy.get(field)
+        if not (isinstance(value, list) and value):
+            raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
+        if any(not isinstance(entry, str) for entry in value):
+            raise ValueError('operator policy allowlist entries must be strings')
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
             argv, timeout=timeout, max_bytes=131072, accepted=accepted)
@@ -13,11 +19,11 @@ def main():
         return rows
     def interface():
         value=p.get('interface',policy.get('interface'))
-        if (policy['interfaces'] and '*' not in policy['interfaces'] and (not value or value not in policy['interfaces'])) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
+        if not estus_runtime.allowed(value, policy['interfaces']) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
         return value
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
-        if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')
+        if not estus_runtime.allowed(value, policy['destinations']): raise ValueError('destination outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):
@@ -39,7 +45,7 @@ def main():
         print(raw)
 
     dev=interface(); dest=destination()
-    if (policy['interfaces'] and '*' not in policy['interfaces'] and dev not in policy['interfaces']) or (policy['neighbors'] and '*' not in policy['neighbors'] and dest not in policy['neighbors']): raise ValueError('neighbor mutation outside policy')
+    if (not estus_runtime.allowed(dev, policy['interfaces'])) or (not estus_runtime.allowed(dest, policy['neighbors'])): raise ValueError('neighbor mutation outside policy')
     run([os.environ['ESTUS_EXEC_IP'],'neighbor','del',dest,'dev',dev])
     if any(r.get('dst')==dest for r in ip(['neighbor','show','dev',dev])): raise ValueError('neighbor readback mismatch')
     emit({'interface':dev,'operation':'network_neighbor_remove','verified':True,'persistence':'runtime_only'})

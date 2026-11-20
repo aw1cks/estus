@@ -29,7 +29,7 @@ def main():
     if 'unit' in request:
         unit = request['unit']
         allowed = request.get('allowed_units')
-        if not isinstance(unit, str) or not re.fullmatch(r'[A-Za-z0-9_@.:-]{1,128}', unit) or (isinstance(allowed, list) and allowed and '*' not in allowed and unit not in allowed):
+        if not isinstance(unit, str) or not re.fullmatch(r'[A-Za-z0-9_@.:-]{1,128}', unit) or (not estus_runtime.allowed(unit, allowed)):
             raise ValueError('unit is outside operator allowlist')
     result = {'scope': scope}
     run(['mask', '--no-reload', '--', unit])

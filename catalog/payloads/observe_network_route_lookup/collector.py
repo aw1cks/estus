@@ -3,6 +3,12 @@ def main():
     import json, os, ipaddress
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    for field in ('destinations'):
+        value = policy.get(field)
+        if not (isinstance(value, list) and value):
+            raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
+        if any(not isinstance(entry, str) for entry in value):
+            raise ValueError('operator policy allowlist entries must be strings')
     SCOPE = 'current_network_namespace'
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
@@ -14,7 +20,7 @@ def main():
         return rows
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
-        if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')
+        if not estus_runtime.allowed(value, policy['destinations']): raise ValueError('destination outside operator policy')
         return value
     def emit(value):
         if 'entries' in value:

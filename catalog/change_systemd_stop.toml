@@ -26,7 +26,7 @@ targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/change_systemd_stop.payload.json", source = "/etc/estus/payloads/change_systemd_stop/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
 input_map = { "unit" = "unit" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "minLength" = 1, "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }

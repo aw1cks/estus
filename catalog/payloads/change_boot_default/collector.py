@@ -90,7 +90,7 @@ def main():
         if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_@.+:-]{0,254}', ident) or '..' in ident:
             raise ValueError('entry ID invalid')
         allowed = a.get('allowed_entries')
-        if not isinstance(allowed, list) or not allowed or ('*' not in allowed and ident not in allowed):
+        if not estus_runtime.allowed(ident, allowed):
             raise ValueError('entry ID not approved')
         matches = [(v,e) for v,e in entries() if v['entry_id'] == ident]
         if len(matches) != 1:

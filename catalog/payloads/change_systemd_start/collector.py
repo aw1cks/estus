@@ -11,13 +11,9 @@ PROJECTION_BOUND = 4096
 
 
 def unit_allowed(unit, allowed):
-    if not isinstance(unit, str) or UNIT_PATTERN.fullmatch(unit) is None:
+    if UNIT_PATTERN.fullmatch(unit or '') is None:
         return False
-    if allowed is None:
-        return True
-    if not isinstance(allowed, list) or not allowed:
-        return True
-    return '*' in allowed or unit in allowed
+    return estus_runtime.allowed(unit, allowed)
 
 
 def systemctl(scope, args):

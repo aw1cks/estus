@@ -3,6 +3,12 @@ def main():
     import json, os
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    for field in ('namespaces'):
+        value = policy.get(field)
+        if not (isinstance(value, list) and value):
+            raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
+        if any(not isinstance(entry, str) for entry in value):
+            raise ValueError('operator policy allowlist entries must be strings')
     SCOPE = 'approved_named_namespaces'
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
@@ -41,7 +47,7 @@ def main():
 
     out=[]
     for r in ip(['netns','list']):
-        if policy['namespaces'] and '*' not in policy['namespaces'] and r['name'] not in policy['namespaces']: continue
+        if not estus_runtime.allowed(r['name'], policy['namespaces']): continue
         x={'name':r['name']}
         if 'id' in r and r['id']>=0: x['id']=r['id']
         out.append(x)

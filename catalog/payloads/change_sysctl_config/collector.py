@@ -18,7 +18,7 @@ def main():
     key,value=args[0],args[1]
     if not isinstance(key,str): raise ValueError('unapproved typed sysctl')
     approved_keys=args[2] if len(args)>=3 else None
-    if not isinstance(approved_keys,list) or not approved_keys or ('*' not in approved_keys and key not in approved_keys): raise ValueError('unapproved typed sysctl')
+    if not estus_runtime.allowed(key, approved_keys): raise ValueError('unapproved typed sysctl')
     if ('..' in key or '/' in key or not re.fullmatch(r'[a-z0-9_]+(?:\.[a-z0-9_-]+)+',key)
             or type(value) is not int or not 0<=value<=MAX):
         raise ValueError('unapproved typed sysctl')

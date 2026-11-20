@@ -16,7 +16,7 @@ targets = ["server"]
 authority = "automation"
 effects = ["probe"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_tcp_connect_probe.payload.json", source = "/etc/estus/payloads/inspect_tcp_connect_probe/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interfaces" = [], "destinations" = [], "ports" = [], "addresses" = [], "routes" = [], "neighbors" = [], "namespaces" = [], "dns_names" = [] } }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
 input_map = { "destination" = "destination", "destination_port" = "destination_port", "probe_timeout" = "timeout" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "destination" = { "type" = "string", "minLength" = 1, "maxLength" = 64 }, "destination_port" = { "type" = "integer", "minimum" = 1024, "maximum" = 65535 }, "timeout" = { "type" = "integer", "minimum" = 1, "maximum" = 3 } }, "required" = ["destination", "destination_port", "timeout"], "additionalProperties" = false }

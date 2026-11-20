@@ -16,7 +16,7 @@ targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/observe_filesystem_usage.payload.json", source = "/etc/estus/payloads/observe_filesystem_usage/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "configured_paths" = { "root" = "/", "var" = "/var", "tmp" = "/tmp" } }
+fixed_args = { "target_python" = "/usr/bin/python3", "configured_paths" = { "data" = "/var/lib/estus-catalog" } }
 input_map = { "path_id" = "path_id" }
 limits = { timeout_secs = 20 }
 [tools.observe_filesystem_usage.input_schema]

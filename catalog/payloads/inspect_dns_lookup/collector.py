@@ -3,6 +3,12 @@ def main():
     import json, os, ipaddress, socket, struct
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    for field in ('dns_names'):
+        value = policy.get(field)
+        if not (isinstance(value, list) and value):
+            raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
+        if any(not isinstance(entry, str) for entry in value):
+            raise ValueError('operator policy allowlist entries must be strings')
     def emit(value):
         def measure(v,depth=0):
             if depth>8: raise ValueError('result depth exceeded')
@@ -23,8 +29,9 @@ def main():
         print(raw)
 
     name=p['name']; resolver=p.get('resolver') or policy.get('resolver')
-    if policy.get('resolver') and resolver!=policy['resolver']: raise ValueError('DNS target outside operator policy')
-    if policy.get('dns_names') and '*' not in policy['dns_names'] and name not in policy['dns_names']: raise ValueError('DNS target outside operator policy')
+    if not isinstance(policy.get('resolver'), str) or not policy['resolver']: raise ValueError('operator policy requires an explicit resolver')
+    if resolver!=policy['resolver']: raise ValueError('DNS target outside operator policy')
+    if not estus_runtime.allowed(name, policy.get('dns_names')): raise ValueError('DNS target outside operator policy')
     port=policy.get('dns_port') if policy.get('dns_port') is not None else 53
     qtype={'A':1,'AAAA':28}[p['type']]
     ident=int.from_bytes(os.urandom(2),'big')
