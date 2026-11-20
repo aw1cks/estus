@@ -4,7 +4,7 @@ use rmcp::model::RequestId;
 
 use crate::{
     audit::Metadata,
-    bindings::{BindingId, BindingRequest},
+    bindings::{BindingId, BindingRequest, CompiledBinding},
     command::{ExecRequest, Invocation, RunRequest, SudoRequest},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, ToolId, ToolKey},
     reply::ToolError,
@@ -62,10 +62,7 @@ impl Operation {
                 format!("sudo:{}", req.user),
             ),
             Self::Binding { id, .. } => {
-                let binding = config
-                    .bindings()
-                    .get(*id)
-                    .expect("registered binding exists");
+                let binding = Self::binding(*id, config);
                 let mode = if binding.is_shared_read() {
                     AdmissionMode::SharedRead
                 } else if binding.is_probe_only() {
@@ -114,11 +111,7 @@ impl Operation {
                 None,
             ),
             Self::Binding { id, request } => {
-                let binding = state
-                    .config
-                    .bindings()
-                    .get(*id)
-                    .expect("registered binding exists");
+                let binding = Self::binding(*id, &state.config);
                 let host = binding
                     .targets
                     .contains(&request.host)
@@ -199,11 +192,8 @@ impl Operation {
                 )
             }
             Self::Binding { id, request } => {
+                let binding = Self::binding(*id, config);
                 let target = config.resolve_binding(&request.host, *id)?;
-                let binding = config
-                    .bindings()
-                    .get(*id)
-                    .expect("registered binding exists");
                 let prepared = binding.prepare(request, config.limits())?;
                 return Ok(PreparedCommand {
                     target,
@@ -221,6 +211,16 @@ impl Operation {
             stdin,
             max_output_bytes: config.limits().max_output_bytes,
         })
+    }
+
+    /// Resolves a binding id to its compiled form. The id was already verified at
+    /// dispatch (see `Estus::binding` / `Estus::command`), so this can only fail on
+    /// an internal bug.
+    pub(super) fn binding(id: BindingId, config: &Config) -> &CompiledBinding {
+        config
+            .bindings()
+            .get(id)
+            .expect("binding was resolved at dispatch")
     }
 }
 
@@ -322,13 +322,9 @@ impl State {
     pub(super) fn controller_metadata<'a>(
         &'a self,
         id: BindingId,
+        binding: &'a CompiledBinding,
         request_id: &'a RequestId,
     ) -> Metadata<'a> {
-        let binding = self
-            .config
-            .bindings()
-            .get(id)
-            .expect("registered controller binding exists");
         Metadata {
             request_id,
             tool: self.binding_name(id),

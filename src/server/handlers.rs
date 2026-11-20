@@ -128,12 +128,9 @@ impl Estus {
         arguments: JsonObject,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let binding = self
-            .state
-            .config
-            .bindings()
-            .get(id)
-            .expect("registered binding exists");
+        // Verify the binding exists once at dispatch; handlers below reuse this
+        // resolved reference instead of re-deriving it.
+        let binding = super::preparation::Operation::binding(id, &self.state.config);
         let mode = arguments
             .get("host")
             .and_then(serde_json::Value::as_str)
@@ -162,7 +159,7 @@ impl Estus {
                 );
                 if binding.is_controller() {
                     self.state
-                        .controller_metadata(id, &context.id)
+                        .controller_metadata(id, binding, &context.id)
                         .reject_controller(
                             Instant::now(),
                             &ControllerError::invalid_argument(

@@ -20,12 +20,8 @@ impl Estus {
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let binding = self
-            .state
-            .config
-            .bindings()
-            .get(id)
-            .expect("registered binding exists");
+        // Resolved once at dispatch (see Estus::binding).
+        let binding = super::preparation::Operation::binding(id, &self.state.config);
         budget.automation_reserve(&request.host, Some(activated.projection.max_bytes))?;
         let identity_role = activated.authority.identity_role();
         let authority = activated.authority.label().into_owned();

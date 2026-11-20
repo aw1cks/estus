@@ -25,12 +25,8 @@ impl Estus {
         use crate::reply::AutomationData;
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
-        let binding = self
-            .state
-            .config
-            .bindings()
-            .get(id)
-            .expect("registered binding exists");
+        // Resolved once at dispatch (see Estus::binding).
+        let binding = super::preparation::Operation::binding(id, &self.state.config);
         budget.automation_reserve(
             &request.host,
             activated.projection.as_ref().map(|plan| plan.max_bytes),
@@ -326,7 +322,9 @@ impl Estus {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let started = Instant::now();
-        let metadata = self.state.controller_metadata(id, &context.id);
+        // Resolved once at dispatch (see Estus::binding).
+        let binding = super::preparation::Operation::binding(id, &self.state.config);
+        let metadata = self.state.controller_metadata(id, binding, &context.id);
         let budget = ReplyBudget::new(&context.id)?;
         let capture_limit = match budget.controller_capture_limit(request.retain_output) {
             Ok(limit) => limit,
@@ -349,12 +347,6 @@ impl Estus {
                     "Controller operation is not authorized",
                 ));
             }
-            let binding = self
-                .state
-                .config
-                .bindings()
-                .get(id)
-                .expect("registered binding exists");
             let prepared = binding.prepare_activated_controller(
                 &plan,
                 &request,
@@ -401,7 +393,11 @@ impl Estus {
             super::launch::spawn_surviving(&self.state.local_tasks, move |sender| async move {
                 let _credit = crate::progress::HandlerCredit::from_context(&context);
                 let permit = permit;
-                let metadata = state.controller_metadata(id, &context.id);
+                let metadata = state.controller_metadata(
+                    id,
+                    super::preparation::Operation::binding(id, &state.config),
+                    &context.id,
+                );
                 let audit = Audit::start(metadata, started);
                 let retention = request.retain_output.then(|| state.outputs.reserve());
                 let run = crate::controller::run(
