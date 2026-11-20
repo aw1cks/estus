@@ -50,35 +50,7 @@ const KNOWN_EXECUTORS: &[&str] = &[
 /// Closed set of quarantine causes; persisted and audited by wire string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum QuarantineCause {
-    AlreadyExists,
-    AutomationFailed,
-    Cancelled,
-    ChecksumMismatch,
-    CleanupIncomplete,
-    CommandFailed,
-    ConnectionLost,
-    ControllerResourceLimit,
-    DiscoveryFailed,
-    InvalidArgument,
-    InvalidEncoding,
-    InvalidProjection,
-    InvalidResult,
-    IoError,
-    NotFound,
-    PayloadFailed,
-    PayloadRejected,
-    PermissionDenied,
-    PolicyDenied,
-    PreviewRequired,
-    ResourceLimit,
-    ResourceUnavailable,
-    Shutdown,
-    SpawnFailed,
-    SshConnectFailed,
-    SshSpawnFailed,
-    TargetQuarantined,
-    Timeout,
-    Unsupported,
+    Error(ErrorCode),
     UnsupportedWorkspaceEntry,
     WorkerLost,
 }
@@ -86,112 +58,22 @@ pub(super) enum QuarantineCause {
 impl QuarantineCause {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
-            Self::AlreadyExists => "already_exists",
-            Self::AutomationFailed => "automation_failed",
-            Self::Cancelled => "cancelled",
-            Self::ChecksumMismatch => "checksum_mismatch",
-            Self::CleanupIncomplete => "cleanup_incomplete",
-            Self::CommandFailed => "command_failed",
-            Self::ConnectionLost => "connection_lost",
-            Self::ControllerResourceLimit => "controller_resource_limit",
-            Self::DiscoveryFailed => "discovery_failed",
-            Self::InvalidArgument => "invalid_argument",
-            Self::InvalidEncoding => "invalid_encoding",
-            Self::InvalidProjection => "invalid_projection",
-            Self::InvalidResult => "invalid_result",
-            Self::IoError => "io_error",
-            Self::NotFound => "not_found",
-            Self::PayloadFailed => "payload_failed",
-            Self::PayloadRejected => "payload_rejected",
-            Self::PermissionDenied => "permission_denied",
-            Self::PolicyDenied => "policy_denied",
-            Self::PreviewRequired => "preview_required",
-            Self::ResourceLimit => "resource_limit",
-            Self::ResourceUnavailable => "resource_unavailable",
-            Self::Shutdown => "shutdown",
-            Self::SpawnFailed => "spawn_failed",
-            Self::SshConnectFailed => "ssh_connect_failed",
-            Self::SshSpawnFailed => "ssh_spawn_failed",
-            Self::TargetQuarantined => "target_quarantined",
-            Self::Timeout => "timeout",
-            Self::Unsupported => "unsupported",
+            Self::Error(code) => ErrorCode::as_str(code),
             Self::UnsupportedWorkspaceEntry => "unsupported_workspace_entry",
             Self::WorkerLost => "worker_lost",
         }
     }
 
     fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "already_exists" => Some(Self::AlreadyExists),
-            "automation_failed" => Some(Self::AutomationFailed),
-            "cancelled" => Some(Self::Cancelled),
-            "checksum_mismatch" => Some(Self::ChecksumMismatch),
-            "cleanup_incomplete" => Some(Self::CleanupIncomplete),
-            "command_failed" => Some(Self::CommandFailed),
-            "connection_lost" => Some(Self::ConnectionLost),
-            "controller_resource_limit" => Some(Self::ControllerResourceLimit),
-            "discovery_failed" => Some(Self::DiscoveryFailed),
-            "invalid_argument" => Some(Self::InvalidArgument),
-            "invalid_encoding" => Some(Self::InvalidEncoding),
-            "invalid_projection" => Some(Self::InvalidProjection),
-            "invalid_result" => Some(Self::InvalidResult),
-            "io_error" => Some(Self::IoError),
-            "not_found" => Some(Self::NotFound),
-            "payload_failed" => Some(Self::PayloadFailed),
-            "payload_rejected" => Some(Self::PayloadRejected),
-            "permission_denied" => Some(Self::PermissionDenied),
-            "policy_denied" => Some(Self::PolicyDenied),
-            "preview_required" => Some(Self::PreviewRequired),
-            "resource_limit" => Some(Self::ResourceLimit),
-            "resource_unavailable" => Some(Self::ResourceUnavailable),
-            "shutdown" => Some(Self::Shutdown),
-            "spawn_failed" => Some(Self::SpawnFailed),
-            "ssh_connect_failed" => Some(Self::SshConnectFailed),
-            "ssh_spawn_failed" => Some(Self::SshSpawnFailed),
-            "target_quarantined" => Some(Self::TargetQuarantined),
-            "timeout" => Some(Self::Timeout),
-            "unsupported" => Some(Self::Unsupported),
+        let extra = match value {
             "unsupported_workspace_entry" => Some(Self::UnsupportedWorkspaceEntry),
             "worker_lost" => Some(Self::WorkerLost),
             _ => None,
-        }
-    }
-
-    fn from_error_code(code: ErrorCode) -> Self {
-        match code {
-            ErrorCode::AlreadyExists => Self::AlreadyExists,
-            ErrorCode::AutomationFailed => Self::AutomationFailed,
-            ErrorCode::Cancelled => Self::Cancelled,
-            ErrorCode::ChecksumMismatch => Self::ChecksumMismatch,
-            ErrorCode::CleanupIncomplete => Self::CleanupIncomplete,
-            ErrorCode::CommandFailed => Self::CommandFailed,
-            ErrorCode::ConnectionLost => Self::ConnectionLost,
-            ErrorCode::ControllerResourceLimit => Self::ControllerResourceLimit,
-            ErrorCode::DiscoveryFailed => Self::DiscoveryFailed,
-            ErrorCode::InvalidArgument => Self::InvalidArgument,
-            ErrorCode::InvalidEncoding => Self::InvalidEncoding,
-            ErrorCode::InvalidProjection => Self::InvalidProjection,
-            ErrorCode::InvalidResult => Self::InvalidResult,
-            ErrorCode::IoError => Self::IoError,
-            ErrorCode::NotFound => Self::NotFound,
-            ErrorCode::PayloadFailed => Self::PayloadFailed,
-            ErrorCode::PayloadRejected => Self::PayloadRejected,
-            ErrorCode::PermissionDenied => Self::PermissionDenied,
-            ErrorCode::PolicyDenied => Self::PolicyDenied,
-            ErrorCode::PreviewRequired => Self::PreviewRequired,
-            ErrorCode::ResourceLimit => Self::ResourceLimit,
-            ErrorCode::ResourceUnavailable => Self::ResourceUnavailable,
-            ErrorCode::Shutdown => Self::Shutdown,
-            ErrorCode::SpawnFailed => Self::SpawnFailed,
-            ErrorCode::SshConnectFailed => Self::SshConnectFailed,
-            ErrorCode::SshSpawnFailed => Self::SshSpawnFailed,
-            ErrorCode::TargetQuarantined => Self::TargetQuarantined,
-            ErrorCode::Timeout => Self::Timeout,
-            ErrorCode::Unsupported => Self::Unsupported,
-            #[cfg(test)]
-            // Test-only code; controller errors never quarantine targets.
-            ErrorCode::ControllerTimeout => Self::CommandFailed,
-        }
+        };
+        serde_json::from_value(serde_json::Value::String(value.into()))
+            .map(Self::Error)
+            .ok()
+            .or(extra)
     }
 }
 
@@ -832,7 +714,7 @@ impl ExecLease {
     fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         if let Some(ctx) = self.dispatched.take()
             && quarantine_target
-            && let Some(cause) = cause.map(QuarantineCause::from_error_code)
+            && let Some(cause) = cause.map(QuarantineCause::Error)
         {
             self.gate.set_quarantine(
                 self.persistence.as_deref(),
@@ -883,7 +765,7 @@ impl WriteLease {
     pub(super) fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         if let Some(ctx) = self.dispatched.take()
             && quarantine_target
-            && let Some(cause) = cause.map(QuarantineCause::from_error_code)
+            && let Some(cause) = cause.map(QuarantineCause::Error)
         {
             self.gate.set_quarantine(
                 self.persistence.as_deref(),

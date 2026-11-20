@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 use serde::{Serialize, ser::SerializeStruct};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     AlreadyExists,
