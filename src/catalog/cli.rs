@@ -394,7 +394,7 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
         return Ok(bytes);
     }
     let mut text = format!(
-        "Catalog {} — bundled templates, default in workstation mode\n",
+        "Catalog {} — bundled templates; workstation mode loads only declared tools\n",
         catalog.manifest().version
     );
     for (name, members) in &catalog.manifest().presets {

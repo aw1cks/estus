@@ -767,6 +767,41 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_processes"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "uid",
+            "name_contains",
+            "limit"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "uid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "name_contains": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            }
+          }
+        },
+        "input_map": {
+          "uid": "uid",
+          "name_contains": "name_contains",
+          "limit": "limit"
+        }
       }
     },
     "inspect_sockets": {
@@ -891,6 +926,32 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_cpu"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [],
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "sample_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2000
+            }
+          }
+        },
+        "input_map": {
+          "limit": "limit",
+          "sample_ms": "sample_ms"
+        }
       }
     },
     "observe_device_attributes": {
@@ -1041,6 +1102,26 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_kernel_modules"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 512
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {
+          "offset": "offset"
+        }
       }
     },
     "observe_kernel_state": {
@@ -1054,6 +1135,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_kernel_state"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_memory": {
@@ -1067,6 +1160,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_memory"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [],
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "input_map": {}
       }
     },
     "observe_network_addresses": {
@@ -1389,6 +1494,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_pci_devices"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_pci_driver_binding": {
@@ -1428,6 +1545,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_pci_topology"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_pressure": {
@@ -1441,6 +1570,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_pressure"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [],
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "input_map": {}
       }
     },
     "observe_storage_device": {
@@ -1536,6 +1677,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_systemd_jobs"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3",
+          "manager_scope": "system"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_systemd_sockets": {
@@ -1550,6 +1704,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_systemd_sockets"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3",
+          "manager_scope": "system"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_systemd_timers": {
@@ -1564,6 +1731,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_systemd_timers"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3",
+          "manager_scope": "system"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_systemd_unit": {
@@ -1620,6 +1800,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_time_sync"
+      },
+      "workstation": {
+        "fixed_args": {
+          "target_python": "/usr/bin/python3"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "preview_apt": {

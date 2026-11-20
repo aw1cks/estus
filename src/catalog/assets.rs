@@ -49,198 +49,6 @@ pub(crate) fn discover_default_root() -> Option<PathBuf> {
     None
 }
 
-fn adapt_workstation_definition(
-    name: &str,
-    tool_def: &mut toml::Value,
-) -> Result<(), &'static str> {
-    let table = tool_def.as_table_mut().ok_or(ERROR)?;
-    // Strip site-specific fixture constraints for workstation dynamic mode.
-    let removed_constraints = table.remove("constraints");
-    let had_allowed_units = removed_constraints
-        .as_ref()
-        .and_then(toml::Value::as_table)
-        .is_some_and(|c| c.contains_key("allowed_units"));
-    let had_allowed_keys = removed_constraints
-        .as_ref()
-        .and_then(toml::Value::as_table)
-        .is_some_and(|c| c.contains_key("allowed_keys"));
-    if had_allowed_units
-        || had_allowed_keys
-        || matches!(
-            name,
-            "change_sysctl_config"
-                | "change_sysctl_runtime"
-                | "change_boot_default"
-                | "change_boot_oneshot"
-        )
-    {
-        table
-            .entry("fixed_args")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    }
-    if let Some(fixed) = table
-        .get_mut("fixed_args")
-        .and_then(toml::Value::as_table_mut)
-    {
-        if had_allowed_units || fixed.contains_key("allowed_units") {
-            fixed.insert(
-                "allowed_units".into(),
-                toml::Value::Array(vec![toml::Value::String("*".into())]),
-            );
-        }
-        if name == "change_sysctl_config" || name == "change_sysctl_runtime" {
-            fixed.insert(
-                "approved_keys".into(),
-                toml::Value::Array(vec![toml::Value::String("*".into())]),
-            );
-        }
-        if name == "change_boot_default" || name == "change_boot_oneshot" {
-            fixed.insert(
-                "allowed_entries".into(),
-                toml::Value::Array(vec![toml::Value::String("*".into())]),
-            );
-        }
-        if fixed.contains_key("approved_packages") {
-            fixed.insert(
-                "approved_packages".into(),
-                toml::Value::Array(vec![toml::Value::String("*".into())]),
-            );
-        }
-        if name == "observe_systemd_units" && fixed.contains_key("unit_pattern") {
-            fixed.insert("unit_pattern".into(), toml::Value::String("*".into()));
-        }
-        if (name.starts_with("observe_cgroup_") || name == "inspect_cgroup_processes")
-            && fixed.contains_key("approved_root")
-        {
-            fixed.insert("approved_root".into(), toml::Value::String("/".into()));
-        }
-        if let Some(policy) = fixed
-            .get_mut("operator_policy")
-            .and_then(toml::Value::as_table_mut)
-        {
-            if policy.contains_key("interfaces") {
-                policy.insert(
-                    "interfaces".into(),
-                    toml::Value::Array(vec![toml::Value::String("*".into())]),
-                );
-            }
-            for key in ["interface", "mac", "driver"] {
-                if policy.contains_key(key) {
-                    policy.insert(key.into(), toml::Value::String("*".into()));
-                }
-            }
-        }
-    }
-    if name == "observe_filesystem_usage" {
-        let mut paths = toml::Table::new();
-        for (id, path) in [
-            ("root", "/"),
-            ("var", "/var"),
-            ("tmp", "/tmp"),
-            ("home", "/home"),
-            ("run", "/run"),
-        ] {
-            paths.insert(id.into(), toml::Value::String(path.into()));
-        }
-        if let Some(fixed) = table
-            .get_mut("fixed_args")
-            .and_then(toml::Value::as_table_mut)
-        {
-            fixed.insert("configured_paths".into(), toml::Value::Table(paths));
-        }
-        if let Some(path_id) = table
-            .get_mut("input_schema")
-            .and_then(toml::Value::as_table_mut)
-            .and_then(|s| s.get_mut("properties"))
-            .and_then(toml::Value::as_table_mut)
-            .and_then(|p| p.get_mut("path_id"))
-            .and_then(toml::Value::as_table_mut)
-        {
-            path_id.insert(
-                "enum".into(),
-                toml::Value::Array(
-                    ["root", "var", "tmp", "home", "run"]
-                        .into_iter()
-                        .map(|s| toml::Value::String(s.into()))
-                        .collect(),
-                ),
-            );
-        }
-    }
-    if let Some(props) = table
-        .get_mut("input_schema")
-        .and_then(toml::Value::as_table_mut)
-        .and_then(|s| s.get_mut("properties"))
-        .and_then(toml::Value::as_table_mut)
-    {
-        for (prop_name, max_len) in [
-            ("unit", 128),
-            ("interface", 15),
-            ("destination", 64),
-            ("address", 64),
-            ("device", 64),
-            ("package", 128),
-            ("key", 128),
-            ("entry_id", 255),
-        ] {
-            if let Some(prop) = props.get_mut(prop_name).and_then(toml::Value::as_table_mut)
-                && prop.get("type").and_then(toml::Value::as_str) == Some("string")
-                && prop.contains_key("enum")
-            {
-                prop.remove("enum");
-                prop.entry("minLength")
-                    .or_insert_with(|| toml::Value::Integer(1));
-                prop.entry("maxLength")
-                    .or_insert_with(|| toml::Value::Integer(max_len));
-            }
-        }
-        if let Some(items) = props
-            .get_mut("name")
-            .and_then(toml::Value::as_table_mut)
-            .and_then(|n| n.get_mut("items"))
-            .and_then(toml::Value::as_table_mut)
-            && items.get("type").and_then(toml::Value::as_str) == Some("string")
-            && items.contains_key("enum")
-        {
-            items.remove("enum");
-            items
-                .entry("minLength")
-                .or_insert_with(|| toml::Value::Integer(1));
-            items
-                .entry("maxLength")
-                .or_insert_with(|| toml::Value::Integer(128));
-        }
-        if name == "observe_sysctl"
-            && let Some(keys) = props.get_mut("keys").and_then(toml::Value::as_table_mut)
-            && keys.get("type").and_then(toml::Value::as_str) == Some("array")
-        {
-            keys.insert("maxItems".into(), toml::Value::Integer(16));
-            if let Some(items) = keys.get_mut("items").and_then(toml::Value::as_table_mut)
-                && items.get("type").and_then(toml::Value::as_str) == Some("string")
-                && items.contains_key("enum")
-            {
-                items.remove("enum");
-                items
-                    .entry("minLength")
-                    .or_insert_with(|| toml::Value::Integer(1));
-                items
-                    .entry("maxLength")
-                    .or_insert_with(|| toml::Value::Integer(64));
-            }
-            if let Some(fixed) = table
-                .get_mut("fixed_args")
-                .and_then(toml::Value::as_table_mut)
-            {
-                fixed.insert(
-                    "approved_keys".into(),
-                    toml::Value::Array(vec![toml::Value::String("*".into())]),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -269,6 +77,28 @@ pub struct Template {
     pub policy_required: bool,
     pub requires: Vec<String>,
     pub qualification: Qualification,
+    /// Explicit, reviewed workstation policy. A template without one is not
+    /// loaded in workstation mode; nothing is widened or inferred at runtime.
+    #[serde(default)]
+    pub workstation: Option<WorkstationPolicy>,
+}
+
+/// Literal overlay a workstation-mode binding is compiled with. These values
+/// are catalog data reviewed like any other definition; the controller never
+/// rewrites them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkstationPolicy {
+    #[serde(default)]
+    pub fixed_args: toml::Table,
+    #[serde(default)]
+    pub input_schema: toml::Table,
+    #[serde(default)]
+    pub input_map: BTreeMap<String, String>,
+    /// Published description, when the site-policy template description is not
+    /// truthful for the workstation overlay.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -447,6 +277,9 @@ impl Catalog {
                     .requires
                     .iter()
                     .any(|requirement| !name_valid(requirement))
+                // A workstation policy is only meaningful where no site policy
+                // is required; site-policy templates stay out of open mode.
+                || template.workstation.is_some() && template.policy_required
             {
                 return Err(ERROR);
             }
@@ -479,10 +312,13 @@ impl Catalog {
         &self.manifest
     }
 
+    /// Templates that explicitly declare a reviewed workstation policy. This is
+    /// the only source of workstation-mode catalog exposure.
     pub(crate) fn workstation_tool_names(&self) -> impl Iterator<Item = &str> {
         self.manifest.tools.iter().filter_map(|(name, template)| {
-            (!matches!(template.qualification, Qualification::LaboratoryOnly))
-                .then_some(name.as_str())
+            (template.workstation.is_some()
+                && !matches!(template.qualification, Qualification::LaboratoryOnly))
+            .then_some(name.as_str())
         })
     }
 
@@ -533,6 +369,9 @@ impl Catalog {
         Self::validate_definition(&self.directory, name, &template.definition)
     }
 
+    /// Build a workstation-mode entry from its declared policy. The definition's
+    /// own fixed arguments, schema and constraints are replaced by the reviewed
+    /// `workstation` block; nothing is inferred from names or example values.
     pub(crate) fn load_workstation_entry(
         &self,
         name: &str,
@@ -542,6 +381,7 @@ impl Catalog {
             .tools
             .get(name)
             .ok_or("unknown catalog tool")?;
+        let policy = template.workstation.as_ref().ok_or(ERROR)?;
         if matches!(template.qualification, Qualification::LaboratoryOnly) {
             return Err(ERROR);
         }
@@ -550,15 +390,42 @@ impl Catalog {
             .remove("tools")
             .and_then(|v| v.try_into::<toml::Table>().ok())
             .ok_or(ERROR)?;
-        let mut tool_def = tools.remove(name).ok_or(ERROR)?;
+        let mut definition = tools.remove(name).ok_or(ERROR)?;
         if !tools.is_empty() {
             return Err(ERROR);
         }
-        adapt_workstation_definition(name, &mut tool_def)?;
+        let table = definition.as_table_mut().ok_or(ERROR)?;
+        table.remove("constraints");
+        table.insert(
+            "fixed_args".into(),
+            toml::Value::Table(policy.fixed_args.clone()),
+        );
+        table.insert(
+            "input_schema".into(),
+            toml::Value::Table(policy.input_schema.clone()),
+        );
+        if policy.input_map.is_empty() {
+            table.remove("input_map");
+        } else {
+            table.insert(
+                "input_map".into(),
+                toml::Value::Table(
+                    policy
+                        .input_map
+                        .iter()
+                        .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(description) = &policy.description {
+            table.insert(
+                "description".into(),
+                toml::Value::String(description.clone()),
+            );
+        }
         match &template.executor {
-            Executor::AnsibleModule { .. } => Ok(WorkstationEntry::Module {
-                definition: tool_def,
-            }),
+            Executor::AnsibleModule { .. } => Ok(WorkstationEntry::Module { definition }),
             Executor::NativePayload { .. } => {
                 let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
                 let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
@@ -572,57 +439,22 @@ impl Catalog {
                 )?;
                 let mut manifest_val: Value =
                     crate::strict_json::parse(&manifest_raw).map_err(|_| ERROR)?;
-                let def_table = tool_def.as_table().ok_or(ERROR)?;
-                let adapted_overlay = json!({
-                    "input_schema": serde_json::to_value(def_table.get("input_schema").ok_or(ERROR)?).map_err(|_| ERROR)?,
-                    "fixed_args": def_table.get("fixed_args").map(serde_json::to_value).transpose().map_err(|_| ERROR)?.unwrap_or_else(|| json!({})),
-                    "input_map": def_table.get("input_map").map(serde_json::to_value).transpose().map_err(|_| ERROR)?.unwrap_or_else(|| json!({})),
+                // The activated approval must equal the overlay the definition
+                // compiles to, so the declared policy replaces the reviewed one.
+                let overlay = json!({
+                    "input_schema": policy.input_schema,
+                    "fixed_args": policy.fixed_args,
+                    "input_map": policy.input_map,
                 });
                 if let Some(approval) = manifest_val
                     .get_mut("approval")
                     .and_then(Value::as_object_mut)
                 {
-                    approval.insert("overlay".into(), adapted_overlay);
-                }
-                // Widen contract enums removed by workstation adaptation so compile_binding accepts open inputs.
-                if let Some(contract_props) = manifest_val
-                    .get_mut("contract")
-                    .and_then(|c| c.get_mut("schema"))
-                    .and_then(|s| s.get_mut("properties"))
-                    .and_then(Value::as_object_mut)
-                {
-                    for (_, prop) in contract_props.iter_mut() {
-                        if let Some(obj) = prop.as_object_mut()
-                            && obj.get("type").and_then(Value::as_str) == Some("string")
-                            && obj.contains_key("enum")
-                        {
-                            // Keep closed operational enums (direction, scope, signal), drop fixture target enums.
-                            let is_fixture_enum = obj
-                                .get("enum")
-                                .and_then(Value::as_array)
-                                .is_some_and(|arr| {
-                                    arr.iter().any(|v| {
-                                        v.as_str().is_some_and(|s| {
-                                            s.contains("estus-fixture")
-                                                || s == "catalog0"
-                                                || s == "eth0"
-                                                || s == "vda"
-                                                || s == "queue0"
-                                                || s.starts_with("estus-")
-                                                || s.starts_with("192.0.2.")
-                                                || s.starts_with("198.51.100.")
-                                        })
-                                    })
-                                });
-                            if is_fixture_enum {
-                                obj.remove("enum");
-                            }
-                        }
-                    }
+                    approval.insert("overlay".into(), overlay);
                 }
                 let manifest_bytes = serde_json::to_vec(&manifest_val).map_err(|_| ERROR)?;
                 Ok(WorkstationEntry::Payload {
-                    definition: tool_def,
+                    definition,
                     source: source_bytes,
                     manifest: manifest_bytes,
                 })
