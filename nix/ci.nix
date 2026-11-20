@@ -6,6 +6,7 @@
       checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"; # v7.0.1
       lixInstaller = "samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d"; # v2026-06-15
       nixCache = "nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569"; # v7.0.2
+      uploadArtifact = "actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874"; # v4.4.0
       cachePrefix = "nix-\${{ runner.os }}-\${{ runner.arch }}-";
       workflows = {
         "ssh-baseline.yml" = {
@@ -205,6 +206,75 @@
                     echo "::endgroup::"
                   done
                 '';
+              }
+            ];
+          };
+          # Time-boxed mutation campaigns: one lane per target, corpus written to
+          # the ignored generated-corpus dir, crash artifacts uploaded on failure.
+          # The -runs=0 replay above stays the committed-corpus gate.
+          jobs.mutate = {
+            name = "\${{ matrix.target }}";
+            runs-on = "ubuntu-26.04";
+            timeout-minutes = 45;
+            strategy = {
+              fail-fast = false;
+              matrix.target = [
+                "wire_budget"
+                "file_encoding"
+                "filename_metadata"
+                "binding_schema"
+                "command_encoding"
+              ];
+            };
+            permissions = {
+              contents = "read";
+              actions = "write";
+            };
+            steps = [
+              {
+                uses = checkout;
+                "with".persist-credentials = false;
+              }
+              {
+                uses = lixInstaller;
+                "with" = {
+                  github_access_token = "\${{ secrets.GITHUB_TOKEN }}";
+                  extra_nix_config = "auto-optimise-store = false\n";
+                };
+              }
+              {
+                uses = nixCache;
+                "with" = {
+                  primary-key = cachePrefix + "fuzz-\${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', '**/Cargo.lock', '**/*.rs') }}";
+                  restore-prefixes-first-match = cachePrefix + "fuzz-";
+                  save = true;
+                  purge = "\${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
+                  purge-prefixes = cachePrefix + "fuzz-";
+                  purge-created = 0;
+                  purge-primary-key = "never";
+                  gc-max-store-size-linux = "2G";
+                  gc-max-store-size-macos = "2G";
+                };
+              }
+              {
+                name = "Build fuzz targets";
+                run = "nix develop --no-update-lock-file .#fuzz --command cargo fuzz build";
+              }
+              {
+                name = "Time-boxed mutation campaign";
+                shell = "bash";
+                "env".TARGET = "\${{ matrix.target }}";
+                run = ''
+                  set -euo pipefail
+                  nix develop --no-update-lock-file .#fuzz --command cargo fuzz run "$TARGET" "fuzz/generated-corpus/$TARGET" "fuzz/corpus/$TARGET" -- -max_total_time=300 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+                '';
+              }
+              {
+                "if" = "failure()";
+                uses = uploadArtifact;
+                "with".name = "fuzz-crashes-\${{ matrix.target }}";
+                "with".path = "fuzz/artifacts/\${{ matrix.target }}";
+                "with".if-no-files-found = "ignore";
               }
             ];
           };

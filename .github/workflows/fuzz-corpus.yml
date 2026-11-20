@@ -40,6 +40,57 @@ jobs:
         done
       shell: bash
     timeout-minutes: 30
+  mutate:
+    name: ${{ matrix.target }}
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      with:
+        gc-max-store-size-linux: 2G
+        gc-max-store-size-macos: 2G
+        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-fuzz-${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', '**/Cargo.lock', '**/*.rs') }}
+        purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        purge-created: 0
+        purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-fuzz-
+        purge-primary-key: never
+        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-fuzz-
+        save: true
+    - name: Build fuzz targets
+      run: nix develop --no-update-lock-file .#fuzz --command cargo fuzz build
+    - env:
+        TARGET: ${{ matrix.target }}
+      name: Time-boxed mutation campaign
+      run: |
+        set -euo pipefail
+        nix develop --no-update-lock-file .#fuzz --command cargo fuzz run "$TARGET" "fuzz/generated-corpus/$TARGET" "fuzz/corpus/$TARGET" -- -max_total_time=300 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+      shell: bash
+    - if: failure()
+      uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874
+      with:
+        if-no-files-found: ignore
+        name: fuzz-crashes-${{ matrix.target }}
+        path: fuzz/artifacts/${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+        - wire_budget
+        - file_encoding
+        - filename_metadata
+        - binding_schema
+        - command_encoding
+    timeout-minutes: 45
 name: Fuzz corpus
 'on':
   schedule:

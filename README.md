@@ -1753,6 +1753,7 @@ The generated workflow (`nix/ci.nix`; regenerate with
 | Installed MSRV native | Real SSH/SFTP, controller scripts, doctor and native/controller/SFTP progress |
 | Installed MSRV bundle | Bundle build/inspect, digest drift, real SSH module execution, typed projections and progress |
 | Linux containers | Default/MSRV SSH baseline; bundle-backed module smoke, automation authority and shipped host-summary, CPU and memory payloads |
+| Fuzz corpus | Weekly and on dispatch: committed-corpus replay gate (`-runs=0`) plus a time-boxed 300-second mutation campaign per target, crash artifacts uploaded on failure |
 
 The native Nix source filter keeps `skills/estus-sre/SKILL.md`,
 `python/estus/__init__.py`, and `setup.py` for the catalog distribution checks.
@@ -1796,8 +1797,10 @@ escaped length and byte accounting through the actual pinned encoder, so
 oversize commands and zero timeouts must fail as `invalid_argument` without
 ever marking remote state unknown.
 
-Time-bounded mutation campaigns write only to ignored
-`fuzz/generated-corpus/` directories, keeping committed seeds deterministic:
+CI runs the same mutation campaign weekly and on dispatch
+(`.github/workflows/fuzz-corpus.yml`), one 300-second lane per target against
+the ignored `fuzz/generated-corpus/` directories, keeping committed seeds
+deterministic while uploading crash artifacts on failure. Locally:
 
 ```sh
 mkdir -p fuzz/generated-corpus/binding_schema fuzz/generated-corpus/command_encoding
