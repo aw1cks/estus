@@ -384,6 +384,42 @@ class Execution(unittest.TestCase):
         self.assertEqual(evidence['rc'], 1)
         self.assertEqual(json.loads(evidence['stdout']), {'estus_error': {'code': 'timeout'}})
 
+    def test_collector_allowlist_fails_closed_and_wildcard_is_explicit(self):
+        # The shipped systemd restart collector is the regression the audit found:
+        # an absent allowed_units must deny instead of permitting any unit.
+        source = pathlib.Path(__file__).parents[2] / 'catalog/payloads/change_systemd_restart/collector.py'
+        probe = (
+            b"import importlib.util, json, sys, types\n"
+            b"bootstrap = types.ModuleType('b')\n"
+            b"exec(compile(open(sys.argv[2]).read(), 'b', 'exec'), bootstrap.__dict__)\n"
+            b"runtime = {'types': types}\n"
+            b"exec(compile(bootstrap.COLLECTOR_RUNTIME, 'r', 'exec'), runtime)\n"
+            b"sys.modules['estus_runtime'] = runtime['_make_runtime']([])\n"
+            b"spec = importlib.util.spec_from_file_location('c', sys.argv[1])\n"
+            b"module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n"
+            b"check = module.unit_allowed\n"
+            b"print(json.dumps({\n"
+            b"  'listed': check('estus-fixture.service', ['estus-fixture.service']),\n"
+            b"  'unlisted': check('ssh.service', ['estus-fixture.service']),\n"
+            b"  'wildcard': check('ssh.service', ['*']),\n"
+            b"  'absent': check('ssh.service', None),\n"
+            b"  'empty': check('ssh.service', []),\n"
+            b"  'non_list': check('ssh.service', 'ssh.service'),\n"
+            b"  'malformed_unit': check('bad unit!', ['*']),\n"
+            b"}))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, '-I', '-B', '-c', probe, str(source),
+             str(pathlib.Path(__file__).with_name('bootstrap.py'))],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(
+            json.loads(result.stdout),
+            {'listed': True, 'unlisted': False, 'wildcard': True, 'absent': False,
+             'empty': False, 'non_list': False, 'malformed_unit': False},
+        )
+
     def test_ansiballz_execution_cleans_tmpdir_and_classifies_missing_deps(self):
         import glob, os, tempfile
         self.assertIn('pkg_mgr', self.identity)
