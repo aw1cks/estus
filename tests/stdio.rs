@@ -3245,18 +3245,18 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
         operation_timeout_secs = 2
         [targets.read]
         ssh_host = 'private-backend-read.invalid'
-        capabilities = { file_read = true }
+        capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }
         [targets.read.sudo]
         mode = 'separate-identity'
         ssh_host = 'private-identity.invalid'
         [targets.files]
         ssh_host = 'private-backend-files.invalid'
-        capabilities = { file_read = true, file_write = true }
+        capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }
         [targets.files.sudo]
         mode = 'same-account'
         [targets.actions]
         ssh_host = 'private-backend-actions.invalid'
-        capabilities = { named = true }
+        capabilities = { named = true, file_read = false, file_write = false, exec = false, sudo = false }
         [targets.actions.sudo]
         mode = 'same-account'
         [targets.base]
@@ -3574,10 +3574,10 @@ const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
     ssh_host = "private-binding-elevated.invalid"
     [targets.read]
     ssh_host = "private-binding-read.invalid"
-    capabilities = { file_read = true }
+    capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }
     [targets.files]
     ssh_host = "private-binding-files.invalid"
-    capabilities = { file_read = true, file_write = true }
+    capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }
     [targets.other]
     ssh_host = "private-binding-other.invalid"
     [tools.inspect_account]
@@ -4052,12 +4052,12 @@ const FIXED_SUDO_TOOL_CONFIG: &str = indoc::indoc! {r#"
     programs = ["/usr/bin/id", "/usr/bin/printf"]
     [targets.read]
     ssh_host = "private-binding-read.invalid"
-    capabilities = { file_read = true }
+    capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }
     [targets.read.sudo]
     mode = "same-account"
     [targets.files]
     ssh_host = "private-binding-files.invalid"
-    capabilities = { file_read = true, file_write = true }
+    capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }
     [targets.files.sudo]
     mode = "same-account"
     [targets.other]
