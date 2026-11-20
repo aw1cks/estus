@@ -1030,13 +1030,7 @@ async fn journal_and_record_prepare_publish_expanded_schemas_and_reject_exhauste
         inputs["properties"]["direction"]["enum"] == serde_json::json!(["backward", "forward"])
     );
     ensure!(inputs["properties"]["contains"]["maxLength"] == 128);
-    ensure!(
-        !inputs["required"]
-            .as_array()
-            .context("required")?
-            .iter()
-            .any(|f| f == "unit")
-    );
+    ensure!(inputs["required"] == serde_json::json!([]));
     ensure!(tools.iter().any(|t| t["name"] == "inspect_journal_record"));
 
     // RequestId leaving < 32768*3 bytes rejects pre-dispatch with -32602.
@@ -1045,9 +1039,7 @@ async fn journal_and_record_prepare_publish_expanded_schemas_and_reject_exhauste
         &mut stdin,
         serde_json::json!({
             "jsonrpc":"2.0","id":huge_id,"method":"tools/call",
-            "params":{"name":"inspect_journal","arguments":{"host":"server","inputs":{
-                "boot_id":"current","since":0,"until":4102444800_u64,"priority":7,"limit":10
-            }}}
+            "params":{"name":"inspect_journal","arguments":{"host":"server","inputs":{}}}
         }),
     )
     .await?;

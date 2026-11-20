@@ -650,8 +650,6 @@ fn complete_reply(
     output_status: OutputStatus,
     started: std::time::Instant,
 ) -> ToolReply<AutomationData> {
-    let mut error = (rc != 0)
-        .then(|| ToolError::payload_failed("Payload operation completed with failure", false));
     // Censor before domain parsing/publication, including changed evidence.
     let domain = if !no_log && output_status == OutputStatus::Complete {
         value
@@ -661,6 +659,26 @@ fn complete_reply(
     } else {
         None
     };
+    let failure_reason = if !no_log && rc != 0 {
+        domain
+            .as_ref()
+            .and_then(|doc| doc.get("estus_error"))
+            .and_then(|err| err.get("code"))
+            .and_then(Value::as_str)
+            .and_then(crate::reply::PayloadFailureReason::from_code)
+            .or_else(|| {
+                value
+                    .get("error_reason")
+                    .and_then(Value::as_str)
+                    .and_then(crate::reply::PayloadFailureReason::from_code)
+            })
+    } else {
+        None
+    };
+    let mut error = (rc != 0).then(|| match failure_reason {
+        Some(reason) => ToolError::payload_failed_with_reason(reason, false),
+        None => ToolError::payload_failed("Payload operation completed with failure", false),
+    });
     let changed = if no_log {
         None
     } else {
@@ -1388,5 +1406,60 @@ mod tests {
         assert_eq!(dynamic[0], "/usr/bin/python3");
         assert!(dynamic.contains(&"/usr/local/bin/python3"));
         assert!(dynamic.contains(&"python3"));
+    }
+
+    #[test]
+    fn structured_failure_reason_maps_closed_codes_and_respects_no_log() {
+        let explicit = complete_reply(
+            "host-a",
+            false,
+            &crate::native_payload::ChangePolicy::ReadOnly,
+            None,
+            1,
+            &json!({"stdout": "{\"estus_error\":{\"code\":\"verification_failed\"}}"}),
+            OutputStatus::Complete,
+            std::time::Instant::now(),
+        );
+        let err = explicit.error().unwrap();
+        assert_eq!(err.code(), "payload_failed");
+        assert_eq!(
+            err.reason,
+            Some(crate::reply::PayloadFailureReason::VerificationFailed)
+        );
+        assert_eq!(
+            err.message,
+            "Payload operation failed: post-mutation verification failed"
+        );
+
+        let classified = complete_reply(
+            "host-a",
+            false,
+            &crate::native_payload::ChangePolicy::ReadOnly,
+            None,
+            1,
+            &json!({"stdout": "", "error_reason": "permission_denied"}),
+            OutputStatus::Complete,
+            std::time::Instant::now(),
+        );
+        assert_eq!(
+            classified.error().unwrap().reason,
+            Some(crate::reply::PayloadFailureReason::PermissionDenied)
+        );
+
+        let censored = complete_reply(
+            "host-a",
+            true,
+            &crate::native_payload::ChangePolicy::ReadOnly,
+            None,
+            1,
+            &json!({"stdout": "{\"estus_error\":{\"code\":\"verification_failed\"}}", "error_reason": "permission_denied"}),
+            OutputStatus::Complete,
+            std::time::Instant::now(),
+        );
+        assert_eq!(censored.error().unwrap().reason, None);
+        assert_eq!(
+            censored.error().unwrap().message,
+            "Payload operation completed with failure"
+        );
     }
 }

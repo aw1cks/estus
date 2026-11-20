@@ -752,23 +752,33 @@ fn projected_facts(envelope: &Value) -> Result<ProjectedFacts> {
     Ok(facts)
 }
 
-fn projection_value_schemas<'a>(node: &'a Value, found: &mut Vec<&'a Value>) {
-    match node {
-        Value::Object(object) => {
-            if let Some(value) = object.get("properties").and_then(|v| v.get("value")) {
-                found.push(value);
+fn projection_value_schemas<'a>(root: &'a Value, found: &mut Vec<&'a Value>) {
+    fn walk<'a>(root: &'a Value, node: &'a Value, found: &mut Vec<&'a Value>) {
+        match node {
+            Value::Object(object) => {
+                if let Some(value) = object.get("properties").and_then(|v| v.get("value")) {
+                    if value.get("$ref").and_then(Value::as_str) == Some("#/$defs/ProjectedValue")
+                        && let Some(resolved) =
+                            root.get("$defs").and_then(|d| d.get("ProjectedValue"))
+                    {
+                        found.push(resolved);
+                    } else {
+                        found.push(value);
+                    }
+                }
+                for value in object.values() {
+                    walk(root, value, found);
+                }
             }
-            for value in object.values() {
-                projection_value_schemas(value, found);
+            Value::Array(array) => {
+                for value in array {
+                    walk(root, value, found);
+                }
             }
+            _ => {}
         }
-        Value::Array(array) => {
-            for value in array {
-                projection_value_schemas(value, found);
-            }
-        }
-        _ => {}
     }
+    walk(root, root, found);
 }
 
 fn verified_command(envelope: &Value) -> Result<()> {

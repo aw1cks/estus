@@ -200,5 +200,23 @@ class Execution(unittest.TestCase):
             time.sleep(0.05)
             with self.assertRaises(ProcessLookupError):
                 os.kill(child_pid, 0)
+
+    def test_failed_collector_classifies_closed_reason_without_leaking_stderr(self):
+        secret = 'SUPER_SECRET_TOKEN_VALUE_999'
+        for exc, expected in (
+            ('PermissionError', 'permission_denied'),
+            ('FileNotFoundError', 'target_not_found'),
+            ('TimeoutError', 'timeout'),
+            ('ValueError', 'policy_violation'),
+            ('RuntimeError', 'dependency_unavailable'),
+        ):
+            with self.subTest(exc=exc):
+                source = f'raise {exc}({secret!r})\n'.encode()
+                exit_code, evidence = self.execute(source)
+                self.assertEqual(exit_code, 1)
+                self.assertEqual(evidence['phase'], 'complete')
+                self.assertEqual(evidence['error_reason'], expected)
+                self.assertNotIn(secret, json.dumps(evidence))
+                self.assertNotIn('stderr', evidence)
 if __name__ == '__main__':
     unittest.main()

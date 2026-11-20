@@ -249,11 +249,66 @@ impl<T> ToolReply<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadFailureReason {
+    UnsupportedPlatform,
+    PolicyViolation,
+    TargetNotFound,
+    PermissionDenied,
+    DependencyUnavailable,
+    Timeout,
+    OutputBoundExceeded,
+    PreconditionFailed,
+    VerificationFailed,
+}
+
+impl PayloadFailureReason {
+    pub(crate) fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "unsupported_platform" => Some(Self::UnsupportedPlatform),
+            "policy_violation" => Some(Self::PolicyViolation),
+            "target_not_found" => Some(Self::TargetNotFound),
+            "permission_denied" => Some(Self::PermissionDenied),
+            "dependency_unavailable" => Some(Self::DependencyUnavailable),
+            "timeout" => Some(Self::Timeout),
+            "output_bound_exceeded" => Some(Self::OutputBoundExceeded),
+            "precondition_failed" => Some(Self::PreconditionFailed),
+            "verification_failed" => Some(Self::VerificationFailed),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => "Payload operation failed: unsupported target platform",
+            Self::PolicyViolation => "Payload operation failed: input violates collector policy",
+            Self::TargetNotFound => {
+                "Payload operation failed: requested target resource was not found"
+            }
+            Self::PermissionDenied => "Payload operation failed: target permission denied",
+            Self::DependencyUnavailable => {
+                "Payload operation failed: required target subsystem or utility failed"
+            }
+            Self::Timeout => "Payload operation failed: collector subprocess timed out",
+            Self::OutputBoundExceeded => {
+                "Payload operation failed: collector source or output exceeded safety bound"
+            }
+            Self::PreconditionFailed => "Payload operation failed: target precondition was not met",
+            Self::VerificationFailed => {
+                "Payload operation failed: post-mutation verification failed"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ToolError {
     code: ErrorCode,
     pub message: Cow<'static, str>,
     pub remote_state_unknown: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PayloadFailureReason>,
 }
 
 impl ToolError {
@@ -268,6 +323,7 @@ impl ToolError {
             code,
             message: Cow::Borrowed(message),
             remote_state_unknown,
+            reason: None,
         }
     }
 
@@ -331,6 +387,7 @@ impl ToolError {
             code: ErrorCode::InvalidArgument,
             message: Cow::Owned(message),
             remote_state_unknown: false,
+            reason: None,
         }
     }
 
@@ -362,6 +419,18 @@ impl ToolError {
 
     pub(crate) const fn payload_failed(message: &'static str, remote_state_unknown: bool) -> Self {
         Self::new(ErrorCode::PayloadFailed, message, remote_state_unknown)
+    }
+
+    pub(crate) const fn payload_failed_with_reason(
+        reason: PayloadFailureReason,
+        remote_state_unknown: bool,
+    ) -> Self {
+        Self {
+            code: ErrorCode::PayloadFailed,
+            message: Cow::Borrowed(reason.message()),
+            remote_state_unknown,
+            reason: Some(reason),
+        }
     }
 
     pub(crate) const fn payload_rejected(

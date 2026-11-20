@@ -193,30 +193,35 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
     let summary_output_schema = automation_output_schema(None);
     let binding_routes = config.bindings().entries().map(|(id, binding)| {
         let tier = crate::config::risk_tier_for_binding(binding);
-        let read_only =
-            binding.read_only() && !matches!(tier, crate::config::RiskTier::Preview);
+        let read_only = binding.read_only() && !matches!(tier, crate::config::RiskTier::Preview);
         let annotations = ToolAnnotations::new()
             .read_only(read_only)
             .destructive(!read_only)
             .idempotent(false);
         let local = binding.is_controller();
-        let description = if local {
-            format!("{} Trusted operator controller code executes under the server's OS account and can access that account's credentials; this is not SSH authority or a sandbox. Typed inputs use a private JSON file, never caller argv/source. Cleanup reports anchored-group signalling and direct-child reaping, not rollback or escaped-descendant containment. Operations are never replayed.", binding.description)
-        } else if binding.is_automation() {
-            format!("{} Trusted Ansible/controller code executes under the server's OS account and may access its credentials; remote work uses the configured automation authority. no_log and projections restrict disclosure, not code authority. Process cleanup is not a sandbox or authorization boundary. Operations are never replayed.", binding.description)
-        } else {
-            format!("{} Fixed remote execution with declared authority on declared targets; typed values fill whole arguments, not templates. Effects are operator-reviewed, not a sandbox or remote authorization. Cancellation may leave remote work running; operations are never replayed.", binding.description)
-        };
+        let description = binding.description.clone();
         let meta = JsonObject::from_iter([
             ("risk_tier".into(), serde_json::json!(tier)),
             ("revision".into(), serde_json::json!(binding.revision)),
             ("result".into(), serde_json::json!(binding.result_kind())),
             ("effects".into(), serde_json::json!(binding.effects())),
-            ("executor".into(), serde_json::json!(binding.executor_kind())),
+            (
+                "executor".into(),
+                serde_json::json!(binding.executor_kind()),
+            ),
             ("authority".into(), binding.public_authority()),
-            ("execution_location".into(), serde_json::json!(binding.execution_location())),
-            ("trusted_controller_code".into(), serde_json::json!(binding.trusted_controller_code())),
-            ("restriction_boundary".into(), binding.restriction_boundary()),
+            (
+                "execution_location".into(),
+                serde_json::json!(binding.execution_location()),
+            ),
+            (
+                "trusted_controller_code".into(),
+                serde_json::json!(binding.trusted_controller_code()),
+            ),
+            (
+                "restriction_boundary".into(),
+                binding.restriction_boundary(),
+            ),
         ]);
         let output_schema = if binding.is_automation() || binding.is_payload() {
             binding.projection().map_or_else(
@@ -224,12 +229,18 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
                 |plan| automation_output_schema(Some(plan)),
             )
         } else if local {
-            Arc::clone(controller_output_schema.as_ref().expect("controller registration has its result schema"))
+            Arc::clone(
+                controller_output_schema
+                    .as_ref()
+                    .expect("controller registration has its result schema"),
+            )
         } else {
             Arc::clone(&command_output_schema)
         };
         let metadata = Tool::new(
-            binding.name.clone(), description, Arc::clone(&binding.input_schema),
+            binding.name.clone(),
+            description,
+            Arc::clone(&binding.input_schema),
         )
         .with_raw_output_schema(output_schema)
         .with_annotations(annotations)
@@ -244,12 +255,16 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
                         None,
                     ));
                 };
-                context.service.binding(
-                    id,
-                    activated,
-                    context.arguments.unwrap_or_default(),
-                    context.request_context,
-                ).await.map(Into::into)
+                context
+                    .service
+                    .binding(
+                        id,
+                        activated,
+                        context.arguments.unwrap_or_default(),
+                        context.request_context,
+                    )
+                    .await
+                    .map(Into::into)
             })
         });
         (ToolKey::Binding(id), route)

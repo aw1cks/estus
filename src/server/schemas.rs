@@ -24,7 +24,7 @@ pub(super) fn automation_output_schema(
                     .and_then(serde_json::Value::as_object_mut)
                     && let Some(projection) = properties.get_mut("projection")
                 {
-                    if let Some(plan) = plan {
+                    if plan.is_some() {
                         // Generate the non-optional enum itself: an enabled
                         // projection always has one of its five states.
                         let mut generator = schemars::generate::SchemaSettings::draft2020_12()
@@ -58,7 +58,8 @@ pub(super) fn automation_output_schema(
                                 _ => (),
                             }
                         }
-                        payload(projection, &plan.schema);
+                        let value_ref = serde_json::json!({ "$ref": "#/$defs/ProjectedValue" });
+                        payload(projection, &value_ref);
                     } else {
                         properties.remove("projection");
                     }
@@ -87,6 +88,16 @@ pub(super) fn automation_output_schema(
         }
     }
     specialize(&mut schema, plan);
+    if let Some(plan) = plan {
+        schema
+            .as_object_mut()
+            .expect("reply schema is an object")
+            .entry("$defs")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .expect("$defs is an object")
+            .insert("ProjectedValue".into(), plan.schema.clone());
+    }
     Arc::new(
         schema
             .as_object()
@@ -119,7 +130,12 @@ mod projection_metadata_tests {
         }))
         .unwrap();
         let projected = Value::Object((*automation_output_schema(Some(&plan))).clone());
-        assert_eq!(occurrences(&projected, &selected), 2);
+        assert_eq!(occurrences(&projected, &selected), 1);
+        assert_eq!(
+            occurrences(&projected, &json!({ "$ref": "#/$defs/ProjectedValue" })),
+            2
+        );
+        assert_eq!(projected["$defs"]["ProjectedValue"], selected);
         fn data_schema(node: &Value) -> Option<&JsonObject> {
             match node {
                 Value::Object(object) => {

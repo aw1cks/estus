@@ -16,24 +16,28 @@
     {
       "kind": "argument",
       "name": "boot_id",
+      "default": "current",
       "format": "json",
       "omit_if_absent": false
     },
     {
       "kind": "argument",
       "name": "since",
+      "default": 0,
       "format": "json",
       "omit_if_absent": false
     },
     {
       "kind": "argument",
       "name": "journal_until",
+      "default": 4102444800,
       "format": "json",
       "omit_if_absent": false
     },
     {
       "kind": "argument",
       "name": "priority",
+      "default": 7,
       "format": "json",
       "omit_if_absent": false
     },
@@ -47,6 +51,7 @@
     {
       "kind": "argument",
       "name": "limit",
+      "default": 50,
       "format": "json",
       "omit_if_absent": false
     },
@@ -125,12 +130,7 @@
         }
       },
       "required": [
-        "target_python",
-        "boot_id",
-        "since",
-        "journal_until",
-        "priority",
-        "limit"
+        "target_python"
       ],
       "additionalProperties": false
     },
@@ -179,7 +179,13 @@
         }
       }
     },
-    "defaults": {},
+    "defaults": {
+      "boot_id": "current",
+      "since": 0,
+      "journal_until": 4102444800,
+      "priority": 7,
+      "limit": 50
+    },
     "review_required": [
       "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
     ]
@@ -237,13 +243,7 @@
             ]
           }
         },
-        "required": [
-          "boot_id",
-          "since",
-          "until",
-          "priority",
-          "limit"
-        ],
+        "required": [],
         "additionalProperties": false
       },
       "fixed_args": {

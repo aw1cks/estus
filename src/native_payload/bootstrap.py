@@ -105,6 +105,24 @@ def interrupted(_signal, _frame):
 for interruption_signal in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
     signal.signal(interruption_signal, interrupted)
 
+
+def classify_stderr_exception(stderr_bytes):
+    text = stderr_bytes.decode('utf-8', errors='replace')
+    for line in reversed(text.splitlines()):
+        head = line.strip().split(':', 1)[0].strip()
+        if head == 'PermissionError':
+            return 'permission_denied'
+        if head == 'FileNotFoundError':
+            return 'target_not_found'
+        if head in ('TimeoutError', 'subprocess.TimeoutExpired'):
+            return 'timeout'
+        if head == 'ValueError':
+            return 'policy_violation'
+        if head == 'RuntimeError':
+            return 'dependency_unavailable'
+        if head:
+            break
+    return None
 def run():
     if exact(8) != b'ESTUSNP1':
         raise ValueError('protocol')
@@ -197,6 +215,10 @@ def run():
                     response['output_status'] = 'complete'
                 except UnicodeDecodeError:
                     response['output_status'] = 'invalid_utf8'
+            if rc != 0:
+                reason = classify_stderr_exception(output['stderr'])
+                if reason is not None:
+                    response['error_reason'] = reason
             # stderr is drained but never published; it can contain secrets.
             return response, 0 if rc == 0 else 1
         finally:
