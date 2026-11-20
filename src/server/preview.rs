@@ -446,7 +446,13 @@ impl PreviewSpec {
                 // before the merge, they have no qualified preview.
                 if !matches!(
                     operation,
-                    "start" | "stop" | "restart" | "reload" | "enable" | "disable" | "mask"
+                    "start"
+                        | "stop"
+                        | "restart"
+                        | "reload"
+                        | "enable"
+                        | "disable"
+                        | "mask"
                         | "unmask"
                 ) {
                     return None;

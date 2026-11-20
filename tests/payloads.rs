@@ -617,7 +617,7 @@ print('\n'.join(errors))
     );
     let mut lines = stdout.lines();
     let count: usize = lines.next().context("scan count")?.parse()?;
-    ensure!(count >= 100, "expected 100+ collectors, scanned {count}");
+    ensure!(count >= 96, "expected 96+ collectors, scanned {count}");
     let offenders: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
     ensure!(
         offenders.is_empty(),

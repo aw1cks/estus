@@ -46,7 +46,7 @@ const GUIDE_LINUX_MEMORY: &str = "\
 const GUIDE_NETWORKING: &str = "\
 # Estus Runbook: Linux Networking & NIC Triage
 
-1. Observe interfaces, addresses, routes, rules, neighbors, and stats first: `observe_network_links`, `observe_network_addresses`, `observe_network_routes`, `observe_network_route_lookup`, `observe_network_neighbors`, `observe_network_interface_stats`, `observe_nic_*`.
+1. Observe interfaces, addresses, routes, rules, neighbors, and stats first: `observe_network` (`aspect` links, addresses, neighbors or stats), `observe_network_routes`, `observe_network_route_lookup`, `observe_network_rules`, `observe_nic*`.
 2. Escalate to active probes or socket tables deliberately: `inspect_sockets`, `inspect_dns_lookup`, `inspect_icmp_probe`, `inspect_tcp_connect_probe`, `inspect_network_path_probe`.
 3. NIC/link/route mutations (`change_network_*`, `change_nic_*`) can disrupt connectivity and trigger target write quarantine if interrupted.";
 
@@ -402,11 +402,8 @@ pub(super) fn get_prompt(
             let net_observe = format_available(
                 &permitted,
                 &[
-                    "observe_network_links",
-                    "observe_network_addresses",
+                    "observe_network",
                     "observe_network_routes",
-                    "observe_network_interface_stats",
-                    "observe_network_neighbors",
                     "observe_network_rules",
                 ],
                 "permitted `observe_*` tools from `permitted_operations` below",

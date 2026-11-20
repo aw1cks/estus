@@ -10,7 +10,9 @@ async fn observe_pci_aspects() -> Result<()> {
         let binding = guest.binding("observe_pci", json!({})).await?;
         binding.reject(json!({"unexpected": true})).await?;
         binding.reject(json!({"address": "bad;selector"})).await?;
-        binding.reject(json!({"address": "0000:00:00.0", "aspect": "reset"})).await?;
+        binding
+            .reject(json!({"address": "0000:00:00.0", "aspect": "reset"}))
+            .await?;
 
         let envelope = binding
             .call(json!({"address": "0000:00:00.0", "aspect": "identity"}))
@@ -38,7 +40,8 @@ async fn observe_pci_aspects() -> Result<()> {
             .await?;
         let value = catalog::projection(&envelope)?;
         ensure!(
-            value["pci"]["aspect"] == "driver" && value["pci"]["binding"]["address"] == "0000:00:00.0",
+            value["pci"]["aspect"] == "driver"
+                && value["pci"]["binding"]["address"] == "0000:00:00.0",
             "driver aspect did not publish its block"
         );
         ensure!(

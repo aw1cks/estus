@@ -31,13 +31,13 @@ async fn observe_network_aspects() -> Result<()> {
                 && value.get("stats").is_none(),
             "links aspect leaked an unrelated block"
         );
-        let mtu = guest
-            .shell("cat /sys/class/net/catalog0/mtu")
-            .await?;
+        let mtu = guest.shell("cat /sys/class/net/catalog0/mtu").await?;
         ensure!(mtu.status.success(), "link oracle failed");
         ensure!(
             value["links"]["entries"][0]["mtu"]
-                == String::from_utf8(mtu.stdout)?.trim().parse::<serde_json::Value>()?,
+                == String::from_utf8(mtu.stdout)?
+                    .trim()
+                    .parse::<serde_json::Value>()?,
             "mtu differs from the kernel oracle"
         );
 
@@ -49,9 +49,7 @@ async fn observe_network_aspects() -> Result<()> {
             value["aspect"] == "addresses"
                 && value["addresses"]["entries"]
                     .as_array()
-                    .is_some_and(|entries| entries
-                        .iter()
-                        .all(|entry| entry["family"] == "inet")),
+                    .is_some_and(|entries| entries.iter().all(|entry| entry["family"] == "inet")),
             "addresses aspect published the wrong family"
         );
 

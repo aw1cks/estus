@@ -6,7 +6,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 # Estus SRE Operating Method
 
 ## 1. Risk Tiers & Escalation
-- **`observe_*`** (auto-allow eligible): read-only system telemetry. Always start here (`observe_targets`, `observe_host_summary`, `observe_cpu`, `observe_memory`, `observe_pressure`, `observe_systemd_units`, `observe_network_links`).
+- **`observe_*`** (auto-allow eligible): read-only system telemetry. Always start here (`observe_targets`, `observe_host_summary`, `observe_cpu`, `observe_memory`, `observe_pressure`, `observe_systemd_units`, `observe_network`).
 - **`inspect_*`** (ask): sensitive reads (files, directories, processes, sockets, journal logs) or active network probes. Narrow scope before calling.
 - **`preview_*`** (ask): pre-change dependency and plan checks (`preview_kernel_module_load`, `preview_systemd_service`, `preview_sysctl`, `preview_package`, `preview_apt`, `preview_dnf`). Run before the matching mutation.
 - **`change_*`** (ask): structured single-purpose mutations and `change_target_quarantine_clear`. Never automatically replayed.
@@ -40,10 +40,10 @@ description: Safe observation-first Linux triage, journal inspection, and change
 - **Prompts**: `triage_host`, `diagnose_service`, `safe_change`, `network_triage`.
 - **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/preview`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
 
-## 7. Exact-Name Client Approval Policy (127 Published Tools)
-Published tools are the 15 builtin names plus the 112 bundled catalog tools. Which catalog tools exist depends on the selected configuration and, in zero-config workstation mode, on the installed catalog and bundle. Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies).
+## 7. Exact-Name Client Approval Policy (119 Published Tools)
+Published tools are the 15 builtin names plus the 104 bundled catalog tools. Which catalog tools exist depends on the selected configuration and, in zero-config workstation mode, on the installed catalog and bundle. Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies).
 
-### Allow (`observe_*` — 61 tools)
+### Allow (`observe_*` — 53 tools)
 ```json
 [
   "observe_boot_entries",
@@ -102,7 +102,7 @@ Published tools are the 15 builtin names plus the 112 bundled catalog tools. Whi
 ]
 ```
 
-### Ask (`inspect_*`, `preview_*`, `change_*`, `exec_*` — 74 tools)
+### Ask (`inspect_*`, `preview_*`, `change_*`, `exec_*` — 66 tools)
 ```json
 [
   "change_apt",

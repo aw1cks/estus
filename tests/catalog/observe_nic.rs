@@ -8,9 +8,13 @@ async fn observe_nic_aspects() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
         let binding = guest.binding("observe_nic", json!({})).await?;
-        binding.reject(json!({"interface": "catalog0", "aspect": "fec"})).await?;
+        binding
+            .reject(json!({"interface": "catalog0", "aspect": "fec"}))
+            .await?;
         binding.reject(json!({"aspect": "link"})).await?;
-        binding.reject(json!({"interface": "eth-none", "aspect": "link"})).await?;
+        binding
+            .reject(json!({"interface": "eth-none", "aspect": "link"}))
+            .await?;
 
         for aspect in ["link", "rings", "channels", "coalesce"] {
             let envelope = binding
@@ -40,7 +44,10 @@ async fn observe_nic_aspects() -> Result<()> {
             .await?;
         let value = catalog::projection(&envelope)?;
         if let Some(speed) = value["link"]["values"].get("speed") {
-            ensure!(speed.is_string(), "link speed must stay driver-reported text");
+            ensure!(
+                speed.is_string(),
+                "link speed must stay driver-reported text"
+            );
         }
         Ok(())
     }
