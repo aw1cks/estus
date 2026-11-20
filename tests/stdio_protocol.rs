@@ -65,9 +65,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         // No ESTUS_ANSIBLE_BUNDLE is set, so exactly the payload catalog
         // templates that explicitly declare a workstation policy may be
         // published; nothing is eligible by name or qualification alone.
-        let catalog_text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json"),
-        )
+        let catalog_text = std::fs::read_to_string(stdio::bundled_catalog_json())
         .context("read bundled catalog.json")?;
         let catalog: Value = serde_json::from_str(&catalog_text).context("parse catalog.json")?;
         let catalog_tools = catalog["tools"]

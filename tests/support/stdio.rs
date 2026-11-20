@@ -22,13 +22,29 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-pub fn command(args: &[&str]) -> Command {
-    let binary = std::env::var_os("ESTUS_TEST_BINARY").unwrap_or_else(|| {
+fn binary() -> std::ffi::OsString {
+    std::env::var_os("ESTUS_TEST_BINARY").unwrap_or_else(|| {
         option_env!("ESTUS_TEST_BINARY")
             .unwrap_or(env!("CARGO_BIN_EXE_estus"))
             .into()
-    });
-    let mut command = Command::new(binary);
+    })
+}
+
+/// The catalog the tested server actually ships: an installed package keeps it
+/// at `../share/estus/catalog` beside the executable (the server's own default
+/// discovery); a source build falls back to the checkout.
+pub fn bundled_catalog_json() -> std::path::PathBuf {
+    std::path::Path::new(&binary())
+        .parent()
+        .map(|bin| bin.join("../share/estus/catalog/catalog.json"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json")
+        })
+}
+
+pub fn command(args: &[&str]) -> Command {
+    let mut command = Command::new(binary());
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("ESTUS_") {
             command.env_remove(name);
