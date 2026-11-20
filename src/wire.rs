@@ -12,6 +12,34 @@ use crate::reply::{
     GroupCleanup, Termination, ToolError, ToolReply,
 };
 
+pub const MAX_RESPONSE_BYTES: usize = 16_777_216;
+
+// The SDK encoder appends exactly one newline after each compact JSON frame, so
+// every measured frame carries this constant on top of its byte size.
+const FRAME_NEWLINE: usize = 1;
+
+// A placeholder result is measured once and its variable regions are subtracted
+// to leave the fixed frame overhead. The real reply replaces each region with its
+// own request ID and value (in both the compact and escaped-in-text forms):
+const PLACEHOLDER_ID_BYTES: usize = 1; // `RequestId::Number(0)` serializes as `0`
+const PLACEHOLDER_STRUCTURED_NULL: usize = 4; // `structured_content: null`
+const PLACEHOLDER_TEXT_NULL: usize = 4; // the `text` value `null`, excluding its quotes
+const PLACEHOLDER_REGION_BYTES: usize =
+    PLACEHOLDER_ID_BYTES + PLACEHOLDER_STRUCTURED_NULL + PLACEHOLDER_TEXT_NULL;
+
+// The receipt is measured as a standalone object `{"output": …}`. Its enclosing
+// braces cost four bytes in the duplicated accounting; in the real reply the
+// receipt is a single field, so the braces become one separating comma (two).
+const RETENTION_ENVELOPE_BYTES: usize = 4;
+const RETENTION_COMMA_BYTES: usize = 2;
+
+// A fixed, tiny frame can never exceed the budget; the unit test pins that. Map
+// the (unreachable) error to the budget so a future SDK serialization change
+// fails at test time instead of panicking mid-request.
+fn fits_or_budget(size: Result<usize, ErrorData>) -> usize {
+    size.unwrap_or(MAX_RESPONSE_BYTES)
+}
+
 // A requested receipt must fit before execution; the default envelope is unchanged.
 fn retention_overhead(requested: bool) -> Result<usize, ErrorData> {
     static COST: LazyLock<usize> = LazyLock::new(|| {
@@ -26,13 +54,11 @@ fn retention_overhead(requested: bool) -> Result<usize, ErrorData> {
             stdout: info(),
             stderr: info(),
         }});
-        // Replace the enclosing {} (four duplicated bytes) with one comma (two).
-        duplicated_size(&value).expect("fixed output receipt fits response budget") - 2
+        fits_or_budget(duplicated_size(&value))
+            .saturating_sub(RETENTION_ENVELOPE_BYTES - RETENTION_COMMA_BYTES)
     });
     Ok(if requested { *COST } else { 0 })
 }
-
-pub const MAX_RESPONSE_BYTES: usize = 16_777_216;
 
 fn exceeded() -> ErrorData {
     ErrorData::invalid_params("Request leaves insufficient response budget", None)
@@ -108,7 +134,10 @@ pub(crate) fn duplicated_size(value: &impl Serialize) -> Result<usize, ErrorData
 }
 
 // Measure the SDK's actual result/frame shape once, rather than copying its
-// fields or constructing a placeholder result on every size calculation.
+// fields or constructing a placeholder result on every size calculation. The
+// fixed overhead is the measured placeholder frame plus the trailing newline the
+// SDK appends, minus the placeholder's variable regions (its ID and the two
+// `null` payloads). The caller adds the real request ID and reply back on top.
 fn tool_overhead(failed: bool) -> usize {
     static OVERHEAD: LazyLock<[usize; 2]> = LazyLock::new(|| {
         [false, true].map(|failed| {
@@ -123,9 +152,9 @@ fn tool_overhead(failed: bool) -> usize {
                 id: RequestId::Number(0),
                 result,
             };
-            // Remove the one-byte placeholder ID and the two four-byte null
-            // payloads, retaining the text string's quotes. Include the newline.
-            serialized_size(&frame).expect("fixed SDK frame fits the response budget") + 1 - 9
+            fits_or_budget(serialized_size(&frame))
+                .saturating_add(FRAME_NEWLINE)
+                .saturating_sub(PLACEHOLDER_REGION_BYTES)
         })
     });
     OVERHEAD[usize::from(failed)]
@@ -698,6 +727,50 @@ mod tests {
             }
             .controller_capture_limit(false)
             .is_err()
+        );
+    }
+    #[test]
+    fn placeholder_sdk_frames_fit_the_budget() {
+        // Self-checks that used to live in the LazyLock closures: a change to
+        // the SDK frame shape that bloats the fixed overhead must fail here at
+        // test time, not panic at request time.
+        let null = serde_json::Value::Null;
+        for failed in [false, true] {
+            let result = if failed {
+                CallToolResult::structured_error(null.clone())
+            } else {
+                CallToolResult::structured(null.clone())
+            };
+            let frame = JsonRpcResponse {
+                jsonrpc: Default::default(),
+                id: RequestId::Number(0),
+                result,
+            };
+            let size = serialized_size(&frame)
+                .expect("placeholder SDK frame must fit the response budget");
+            assert!(
+                size.saturating_add(FRAME_NEWLINE)
+                    .saturating_sub(PLACEHOLDER_REGION_BYTES)
+                    <= MAX_RESPONSE_BYTES / 2,
+                "SDK frame overhead is unexpectedly large: {size} bytes"
+            );
+        }
+        let info = || crate::reply::StreamInfo {
+            bytes_retained: u64::MAX,
+            total_bytes: u64::MAX,
+            truncated: false,
+        };
+        let receipt = serde_json::json!({"output": crate::reply::OutputReceipt::Ready {
+            handle: "f".repeat(32),
+            expires_in_secs: u64::MAX,
+            stdout: info(),
+            stderr: info(),
+        }});
+        let cost =
+            duplicated_size(&receipt).expect("fixed output receipt must fit the response budget");
+        assert!(
+            cost <= MAX_RESPONSE_BYTES / 2,
+            "output receipt overhead is unexpectedly large: {cost} bytes"
         );
     }
 }
