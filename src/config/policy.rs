@@ -439,10 +439,13 @@ impl Config {
             {
                 return Err(denied());
             }
+            // Same elevation program native `exec_sudo` runs: `sudo` resolved by
+            // the remote login PATH, so wrapped installs (NixOS
+            // `/run/wrappers/bin/sudo`) work without a second setting.
             static WORKSTATION_SUDO: std::sync::LazyLock<AutomationBecome> =
                 std::sync::LazyLock::new(|| AutomationBecome::Sudo {
                     user: "root".to_owned(),
-                    executable: "/usr/bin/sudo".to_owned(),
+                    executable: "sudo".to_owned(),
                 });
             let workstation_become = match binding.automation_authority() {
                 Some(AutomationAuthority::Ordinary) => None,

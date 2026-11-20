@@ -50,10 +50,10 @@ authorizes exactly the logical names it lists, and only those names are accepted
 as `host` values. Its absence leaves the caller naming a raw SSH destination and
 is only reachable in workstation mode.
 
-For local development with no configuration file, `--workstation` (or
-`ESTUS_WORKSTATION=1`) opts into open destinations and all five capability
-ceilings. Without it, a no-config start is headless: `named` only, no exec, sudo,
-file-write or catalog exposure.
+For local development with no configuration file, `--workstation` opts into
+open destinations and all five capability ceilings; it is flag-only. Without it,
+a no-config start is headless: `named` only, no exec, sudo, file-write or
+catalog exposure.
 
 ```sh
 estus --workstation                       # zero-config development

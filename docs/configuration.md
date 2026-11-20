@@ -35,8 +35,8 @@ Numeric limits also accept environment overrides:
 `ESTUS_CONNECT_TIMEOUT_SECS`, `ESTUS_OPERATION_TIMEOUT_SECS`,
 `ESTUS_MAX_TIMEOUT_SECS`, `ESTUS_MAX_OUTPUT_BYTES`, `ESTUS_MAX_FILE_BYTES`.
 Catalog and bundle additionally read `ESTUS_CATALOG_ROOT` and
-`ESTUS_ANSIBLE_BUNDLE`. `--workstation` may be replaced by any non-empty
-`ESTUS_WORKSTATION`.
+`ESTUS_ANSIBLE_BUNDLE`. `--workstation` has no environment equivalent, so an
+inherited environment cannot widen authority.
 
 ## Top level
 

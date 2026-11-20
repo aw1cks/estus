@@ -23,8 +23,9 @@ pub(crate) struct Cli {
     pub(super) ssh: Option<PathBuf>,
     /// Opt in to workstation mode: open destinations and caller-chosen hosts.
     /// Without a configuration file this is required to expose anything beyond
-    /// the read-only inspection builtins.
-    #[arg(long, global = true, env = "ESTUS_WORKSTATION")]
+    /// the read-only inspection builtins. Deliberately flag-only: an inherited
+    /// environment variable must never widen authority.
+    #[arg(long, global = true)]
     pub(super) workstation: bool,
     #[command(subcommand)]
     pub(crate) command: Option<CliCommand>,
