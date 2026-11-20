@@ -63,20 +63,25 @@ impl Estus {
         };
         let state = Arc::clone(&self.state);
         // Keep cleanup/audit alive even if RMCP suppresses the cancelled reply and
-        // drops this handler's JoinHandle. Admission above bounds these tasks.
-        let task = self.state.tasks.spawn(async move {
-            let reply = state
-                .command(request, context, started, capture_limit)
-                .await;
-            (permit, reply)
-        });
-        match task.await {
-            Ok((_permit, reply)) => budget.command_result(reply),
-            Err(_) => budget.result(ToolReply::<CommandData>::failure(ToolError::io_error(
-                "Command task could not complete; remote state is unknown",
-                true,
-            ))),
-        }
+        // drops this handler's future. Admission above bounds these tasks.
+        let reply =
+            match super::launch::spawn_surviving(&self.state.tasks, move |sender| async move {
+                let reply = state
+                    .command(request, context, started, capture_limit)
+                    .await;
+                let _ = sender.send((permit, reply));
+            })
+            .await
+            {
+                Some((_permit, reply)) => reply,
+                None => {
+                    return budget.result(ToolReply::<CommandData>::failure(ToolError::io_error(
+                        "Command task could not complete; remote state is unknown",
+                        true,
+                    )));
+                }
+            };
+        budget.command_result(reply)
     }
 }
 

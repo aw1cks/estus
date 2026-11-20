@@ -15,6 +15,7 @@ mod command_execution;
 mod file_execution;
 mod guidance;
 mod handlers;
+mod launch;
 mod local_execution;
 mod payload_execution;
 mod preparation;

@@ -92,6 +92,29 @@ enum Diagnostic {
     Bundle(bundle::BundleArgs),
 }
 
+/// Runs `operation` until it completes or SIGINT/SIGTERM arrives. On a signal
+/// the shared shutdown token is cancelled first, then the operation is given a
+/// chance to finish before the process exits.
+async fn run_cancellable<T>(
+    interrupt: &mut tokio::signal::unix::Signal,
+    terminate: &mut tokio::signal::unix::Signal,
+    shutdown: &CancellationToken,
+    operation: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => result,
+        _ = interrupt.recv() => {
+            shutdown.cancel();
+            operation.as_mut().await
+        },
+        _ = terminate.recv() => {
+            shutdown.cancel();
+            operation.as_mut().await
+        },
+    }
+}
+
 pub fn run_cli() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     if arguments.next().as_deref() == Some(std::ffi::OsStr::new(process::ANCHOR_ARG))
@@ -182,12 +205,7 @@ fn standalone_catalog(
         };
         let shutdown = CancellationToken::new();
         let operation = catalog::cli::run(args, cli, shutdown.clone());
-        tokio::pin!(operation);
-        let status = tokio::select! {
-            status = &mut operation => status,
-            _ = interrupt.recv() => { shutdown.cancel(); operation.as_mut().await },
-            _ = terminate.recv() => { shutdown.cancel(); operation.as_mut().await },
-        };
+        let status = run_cancellable(&mut interrupt, &mut terminate, &shutdown, operation).await;
         ExitCode::from(status)
     });
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -217,36 +235,17 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
                 }
             }
         };
-        tokio::pin!(operation);
-        let report = tokio::select! {
-            report = &mut operation => report,
-            _ = interrupt.recv() => {
-                shutdown.cancel();
-                operation.as_mut().await
-            },
-            _ = terminate.recv() => {
-                shutdown.cancel();
-                operation.as_mut().await
-            },
-        };
+        let report = run_cancellable(&mut interrupt, &mut terminate, &shutdown, operation).await;
         return ExitCode::from(report);
     }
     let shutdown = CancellationToken::new();
-    let activated = {
-        let activation = config.activate_automation(&shutdown);
-        tokio::pin!(activation);
-        tokio::select! {
-            result = &mut activation => result,
-            _ = interrupt.recv() => {
-                shutdown.cancel();
-                activation.as_mut().await
-            },
-            _ = terminate.recv() => {
-                shutdown.cancel();
-                activation.as_mut().await
-            },
-        }
-    };
+    let activated = run_cancellable(
+        &mut interrupt,
+        &mut terminate,
+        &shutdown,
+        config.activate_automation(&shutdown),
+    )
+    .await;
     let activated = match activated {
         Ok(activated) if !shutdown.is_cancelled() => activated,
         Ok(_) => return fail_phase("cancelled", "activation", "automation"),

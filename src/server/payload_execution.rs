@@ -119,68 +119,70 @@ impl Estus {
             Err(error) => return reject(error),
         };
         let state = Arc::clone(&self.state);
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        self.state.local_tasks.spawn(async move {
-            // Dropping an MCP handler never relinquishes execution/admission ownership.
-            let _credit = crate::progress::HandlerCredit::from_context(&context);
-            let _permits = (operation, runtime);
-            let metadata = Metadata {
-                request_id: &context.id,
-                tool: state.binding_name(id),
-                host: Some(&request.host),
-                identity_role,
-                sudo_mode: None,
-                user: None,
-                program: None,
-                binding_revision: Some(&revision),
-                executor: Some("native_payload"),
-            };
-            let mut target_lease = match state
-                .admission
-                .acquire(
-                    &request.host,
-                    admission_mode,
-                    deadline,
-                    &context.ct,
-                    &state.shutdown,
-                )
-                .await
-            {
-                Ok(lease) => lease,
-                Err(error) => {
-                    metadata.reject(started, &error);
-                    let _ = sender.send(ToolReply::failure(error));
-                    return;
-                }
-            };
-            let target = state
-                .config
-                .automation_target(id, &request.host)
-                .expect("payload target already authorized");
-            if requires_preview {
-                let spec = preview_meta
-                    .as_ref()
-                    .expect("preview spec checked before spawn");
-                let pre_state_digest = match state
-                    .payload
-                    .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
-                        host: &request.host,
-                        authority: &authority,
-                        target: &target,
-                        module: spec.prestate_module,
-                        arguments: &spec.prestate_args,
-                        connect_timeout: Duration::from_secs(
-                            state.config.limits().connect_timeout_secs,
-                        ),
+        let reply =
+            super::launch::spawn_surviving(&self.state.local_tasks, move |sender| async move {
+                // Dropping an MCP handler never relinquishes execution/admission ownership.
+                let _credit = crate::progress::HandlerCredit::from_context(&context);
+                let _permits = (operation, runtime);
+                let metadata = Metadata {
+                    request_id: &context.id,
+                    tool: state.binding_name(id),
+                    host: Some(&request.host),
+                    identity_role,
+                    sudo_mode: None,
+                    user: None,
+                    program: None,
+                    binding_revision: Some(&revision),
+                    executor: Some("native_payload"),
+                };
+                let mut target_lease = match state
+                    .admission
+                    .acquire(
+                        &request.host,
+                        admission_mode,
                         deadline,
-                        ct: &context.ct,
-                    })
+                        &context.ct,
+                        &state.shutdown,
+                    )
                     .await
                 {
-                    Ok(digest) => digest,
+                    Ok(lease) => lease,
                     Err(error) => {
-                        let error =
-                            if matches!(error.code(), ErrorCode::Cancelled | ErrorCode::Timeout) {
+                        metadata.reject(started, &error);
+                        let _ = sender.send(ToolReply::failure(error));
+                        return;
+                    }
+                };
+                let target = state
+                    .config
+                    .automation_target(id, &request.host)
+                    .expect("payload target already authorized");
+                if requires_preview {
+                    let spec = preview_meta
+                        .as_ref()
+                        .expect("preview spec checked before spawn");
+                    let pre_state_digest = match state
+                        .payload
+                        .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
+                            host: &request.host,
+                            authority: &authority,
+                            target: &target,
+                            module: spec.prestate_module,
+                            arguments: &spec.prestate_args,
+                            connect_timeout: Duration::from_secs(
+                                state.config.limits().connect_timeout_secs,
+                            ),
+                            deadline,
+                            ct: &context.ct,
+                        })
+                        .await
+                    {
+                        Ok(digest) => digest,
+                        Err(error) => {
+                            let error = if matches!(
+                                error.code(),
+                                ErrorCode::Cancelled | ErrorCode::Timeout
+                            ) {
                                 error
                             } else {
                                 ToolError::preview_required(
@@ -188,98 +190,103 @@ impl Estus {
                                     false,
                                 )
                             };
+                            target_lease.finish(false, Some(error.code())).await;
+                            metadata.reject(started, &error);
+                            let _ = sender.send(ToolReply::failure(error));
+                            return;
+                        }
+                    };
+                    let key = super::preview::PreviewKey {
+                        target: request.host.clone(),
+                        authority: identity_role,
+                        domain: spec.domain,
+                        intent_digest: spec.intent_digest,
+                        pre_state_digest,
+                    };
+                    if !state.previews.consume(&key) {
+                        let error = ToolError::preview_required(
+                            "A matching non-expired preview is required before apply",
+                            false,
+                        );
                         target_lease.finish(false, Some(error.code())).await;
                         metadata.reject(started, &error);
                         let _ = sender.send(ToolReply::failure(error));
                         return;
                     }
-                };
-                let key = super::preview::PreviewKey {
-                    target: request.host.clone(),
-                    authority: identity_role,
-                    domain: spec.domain,
-                    intent_digest: spec.intent_digest,
-                    pre_state_digest,
-                };
-                if !state.previews.consume(&key) {
-                    let error = ToolError::preview_required(
-                        "A matching non-expired preview is required before apply",
-                        false,
-                    );
-                    target_lease.finish(false, Some(error.code())).await;
-                    metadata.reject(started, &error);
-                    let _ = sender.send(ToolReply::failure(error));
-                    return;
                 }
-            }
-            let audit = Audit::start(metadata, started);
-            target_lease.mark_dispatched(request.host.clone(), authority.clone(), "native_payload");
-            let reply = state
-                .payload
-                .run(crate::native_payload::PayloadRun {
-                    plan: &activated.plan,
-                    host: &request.host,
-                    authority: &authority,
-                    target,
-                    request: payload_request,
-                    output_limit,
-                    connect_timeout: Duration::from_secs(
-                        state.config.limits().connect_timeout_secs,
-                    ),
-                    deadline,
-                    ct: &context.ct,
-                    started,
-                })
-                .await;
-            if is_preview
-                && reply.error().is_none()
-                && reply.data().is_some_and(|d| {
-                    d.complete && d.status == crate::reply::AutomationStatus::Successful
-                })
-                && let Some(spec) = preview_meta
-                && let Ok(pre_state_digest) = state
+                let audit = Audit::start(metadata, started);
+                target_lease.mark_dispatched(
+                    request.host.clone(),
+                    authority.clone(),
+                    "native_payload",
+                );
+                let reply = state
                     .payload
-                    .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
+                    .run(crate::native_payload::PayloadRun {
+                        plan: &activated.plan,
                         host: &request.host,
                         authority: &authority,
-                        target: &state
-                            .config
-                            .automation_target(id, &request.host)
-                            .expect("payload target already authorized"),
-                        module: spec.prestate_module,
-                        arguments: &spec.prestate_args,
+                        target,
+                        request: payload_request,
+                        output_limit,
                         connect_timeout: Duration::from_secs(
                             state.config.limits().connect_timeout_secs,
                         ),
                         deadline,
                         ct: &context.ct,
+                        started,
                     })
-                    .await
-            {
-                // Record the key from the preview's own pre-state observation.
-                state.previews.insert(super::preview::PreviewKey {
-                    target: request.host.clone(),
-                    authority: identity_role,
-                    domain: spec.domain,
-                    intent_digest: spec.intent_digest,
-                    pre_state_digest,
-                });
-            }
-            target_lease
-                .finish(
-                    reply.error().is_some_and(|e| e.remote_state_unknown),
-                    reply.error().map(|error| error.code()),
-                )
-                .await;
-            audit.finish_automation(&reply);
-            let _ = sender.send(reply);
-        });
-        let reply = receiver.await.unwrap_or_else(|_| {
-            ToolReply::failure(ToolError::io_error(
-                "Native payload worker lost; remote state is unknown",
-                true,
-            ))
-        });
+                    .await;
+                if is_preview
+                    && reply.error().is_none()
+                    && reply.data().is_some_and(|d| {
+                        d.complete && d.status == crate::reply::AutomationStatus::Successful
+                    })
+                    && let Some(spec) = preview_meta
+                    && let Ok(pre_state_digest) = state
+                        .payload
+                        .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
+                            host: &request.host,
+                            authority: &authority,
+                            target: &state
+                                .config
+                                .automation_target(id, &request.host)
+                                .expect("payload target already authorized"),
+                            module: spec.prestate_module,
+                            arguments: &spec.prestate_args,
+                            connect_timeout: Duration::from_secs(
+                                state.config.limits().connect_timeout_secs,
+                            ),
+                            deadline,
+                            ct: &context.ct,
+                        })
+                        .await
+                {
+                    // Record the key from the preview's own pre-state observation.
+                    state.previews.insert(super::preview::PreviewKey {
+                        target: request.host.clone(),
+                        authority: identity_role,
+                        domain: spec.domain,
+                        intent_digest: spec.intent_digest,
+                        pre_state_digest,
+                    });
+                }
+                target_lease
+                    .finish(
+                        reply.error().is_some_and(|e| e.remote_state_unknown),
+                        reply.error().map(|error| error.code()),
+                    )
+                    .await;
+                audit.finish_automation(&reply);
+                let _ = sender.send(reply);
+            })
+            .await
+            .unwrap_or_else(|| {
+                ToolReply::failure(ToolError::io_error(
+                    "Native payload worker lost; remote state is unknown",
+                    true,
+                ))
+            });
         budget.result(reply)
     }
 }
