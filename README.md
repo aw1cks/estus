@@ -90,8 +90,8 @@ exact names; the tier is the recommended default.
 allow/ask lists for the full published inventory (15 builtins plus the 104
 bundled catalog tools).
 
-Per-target narrowing is separate from the tier: `max_tier` denies every builtin
-above a ceiling, and `selection` names the tools that host keeps. `require_preview`
+Per-target narrowing is separate from the tier: `max_tier` denies every tool,
+builtin or catalog, above a ceiling, and `selection` names the tools that host keeps. `require_preview`
 (global, with a per-target override) applies only to named `change`/`exec` bindings
 that have a qualified preview pairing: such a call needs a fresh matching preview,
 and a named binding with no pairing — including every generic tool — is refused

@@ -111,7 +111,7 @@ impl Serialize for PermittedOperations<'_> {
                             && !binding.is_controller()
                             && binding.permits_host(self.target_name)
                             && self.target.is_none_or(|target| {
-                                target.permits(entry.name.as_ref())
+                                target.permits_binding(binding)
                                     && binding.sudo().is_none_or(|(user, program)| {
                                         target.sudo.permits(user, program)
                                     })

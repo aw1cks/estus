@@ -68,18 +68,24 @@ impl Capabilities {
 }
 
 impl Target {
-    /// The per-target test for a named tool: the operator either selected this
-    /// tool for this host or did not. A named tool's own reviewed tier is
-    /// published metadata, not a second per-host switch.
+    /// The per-target selection test: the operator either selected this tool
+    /// for this host or did not.
     pub(super) fn permits(&self, name: &str) -> bool {
         self.selected_bindings
             .as_ref()
             .is_none_or(|names| names.contains(name))
     }
 
-    /// The per-target ceiling on the generic builtin surface.
+    /// `max_tier` is a ceiling on every callable, builtin or named.
     pub(super) fn permits_tier(&self, tier: RiskTier) -> bool {
         self.max_tier.is_none_or(|ceiling| tier <= ceiling)
+    }
+
+    /// The one per-target test for a named tool: selected `and` within the
+    /// declared tier ceiling. Dispatch, publication and discovery all use it,
+    /// so the agent can never be told a tool this host would refuse.
+    pub(super) fn permits_binding(&self, binding: &crate::bindings::CompiledBinding) -> bool {
+        self.permits(&binding.name) && self.permits_tier(risk_tier_for_binding(binding))
     }
 
     pub(super) fn permits_workstation_sudo(&self) -> bool {
@@ -429,7 +435,7 @@ impl Config {
                 None => None,
             };
             if let Some(target) = target
-                && !target.permits(&binding.name)
+                && !target.permits_binding(binding)
             {
                 return Err(denied());
             }
@@ -512,7 +518,7 @@ impl Config {
                 .targets
                 .as_ref()
                 .and_then(|targets| targets.get(host))
-                .is_some_and(|target| target.permits(&binding.name))
+                .is_some_and(|target| target.permits_binding(binding))
         {
             return Err(denied());
         }
@@ -590,7 +596,7 @@ impl Config {
                             self.targets
                                 .as_ref()
                                 .and_then(|targets| targets.get(name))
-                                .is_some_and(|target| target.permits(&binding.name))
+                                .is_some_and(|target| target.permits_binding(binding))
                         }))
             })
     }
@@ -608,7 +614,7 @@ impl Config {
         };
         let authority = binding.automation_authority();
         targets.iter().any(|(host_name, target)| {
-            target.permits(&binding.name)
+            target.permits_binding(binding)
                 && match authority {
                     Some(AutomationAuthority::Ordinary) => true,
                     Some(AutomationAuthority::Named(name)) => {
@@ -655,7 +661,7 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target.permits(&binding.name) {
+        if !target.permits_binding(binding) {
             return Err(denied());
         }
         let resolved = match binding.sudo() {
@@ -1705,6 +1711,57 @@ max_tier = "inspect"
         assert!(config.resolve("observe-only", ToolId::WriteFile).is_err());
         assert!(config.resolve("inspect-only", ToolId::ReadFile).is_ok());
         assert!(config.resolve("inspect-only", ToolId::WriteFile).is_err());
+    }
+
+    #[test]
+    fn max_tier_caps_named_tools_as_well_as_builtins() {
+        let caps = super::super::test_support::capabilities_toml("actions-only");
+        let config = load_text(
+            &format!(
+                r#"{caps}
+[selection]
+allow = ["restart"]
+[targets.open]
+ssh_host = 'open-alias'
+[targets.capped]
+ssh_host = 'capped-alias'
+max_tier = "inspect"
+[tools.restart]
+description = "Restart a fixed unit"
+revision = "1"
+targets = ["open", "capped"]
+authority = "ordinary"
+effects = ["runtime_write"]
+execution = {{ kind = "native_argv", program = "/usr/bin/true", argv = [] }}
+input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
+result = {{ kind = "command" }}
+"#
+            ),
+            &[],
+        )
+        .unwrap();
+        let (id, binding) = config.bindings().entries().next().unwrap();
+        assert_eq!(risk_tier_for_binding(binding), RiskTier::Change);
+        // Selected on both hosts; only the ceiling differs.
+        assert!(config.resolve_binding("open", id).is_ok());
+        assert!(config.resolve_binding("capped", id).is_err());
+        let tools = ToolCatalog::new(vec![ToolEntry {
+            id: ToolKey::Binding(id),
+            name: binding.name.clone().into(),
+        }])
+        .unwrap();
+        let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
+        let permitted = |host: &str| {
+            discovery["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == host)
+                .unwrap()["permitted_operations"]
+                .clone()
+        };
+        assert_eq!(permitted("open"), serde_json::json!(["restart"]));
+        assert_eq!(permitted("capped"), serde_json::json!([]));
     }
 
     #[test]

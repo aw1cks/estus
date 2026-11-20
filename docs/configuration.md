@@ -160,8 +160,8 @@ programs = ["/usr/bin/systemctl"]   # optional absolute executable allowlist
 
 - `ssh_host` must be non-empty, contain no NUL or whitespace, and not start with
   `-`. `sudo.ssh_host` must not equal any configured ordinary alias.
-- `max_tier` denies every **builtin** whose published tier exceeds it on that
-  host. Named catalog tools are gated by `selection` and their own authority.
+- `max_tier` denies every tool, builtin or catalog, whose published tier exceeds
+  it on that host; a catalog tool must be both selected and within the ceiling.
 - `selection` is the same shape as the global `[selection]` and only narrows it:
   `allow`/`presets` list what this host may call, `deny` subtracts, a present
   table with every list empty denies every named tool, and an omitted table
