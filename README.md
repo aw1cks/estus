@@ -11,8 +11,8 @@ such as `/etc/estus`, `/var/lib/estus` and `/opt/estus`. There are no compatibil
 aliases. Ansible internal variables use the `estus_` prefix.
 
 Reimport and re-review existing automation definitions before enabling them: helper
-identity and content-hash namespaces have changed, so previous approval-like digests
-are not reusable. Deploy the reviewed content and update configuration accordingly.
+identity and content-hash namespaces have changed, so previous digest pins are not
+reusable. Deploy the reviewed content and update configuration accordingly.
 
 The automation-only `automation.ssh_executable` setting and
 `ESTUS_AUTOMATION_SSH` environment variable have been removed without aliases.
@@ -580,7 +580,7 @@ enables a tool. The manifest records the ansible-core version that produced it a
 the target Python floor implied by that version; the target still needs an
 interpreter at the configured absolute path.
 
-Module bindings name the module and never carry a snapshot path:
+Module bindings name the module and never carry a payload path:
 
 ```toml
 [tools.automation_probe]
@@ -850,7 +850,7 @@ forced-command stdio ingress. The client must not have service-account shell,
 sudo/root, shared privileged groups, or host/container-administration access.
 The [separated-account example](examples/separated-accounts/) makes this concrete
 without introducing another production daemon or container requirement.
-Estus does not provision or verify production account isolation; inspection
+Estus does not provision or verify production account isolation; tool metadata
 explicitly reports `operator_managed_not_observed`.
 
 ## Bundled operational catalog
@@ -1177,7 +1177,7 @@ introducing second collectors:
 |---|---|---|
 | `observe_systemd_unit` | [`systemd_service`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/systemd_service_module.html) query-only `status` | Selected per-unit properties in a fixed system/user scope; no mutation arguments |
 | `observe_hardware_system` | [`setup`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/setup_module.html) DMI fields | Manufacturer/model, board and BIOS versions |
-| `inspect_hardware_identifiers` | `setup` DMI fields | Serials, UUIDs and asset tags; retain separate sensitive-read approval |
+| `inspect_hardware_identifiers` | `setup` DMI fields | Serials, UUIDs and asset tags; disclose them only as a separate sensitive read |
 | `observe_storage_devices`, `observe_storage_device` | `setup` device/link facts | Basic block inventory, geometry, partitions and holder/master relationships |
 | `observe_storage_mounts` | [`mount_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/mount_facts_module.html) | Dynamic mount inventory and mount capacity/inode data |
 | `observe_packages` | [`package_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/package_facts_module.html) | Installed package/version inventory and reported backend metadata |
@@ -1228,7 +1228,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 ```
 
-Nothing is executed at startup and no approval file exists. To read the collector
+Nothing is executed at startup and no separate approval file exists. To read the collector
 and manifest an operator is about to trust, copy them out first:
 
 ```sh
@@ -1598,7 +1598,7 @@ policy loaded from the installed assets. Workstation eligibility is catalog data
 only templates with a `workstation` block in `catalog.json` (the generic
 read-only `observe_*`/`inspect_*` collectors) load, and site-policy or
 `laboratory_only` templates never do. Nothing is widened or inferred at runtime.
-No preparation command, readiness record or checkout-local launch script is
+No separate setup command, readiness record or checkout-local launch script is
 required. The same `estus-dev-mcp` executable is available in the pinned default
 devshell.
 
@@ -1657,7 +1657,7 @@ nix run --no-write-lock-file .#dev-mcp </dev/null
 ```
 
 MCP execution remains client-owned: no proxy, detached service, automatic restart,
-or mutable preparation state is added.
+or mutable setup state is added.
 
 ## CI coverage
 

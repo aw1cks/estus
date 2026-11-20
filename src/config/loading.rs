@@ -36,7 +36,7 @@ pub(crate) enum CliCommand {
     Doctor(DoctorArgs),
     /// Build or inspect offline Ansible module bundle packs.
     Bundle(crate::bundle::BundleArgs),
-    /// Discover, export and prepare bundled catalog definitions offline.
+    /// Discover the bundled catalog and export selected definitions offline.
     Catalog(crate::catalog::cli::CatalogArgs),
 }
 

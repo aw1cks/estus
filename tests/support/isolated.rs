@@ -990,7 +990,7 @@ impl Fixture {
     }
 
     /// Provision only the disposable target's config directory as file authority.
-    /// The supplied reviewed recipe is consumed verbatim; no fabricated approvals.
+    /// The supplied reviewed recipe is consumed verbatim; nothing is generated.
     #[allow(dead_code)]
     pub async fn prepare_restricted_files(&self, recipe: &str) -> Result<()> {
         self.prepare_deployment().await?;

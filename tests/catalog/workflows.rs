@@ -62,7 +62,7 @@ async fn controller_local_processes(
 async fn reviewed_health_workflow() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
-        let binding = catalog::Binding::prepare_workflow(&guest.config, HEALTH).await?;
+        let binding = catalog::Binding::enable_workflow(&guest.config, HEALTH)?;
         binding.inspect_workflow_list().await?;
         binding.reject_workflow_runtime().await?;
         binding.reject(json!({"command":"uname -a"})).await?;
@@ -96,7 +96,7 @@ async fn reviewed_health_workflow() -> Result<()> {
 async fn reviewed_service_diagnosis_workflow() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
-        let binding = catalog::Binding::prepare_workflow(&guest.config, DIAGNOSIS).await?;
+        let binding = catalog::Binding::enable_workflow(&guest.config, DIAGNOSIS)?;
         binding.inspect_workflow_list().await?;
         binding.reject(json!({"unit":"ssh.service"})).await?;
         oracle(&guest, "systemctl stop estus-fixture-idle.service; systemctl start estus-fixture-fail.service >/dev/null 2>&1; systemctl is-failed --quiet estus-fixture-fail.service").await?;
@@ -130,7 +130,7 @@ async fn reviewed_service_diagnosis_workflow() -> Result<()> {
 async fn reviewed_service_restart_workflow() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
-        let binding = catalog::Binding::prepare_workflow(&guest.config, RESTART).await?;
+        let binding = catalog::Binding::enable_workflow(&guest.config, RESTART)?;
         binding.inspect_workflow_list().await?;
         let before = unit_state(&guest, UNIT).await?;
         binding.reject(json!({"unit":"ssh.service"})).await?;

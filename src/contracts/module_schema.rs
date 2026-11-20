@@ -219,7 +219,7 @@ pub fn import_document(document: &Value) -> Result<Value, &'static str> {
     }
     if result.get("opaque_options").is_some() {
         result["review_required"].as_array_mut().ok_or(INVALID)?.push(Value::String(
-            "Documented raw options remain opaque and unbindable unless argument_types supplies an explicitly reviewed bounded representation. Fixed values require the same approval; omitted options and documentation defaults are not injected.".to_owned()
+            "Documented raw options remain opaque and unbindable unless argument_types supplies an explicitly reviewed bounded representation. Fixed values require the same explicit review; omitted options and documentation defaults are not injected.".to_owned()
         ));
     }
     if !bounded(&result) {
@@ -947,7 +947,7 @@ struct Overlay {
     argument_types: BTreeMap<String, Value>,
 }
 
-/// Validate configuration shape without reading a reviewed snapshot or runtime.
+/// Validate an overlay's shape without reading a collector or runtime.
 pub fn validate_overlay(overlay: &Value) -> Result<(), &'static str> {
     if !bounded(overlay) {
         return Err(SCHEMA);

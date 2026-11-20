@@ -213,7 +213,7 @@ impl Guest {
     }
 
     pub async fn binding(&self, name: &str, overrides: Value) -> Result<Binding> {
-        Binding::install(&self.config, name, overrides).await
+        Binding::install(&self.config, name, overrides)
     }
 
     pub fn authority_ssh_config(&self) -> PathBuf {
@@ -263,13 +263,14 @@ pub struct Binding {
     pub workspace: PathBuf,
     name: String,
     timeout_secs: u64,
+    /// Catalog authority the shipped definition was reviewed with.
+    authority: String,
 }
 
 impl Binding {
-    /// A broken explicitly selected runtime must fail authoring, not fall back.
+    /// A broken explicitly selected runtime must fail startup, not fall back.
     pub async fn reject_workflow_runtime(&self) -> Result<()> {
-        let mut site: toml::Value =
-            toml::from_str(&fs::read_to_string(self.root.path().join("site.toml"))?)?;
+        let mut site: toml::Value = toml::from_str(&fs::read_to_string(&self.config)?)?;
         site["automation"]["bundle"] = self
             .root
             .path()
@@ -279,21 +280,24 @@ impl Binding {
             .into();
         let site_path = self.root.path().join("invalid-site.toml");
         fs::write(&site_path, toml::to_string(&site)?)?;
-        let output_path = self.root.path().join("invalid-prepared");
-        let mut command = workflow_command()?;
-        command
-            .arg("prepare")
-            .arg("--site")
-            .arg(site_path)
-            .arg("--definitions")
-            .arg(self.root.path().join("export/tools.toml"))
-            .args(["--target", "plain"])
-            .arg("--output")
-            .arg(&output_path);
-        let output = support::run(&mut command).await?;
+        let binary = std::env::var_os("ESTUS_TEST_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    option_env!("ESTUS_TEST_BINARY").unwrap_or(env!("CARGO_BIN_EXE_estus")),
+                )
+            });
+        let mut server = Command::new(support::executable(&binary)?);
+        server
+            .arg("--config")
+            .arg(&site_path)
+            .env_remove("ESTUS_CONFIG")
+            .env_remove("ESTUS_ANSIBLE_BUNDLE")
+            .stdin(Stdio::null());
+        let output = support::run(&mut server).await?;
         ensure!(
-            output.status.code() == Some(2) && output.stdout.is_empty() && !output_path.exists(),
-            "invalid selected site runtime fell back or retained partial preparation"
+            output.status.code() == Some(2) && output.stdout.is_empty(),
+            "invalid selected site runtime fell back"
         );
         let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
         ensure!(
@@ -303,11 +307,16 @@ impl Binding {
         Ok(())
     }
 
-    /// Exercise offline export, explicit site-policy review, prepare, and inspect.
-    /// Recipes select canonical definitions; they never carry approval snapshots.
-    pub async fn prepare_workflow(base: &Path, recipe: &str) -> Result<Self> {
+    /// Enable one catalog tool by name in the provisioned guest's own site, with
+    /// the recipe's reviewed allowlist restated as site constraints. A recipe
+    /// names a canonical tool and the policy it needs, nothing more.
+    pub fn enable_workflow(base: &Path, recipe: &str) -> Result<Self> {
         let recipe: toml::Value = toml::from_str(recipe)?;
         let name = recipe["tool"].as_str().context("workflow tool")?;
+        let authority = recipe["authority"]
+            .as_str()
+            .context("reviewed workflow authority")?
+            .to_owned();
         let root = tempfile::Builder::new()
             .prefix("estus-workflow-")
             .tempdir()?;
@@ -317,36 +326,16 @@ impl Binding {
         command
             .args(["export", "--tool", name, "--output"])
             .arg(&export);
-        workflow_output(&mut command).await?;
-        let definitions = export.join("tools.toml");
-        let mut document: toml::Value = toml::from_str(&fs::read_to_string(&definitions)?)?;
-        let tool = &mut document["tools"][name];
-        if let Some(units) = recipe.get("allowed_units") {
-            ensure!(
-                !units.as_array().context("reviewed units")?.is_empty(),
-                "empty unit policy"
-            );
-            let constraints = tool
-                .as_table_mut()
-                .context("tool table")?
-                .entry("constraints")
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-                .as_table_mut()
-                .context("constraints table")?;
-            constraints.insert("allowed_units".into(), units.clone());
-        }
-        let timeout_secs = tool["limits"]["timeout_secs"]
-            .as_integer()
-            .context("workflow timeout")? as u64;
-        let authority = recipe["authority"]
-            .as_str()
-            .context("reviewed workflow authority")?
-            .to_owned();
+        let exported = std::fs::read_to_string(export.join("tools.toml"))?;
+        let definitions: toml::Value = toml::from_str(&exported)?;
+        let tool = &definitions["tools"][name];
         ensure!(
             tool["authority"].as_str() == Some(authority.as_str()),
             "canonical authority changed; workflow requires explicit review"
         );
-        fs::write(&definitions, toml::to_string(&document)?)?;
+        let timeout_secs = tool["limits"]["timeout_secs"]
+            .as_integer()
+            .context("workflow timeout")? as u64;
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace)?;
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
@@ -370,15 +359,6 @@ impl Binding {
                     .into(),
             );
         site_table
-            .entry("controller")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-            .context("controller")?
-            .insert(
-                "workspace_root".into(),
-                workspace.to_str().context("workspace UTF8")?.into(),
-            );
-        site_table
             .entry("automation")
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
@@ -389,60 +369,47 @@ impl Binding {
                     json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}),
                 )?,
             );
-        let site_path = root.path().join("site.toml");
-        fs::write(&site_path, toml::to_string(&site)?)?;
-        let prepared = root.path().join("prepared");
-        let mut command = workflow_command()?;
-        command
-            .arg("prepare")
-            .arg("--site")
-            .arg(&site_path)
-            .arg("--definitions")
-            .arg(&definitions)
-            .args(["--target", "plain"])
-            .arg("--output")
-            .arg(&prepared);
-        let report = workflow_output(&mut command).await?;
-        ensure!(
-            report["prepared"] == 1 && report["activated"] == false,
-            "prepare did not explicitly approve one tool: {report}"
-        );
-        let config = prepared.join("estus.toml");
-        let mut command = workflow_command()?;
-        command.arg("inspect").arg("--site").arg(&config);
-        let inspected = workflow_output(&mut command).await?;
-        ensure!(
-            inspected["global_native_execution"] == false
-                && inspected["global_native_file_read"] == false
-                && inspected["global_native_file_write"] == false,
-            "workflow exposed native escape: {inspected}"
-        );
-        let tools = inspected["tools"].as_array().context("inspected tools")?;
-        ensure!(
-            tools.len() == 1
-                && tools[0]["name"] == name
-                && tools[0]["enabled"] == true
-                && tools[0]["authority"] == authority
-                && tools[0]["execution_location"] == "controller_and_remote"
-                && tools[0]["targets"] == json!([{"name":"plain","permitted":true}]),
-            "unexpected workflow authority/exposure: {inspected}"
-        );
-        let snapshot: Value = serde_json::from_slice(&fs::read(
-            prepared.join("snapshots").join(format!("{name}.json")),
-        )?)?;
-        ensure!(
-            snapshot["schema"] == 1 && snapshot["approved"] == true,
-            "prepare omitted real reviewed approval"
-        );
+        site_table
+            .entry("controller")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .context("controller")?
+            .insert(
+                "workspace_root".into(),
+                workspace.to_str().context("workspace UTF8")?.into(),
+            );
+        if let Some(units) = recipe.get("allowed_units") {
+            ensure!(
+                !units.as_array().context("reviewed units")?.is_empty(),
+                "empty unit policy"
+            );
+            let mut policy = toml::Table::new();
+            policy.insert(
+                "constraints".into(),
+                toml::Value::try_from(json!({"allowed_units": units}))?,
+            );
+            site_table.insert(
+                "tools".into(),
+                toml::Value::Table(toml::Table::from_iter([(
+                    name.to_owned(),
+                    toml::Value::Table(policy),
+                )])),
+            );
+        }
+        let config = root.path().join("estus.toml");
+        fs::write(&config, toml::to_string(&site)?)?;
         Ok(Self {
             root,
             config,
             workspace,
             name: name.into(),
             timeout_secs,
+            authority,
         })
     }
 
+    /// The site's own enable-by-name flow must publish exactly the reviewed
+    /// catalog definition and no generic escape.
     pub async fn inspect_workflow_list(&self) -> Result<()> {
         let mut server = WireServer::start(&self.config)?;
         let result: Result<()> = async {
@@ -451,8 +418,8 @@ impl Binding {
             let tools = reply["result"]["tools"]
                 .as_array()
                 .context("workflow tools/list")?;
-            // These two non-executing protocol tools are always present in
-            // actions-only; neither grants generic shell or file access.
+            // These protocol tools are always present; none grants generic
+            // shell or file access.
             ensure!(
                 tools.len() == 4
                     && tools.iter().all(|tool| tool["name"] == self.name
@@ -465,10 +432,8 @@ impl Binding {
                 .iter()
                 .find(|tool| tool["name"] == self.name)
                 .context("selected workflow publication")?;
-            let config: toml::Value = toml::from_str(&fs::read_to_string(&self.config)?)?;
             ensure!(
-                published["_meta"]["authority"].as_str()
-                    == config["tools"][self.name.as_str()]["authority"].as_str()
+                published["_meta"]["authority"] == self.authority.as_str()
                     && published["_meta"]["execution_location"] == "controller_and_remote",
                 "workflow discovery authority/location differs from review: {published}"
             );
@@ -479,11 +444,25 @@ impl Binding {
         result
     }
 
-    pub async fn install(base: &Path, name: &str, overrides: Value) -> Result<Self> {
+    pub fn install(base: &Path, name: &str, overrides: Value) -> Result<Self> {
         ensure!(
             !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
             "invalid catalog name"
         );
+        // The installed definition decides the executor, timeout and authority;
+        // the site contributes policy only.
+        let definitions: toml::Value = toml::from_str(&fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("catalog/{name}.toml")),
+        )?)?;
+        let tool = &definitions["tools"][name];
+        let native = tool["execution"]["kind"].as_str() == Some("native_payload");
+        let timeout_secs = tool["limits"]["timeout_secs"]
+            .as_integer()
+            .context("catalog timeout")? as u64;
+        let authority = tool["authority"]
+            .as_str()
+            .context("catalog authority")?
+            .to_owned();
         let root = tempfile::Builder::new()
             .prefix("estus-catalog-binding-")
             .tempdir()?;
@@ -491,39 +470,6 @@ impl Binding {
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace)?;
         fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
-        let export = root.path().join("export");
-        let mut command = workflow_command()?;
-        command
-            .args(["export", "--tool", name, "--output"])
-            .arg(&export);
-        workflow_output(&mut command).await?;
-        let definitions = export.join("tools.toml");
-        let mut document: toml::Value = toml::from_str(&fs::read_to_string(&definitions)?)?;
-        let tool = document["tools"][name]
-            .as_table_mut()
-            .context("shipped catalog binding")?;
-        let fixed = tool
-            .get_mut("fixed_args")
-            .and_then(toml::Value::as_table_mut)
-            .context("catalog fixed args")?;
-        for (key, value) in overrides
-            .as_object()
-            .context("operator fixed-argument overrides must be object")?
-        {
-            ensure!(
-                fixed.contains_key(key),
-                "override must name an existing reviewed fixed argument"
-            );
-            fixed.insert(key.clone(), toml::Value::try_from(value)?);
-        }
-        let native = tool["execution"]["kind"].as_str() == Some("native_payload");
-        let timeout_secs = tool
-            .get("limits")
-            .and_then(|value| value.get("timeout_secs"))
-            .and_then(toml::Value::as_integer)
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(20);
-        fs::write(&definitions, toml::to_string(&document)?)?;
         let mut site: toml::Table = toml::from_str(&fs::read_to_string(base)?)?;
         site.insert("mode".into(), "headless".into());
         site.insert(
@@ -563,26 +509,33 @@ impl Binding {
                 json!({"plain":{"destination":"plain","python":"/usr/bin/python3"}}),
             )?,
         );
-        let site_path = root.path().join("site.toml");
-        fs::write(&site_path, toml::to_string(&site)?)?;
-        let prepared = root.path().join("prepared");
-        let mut command = workflow_command()?;
-        command
-            .arg("prepare")
-            .arg("--site")
-            .arg(site_path)
-            .arg("--definitions")
-            .arg(definitions)
-            .args(["--target", "plain"])
-            .arg("--output")
-            .arg(&prepared);
-        workflow_output(&mut command).await?;
+        // Site policy only: the definition, contract and result stay the
+        // catalog's, so an override cannot widen what a tool claims.
+        let mut fixed = toml::Table::new();
+        fixed.insert("target_python".into(), "/usr/bin/python3".into());
+        if let Some(overrides) = overrides.as_object() {
+            for (key, value) in overrides {
+                fixed.insert(key.clone(), toml::Value::try_from(value)?);
+            }
+        }
+        let mut policy = toml::Table::new();
+        policy.insert("fixed_args".into(), toml::Value::Table(fixed));
+        site.insert(
+            "tools".into(),
+            toml::Value::Table(toml::Table::from_iter([(
+                name.to_owned(),
+                toml::Value::Table(policy),
+            )])),
+        );
+        let config = root.path().join("estus.toml");
+        fs::write(&config, toml::to_string(&site)?)?;
         Ok(Self {
             root,
-            config: prepared.join("estus.toml"),
+            config,
             workspace,
             name: name.into(),
             timeout_secs,
+            authority,
         })
     }
 

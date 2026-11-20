@@ -291,15 +291,15 @@ impl PayloadPlan {
     pub(crate) fn load_from_bytes(
         source: Vec<u8>,
         manifest_bytes: &[u8],
-        approval: &PayloadSource<'_>,
+        policy: &PayloadSource<'_>,
     ) -> Result<Self, ConfigError> {
-        Self::assemble(source, manifest_bytes, approval)
+        Self::assemble(source, manifest_bytes, policy)
     }
 
     fn assemble(
         source: Vec<u8>,
         manifest_bytes: &[u8],
-        approval: &PayloadSource<'_>,
+        policy: &PayloadSource<'_>,
     ) -> Result<Self, ConfigError> {
         let manifest: Manifest = parse(manifest_bytes)
             .and_then(serde_json::from_value)
@@ -312,14 +312,14 @@ impl PayloadPlan {
         }
         validate_manifest(&manifest)
             .map_err(|error| error.with_cause("manifest_constraints", "payload_validation"))?;
-        let binding = module_schema::compile_binding(&manifest.contract, approval.overlay)
+        let binding = module_schema::compile_binding(&manifest.contract, policy.overlay)
             .map_err(|code| invalid().with_cause(code, "payload_binding"))?;
         Ok(Self {
             manifest,
             source: source.into(),
             binding,
-            no_log: approval.no_log,
-            projection: approval.projection.clone(),
+            no_log: policy.no_log,
+            projection: policy.projection.clone(),
         })
     }
     /// The request is the reviewed adapter evaluated to typed JSON values, in order.

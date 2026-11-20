@@ -166,7 +166,7 @@ fn export_is_inert_and_writes_only_reviewable_inputs() -> Result<()> {
     );
     ensure!(
         pressure["execution"].get("snapshot").is_none(),
-        "export reintroduced an approval snapshot reference"
+        "export reintroduced a snapshot reference"
     );
     ensure!(
         pressure["input_schema"]["additionalProperties"] == toml::Value::Boolean(false)

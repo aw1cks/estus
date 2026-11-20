@@ -1,6 +1,6 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
 # Export, review payloads/observe_memory/manifest.json and the fixed policy here, then enable it by name.
-# Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
+# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
 enabled_tools = ["observe_memory"]

@@ -879,9 +879,7 @@ impl CompiledBinding {
                         .values()
                         .any(|path| path.first().map(String::as_str) == Some("diff"))
                 {
-                    return Err(invalid(
-                        "diff requires explicit approval in projection fields",
-                    ));
+                    return Err(invalid("diff requires an explicit projection field"));
                 }
                 let schema = serde_json::to_value(schema)
                     .map_err(|_| invalid("Invalid projection schema"))?;

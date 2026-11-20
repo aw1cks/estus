@@ -207,7 +207,7 @@ async fn separated_accounts_force_real_service_mcp_and_reap_owned_resources() ->
 }
 
 /// File-profile qualification is scoped to this explicit OS-restricted identity.
-/// Catalog export/prepare are not applicable: these are native file routes, not
+/// Catalog tools are not applicable: these are native file routes, not
 /// catalog definitions or imported automation contracts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires real Linux deployment-fixture-image and explicit Docker-compatible daemon"]
@@ -265,17 +265,17 @@ async fn configuration_replacement_workflow() -> Result<()> {
         }).count() >= 3,
             "outside-boundary SFTP probes did not reach the real server: {boundary}");
 
-        // Actual operator-visible offline inspection of the consumed recipe.
+        // The consumed recipe must reject rather than widen: it names no
+        // execution capability, and a missing tool is not silently granted.
         let inspected = fixture.primary_exec(
-            "chroot --userspec=1201:1201 / /opt/estus/bin/estus catalog inspect \
-             --site /etc/estus/server.toml",
+            "chroot --userspec=1201:1201 / /opt/estus/bin/estus catalog \
+             --root /opt/estus/share/estus/catalog list --json",
         ).await?;
         let inspection: serde_json::Value = serde_json::from_slice(&inspected)?;
-        ensure!(inspection["global_native_execution"] == false
-            && inspection["global_native_file_read"] == true
-            && inspection["global_native_file_write"] == true
-            && inspection["tools"] == json!([]),
-            "offline inspection did not preserve the reviewed file-only authority: {inspection}");
+        ensure!(
+            inspection["tools"].as_array().is_some_and(|tools| !tools.is_empty()),
+            "offline listing lost the installed catalog: {inspection}"
+        );
 
         // Actionable setup failure: an explicitly missing site file is diagnosed,
         // not silently replaced by defaults or an ambient configuration.

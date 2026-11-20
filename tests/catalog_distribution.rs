@@ -321,12 +321,6 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
                 .join(format!("payloads/{name}/collector.py"))
                 .is_file()
         );
-        let overlay: Value = serde_json::from_slice(
-            &fs::read(output.join(format!("overlays/{name}.json"))).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(overlay.as_object().unwrap().len(), 3);
-        assert!(overlay["input_schema"].is_object());
         assert_eq!(
             definitions["tools"][name]["execution"]["source"]
                 .as_str()
@@ -337,13 +331,9 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
                 .unwrap()
         );
     }
-    assert!(output.join("snapshots").is_dir());
-    assert!(
-        fs::read_dir(output.join("snapshots"))
-            .unwrap()
-            .next()
-            .is_none()
-    );
+    // Export writes reviewable inputs only, never generated policy state.
+    assert!(!output.join("overlays").exists());
+    assert!(!output.join("snapshots").exists());
     let laboratory = work.join("laboratory");
     let exported = installed_command(
         &binary,
