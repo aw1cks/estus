@@ -27,12 +27,20 @@ set `destination_policy = "open"` at the TOML root and omit the targets table.
 Combining open mode with any targets table is rejected. Otherwise only exact
 configured logical names are accepted; backend aliases do not grant authority.
 
-No-config startup uses `mode = "workstation"` with all five capability ceilings
-enabled (`named`, `file_read`, `file_write`, `exec`, `sudo`) and open ordinary SSH
-resolution (actual `exec_sudo` still requires configured target sudo). Explicit
-configuration files default to `mode = "headless"` with `[capabilities]`
-`named = true` only unless `[capabilities]` or `mode = "workstation"` is specified.
-Per-target `[targets.<name>.capabilities]` fields only narrow the global set.
+Workstation mode is an explicit opt-in: pass `--workstation` (or set
+`ESTUS_WORKSTATION`) and omit the targets table, or declare
+`mode = "workstation"` in a configuration file. With a configuration file, the
+flag may only restate that declared mode; it never upgrades a headless file.
+No-config startup without the flag uses the restrictive `headless` default with
+`[capabilities]` `named = true` only: no exec, sudo, file-write or catalog
+exposure. `mode = "workstation"` enables all five capability ceilings (`named`,
+`file_read`, `file_write`, `exec`, `sudo`) with open ordinary SSH resolution.
+`exec_sudo` is published only when some configured target declares sudo policy,
+and open resolution never elevates: dynamic catalog bindings that require
+`automation:<authority>` stay unpublished unless a configured target grants
+unrestricted root sudo or a matching `[automation.authorities.<name>]` mapping
+exists. Per-target `[targets.<name>.capabilities]` fields only narrow the global
+set.
 
 ## Base wheel
 
@@ -1047,9 +1055,9 @@ overlay drift still invalidates snapshots; startup never refreshes approval.
 
 `[capabilities]` (`named`, `file_read`, `file_write`, `exec`, `sudo`) sets
 independent exposure ceilings, **not** task presets. Explicit configuration files
-default to `mode = "headless"` (`named = true` only); no-config startup uses
-`mode = "workstation"` with all five ceilings enabled and dynamic ordinary SSH
-resolution. `[rules."<pattern>"]` narrows per-host permissions via `deny_tiers`,
+default to `mode = "headless"` (`named = true` only); no-config startup needs the
+explicit `--workstation` opt-in to enable all five ceilings with dynamic ordinary
+SSH resolution. `[rules."<pattern>"]` narrows per-host permissions via `deny_tiers`,
 `allow_tools`, and per-tool `constraints`. Capabilities are not OS/account sandboxes.
 
 Every registered tool publishes `_meta.risk_tier` (`observe`, `inspect`, `preview`,
@@ -1632,14 +1640,19 @@ nix run --no-write-lock-file .#dev-mcp
 ```
 
 Nix builds the current native package when needed, then the app `exec`s it with
-no `--config`, so the server starts in zero-config workstation mode: all five
-capability ceilings enabled, ordinary SSH destinations resolved normally, and
-catalog tools loaded from the installed assets. No preparation command, readiness
-record or checkout-local launch script is required. The same `estus-dev-mcp`
-executable is available in the pinned default devshell.
+`--workstation` and no `--config`, so the server starts in explicit zero-config
+workstation mode: all five capability ceilings enabled, ordinary SSH destinations
+resolved normally, and the catalog templates that declare a reviewed workstation
+policy loaded from the installed assets. Workstation eligibility is catalog data:
+only templates with a `workstation` block in `catalog.json` (the generic
+read-only `observe_*`/`inspect_*` collectors) load, and site-policy or
+`laboratory_only` templates never do. Nothing is widened or inferred at runtime.
+No preparation command, readiness record or checkout-local launch script is
+required. The same `estus-dev-mcp` executable is available in the pinned default
+devshell.
 
 The wrapper clears inherited `ESTUS_CONFIG`, `ESTUS_SSH_CONFIG`, `ESTUS_SSH`,
-`ESTUS_CATALOG_ROOT` and `ESTUS_PYTHON_RUNTIME`, and pins
+`ESTUS_CATALOG_ROOT`, `ESTUS_PYTHON_RUNTIME` and `ESTUS_WORKSTATION`, and pins
 `ESTUS_ANSIBLE_BUNDLE` to the Nix-built direct module bundle, so bundle-backed
 module tools work without an operator-built pack. Workstation mode still grants no
 credentials and performs no remote action until a request arrives; it provisions
@@ -1672,14 +1685,17 @@ cargo test --test bundle_cli
 ### OMP workspace client
 
 The tracked `.omp/mcp.json` invokes `nix run --no-write-lock-file .#dev-mcp`
-from the checkout root in default `workstation` mode with `ESTUS_ANSIBLE_BUNDLE`
-set to the Nix-built base module bundle. Set `"disabled": true` or use
+from the checkout root; the app itself passes `--workstation`, so the client gets
+explicit workstation mode with `ESTUS_ANSIBLE_BUNDLE` set to the Nix-built base
+module bundle. Set `"disabled": true` or use
 `disabledServers` in your profile if you want to disable it locally.
 
 The entry allows 300,000 ms for MCP requests, including cold initialization.
 That client-side timeout is separate from the server's own limits: zero-config
 workstation startup keeps the default `max_timeout_secs` of 600 and per-tool
-timeouts, and this entry changes neither. `OMP_MCP_TIMEOUT_MS` overrides the entry
+timeouts, and this entry changes neither. Removing `--workstation` from the app
+drops the client to the headless default rather than changing any of these
+limits. `OMP_MCP_TIMEOUT_MS` overrides the entry
 process-wide.
 
 OMP18.19.0 discards subprocess stderr and reports startup failure as generic EOF.

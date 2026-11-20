@@ -252,7 +252,7 @@ fn discovery_data<'a>(result: &'a Value, mode: &str) -> Result<&'a Value> {
 
 #[tokio::test]
 async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
-    let mut server = Server::start(&[])?;
+    let mut server = Server::start(&["--workstation"])?;
     let scenario = async {
         server.initialize().await?;
         server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
@@ -298,8 +298,9 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
                 | "observe_targets"
                 | "change_file_write"
         );
-        // No ESTUS_ANSIBLE_BUNDLE is set, so exactly the non-laboratory_only
-        // native_payload catalog tools may be published.
+        // No ESTUS_ANSIBLE_BUNDLE is set, so exactly the payload catalog
+        // templates that explicitly declare a workstation policy may be
+        // published; nothing is eligible by name or qualification alone.
         let catalog_text = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json"),
         )
@@ -311,11 +312,22 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         let expected: std::collections::BTreeSet<String> = catalog_tools
             .iter()
             .filter(|(_, template)| {
-                template["qualification"] != "laboratory_only"
+                template.get("workstation").is_some()
+                    && template["qualification"] != "laboratory_only"
                     && template["executor"]["kind"] == "native_payload"
             })
             .map(|(name, _)| name.clone())
             .collect();
+        ensure!(
+            !expected.is_empty() && expected.len() == 12,
+            "declared workstation tools: {expected:?}"
+        );
+        ensure!(
+            expected
+                .iter()
+                .all(|name| catalog_tools[name]["policy_required"] == false),
+            "site-policy templates must not be workstation eligible"
+        );
         let published: std::collections::BTreeSet<String> = names
             .iter()
             .filter(|name| !is_builtin(name))
@@ -334,14 +346,20 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
                 tool["inputSchema"]["properties"]["host"]
             );
         }
-        let dynamic_count = names
-            .iter()
-            .filter(|name| matches!(**name, "observe_cpu" | "observe_systemd_units" | "observe_filesystem_usage" | "observe_network_links" | "inspect_processes" | "inspect_sockets"))
-            .count();
-        ensure!(
-            dynamic_count == 6,
-            "expected auto-discovered workstation catalog tools in default startup, got: {names:?}"
-        );
+        // Privileged catalog templates are never published in open mode: they
+        // have no per-target sudo grant to check.
+        for denied in [
+            "change_sysctl_runtime",
+            "change_systemd_restart",
+            "observe_filesystem_usage",
+            "observe_network_links",
+            "inspect_sockets",
+        ] {
+            ensure!(
+                !names.contains(&denied),
+                "open workstation mode exposed {denied}: {names:?}"
+            );
+        }
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
@@ -360,6 +378,72 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
         ensure!(denied.get("result").is_none());
         Ok::<_, anyhow::Error>(())
     }.await;
+    let finished = server.finish().await;
+    scenario?;
+    let (status, stderr) = finished?;
+    no_remote_dispatch(&stderr)?;
+    ensure!(status.success(), "server exit status: {status}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_config_without_opt_in_exposes_no_execution_or_write_tools() -> Result<()> {
+    let mut server = Server::start(&[])?;
+    let scenario = async {
+        server.initialize().await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(2).await?;
+        let tools = listed["result"]["tools"].as_array().context("tools list")?;
+        let names: std::collections::BTreeSet<&str> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().context("default tool name"))
+            .collect::<Result<_>>()?;
+        ensure!(
+            names == std::collections::BTreeSet::from([
+                "observe_targets",
+                "inspect_output",
+                "change_target_quarantine_clear",
+            ]),
+            "headless default published {names:?}"
+        );
+        for denied in [
+            "exec_command",
+            "exec_argv",
+            "exec_sudo",
+            "change_file_write",
+            "change_mkdir",
+            "change_rename",
+            "change_file_remove",
+            "change_directory_remove",
+            "change_file_replace",
+            "inspect_file",
+            "observe_stat",
+            "inspect_directory",
+            "change_sysctl_runtime",
+            "observe_cpu",
+        ] {
+            ensure!(!names.contains(denied), "headless default exposed {denied}");
+        }
+        server
+            .send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"observe_targets","arguments":{}}}))
+            .await?;
+        let called = server.response(3).await?;
+        ensure!(discovery_data(&called["result"], "configured")?["targets"] == json!([]));
+        server
+            .send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"exec_command","arguments":profile_call_arguments("exec_command","DO_NOT_CONNECT.invalid")}}))
+            .await?;
+        let unpublished = server.response(4).await?;
+        ensure!(
+            unpublished["error"]["code"] == -32602,
+            "unpublished exec_command must not route: {unpublished}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
     let finished = server.finish().await;
     scenario?;
     let (status, stderr) = finished?;

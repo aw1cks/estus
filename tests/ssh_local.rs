@@ -7664,7 +7664,10 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
     .await?;
     let scenario = async {
         let mut command = support::raw_server_command()?;
-        command.arg("--ssh-config").arg(&fixture.ssh_config);
+        command
+            .arg("--workstation")
+            .arg("--ssh-config")
+            .arg(&fixture.ssh_config);
         let mut server = WireServer::start_command(command)?;
         let cases = async {
             server.initialize().await?;
@@ -7672,16 +7675,13 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
             let tools = listed["result"]["tools"]
                 .as_array()
                 .context("workstation tools")?;
+            // Only catalog templates that declare a workstation policy load here.
             for name in [
                 "observe_cpu",
                 "observe_memory",
                 "observe_pressure",
-                "observe_filesystem_usage",
-                "observe_network_links",
-                "observe_network_interface_stats",
-                "observe_systemd_units",
+                "observe_kernel_state",
                 "inspect_processes",
-                "inspect_sockets",
             ] {
                 let tool = tools
                     .iter()
@@ -7716,19 +7716,12 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
                 (4, "observe_cpu", json!({"limit": 4})),
                 (5, "observe_memory", json!({})),
                 (6, "observe_pressure", json!({})),
-                (7, "observe_filesystem_usage", json!({"path_id": "root"})),
-                (8, "observe_network_links", json!({"limit": 4})),
+                (7, "observe_kernel_state", json!({})),
                 (
-                    9,
-                    "observe_network_interface_stats",
-                    json!({"interface": "lo"}),
-                ),
-                (
-                    10,
+                    8,
                     "inspect_processes",
                     json!({"uid": 0, "name_contains": "", "limit": 4}),
                 ),
-                (11, "inspect_sockets", json!({"limit": 4})),
             ] {
                 let reply = script_wire_call(
                     &mut server,
