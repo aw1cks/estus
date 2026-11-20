@@ -130,10 +130,8 @@ mod tools {
     mod observe_nic_stats;
     mod observe_nic_transceiver;
     mod observe_packages;
-    mod observe_pci_device;
+    mod observe_pci;
     mod observe_pci_devices;
-    mod observe_pci_driver_binding;
-    mod observe_pci_iommu_group;
     mod observe_pci_topology;
     mod observe_pressure;
     mod observe_storage_device;

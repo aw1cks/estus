@@ -3,13 +3,22 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "5aff98fca1b58d54120eafe90a2ac413cfc41503a38b8641cf8f258d9b22e904",
+  "source_sha256": "1f298d8e3e906e6953a027c64ce24d5e6bd65d3f1c97c0bfbe050cc045a9d8bd",
   "max_source_bytes": 1048576,
   "argv": [
     {
-      "kind": "argument",
-      "name": "address",
-      "format": "scalar"
+      "kind": "object",
+      "fields": {
+        "target_python": {
+          "name": "target_python"
+        },
+        "address": {
+          "name": "address"
+        },
+        "aspect": {
+          "name": "aspect"
+        }
+      }
     }
   ],
   "requirements": {
@@ -18,14 +27,14 @@
       8
     ],
     "modules": [
-      "datetime",
       "json",
       "os",
       "re",
-      "sys"
+      "datetime"
     ],
     "executables": [],
-    "paths": []
+    "paths": [],
+    "executable_candidates": {}
   },
   "contract": {
     "schema": {
@@ -36,11 +45,20 @@
         },
         "address": {
           "type": "string"
+        },
+        "aspect": {
+          "type": "string",
+          "enum": [
+            "identity",
+            "driver",
+            "iommu"
+          ]
         }
       },
       "required": [
         "target_python",
-        "address"
+        "address",
+        "aspect"
       ],
       "additionalProperties": false
     },
@@ -52,6 +70,10 @@
           "properties": {}
         },
         "address": {
+          "aliases": {},
+          "properties": {}
+        },
+        "aspect": {
           "aliases": {},
           "properties": {}
         }

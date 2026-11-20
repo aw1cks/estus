@@ -1,0 +1,29 @@
+# Reviewed controller-owned native Python payload; no Ansible runtime required.
+# Export, review payloads/observe_pci/manifest.json and the fixed policy here, then enable it by name.
+# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["observe_pci"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+[tools.observe_pci]
+description = "Read one PCI device's numeric identity, its bound driver/module, or its IOMMU group and members from sysfs. Bounded reads only; absence of a group is not isolation proof."
+revision = "1_native1"
+targets = ["server"]
+authority = "automation"
+effects = ["read"]
+execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_pci/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3" }
+limits = { timeout_secs = 30 }
+input_map = { address = "address", aspect = "aspect" }
+input_schema = { type = "object", properties = { address = { type = "string", minLength = 7, maxLength = 16 }, aspect = { type = "string", enum = ["identity", "driver", "iommu"] } }, required = ["address", "aspect"], additionalProperties = false }
+[tools.observe_pci.result]
+kind = "capability_projection"
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "pci" = ["mcp_result", "pci"], truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+max_bytes = 4096
+max_items = 256
+max_depth = 8
+schema = { "type" = "object", "properties" = { "truncated" = { "type" = "boolean" }, "omitted_records" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "pci" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "aspect" = { "type" = "string", "enum" = ["identity", "driver", "iommu"], "maxLength" = 8 }, "identity" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "vendor" = { "type" = "string", "maxLength" = 10 }, "device" = { "type" = "string", "maxLength" = 10 }, "class" = { "type" = "string", "maxLength" = 10 }, "subsystem_vendor" = { "type" = "string", "maxLength" = 10 }, "subsystem_device" = { "type" = "string", "maxLength" = 10 }, "revision" = { "type" = "string", "maxLength" = 10 } }, "required" = ["address"], "additionalProperties" = false }, "binding" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "bound" = { "type" = "boolean" }, "driver" = { "type" = "string", "maxLength" = 4096 }, "module" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["address", "bound"], "additionalProperties" = false }, "iommu" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "available" = { "type" = "boolean" }, "group" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "members" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 12 }, "maxItems" = 256 } }, "required" = ["address", "available"], "additionalProperties" = false } }, "required" = ["address", "aspect"], "additionalProperties" = false } }, "required" = ["source", "observed_at", "unavailable", "pci"], "additionalProperties" = false }

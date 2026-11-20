@@ -1358,8 +1358,8 @@
         "path": "payloads/observe_packages"
       }
     },
-    "observe_pci_device": {
-      "definition": "observe_pci_device.toml",
+    "observe_pci": {
+      "definition": "observe_pci.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
@@ -1368,7 +1368,7 @@
       ],
       "executor": {
         "kind": "native_payload",
-        "path": "payloads/observe_pci_device"
+        "path": "payloads/observe_pci"
       }
     },
     "observe_pci_devices": {
@@ -1394,32 +1394,6 @@
           "additionalProperties": false
         },
         "input_map": {}
-      }
-    },
-    "observe_pci_driver_binding": {
-      "definition": "observe_pci_driver_binding.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_pci_driver_binding"
-      }
-    },
-    "observe_pci_iommu_group": {
-      "definition": "observe_pci_iommu_group.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_pci_iommu_group"
       }
     },
     "observe_pci_topology": {

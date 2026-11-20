@@ -1,6 +1,7 @@
 import estus_runtime
 def main():
     import json, os, re, datetime
+    ASPECTS=('identity','driver','iommu')
     unavailable=[]
     def read(path,limit=4096):
         try:
@@ -42,7 +43,8 @@ def main():
             if len(out.encode())<=4096 and nodes(result)<=256:break
             # Return a whole-record prefix, never trim strings or unknown metadata.
             candidates=[v for k,v in data.items() if isinstance(v,list) and v]
-            if not candidates:raise ValueError('selected record exceeds projection budget')
+            if not candidates:
+                raise ValueError('selected record exceeds projection budget')
             max(candidates,key=len).pop()
             result['truncated']=True
             result['omitted_records']+=1
@@ -58,10 +60,37 @@ def main():
             elif re.fullmatch(r'0x[0-9a-fA-F]{2,8}',v):result[k]=v.lower()
             else:raise ValueError('PCI numeric identity malformed')
         return result
-    address=estus_runtime.request()[0]
-    device(address)
+    request=estus_runtime.request()[0]
+    address=request.get('address')
+    aspect=request.get('aspect')
+    if aspect not in ASPECTS:raise ValueError('unsupported PCI aspect')
+    identity=device(address)
     path=root+'/'+address
-    publish({'device':device(address)},'Linux PCI sysfs numeric identity')
+    result={'address':address,'aspect':aspect}
+    if aspect=='identity':
+        result['identity']=identity
+        source='Linux PCI sysfs numeric identity'
+    elif aspect=='driver':
+        binding={'address':address,'bound':os.path.islink(path+'/driver')}
+        if binding['bound']:
+            binding['driver']=os.path.basename(os.path.realpath(path+'/driver'))
+            if os.path.islink(path+'/driver/module'):binding['module']=os.path.basename(os.path.realpath(path+'/driver/module'))
+            else:unavailable.append('module')
+        else:unavailable.extend(['driver','module'])
+        result['binding']=binding
+        source='Linux PCI sysfs driver binding; no bind/unbind'
+    else:
+        iommu={'address':address,'available':os.path.islink(path+'/iommu_group')}
+        if iommu['available']:
+            group=os.path.realpath(path+'/iommu_group');number=os.path.basename(group)
+            if not number.isdecimal():raise ValueError('group number')
+            members=entries(group+'/devices')
+            if not all(re.fullmatch(pattern,m) for m in members):raise ValueError('invalid group member')
+            iommu.update(group=int(number),members=members)
+        else:unavailable.append('iommu_group')
+        result['iommu']=iommu
+        source='Linux PCI sysfs IOMMU group; absence is not isolation proof'
+    publish({'pci':result},source)
 
 
 if __name__ == "__main__":
