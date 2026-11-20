@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::{
     config::{IdentityRole, SudoMode},
-    reply::{ControllerError, ControllerReply, GroupCleanup, ToolError},
+    reply::{ControllerError, ControllerReply, ErrorCode, GroupCleanup, ToolError},
 };
 
 // These bounds include serialization, queued records and the in-flight write:
@@ -322,7 +322,7 @@ impl<'a> Metadata<'a> {
             event,
             duration_ms,
             exit_code,
-            error.map(ToolError::code),
+            error.map(|error| ErrorCode::as_str(error.code())),
             duration_ms.map(|_| error.is_some_and(|error| error.remote_state_unknown)),
             None,
         ));
@@ -441,7 +441,7 @@ impl<'a> Audit<'a> {
             "finish",
             Some(millis(self.started.elapsed())),
             reply.data().and_then(|data| data.runner_rc),
-            reply.error().map(ToolError::code),
+            reply.error().map(|error| ErrorCode::as_str(error.code())),
             Some(
                 reply
                     .error()

@@ -352,7 +352,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
                 let sftp = match outcome.reply.error() {
                     Some(error) => {
                         ok = false;
-                        Check::failed(error.code(), "sftp_probe")
+                        Check::failed(error.code().as_str(), "sftp_probe")
                     }
                     None => Check::passed(),
                 };
@@ -361,7 +361,7 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
             Err(error) => {
                 ok = false;
                 (
-                    Check::failed(error.code(), "ssh_connect"),
+                    Check::failed(error.code().as_str(), "ssh_connect"),
                     Check::untested(None, "sftp_probe"),
                 )
             }

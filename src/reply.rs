@@ -3,8 +3,9 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 use serde::{Serialize, ser::SerializeStruct};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ErrorCode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
     AlreadyExists,
     AutomationFailed,
     Cancelled,
@@ -39,7 +40,7 @@ enum ErrorCode {
 }
 
 impl ErrorCode {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::AlreadyExists => "already_exists",
             Self::AutomationFailed => "automation_failed",
@@ -73,12 +74,6 @@ impl ErrorCode {
             Self::Timeout => "timeout",
             Self::Unsupported => "unsupported",
         }
-    }
-}
-
-impl Serialize for ErrorCode {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -375,8 +370,8 @@ impl ToolError {
         }
     }
 
-    pub const fn code(&self) -> &'static str {
-        self.code.as_str()
+    pub const fn code(&self) -> ErrorCode {
+        self.code
     }
 
     pub(crate) const fn already_exists(message: &'static str, remote_state_unknown: bool) -> Self {
@@ -1082,7 +1077,7 @@ mod tests {
             ("unsupported", ToolError::unsupported("m", false)),
         ];
         for (expected, err) in &tool_cases {
-            assert_eq!(err.code(), *expected);
+            assert_eq!(err.code().as_str(), *expected);
             let serialized = serde_json::to_value(err).unwrap();
             assert_eq!(serialized["code"], *expected);
             assert!(serialized["message"].is_string());

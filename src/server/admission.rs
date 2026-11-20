@@ -823,6 +823,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::reply::ErrorCode;
 
     fn admission_with(hosts: &[&str]) -> TargetAdmission {
         let owned: Vec<String> = hosts.iter().map(|h| (*h).to_owned()).collect();
@@ -932,7 +933,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.code(), "cancelled");
+        assert_eq!(err.code(), ErrorCode::Cancelled);
         assert!(!err.remote_state_unknown);
 
         drop((r1, r2, r3, r4));
@@ -953,7 +954,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.code(), "cancelled");
+        assert_eq!(err.code(), ErrorCode::Cancelled);
         assert!(!err.remote_state_unknown);
 
         // Partial read_permit MUST have been released when rw.read_owned cancelled.
@@ -968,7 +969,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.code(), "cancelled");
+        assert_eq!(err.code(), ErrorCode::Cancelled);
         assert!(!err.remote_state_unknown);
 
         w.finish(false, "ok");
@@ -1013,7 +1014,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked.code(), "target_quarantined");
+        assert_eq!(blocked.code(), ErrorCode::TargetQuarantined);
         assert!(!blocked.remote_state_unknown);
 
         // Reads still succeed while quarantined.
@@ -1050,7 +1051,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked_exec.code(), "target_quarantined");
+        assert_eq!(blocked_exec.code(), ErrorCode::TargetQuarantined);
 
         // Unknown or non-quarantined targets return None.
         assert!(admission.clear_quarantine("missing").unwrap().is_none());
@@ -1091,7 +1092,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .code(),
-            "target_quarantined"
+            ErrorCode::TargetQuarantined
         );
         let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
         assert_eq!(cleared.executor, "native_shell");
@@ -1110,7 +1111,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked.code(), "target_quarantined");
+        assert_eq!(blocked.code(), ErrorCode::TargetQuarantined);
         let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
         assert_eq!(cleared.cause, "worker_lost");
     }
@@ -1139,7 +1140,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(overflow.code(), "resource_limit");
+        assert_eq!(overflow.code(), ErrorCode::ResourceLimit);
 
         // Quarantine host-000, drop its active lease, and verify it cannot be evicted.
         let first_read = active_reads.remove(0);
@@ -1157,7 +1158,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked_evict.code(), "resource_limit");
+        assert_eq!(blocked_evict.code(), ErrorCode::ResourceLimit);
 
         // Drop idle non-quarantined host-001: now 257th host succeeds by evicting host-001 while host-000 stays quarantined.
         let second_read = active_reads.remove(0);
@@ -1218,7 +1219,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(blocked.code(), "target_quarantined");
+        assert_eq!(blocked.code(), ErrorCode::TargetQuarantined);
         let cleared = adm2.clear_quarantine("alpha").unwrap().unwrap();
         assert_eq!(cleared.executor, "native_sftp");
         assert_eq!(cleared.cause, "timeout");

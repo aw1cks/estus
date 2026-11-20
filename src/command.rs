@@ -423,6 +423,7 @@ pub fn shell_script<'a>(command: &'a str, cwd: Option<&str>) -> Cow<'a, str> {
 #[cfg(test)]
 mod bound_argv_tests {
     use super::*;
+    use crate::reply::ErrorCode;
 
     fn actual_encoding(program: &str, arguments: &[Cow<'_, str>], cwd: Option<&str>) -> String {
         let escape = |value: &str| shell_escape::unix::escape(Cow::Borrowed(value)).into_owned();
@@ -503,7 +504,7 @@ mod bound_argv_tests {
                 );
             }
             let error = bound.encoded_len().unwrap_err();
-            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
             assert!(!error.remote_state_unknown);
         }
     }
@@ -512,6 +513,7 @@ mod bound_argv_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reply::ErrorCode;
 
     #[test]
     fn output_retention_is_an_optional_strict_boolean_control() {
@@ -669,7 +671,10 @@ mod tests {
             );
             request.validate(0).unwrap();
             request.command.push('x');
-            assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
+            assert_eq!(
+                request.validate(0).unwrap_err().code(),
+                ErrorCode::InvalidArgument
+            );
         }
         let mut request = sudo(vec![String::new(); 21_837]);
         request.argv[0] = "/bin/x".into();
@@ -695,9 +700,12 @@ mod tests {
         };
         assert_eq!(bound_size(&request.argv).unwrap(), MAX_COMMAND_BYTES);
         request.argv.push(String::new());
-        assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
+        assert_eq!(
+            request.validate(0).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
         let error = bound_size(&request.argv).unwrap_err();
-        assert_eq!(error.code(), "invalid_argument");
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert!(!error.remote_state_unknown);
     }
 
@@ -709,7 +717,7 @@ mod tests {
         );
         for (bytes, extra) in [(MAX_COMMAND_BYTES, 1), (usize::MAX, 1)] {
             let error = checked_size(bytes, extra).unwrap_err();
-            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
             assert!(!error.remote_state_unknown);
         }
     }
@@ -720,7 +728,7 @@ mod tests {
         for command in [String::new(), "echo\0bad".into(), "é".repeat(32_762)] {
             assert_eq!(
                 exec(command).validate(0).unwrap_err().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
         }
         let mut request = exec("pwd".into());
@@ -838,7 +846,10 @@ mod tests {
             );
             request.validate(0).unwrap();
             request.argv.last_mut().unwrap().push('x');
-            assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
+            assert_eq!(
+                request.validate(0).unwrap_err().code(),
+                ErrorCode::InvalidArgument
+            );
         }
         // Empty arguments have no raw payload, but their quotes and separators count.
         let mut request = run(vec!["xx".into()]);
@@ -862,13 +873,16 @@ mod tests {
         ] {
             assert_eq!(
                 run(argv).validate(0).unwrap_err().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
         }
         let mut request = run(vec!["cat".into()]);
         for cwd in ["", "relative", "/bad\0path"] {
             request.cwd = Some(cwd.into());
-            assert_eq!(request.validate(0).unwrap_err().code(), "invalid_argument");
+            assert_eq!(
+                request.validate(0).unwrap_err().code(),
+                ErrorCode::InvalidArgument
+            );
         }
         request.cwd = Some("/with ' quote\nand newline".into());
         request.stdin = Some("é\0".into());

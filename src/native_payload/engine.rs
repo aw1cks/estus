@@ -19,8 +19,8 @@ use super::{MAX_INPUT, PayloadPlan, digest};
 use crate::{
     config::{AutomationAgent, AutomationBecome, ResolvedAutomation},
     reply::{
-        AutomationData, AutomationStatus, AutomationTasks, GroupCleanup, ModuleProjection,
-        ToolError, ToolReply,
+        AutomationData, AutomationStatus, AutomationTasks, ErrorCode, GroupCleanup,
+        ModuleProjection, ToolError, ToolReply,
     },
     ssh::{Lease, Pool},
     strict_json::parse,
@@ -361,7 +361,9 @@ impl Engine {
                         Err(error)
                             if matches!(
                                 error.code(),
-                                "discovery_failed" | "io_error" | "connection_lost"
+                                ErrorCode::DiscoveryFailed
+                                    | ErrorCode::IoError
+                                    | ErrorCode::ConnectionLost
                             ) =>
                         {
                             continue;
@@ -418,7 +420,7 @@ impl Engine {
                 if decoded
                     .as_ref()
                     .err()
-                    .is_some_and(|error| error.code() == "payload_rejected")
+                    .is_some_and(|error| error.code() == ErrorCode::PayloadRejected)
                 {
                     lock(&self.probes).remove(&cache_key);
                     if !retried_drift {
@@ -434,9 +436,9 @@ impl Engine {
         match operation {
             Err(error) => {
                 let status = match error.code() {
-                    "cancelled" => AutomationStatus::Cancelled,
-                    "timeout" => AutomationStatus::Timeout,
-                    "invalid_result" => AutomationStatus::InvalidResult,
+                    ErrorCode::Cancelled => AutomationStatus::Cancelled,
+                    ErrorCode::Timeout => AutomationStatus::Timeout,
+                    ErrorCode::InvalidResult => AutomationStatus::InvalidResult,
                     _ if error.remote_state_unknown => AutomationStatus::WorkerLost,
                     _ => AutomationStatus::NotStarted,
                 };
@@ -530,7 +532,9 @@ impl Engine {
                         Err(error)
                             if matches!(
                                 error.code(),
-                                "discovery_failed" | "io_error" | "connection_lost"
+                                ErrorCode::DiscoveryFailed
+                                    | ErrorCode::IoError
+                                    | ErrorCode::ConnectionLost
                             ) =>
                         {
                             continue;
@@ -630,7 +634,7 @@ impl Engine {
                 if decoded
                     .as_ref()
                     .err()
-                    .is_some_and(|error| error.code() == "payload_rejected")
+                    .is_some_and(|error| error.code() == ErrorCode::PayloadRejected)
                 {
                     lock(&self.probes).remove(&cache_key);
                     if !retried_drift {
@@ -645,9 +649,9 @@ impl Engine {
         match operation {
             Err(error) => {
                 let status = match error.code() {
-                    "cancelled" => AutomationStatus::Cancelled,
-                    "timeout" => AutomationStatus::Timeout,
-                    "invalid_result" => AutomationStatus::InvalidResult,
+                    ErrorCode::Cancelled => AutomationStatus::Cancelled,
+                    ErrorCode::Timeout => AutomationStatus::Timeout,
+                    ErrorCode::InvalidResult => AutomationStatus::InvalidResult,
                     _ if error.remote_state_unknown => AutomationStatus::WorkerLost,
                     _ => AutomationStatus::NotStarted,
                 };
@@ -1668,7 +1672,10 @@ mod tests {
 
     #[test]
     fn interruption_terminals_remain_unknown_and_require_matching_exit() {
-        for (phase, rc, code) in [("timeout", 124, "timeout"), ("cancelled", 125, "cancelled")] {
+        for (phase, rc, code) in [
+            ("timeout", 124, ErrorCode::Timeout),
+            ("cancelled", 125, ErrorCode::Cancelled),
+        ] {
             let stdout =
                 serde_json::to_vec(&json!({"schema":1,"id":"owned","phase":phase})).unwrap();
             let error = terminal(
@@ -1691,7 +1698,7 @@ mod tests {
                 "owned",
             )
             .unwrap_err();
-            assert_eq!(error.code(), "invalid_result");
+            assert_eq!(error.code(), ErrorCode::InvalidResult);
         }
     }
     #[test]
@@ -1714,14 +1721,14 @@ mod tests {
                 "overflow",
                 true,
                 OutputStatus::Overflow,
-                "resource_limit",
+                ErrorCode::ResourceLimit,
                 "unavailable",
             ),
             (
                 "invalid_utf8",
                 false,
                 OutputStatus::InvalidUtf8,
-                "invalid_projection",
+                ErrorCode::InvalidProjection,
                 "invalid",
             ),
         ] {
@@ -1770,7 +1777,7 @@ mod tests {
                     if rc == 0 {
                         expected_code
                     } else {
-                        "payload_failed"
+                        ErrorCode::PayloadFailed
                     }
                 );
             }
@@ -1814,7 +1821,7 @@ mod tests {
                 "owned",
             )
             .unwrap_err();
-            assert_eq!(err.code(), "invalid_result");
+            assert_eq!(err.code(), ErrorCode::InvalidResult);
         }
     }
 
@@ -1927,7 +1934,7 @@ mod tests {
             std::time::Instant::now(),
         );
         let err = explicit.error().unwrap();
-        assert_eq!(err.code(), "payload_failed");
+        assert_eq!(err.code(), ErrorCode::PayloadFailed);
         assert_eq!(
             err.reason,
             Some(crate::reply::PayloadFailureReason::VerificationFailed)

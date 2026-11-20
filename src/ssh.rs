@@ -1095,6 +1095,7 @@ fn diagnostic(code: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reply::ErrorCode;
     use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
 
     #[test]
@@ -1310,7 +1311,7 @@ mod tests {
             .expect("nonexistent ssh fails launch");
         // Must not return connection_lost from the invalidated generation;
         // wait for teardown and attempt launch of a new generation.
-        assert_eq!(err.code(), "ssh_spawn_failed");
+        assert_eq!(err.code(), ErrorCode::SshSpawnFailed);
         assert!(
             lock(&pool.entries)
                 .get(&key)
@@ -1364,7 +1365,7 @@ mod tests {
             .await
             .err()
             .expect("nonexistent ssh fails launch after eviction");
-        assert_eq!(err.code(), "ssh_spawn_failed");
+        assert_eq!(err.code(), ErrorCode::SshSpawnFailed);
         assert!(!entries_list[0].1.stop.is_cancelled());
         for (key, entry) in entries_list {
             lock(&pool.entries).remove(&key);
@@ -1398,7 +1399,7 @@ mod tests {
             .await
             .err()
             .expect("busy pool must reject");
-        assert_eq!(err.code(), "resource_limit");
+        assert_eq!(err.code(), ErrorCode::ResourceLimit);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1448,7 +1449,7 @@ mod tests {
             .await
             .err()
             .expect("fresh launch fails on nonexistent ssh");
-        assert_eq!(err.code(), "ssh_spawn_failed");
+        assert_eq!(err.code(), ErrorCode::SshSpawnFailed);
         pool.shutdown().await;
     }
 

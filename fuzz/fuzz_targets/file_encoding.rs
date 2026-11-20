@@ -16,7 +16,7 @@ use estus::internal::{
 };
 
 use data::{Encoding, RawRead, ReadData, ReadRequest, WriteData, WriteRequest, encode};
-use reply::{ToolError, ToolReply};
+use reply::{ErrorCode, ToolError, ToolReply};
 use wire::ReplyBudget;
 
 // Parsing cannot allocate from an unchecked integer. Explicit collections are
@@ -157,7 +157,7 @@ fn write_case(request: Value, limit: u64, repeat: usize) -> Option<()> {
             known(&error);
             assert!(matches!(
                 error.code(),
-                "invalid_argument" | "invalid_encoding"
+                ErrorCode::InvalidArgument | ErrorCode::InvalidEncoding
             ));
             let failed = wire_reply(budget, id, ToolReply::<WriteData>::failure(error));
             assert!(failed["data"].is_null());
@@ -175,13 +175,13 @@ fn write_case(request: Value, limit: u64, repeat: usize) -> Option<()> {
                 let error = request
                     .validate(bytes.len() as u64 - 1, budget)
                     .unwrap_err();
-                assert_eq!(error.code(), "invalid_argument");
+                assert_eq!(error.code(), ErrorCode::InvalidArgument);
                 known(&error);
             }
         }
         None => {
             let error = request.validate(u64::MAX, budget).unwrap_err();
-            assert_eq!(error.code(), "invalid_encoding");
+            assert_eq!(error.code(), ErrorCode::InvalidEncoding);
             known(&error);
         }
     }
@@ -229,7 +229,7 @@ fn read_case(
         Ok(spec) => spec,
         Err(error) => {
             known(&error);
-            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
             return Some(());
         }
     };
@@ -276,12 +276,12 @@ fn read_case(
         Err(error) => {
             known(&error);
             let expected_code = if mismatch {
-                "checksum_mismatch"
+                ErrorCode::ChecksumMismatch
             } else if next_offset.is_none() {
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             } else {
                 assert!(invalid_utf8);
-                "invalid_encoding"
+                ErrorCode::InvalidEncoding
             };
             assert_eq!(error.code(), expected_code);
             let reply = wire_reply(budget, id, ToolReply::<ReadData>::failure(error));

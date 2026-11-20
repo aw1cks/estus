@@ -351,6 +351,7 @@ impl Config {
 mod tests {
     use super::super::test_support::{builtin, catalog, load_text};
     use super::*;
+    use crate::reply::ErrorCode;
 
     #[test]
     fn discovery_intersects_target_policy_with_enabled_catalog() {
@@ -495,7 +496,7 @@ programs=['/private/program']
                     .err()
                     .unwrap()
                     .code(),
-                "policy_denied"
+                ErrorCode::PolicyDenied
             );
         }
         let disabled = rows.iter().find(|row| row["name"] == "disabled").unwrap();

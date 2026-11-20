@@ -167,7 +167,7 @@ impl State {
                 .await;
                 target_lease.finish(
                     reply.error().is_some_and(|e| e.remote_state_unknown),
-                    reply.error().map_or("ok", ToolError::code),
+                    reply.error().map_or("ok", |error| error.code().as_str()),
                 );
                 if matches!(
                     reply.data().map(|data| &data.termination),
@@ -179,7 +179,7 @@ impl State {
                 reply
             }
             Err(error) => {
-                target_lease.finish(false, error.code());
+                target_lease.finish(false, error.code().as_str());
                 ToolReply::failure(error)
             }
         };

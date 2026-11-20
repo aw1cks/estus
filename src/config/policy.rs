@@ -925,6 +925,7 @@ mod tests {
         automation_text, binding_definition, builtin, catalog, load_text, named_authority_text,
     };
     use super::*;
+    use crate::reply::ErrorCode;
 
     #[test]
     fn active_authority_inspection_rejects_missing_config_and_non_socket_agent_privately() {
@@ -1039,7 +1040,7 @@ mod tests {
                 "untrusted-secret-host",
             ] {
                 let error = config.automation_target(BindingId(0), host).err().unwrap();
-                assert_eq!(error.code(), "policy_denied");
+                assert_eq!(error.code(), ErrorCode::PolicyDenied);
             }
             let tools = ToolCatalog::new(Vec::new()).unwrap();
             let discovery = serde_json::to_string(&config.targets(&tools)).unwrap();
@@ -1100,7 +1101,7 @@ mod tests {
                 "user@host",
             ] {
                 let error = config.doctor_target(host).err().unwrap();
-                assert_eq!(error.code(), "policy_denied");
+                assert_eq!(error.code(), ErrorCode::PolicyDenied);
                 assert!(!error.remote_state_unknown);
                 let encoded = serde_json::to_string(&error).unwrap();
                 for secret in [
@@ -1236,7 +1237,7 @@ mod tests {
                         assert_eq!(resolved.role, IdentityRole::Ordinary);
                     } else {
                         let error = result.err().unwrap();
-                        assert_eq!(error.code(), "policy_denied");
+                        assert_eq!(error.code(), ErrorCode::PolicyDenied);
                         assert!(!error.remote_state_unknown);
                     }
                     for host in ["two", "ordinary-private", "elevated-private", "unknown"] {
@@ -1341,7 +1342,7 @@ mod tests {
                                 assert_eq!((resolved.destination, resolved.role), expected);
                             } else {
                                 let error = result.err().unwrap();
-                                assert_eq!(error.code(), "policy_denied");
+                                assert_eq!(error.code(), ErrorCode::PolicyDenied);
                                 assert!(!error.remote_state_unknown);
                             }
                             for host in ["two", "ordinary-private", "elevated-private", "unknown"] {
@@ -1481,7 +1482,7 @@ mod tests {
                                 .err()
                                 .unwrap()
                                 .code(),
-                            "policy_denied"
+                            ErrorCode::PolicyDenied
                         );
                     }
                 }
@@ -1577,7 +1578,12 @@ mod tests {
                     assert_eq!(result.unwrap().destination, "private-alias", "{profile}");
                 } else {
                     let error = result.err().unwrap();
-                    assert_eq!(error.code(), "policy_denied", "{profile}/{:?}", entry.id);
+                    assert_eq!(
+                        error.code(),
+                        ErrorCode::PolicyDenied,
+                        "{profile}/{:?}",
+                        entry.id
+                    );
                     assert!(!error.remote_state_unknown);
                     assert!(!format!("{error:?}").contains("private"));
                     assert!(!format!("{error:?}").contains(profile));
@@ -1589,7 +1595,7 @@ mod tests {
                     .err()
                     .unwrap()
                     .code(),
-                "policy_denied"
+                ErrorCode::PolicyDenied
             );
             // Even an unfiltered catalogue cannot advertise a profile-disabled operation.
             let discovery = serde_json::to_value(config.targets(&all)).unwrap();
@@ -1676,7 +1682,7 @@ mod tests {
         assert!(config.tool_enabled(ToolId::Sudo));
         for name in ["reader", "files", "actions", "disabled", "empty"] {
             let error = config.resolve_sudo(name, "root", "/bin/sh").err().unwrap();
-            assert_eq!(error.code(), "policy_denied");
+            assert_eq!(error.code(), ErrorCode::PolicyDenied);
             assert!(!error.remote_state_unknown);
         }
         for name in ["reader", "files", "actions"] {
@@ -1712,14 +1718,14 @@ mod tests {
                 .err()
                 .unwrap()
                 .code(),
-            "invalid_argument"
+            ErrorCode::InvalidArgument
         );
         assert_eq!(
             open.resolve("user@example", ToolId::WriteFile)
                 .err()
                 .unwrap()
                 .code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
         let closed = load_text(
             &format!(
@@ -1756,7 +1762,7 @@ mod tests {
         for tool in [ToolId::Targets, ToolId::Sudo] {
             assert_eq!(
                 closed.resolve("logical", tool).err().unwrap().code(),
-                "policy_denied"
+                ErrorCode::PolicyDenied
             );
             assert_eq!(
                 load_text("", &[])
@@ -1765,7 +1771,7 @@ mod tests {
                     .err()
                     .unwrap()
                     .code(),
-                "policy_denied"
+                ErrorCode::PolicyDenied
             );
         }
         let discovery = serde_json::to_value(open.targets(&catalog())).unwrap();
@@ -1847,7 +1853,7 @@ result={{kind="controller_command"}}
                     .err()
                     .unwrap()
                     .code(),
-                "policy_denied",
+                ErrorCode::PolicyDenied,
                 "{source}"
             );
         }
@@ -1939,7 +1945,7 @@ result={{kind="controller_command"}}
         for host in ["ordinary-alias", "unknown", ""] {
             assert_eq!(
                 config.resolve(host, ToolId::Exec).err().unwrap().code(),
-                "policy_denied"
+                ErrorCode::PolicyDenied
             );
         }
         let empty = load_text("[targets]", &[]).unwrap();
@@ -1949,7 +1955,7 @@ result={{kind="controller_command"}}
                 .err()
                 .unwrap()
                 .code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
         let open = load_text(
             &format!(
@@ -1967,7 +1973,7 @@ result={{kind="controller_command"}}
         for host in ["", "-option", "host name", "host\0name"] {
             assert_eq!(
                 open.resolve(host, ToolId::Exec).err().unwrap().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
         }
         assert!(!open.has_sudo());
@@ -1976,7 +1982,7 @@ result={{kind="controller_command"}}
                 .err()
                 .unwrap()
                 .code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
     }
 
@@ -2045,7 +2051,7 @@ mode = "same-account"
                     .err()
                     .unwrap()
                     .code(),
-                "policy_denied",
+                ErrorCode::PolicyDenied,
                 "{host}/{user}/{program}"
             );
         }
@@ -2063,7 +2069,7 @@ mode = "same-account"
         for seconds in [0, 601] {
             assert_eq!(
                 config.timeout(Some(seconds)).err().unwrap().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
         }
     }
@@ -2207,7 +2213,7 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
         );
         for host in ["db", "unlisted", "server"] {
             let error = config.automation_target(named, host).err().unwrap();
-            assert_eq!(error.code(), "policy_denied", "{host}");
+            assert_eq!(error.code(), ErrorCode::PolicyDenied, "{host}");
         }
         let resolved = config.automation_target(ordinary, "db").unwrap();
         assert_eq!(resolved.target.destination, "db");
@@ -2225,7 +2231,7 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
             for host in ["db", "unlisted", "server"] {
                 assert_eq!(
                     config.automation_target(id, host).err().unwrap().code(),
-                    "policy_denied",
+                    ErrorCode::PolicyDenied,
                     "{id:?} {host}"
                 );
             }
@@ -2248,7 +2254,7 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
                 .err()
                 .unwrap()
                 .code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
     }
 
@@ -2266,7 +2272,7 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
         assert!(!config.binding_enabled(named));
         assert_eq!(
             config.automation_target(named, "db").err().unwrap().code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
     }
 
@@ -2296,7 +2302,7 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
             assert!(!config.binding_enabled(named), "{restricted}");
             assert_eq!(
                 config.automation_target(named, "db").err().unwrap().code(),
-                "policy_denied"
+                ErrorCode::PolicyDenied
             );
         }
     }

@@ -49,7 +49,7 @@ use super::{
     },
     metadata::{ListEntry, StatData, metadata_data},
 };
-use crate::reply::{ToolError, ToolReply};
+use crate::reply::{ErrorCode, ToolError, ToolReply};
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -1396,7 +1396,7 @@ async fn directory_owner(
             if channel.dispatched
                 && matches!(
                     failure.error.code(),
-                    "timeout" | "cancelled" | "connection_lost"
+                    ErrorCode::Timeout | ErrorCode::Cancelled | ErrorCode::ConnectionLost
                 )
             {
                 failure.error.remote_state_unknown = true;
@@ -1571,7 +1571,7 @@ where
                 || (dispatched
                     && matches!(
                         failure.error.code(),
-                        "timeout" | "cancelled" | "connection_lost"
+                        ErrorCode::Timeout | ErrorCode::Cancelled | ErrorCode::ConnectionLost
                     ));
             if lost_ack {
                 failure.error.remote_state_unknown = true;
@@ -1592,7 +1592,7 @@ mod tests {
     #[test]
     fn missing_subsystem_executable_is_not_a_missing_remote_file() {
         let failure = ssh_failure(openssh::Error::Remote(io::ErrorKind::NotFound.into()));
-        assert_eq!(failure.error.code(), "io_error");
+        assert_eq!(failure.error.code(), ErrorCode::IoError);
         assert!(!failure.check_master);
     }
 }

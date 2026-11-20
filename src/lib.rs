@@ -27,7 +27,9 @@ pub mod internal {
     }
 
     pub mod reply {
-        pub use crate::reply::{CommandData, GroupCleanup, Termination, ToolError, ToolReply};
+        pub use crate::reply::{
+            CommandData, ErrorCode, GroupCleanup, Termination, ToolError, ToolReply,
+        };
     }
 
     pub mod command {

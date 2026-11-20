@@ -576,6 +576,7 @@ fn not_found() -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reply::ErrorCode;
 
     fn limits() -> Limits {
         Limits {
@@ -758,7 +759,7 @@ mod tests {
         };
         let foreign_reply = foreign.read(request(), 16, budget).await;
         let error = foreign_reply.error().unwrap();
-        assert_eq!(error.code(), "not_found");
+        assert_eq!(error.code(), ErrorCode::NotFound);
         assert!(!error.remote_state_unknown);
         let ok_reply = store.read(request(), 16, budget).await;
         let data = ok_reply.data().unwrap();
@@ -777,7 +778,7 @@ mod tests {
             )
             .await;
         let error = bad_reply.error().unwrap();
-        assert_eq!(error.code(), "invalid_encoding");
+        assert_eq!(error.code(), ErrorCode::InvalidEncoding);
         store.shutdown().await;
     }
 

@@ -1281,6 +1281,7 @@ mod tests {
 #[cfg(test)]
 mod catalog_selection_tests {
     use super::*;
+    use crate::reply::ErrorCode;
 
     fn definition(name: &str) -> String {
         format!(
@@ -1349,7 +1350,7 @@ enabled_tools = ["other"]
         assert!(config.resolve_binding("one", id).is_ok());
         assert_eq!(
             config.resolve_binding("two", id).err().unwrap().code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
         assert_eq!(
             config
@@ -1357,7 +1358,7 @@ enabled_tools = ["other"]
                 .err()
                 .unwrap()
                 .code(),
-            "policy_denied"
+            ErrorCode::PolicyDenied
         );
         let tools = ToolCatalog::new(
             config

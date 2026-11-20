@@ -966,6 +966,7 @@ pub(crate) fn verify_script(
 mod tests {
     use super::super::metadata::metadata_data;
     use super::*;
+    use crate::reply::ErrorCode;
     use rmcp::model::RequestId;
     use serde_json::json;
 
@@ -982,10 +983,10 @@ mod tests {
             "abc"
         );
         for (bytes, eof, limit, code) in [
-            (b"abc".as_slice(), false, 3, "resource_limit"),
-            (b"abcd".as_slice(), true, 3, "resource_limit"),
-            (b"ab".as_slice(), true, 3, "checksum_mismatch"),
-            (b"abd".as_slice(), true, 3, "checksum_mismatch"),
+            (b"abc".as_slice(), false, 3, ErrorCode::ResourceLimit),
+            (b"abcd".as_slice(), true, 3, ErrorCode::ResourceLimit),
+            (b"ab".as_slice(), true, 3, ErrorCode::ChecksumMismatch),
+            (b"abd".as_slice(), true, 3, ErrorCode::ChecksumMismatch),
         ] {
             let error = verify_script(bytes.to_vec(), eof, &digest, limit).unwrap_err();
             assert_eq!(error.code(), code);
@@ -994,7 +995,7 @@ mod tests {
         for bytes in [b"\xff".as_slice(), b"abc\0"] {
             let digest = Sha256::digest(bytes).into();
             let error = verify_script(bytes.to_vec(), true, &digest, bytes.len()).unwrap_err();
-            assert_eq!(error.code(), "invalid_encoding");
+            assert_eq!(error.code(), ErrorCode::InvalidEncoding);
         }
     }
 
@@ -1034,7 +1035,11 @@ mod tests {
                 let error = request
                     .validate(raw.len() as u64 - 1, budget())
                     .unwrap_err();
-                assert_eq!(error.code(), "invalid_argument", "encoded: {encoded}");
+                assert_eq!(
+                    error.code(),
+                    ErrorCode::InvalidArgument,
+                    "encoded: {encoded}"
+                );
                 assert!(!error.remote_state_unknown);
             }
         }
@@ -1045,7 +1050,7 @@ mod tests {
         );
         assert_eq!(
             request.validate(5, budget()).unwrap_err().code(),
-            "invalid_argument"
+            ErrorCode::InvalidArgument
         );
     }
 
@@ -1057,7 +1062,11 @@ mod tests {
             let error = write_request(content, "base64")
                 .validate(100, budget())
                 .unwrap_err();
-            assert_eq!(error.code(), "invalid_encoding", "content: {content:?}");
+            assert_eq!(
+                error.code(),
+                ErrorCode::InvalidEncoding,
+                "content: {content:?}"
+            );
             assert!(!error.remote_state_unknown);
         }
         // Same encoded length as a one-byte payload, but without padding this
@@ -1067,7 +1076,7 @@ mod tests {
                 .validate(1, budget())
                 .unwrap_err()
                 .code(),
-            "invalid_argument",
+            ErrorCode::InvalidArgument,
         );
     }
 
@@ -1104,7 +1113,7 @@ mod tests {
         let error = write_request("Zg==", "base64")
             .validate(1, ReplyBudget::new(&id).unwrap())
             .unwrap_err();
-        assert_eq!(error.code(), "invalid_argument");
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert!(!error.remote_state_unknown);
     }
 
@@ -1185,14 +1194,14 @@ mod tests {
         for path in ["", "a\0b"] {
             request.path = path.into();
             let error = request.validate(budget()).unwrap_err();
-            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
             assert!(!error.remote_state_unknown);
         }
         request.path = "file".into();
         request.timeout_secs = Some(0);
         assert_eq!(
             request.validate(budget()).unwrap_err().code(),
-            "invalid_argument"
+            ErrorCode::InvalidArgument
         );
         for value in [
             json!({"host": "target", "path": "file", "follow_symlinks": "true"}),
@@ -1236,7 +1245,7 @@ mod tests {
         let error = request
             .validate(ReplyBudget::new(&id).unwrap())
             .unwrap_err();
-        assert_eq!(error.code(), "invalid_argument");
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert!(!error.remote_state_unknown);
     }
 
@@ -1336,7 +1345,7 @@ mod tests {
             let mut request = request();
             request.expected_content_sha256 = Some(value);
             let error = request.validate(100, budget()).unwrap_err();
-            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
             assert!(!error.remote_state_unknown);
         }
     }
@@ -1378,7 +1387,7 @@ mod tests {
             request.max_bytes = Some(max_bytes as u64 + 1);
             assert_eq!(
                 request.validate(u64::MAX, budget).unwrap_err().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
             reservation.data_mut().unwrap().content = content;
             assert!(budget.remaining(&reservation).is_ok());
@@ -1414,7 +1423,7 @@ mod tests {
             request.path = path.into();
             assert_eq!(
                 request.validate(100, budget()).unwrap_err().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
         }
         for count in [0, 101, u64::MAX] {
@@ -1422,7 +1431,7 @@ mod tests {
             request.max_bytes = Some(count);
             assert_eq!(
                 request.validate(100, budget()).unwrap_err().code(),
-                "invalid_argument"
+                ErrorCode::InvalidArgument
             );
         }
         let mut request = request();
@@ -1496,7 +1505,7 @@ mod tests {
             let error = encoded(bytes, bytes.len(), 0, Encoding::Utf8, true)
                 .err()
                 .unwrap();
-            assert_eq!(error.code(), "invalid_encoding");
+            assert_eq!(error.code(), ErrorCode::InvalidEncoding);
             assert!(!error.remote_state_unknown);
         }
         // Even when lookahead completes a codepoint, the requested range must

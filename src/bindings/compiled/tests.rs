@@ -1,6 +1,7 @@
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
 use crate::command::Invocation;
+use crate::reply::ErrorCode;
 
 use super::*;
 
@@ -755,7 +756,7 @@ fn string_bounds_count_characters_and_enum_is_enforced() {
         let result = binding.prepare(&request, &Limits::default());
         assert_eq!(result.is_ok(), accepted, "{text:?}");
         if let Err(error) = result {
-            assert_eq!(error.code(), "invalid_argument");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
             assert!(!error.remote_state_unknown);
         }
     }
@@ -1016,7 +1017,7 @@ fn actual_expansion_obeys_exact_encoded_command_boundary() {
     assert_eq!(prepared.invocation.encoded_len().unwrap(), 65536);
     let over = request(binding, json!("x".repeat(4094)));
     let error = binding.prepare(&over, &Limits::default()).err().unwrap();
-    assert_eq!(error.code(), "invalid_argument");
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
     assert!(!error.remote_state_unknown);
 }
 

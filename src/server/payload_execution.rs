@@ -2,7 +2,7 @@ use super::{Estus, preparation::request_deadline};
 use crate::{
     audit::{Audit, Metadata},
     bindings::{AutomationRequest, BindingId},
-    reply::{AutomationData, ToolError, ToolReply},
+    reply::{AutomationData, ErrorCode, ToolError, ToolReply},
     wire::ReplyBudget,
 };
 use rmcp::{ErrorData, RoleServer, model::CallToolResult, service::RequestContext};
@@ -187,15 +187,16 @@ impl Estus {
                 {
                     Ok(digest) => digest,
                     Err(error) => {
-                        let error = if matches!(error.code(), "cancelled" | "timeout") {
-                            error
-                        } else {
-                            ToolError::preview_required(
-                                "Independent pre-state digest could not be obtained",
-                                false,
-                            )
-                        };
-                        target_lease.finish(false, error.code());
+                        let error =
+                            if matches!(error.code(), ErrorCode::Cancelled | ErrorCode::Timeout) {
+                                error
+                            } else {
+                                ToolError::preview_required(
+                                    "Independent pre-state digest could not be obtained",
+                                    false,
+                                )
+                            };
+                        target_lease.finish(false, error.code().as_str());
                         metadata.reject(started, &error);
                         let _ = sender.send(ToolReply::failure(error));
                         return;
@@ -213,7 +214,7 @@ impl Estus {
                         "A matching non-expired preview is required before apply",
                         false,
                     );
-                    target_lease.finish(false, error.code());
+                    target_lease.finish(false, error.code().as_str());
                     metadata.reject(started, &error);
                     let _ = sender.send(ToolReply::failure(error));
                     return;
@@ -276,7 +277,9 @@ impl Estus {
             }
             target_lease.finish(
                 reply.error().is_some_and(|e| e.remote_state_unknown),
-                reply.error().map_or("unknown", ToolError::code),
+                reply
+                    .error()
+                    .map_or("unknown", |error| error.code().as_str()),
             );
             audit.finish_automation(&reply);
             let _ = sender.send(reply);
