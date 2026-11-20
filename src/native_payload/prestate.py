@@ -7,25 +7,49 @@ import sys
 
 
 def canonical_file(path, limit=1048576):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
-        st = os.stat(path)
+        fd = os.open(path, flags)
     except FileNotFoundError:
         return {"exists": False}
-    if not stat.S_ISREG(st.st_mode):
+    except OSError:
         raise ValueError("not a regular file")
-    with open(path, "rb") as stream:
-        data = stream.read(limit + 1)
-    if len(data) > limit:
-        raise ValueError("file exceeds prestate bound")
-    return {
-        "exists": True,
-        "mode": stat.S_IMODE(st.st_mode),
-        "uid": st.st_uid,
-        "gid": st.st_gid,
-        "size": st.st_size,
-        "mtime_ns": st.st_mtime_ns,
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("not a regular file")
+        data = bytearray()
+        while len(data) <= limit:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > limit:
+            raise ValueError("file exceeds prestate bound")
+        return {
+            "exists": True,
+            "mode": stat.S_IMODE(st.st_mode),
+            "uid": st.st_uid,
+            "gid": st.st_gid,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "sha256": hashlib.sha256(bytes(data)).hexdigest(),
+        }
+    finally:
+        os.close(fd)
+
+
+def _resolve_bin(name):
+    for path in (
+        "/usr/bin/" + name,
+        "/bin/" + name,
+        "/usr/sbin/" + name,
+        "/sbin/" + name,
+        "/run/current-system/sw/bin/" + name,
+    ):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    raise RuntimeError(name + " unavailable")
 
 
 def stat_identity(path):
@@ -77,7 +101,7 @@ def observe_systemd(args):
     scope = args.get("scope", "system")
     if scope not in ("system", "user", "global"):
         raise ValueError("invalid scope")
-    cmd = ["systemctl"]
+    cmd = [_resolve_bin("systemctl")]
     if scope == "user":
         cmd.append("--user")
     elif scope == "global":
@@ -112,9 +136,15 @@ def observe_sysctl(args):
     key = args.get("name")
     if not valid_name(key) or ".." in key or "/" in key:
         raise ValueError("invalid sysctl key")
-    sysctl_file = args.get("sysctl_file") or "/etc/sysctl.conf"
-    if not isinstance(sysctl_file, str) or not sysctl_file.startswith("/") or len(sysctl_file) > 4096 or "\x00" in sysctl_file:
+    sysctl_file = args.get("sysctl_file")
+    if sysctl_file is not None and (
+        not isinstance(sysctl_file, str)
+        or not sysctl_file.startswith("/")
+        or len(sysctl_file) > 4096
+        or "\x00" in sysctl_file
+    ):
         raise ValueError("invalid sysctl_file")
+    file_state = None if sysctl_file is None else canonical_file(sysctl_file)
     proc_path = "/proc/sys/" + key.replace(".", "/")
     try:
         fd = os.open(proc_path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -132,7 +162,7 @@ def observe_sysctl(args):
         "key": key,
         "sysctl_file": sysctl_file,
         "proc_sys": proc_state,
-        "file": canonical_file(sysctl_file),
+        "file": file_state,
     }
 
 
@@ -143,7 +173,7 @@ def observe_apt(args):
     query_out = ""
     if names:
         proc = subprocess.run(
-            ["dpkg-query", "-W", "-f=${Package}\t${db:Status-Status}\t${Version}\n", "--"] + names,
+            [_resolve_bin("dpkg-query"), "-W", "-f=${Package}\t${db:Status-Status}\t${Version}\n", "--"] + names,
             capture_output=True,
             text=True,
             check=False,
@@ -166,7 +196,7 @@ def observe_apt(args):
 def observe_dnf(args):
     names = package_names(args)
     rpmdb = None
-    for candidate in ("/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages"):
+    for candidate in ("/usr/lib/sysimage/rpm/rpmdb.sqlite", "/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages"):
         if os.path.exists(candidate):
             rpmdb = stat_identity(candidate)
             break
@@ -176,7 +206,7 @@ def observe_dnf(args):
     query_out = ""
     if names:
         proc = subprocess.run(
-            ["rpm", "-q", "--qf", "%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n", "--"] + names,
+            [_resolve_bin("rpm"), "-q", "--qf", "%{NAME}\t%{EPOCH}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n", "--"] + names,
             capture_output=True,
             text=True,
             check=False,
@@ -196,10 +226,33 @@ def observe_dnf(args):
     }
 
 
+def observe_apk(args):
+    names = package_names(args)
+    database = canonical_file("/lib/apk/db/installed", 16777216)
+    if not database["exists"]:
+        raise RuntimeError("apk database unavailable")
+    return {"module": "estus.packages", "backend": "apk", "names": names, "database": database}
+
+
+def observe_pacman(args):
+    names = package_names(args)
+    database = stat_identity("/var/lib/pacman/local")
+    proc = subprocess.run([_resolve_bin("pacman"), "-Q", "--"] + names, capture_output=True,
+                          text=True, check=False, timeout=15)
+    if proc.returncode not in (0, 1) or len(proc.stdout.encode("utf-8")) > 65536:
+        raise RuntimeError("pacman query failed")
+    return {"module": "estus.packages", "backend": "pacman", "names": names,
+            "database": database, "query_rc": proc.returncode, "query_out": proc.stdout}
+
+
 def observe_packages(args):
+    if os.path.exists("/lib/apk/db/installed"):
+        return observe_apk(args)
+    if os.path.isdir("/var/lib/pacman/local"):
+        return observe_pacman(args)
     if os.path.exists("/var/lib/dpkg/status"):
         return observe_apt(args)
-    for candidate in ("/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages"):
+    for candidate in ("/usr/lib/sysimage/rpm/rpmdb.sqlite", "/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages"):
         if os.path.exists(candidate):
             return observe_dnf(args)
     raise RuntimeError("no supported package database")

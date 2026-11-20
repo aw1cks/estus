@@ -236,5 +236,104 @@ class Execution(unittest.TestCase):
         self.assertEqual(out['txt'], 'ok')
         self.assertIsNone(out['missing'])
         self.assertTrue(out['timed_out'])
+
+    def test_run_bounded_fsize_scales_with_max_bytes(self):
+        source = (
+            b"import estus_runtime, json, sys\n"
+            b"res = estus_runtime.run_bounded([sys.executable, '-c', 'import sys; sys.stdout.write(\"x\" * 600000)'], max_bytes=1048576)\n"
+            b"print(json.dumps({'rc': res['returncode'], 'timed_out': res['timed_out'], 'len': len(res['stdout'])}))\n"
+        )
+        exit_code, evidence = self.execute(source, timeout=10)
+        self.assertEqual(exit_code, 0)
+        out = json.loads(evidence['stdout'])
+        self.assertEqual(out['rc'], 0)
+        self.assertFalse(out['timed_out'])
+        self.assertEqual(out['len'], 600000)
+
+    def test_ansiballz_execution_cleans_tmpdir_and_classifies_missing_deps(self):
+        import glob, os, tempfile
+        self.assertIn('pkg_mgr', self.identity)
+        wrapper = (
+            b"import json, os, sys\n"
+            b"def _ansiballz_main(zip_data, ansible_module, module_fqn, params, profile, date_time, extensions, rlimit_nofile):\n"
+            b"    args = json.loads(params)['ANSIBLE_MODULE_ARGS']\n"
+            b"    td = args['_ansible_tmpdir']\n"
+            b"    assert os.path.isdir(td)\n"
+            b"    if args.get('fail_dep'):\n"
+            b"        print(json.dumps({'failed': True, 'msg': 'Could not import python modules: python3-apt'}))\n"
+            b"        sys.exit(1)\n"
+            b"    print(json.dumps({'changed': False, 'echo': args.get('val'), 'check': args['_ansible_check_mode']}))\n"
+        )
+        zip_bytes = b'PK\x05\x06' + b'\x00' * 18
+        combined = wrapper + zip_bytes
+        spec = {
+            'schema': 1,
+            'operation': 'ansiballz',
+            'id': 'abz-1',
+            'requirements': REQ,
+            'identity': self.identity,
+            'wrapper_len': len(wrapper),
+            'wrapper_sha256': hashlib.sha256(wrapper).hexdigest(),
+            'zip_sha256': hashlib.sha256(zip_bytes).hexdigest(),
+            'ansible_module': 'stat',
+            'module_fqn': 'ansible.modules.stat',
+            'serialization_profile': 'legacy',
+            'params': {'ANSIBLE_MODULE_ARGS': {'val': 'hello', '_ansible_check_mode': True}},
+            'timeout': 5,
+            'output_limit': 16384,
+        }
+        res = invoke(frame(spec, combined))
+        self.assertEqual(res.returncode, 0)
+        ev = json.loads(res.stdout)
+        self.assertEqual(ev['phase'], 'complete')
+        self.assertEqual(json.loads(ev['stdout']), {'changed': False, 'echo': 'hello', 'check': True})
+        self.assertEqual(glob.glob(os.path.join(tempfile.gettempdir(), 'estus_abz_*')), [])
+
+        spec['id'] = 'abz-dep'
+        spec['params'] = {'ANSIBLE_MODULE_ARGS': {'fail_dep': True, '_ansible_check_mode': False}}
+        res_fail = invoke(frame(spec, combined))
+        self.assertEqual(res_fail.returncode, 1)
+        ev_fail = json.loads(res_fail.stdout)
+        self.assertEqual(ev_fail.get('error_reason'), 'dependency_unavailable')
+        import importlib.util
+        import tempfile
+        from unittest import mock
+
+        spec = importlib.util.spec_from_file_location('prestate_mod', pathlib.Path(__file__).with_name('prestate.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            database = pathlib.Path(directory) / 'installed'
+            database.write_text('P:example\nV:1\n')
+            real_canonical_file = module.canonical_file
+            with mock.patch.object(module, 'canonical_file', side_effect=lambda _path, limit: real_canonical_file(database, limit)):
+                before = module.observe_apk({'name': ['example']})
+                database.write_text('P:example\nV:2\n')
+                after = module.observe_apk({'name': ['example']})
+            self.assertEqual(before['backend'], 'apk')
+            self.assertNotEqual(before['database']['sha256'], after['database']['sha256'])
+
+    def test_canonical_file_rejects_symlinks_with_value_error(self):
+            target = pathlib.Path(directory) / 'target'
+            target.write_bytes(b'payload')
+            link = pathlib.Path(directory) / 'link'
+            link.symlink_to(target)
+            state = module.canonical_file(str(target))
+            self.assertTrue(state['exists'])
+            self.assertEqual(state['size'], 7)
+            with self.assertRaises(ValueError):
+                module.canonical_file(str(link))
+
+    def test_observe_sysctl_accepts_null_sysctl_file(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location('prestate_mod', pathlib.Path(__file__).with_name('prestate.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        result = module.observe_sysctl({'name': 'kernel.ostype', 'sysctl_file': None})
+        self.assertIsNone(result['sysctl_file'])
+        self.assertIsNone(result['file'])
+        self.assertIn('proc_sys', result)
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,4 +1,5 @@
 """Packaged stdin-only payload protocol. Never imports caller data as code."""
+import base64
 import hashlib
 import importlib.util
 import json
@@ -12,8 +13,7 @@ import sys
 import time
 
 MAX_JSON = 262144
-MAX_SOURCE = 1048576
-
+MAX_SOURCE = 4194304
 
 COLLECTOR_HARNESS = r"""import os, re, resource, signal, subprocess, sys, tempfile, types
 
@@ -45,18 +45,18 @@ def _make_runtime():
             raise ValueError('invalid boot_id')
         return raw
 
-    def _child_limits():
-        os.setsid()
-        resource.setrlimit(resource.RLIMIT_FSIZE, (262144, 262144))
-
     def run_bounded(argv, timeout=15, max_bytes=262144):
+        fsize_cap = max(262144, int(max_bytes) + 65536)
+        def _limits():
+            os.setsid()
+            resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_cap, fsize_cap))
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,
-                preexec_fn=_child_limits,
+                preexec_fn=_limits,
                 close_fds=True,
             )
             timed_out = False
@@ -92,6 +92,30 @@ _src = sys.stdin.buffer.read()
 sys.stdin.close()
 exec(compile(_src, '<estus_collector>', 'exec'), {'__name__': '__main__'})
 """
+ANSIBALLZ_HARNESS = r"""import datetime, json, os, shutil, sys, tempfile
+payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+sys.stdin = open(os.devnull, 'r')
+tmpdir = os.path.realpath(tempfile.mkdtemp(prefix='estus_abz_'))
+try:
+    os.chmod(tmpdir, 0o700)
+    params = payload['params']
+    params['ANSIBLE_MODULE_ARGS']['_ansible_tmpdir'] = tmpdir
+    ns = {}
+    exec(compile(payload['wrapper'], 'ansiballz_wrapper.py', 'exec'), ns)
+    ns['_ansiballz_main'](
+        zip_data=payload['zip_data'],
+        ansible_module=payload['ansible_module'],
+        module_fqn=payload['module_fqn'],
+        params=json.dumps(params),
+        profile=payload['profile'],
+        date_time=datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc),
+        extensions={},
+        rlimit_nofile=0,
+    )
+finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+"""
+
 def pairs(items):
     result = {}
     for key, value in items:
@@ -114,6 +138,32 @@ def file_identity(path):
     return [os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
 
 ALLOWED_EXEC_DIRS = ('/usr/sbin', '/usr/bin', '/sbin', '/bin', '/usr/lib/systemd')
+def detect_pkg_mgr():
+    if os.path.exists('/run/ostree-booted'):
+        return 'atomic_container'
+    os_rel = ''
+    try:
+        with open('/etc/os-release', 'r', encoding='utf-8', errors='replace') as stream:
+            os_rel = stream.read(8192).lower()
+    except OSError:
+        pass
+    if ('id=debian' in os_rel or 'id=ubuntu' in os_rel or 'debian' in os_rel) and os.path.exists('/usr/bin/apt-get'):
+        return 'apt'
+    for candidate in ('/usr/bin/dnf', '/usr/bin/microdnf'):
+        if os.path.exists(candidate):
+            return 'dnf5' if os.path.realpath(candidate).endswith('/dnf5') else 'dnf'
+    for path, mgr in (
+        ('/usr/bin/apt-get', 'apt'),
+        ('/usr/bin/yum', 'dnf'),
+        ('/usr/bin/zypper', 'zypper'),
+        ('/sbin/apk', 'apk'),
+        ('/usr/bin/apk', 'apk'),
+        ('/usr/bin/pacman', 'pacman'),
+    ):
+        if os.path.exists(path):
+            return mgr
+    return 'unknown'
+
 
 def normalize_exec_name(name):
     if not isinstance(name, str) or not name or len(name) > 64:
@@ -130,8 +180,12 @@ def resolve_identity(requirements):
         boot = stream.read(128).strip()
     result = {'uid': os.geteuid(), 'gid': os.getegid(), 'boot': boot,
               'python': file_identity(sys.executable), 'version': list(sys.version_info[:3]),
+              'pkg_mgr': detect_pkg_mgr(),
               'modules': {}, 'executables': {}, 'paths': {}}
     for module in requirements['modules']:
+        if module == 'estus_runtime':
+            result['modules'][module] = '<synthetic>'
+            continue
         spec = importlib.util.find_spec(module)
         if spec is None:
             raise ValueError('missing module')
@@ -184,7 +238,20 @@ for interruption_signal in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
     signal.signal(interruption_signal, interrupted)
 
 
-def classify_stderr_exception(stderr_bytes):
+def classify_stderr_exception(stderr_bytes, stdout_bytes=b''):
+    if stdout_bytes:
+        try:
+            doc = json.loads(stdout_bytes.decode('utf-8', errors='replace'))
+            if isinstance(doc, dict) and isinstance(doc.get('msg'), str):
+                msg = doc['msg'].lower()
+                if any(tok in msg for tok in ('python3-apt', 'python-apt', 'python3-dnf', 'libdnf5', 'could not import python modules', 'no module named')):
+                    return 'dependency_unavailable'
+                if 'permission denied' in msg or 'operation not permitted' in msg:
+                    return 'permission_denied'
+                if 'no package' in msg or 'not found' in msg or 'unable to locate package' in msg:
+                    return 'target_not_found'
+        except Exception:
+            pass
     text = stderr_bytes.decode('utf-8', errors='replace')
     for line in reversed(text.splitlines()):
         head = line.strip().split(':', 1)[0].strip()
@@ -198,9 +265,27 @@ def classify_stderr_exception(stderr_bytes):
             return 'policy_violation'
         if head == 'RuntimeError':
             return 'dependency_unavailable'
-        if head:
-            break
     return None
+
+SAFE_ENV_KEYS = ('PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')
+
+def build_child_env(selected_execs, utf8_locale=False):
+    env = {}
+    for key in SAFE_ENV_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    env.setdefault('PATH', '/usr/sbin:/usr/bin:/sbin:/bin')
+    if utf8_locale:
+        env['LC_ALL'] = 'C.UTF-8'
+        env['LANG'] = 'C.UTF-8'
+        env['DEBIAN_FRONTEND'] = 'noninteractive'
+    else:
+        env['LC_ALL'] = 'C'
+        env['LANG'] = 'C'
+    env['TZ'] = 'UTC'
+    for norm, selected_path in selected_execs.items():
+        env['ESTUS_EXEC_' + norm] = selected_path
+    return env
 def run():
     if exact(8) != b'ESTUSNP1':
         raise ValueError('protocol')
@@ -211,7 +296,7 @@ def run():
     source = exact(size)
     if sys.stdin.buffer.read(1):
         raise ValueError('trailing frame')
-    if spec['schema'] != 1 or spec['operation'] not in ('discover', 'execute'):
+    if spec['schema'] != 1 or spec['operation'] not in ('discover', 'execute', 'ansiballz'):
         raise ValueError('protocol')
     response = {'schema': 1, 'id': spec['id'], 'phase': 'rejected'}
     try:
@@ -225,21 +310,42 @@ def run():
         if observed != spec['identity']:
             response['identity_mismatch'] = True
             raise ValueError('identity drift')
-        if hashlib.sha256(source).hexdigest() != spec['sha256']:
-            raise ValueError('source drift')
-        argv = spec['argv']
-        if not isinstance(argv, list) or len(argv) > 64 or any(not isinstance(x, str) or '\0' in x for x in argv):
-            raise ValueError('argv')
         timeout = spec['timeout']
         limit = spec['output_limit']
         if not 0 < timeout <= 600 or not 0 < limit <= 16777216:
             raise ValueError('bounds')
         deadline = time.monotonic() + timeout
-        child_env = {k: v for k, v in os.environ.items() if not k.startswith('ESTUS_EXEC_')}
-        for norm, selected_path in selected_execs.items():
-            child_env['ESTUS_EXEC_' + norm] = selected_path
-        # Source is immutable verified bytes, never a pathname reopened after approval.
-        child = subprocess.Popen([sys.executable, '-I', '-c', COLLECTOR_HARNESS, *argv], stdin=subprocess.PIPE,
+        if spec['operation'] == 'execute':
+            if hashlib.sha256(source).hexdigest() != spec['sha256']:
+                raise ValueError('source drift')
+            argv = spec['argv']
+            if not isinstance(argv, list) or len(argv) > 64 or any(not isinstance(x, str) or '\0' in x for x in argv):
+                raise ValueError('argv')
+            child_env = build_child_env(selected_execs, utf8_locale=False)
+            stdin_bytes = source
+            cmd = [sys.executable, '-I', '-c', COLLECTOR_HARNESS, *argv]
+        else:
+            wlen = spec['wrapper_len']
+            if not isinstance(wlen, int) or wlen <= 0 or wlen > len(source):
+                raise ValueError('wrapper bounds')
+            wrapper_bytes = source[:wlen]
+            zip_bytes = source[wlen:]
+            if hashlib.sha256(wrapper_bytes).hexdigest() != spec['wrapper_sha256']:
+                raise ValueError('wrapper drift')
+            if hashlib.sha256(zip_bytes).hexdigest() != spec['zip_sha256']:
+                raise ValueError('archive drift')
+            abz_payload = {
+                'wrapper': wrapper_bytes.decode('utf-8', 'strict'),
+                'zip_data': base64.b64encode(zip_bytes).decode('ascii'),
+                'ansible_module': spec['ansible_module'],
+                'module_fqn': spec['module_fqn'],
+                'profile': spec['serialization_profile'],
+                'params': spec['params'],
+            }
+            stdin_bytes = json.dumps(abz_payload, separators=(',', ':'), allow_nan=False).encode('utf-8')
+            child_env = build_child_env(selected_execs, utf8_locale=True)
+            cmd = [sys.executable, '-I', '-X', 'utf8', '-c', ANSIBALLZ_HARNESS]
+        child = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env,
                                  start_new_session=True)
         response['phase'] = 'started'
@@ -259,10 +365,10 @@ def run():
                     pipe, name = key.fileobj, key.data
                     if name == 'stdin':
                         try:
-                            offset += os.write(pipe.fileno(), source[offset:offset + 65536])
+                            offset += os.write(pipe.fileno(), stdin_bytes[offset:offset + 65536])
                         except BrokenPipeError:
-                            offset = len(source)
-                        if offset == len(source):
+                            offset = len(stdin_bytes)
+                        if offset == len(stdin_bytes):
                             sel.unregister(pipe)
                             pipe.close()
                     else:
@@ -293,11 +399,10 @@ def run():
                     response['output_status'] = 'complete'
                 except UnicodeDecodeError:
                     response['output_status'] = 'invalid_utf8'
-            if rc != 0:
-                reason = classify_stderr_exception(output['stderr'])
-                if reason is not None:
+            if rc != 0 or spec['operation'] == 'ansiballz':
+                reason = classify_stderr_exception(output['stderr'], output['stdout'] if not overflow else b'')
+                if reason is not None and rc != 0:
                     response['error_reason'] = reason
-            # stderr is drained but never published; it can contain secrets.
             return response, 0 if rc == 0 else 1
         finally:
             sel.close()
