@@ -8,11 +8,11 @@ import platform
 
 import re
 
-import sys
 
 import time
 
 import uuid
+import estus_runtime
 
 MAX_INTEGER = 9007199254740991
 
@@ -34,8 +34,8 @@ def main():
 
     if platform.system() != 'Linux':
         raise ValueError('CPU observation requires Linux')
-    limit = integer(sys.argv[1].encode('ascii'), 16)
-    sample_ms = integer(sys.argv[2].encode('ascii'), 2000)
+    limit = integer(estus_runtime.request()[0].encode('ascii'), 16)
+    sample_ms = integer(estus_runtime.request()[1].encode('ascii'), 2000)
     if limit < 1:
         raise ValueError('topology limit must be positive')
     hz = os.sysconf('SC_CLK_TCK')

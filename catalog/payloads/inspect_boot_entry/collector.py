@@ -1,8 +1,9 @@
+import estus_runtime
 def main():
-    import datetime, json, os, platform, resource, signal, subprocess, sys, tempfile, uuid
+    import datetime, json, os, platform, resource, uuid
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
-    a = json.loads(sys.argv[1])
+    a = estus_runtime.request()[0]
     def read(path, maximum=4096, optional=False):
         try:
             with open(path, 'rb') as f:
@@ -31,31 +32,12 @@ def main():
         resource.setrlimit(resource.RLIMIT_FSIZE, (262144, 262144))
 
     def run(argv):
-        # Disk-backed capped stdout/stderr avoid unbounded PIPE accumulation.
-        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                env={'PATH':'/usr/bin:/bin', 'LC_ALL':'C', 'SYSTEMD_COLORS':'0', 'SYSTEMD_PAGER':'cat'},
-                preexec_fn=child_limits)
-            timed_out = False
-            try:
-                rc = p.wait(timeout=12)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                os.killpg(p.pid, signal.SIGKILL)
-                rc = p.wait(timeout=2)
-            out.seek(0)
-            data = out.read(262145)
-            err.seek(0)
-            error = err.read(262145)
-            if len(data) > 262144 or len(error) > 262144:
-                raise ValueError('subprocess output exceeds bound')
-            return {'returncode':rc, 'timed_out':timed_out, 'stdout':data.decode('utf-8', 'strict')}
+        return estus_runtime.run_bounded(
+            argv, timeout=12, max_bytes=262144, accepted=None,
+            env={'SYSTEMD_COLORS': '0', 'SYSTEMD_PAGER': 'cat'})
 
     def checked(argv):
-        r = run(argv)
-        if r['returncode'] != 0 or r['timed_out']:
-            raise ValueError('required observation command failed')
-        return r['stdout']
+        return run(argv)['stdout']
 
     result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 

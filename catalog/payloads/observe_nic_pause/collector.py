@@ -1,26 +1,10 @@
+import estus_runtime
 def main():
-    import json, os, re, selectors, subprocess, sys, time
-    p=json.loads(sys.argv[1]); policy=json.loads(sys.argv[2])
+    import json, os, re
+    p=estus_runtime.request()[0]; policy=estus_runtime.request()[1]
     def run(args):
-        proc=subprocess.Popen([os.environ['ESTUS_EXEC_ETHTOOL']]+args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'LC_ALL':'C','PATH':'/usr/bin:/bin'})
-        sel=selectors.DefaultSelector(); data={}
-        for stream in (proc.stdout,proc.stderr): sel.register(stream,selectors.EVENT_READ); data[stream]=bytearray()
-        end=time.monotonic()+6
-        try:
-            while sel.get_map():
-                if time.monotonic()>=end: raise ValueError('ethtool deadline exceeded; mutation may have applied')
-                for key,_ in sel.select(.1):
-                    chunk=os.read(key.fd,4096)
-                    if not chunk: sel.unregister(key.fileobj); continue
-                    data[key.fileobj].extend(chunk)
-                    if len(data[key.fileobj])>65536: raise ValueError('ethtool output exceeded bound; mutation may have applied')
-            rc=proc.wait(timeout=max(.01,end-time.monotonic()))
-            if rc: raise ValueError('ethtool failed; mutation may have applied: '+bytes(data[proc.stderr])[:1024].decode('utf8','replace'))
-            return bytes(data[proc.stdout]).decode('utf8')
-        finally:
-            sel.close()
-            if proc.poll() is None: proc.kill()
-            proc.wait(); proc.stdout.close(); proc.stderr.close()
+        return estus_runtime.run_bounded(
+            [os.environ['ESTUS_EXEC_ETHTOOL']] + args, timeout=6, max_bytes=65536)['stdout']
     dev=p['interface']
     if dev!=policy['interface'] or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',dev): raise ValueError('interface outside operator policy')
     with open('/sys/class/net/'+dev+'/address') as f: mac=f.read(64).strip()

@@ -1,5 +1,5 @@
 def main():
-    import json, os, re, sys, datetime
+    import json, os, re, datetime
     unavailable=[]
     def read(path,limit=4096):
         try:
@@ -46,25 +46,10 @@ def main():
             result['truncated']=True
             result['omitted_records']+=1
         print(out)
-    import subprocess, selectors, time
     def run(argv):
-        p=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'PATH':'/usr/bin:/bin','LC_ALL':'C'})
-        sel=selectors.DefaultSelector();data={}
-        for f in (p.stdout,p.stderr): sel.register(f,selectors.EVENT_READ);data[f]=bytearray()
-        end=time.monotonic()+6
-        try:
-            while sel.get_map():
-                if time.monotonic()>end: raise TimeoutError('command timeout')
-                for key,_ in sel.select(.1):
-                    chunk=os.read(key.fd,4096)
-                    if not chunk: sel.unregister(key.fileobj);continue
-                    data[key.fileobj].extend(chunk)
-                    if len(data[key.fileobj])>65536: raise ValueError('command output bound')
-            rc=p.wait(timeout=max(.1,end-time.monotonic()))
-            return rc,bytes(data[p.stdout]).decode(),bytes(data[p.stderr]).decode()
-        finally:
-            if p.poll() is None:p.kill()
-            p.wait();sel.close();p.stdout.close();p.stderr.close()
+        result = estus_runtime.run_bounded(
+            argv, timeout=6, max_bytes=65536, accepted=None)
+        return result['returncode'], result['stdout'], result['stderr']
     rc,text,error=run([os.environ['ESTUS_EXEC_DMIDECODE'],'--type','9'])
     if rc!=0:raise ValueError('firmware inventory unavailable; provision dmidecode and approved firmware access')
     keys={'Designation': 'designation', 'Type': 'type', 'Current Usage': 'current_usage', 'Length': 'length', 'ID': 'slot_id', 'Bus Address': 'bus_address', 'Data Bus Width': 'data_bus_width'}

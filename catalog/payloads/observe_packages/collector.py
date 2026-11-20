@@ -25,14 +25,8 @@ def bounded_text(value, maximum=4096):
 
 
 def run(executable, arguments):
-    result = estus_runtime.run_bounded([executable] + arguments, timeout=30, max_bytes=8388608)
-    if result['timed_out']:
-        print(json.dumps({'estus_error': {'code': 'timeout'}}))
-        sys.exit(1)
-    if result['returncode'] != 0:
-        print(json.dumps({'estus_error': {'code': 'dependency_unavailable'}}))
-        sys.exit(1)
-    return result['stdout']
+    return estus_runtime.run_or_exit(
+        [executable] + arguments, timeout=30, max_bytes=8388608)['stdout']
 
 
 def parse_packages(backend, raw):
@@ -76,7 +70,7 @@ def select_backend():
 
 
 def main():
-    request = json.loads(sys.argv[1])
+    request = estus_runtime.request()[0]
     offset = request.get('offset', 0)
     limit = request.get('limit', 50)
     name_filter = request.get('name')

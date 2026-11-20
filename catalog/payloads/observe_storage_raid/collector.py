@@ -1,4 +1,5 @@
-import datetime, json, os, re, sys
+import datetime, json, os, re
+import estus_runtime
 
 def parse_attribute(raw):
     if len(raw) > 256:
@@ -50,7 +51,7 @@ def parse_md_snapshot(snapshot):
 
 
 def main():
-    if sys.argv[1] != '/dev/md0':
+    if estus_runtime.request()[0] != '/dev/md0':
         raise ValueError('device outside reviewed MD scope')
     base = '/sys/class/block/md0/md'
     def text(path):

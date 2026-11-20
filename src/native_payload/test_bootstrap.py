@@ -367,7 +367,7 @@ class Execution(unittest.TestCase):
         self.assertEqual(out['stdout'], 'fine')
         self.assertEqual(out['rc'], 3)
         self.assertEqual(out['stderr'], 'noise')
-        self.assertEqual(out['rejected'], 'RuntimeError')
+        self.assertEqual(out['rejected'], 'CommandFailed')
         self.assertEqual(out['timeout'], 'TimeoutError')
         self.assertEqual(out['oversize'], 'ValueError')
         self.assertEqual(out['bad_utf8'], 'UnicodeDecodeError')

@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import sys
 
 import estus_runtime
 
@@ -30,8 +29,6 @@ def systemctl(scope, args):
         timeout=20,
         max_bytes=262144,
     )
-    if result['timed_out']:
-        raise ValueError('systemctl deadline exceeded')
     if result['returncode'] != 0:
         raise ValueError('systemctl failed with exit ' + str(result['returncode']))
     return result['stdout']
@@ -49,7 +46,7 @@ def show(scope, unit):
 
 
 def main():
-    request = json.loads(sys.argv[1])
+    request = estus_runtime.request()[0]
     scope = request.get('manager_scope')
     if scope not in ('system', 'user'):
         raise ValueError('unsupported operator manager scope')

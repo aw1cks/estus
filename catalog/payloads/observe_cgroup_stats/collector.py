@@ -1,7 +1,8 @@
+import estus_runtime
 def main():
-    import os, sys, json, re
+    import os, json, re
     MAX=9007199254740991
-    args=[json.loads(x) for x in sys.argv[1:]]
+    args=estus_runtime.request()
     def read(path, bound=65536):
         with open(path,'rb') as f: data=f.read(bound+1)
         if len(data)>bound: raise ValueError('source exceeds bound')

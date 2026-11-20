@@ -1,3 +1,4 @@
+import estus_runtime
 def slice_message_text(raw):
     if isinstance(raw, list) and all(type(x) is int and 0 <= x <= 255 for x in raw):
         return bytes(raw).decode('utf-8', 'replace')
@@ -131,8 +132,8 @@ def parse_cursor_arg(cursor_arg, direction):
 
 
 def main():
-    import os, sys, json, re, time, selectors, subprocess, signal
-    args = [json.loads(x) for x in sys.argv[1:]]
+    import os, json, re
+    args = estus_runtime.request()
 
     def read(path, bound=65536):
         with open(path, 'rb') as f:
@@ -141,48 +142,9 @@ def main():
             raise ValueError('source exceeds bound')
         return data.decode('utf-8', errors='strict').strip()
 
-    class UtilityError(ValueError):
-        pass
-
     def run(argv, bound=8388608):
-        p = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'SYSTEMD_COLORS': '0'},
-            start_new_session=True,
-        )
-        streams = selectors.DefaultSelector()
-        streams.register(p.stdout, selectors.EVENT_READ)
-        streams.register(p.stderr, selectors.EVENT_READ)
-        out = {p.stdout: bytearray(), p.stderr: bytearray()}
-        deadline = time.monotonic() + 20
-        try:
-            while streams.get_map():
-                if time.monotonic() > deadline:
-                    raise ValueError('subprocess deadline')
-                for key, _ in streams.select(.1):
-                    data = os.read(key.fileobj.fileno(), 8192)
-                    if not data:
-                        streams.unregister(key.fileobj)
-                        continue
-                    out[key.fileobj].extend(data)
-                    if sum(map(len, out.values())) > bound:
-                        raise ValueError('subprocess output bound')
-            rc = p.wait(timeout=1)
-            if rc:
-                raise UtilityError(
-                    'fixed utility failed: '
-                    + str(rc)
-                    + ': '
-                    + bytes(out[p.stderr])[:512].decode('utf-8', 'replace')
-                )
-            return bytes(out[p.stdout]).decode('utf-8', 'strict')
-        finally:
-            streams.close()
-            if p.poll() is None:
-                os.killpg(p.pid, signal.SIGKILL)
-            p.wait()
+        return estus_runtime.run_bounded(
+            argv, timeout=20, max_bytes=bound)['stdout']
 
     def publish(value):
         encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
@@ -252,7 +214,7 @@ def main():
             query += ['_SYSTEMD_UNIT=' + unit]
         try:
             raw_records = fetch_records(query, fetch_limit + 1)
-        except UtilityError as error:
+        except estus_runtime.CommandFailed as error:
             if raw_cursor and 'Failed to seek to cursor' in str(error):
                 status = 'cursor_unavailable'
             else:

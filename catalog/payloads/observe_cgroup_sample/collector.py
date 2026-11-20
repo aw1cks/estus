@@ -1,4 +1,5 @@
-import os, sys, json, re, time
+import os, json, re, time
+import estus_runtime
 
 MAX=9007199254740991
 
@@ -37,7 +38,7 @@ def cpu_observation(previous,ident,usage,elapsed):
 
 
 def main():
-    args=[json.loads(x) for x in sys.argv[1:]]
+    args=estus_runtime.request()
     def read(path, bound=65536):
         with open(path,'rb') as f: data=f.read(bound+1)
         if len(data)>bound: raise ValueError('source exceeds bound')

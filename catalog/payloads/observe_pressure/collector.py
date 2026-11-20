@@ -1,4 +1,5 @@
 import re
+import estus_runtime
 
 MAX = 9007199254740991
 
@@ -19,12 +20,12 @@ def parse_pressure(data):
 
 
 def main():
-    import os, sys, json, re, time, signal, platform, datetime, errno
+    import os, json, re, signal, platform, datetime, errno
     signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('observation deadline')))
     signal.alarm(12)
     if platform.system() != 'Linux':
         raise ValueError('Linux required')
-    args = json.loads(sys.argv[1])
+    args = estus_runtime.request()[0]
     def read(path, bound=65536, directory=None):
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
         with os.fdopen(fd, 'rb') as stream: data = stream.read(bound + 1)

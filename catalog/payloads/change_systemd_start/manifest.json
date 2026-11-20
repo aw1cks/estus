@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "40b9188758e7b548e8258d5ce5750359c0380d08a582c8efb75e1b1da69b1131",
+  "source_sha256": "0e7e1f48e36d23bdb5687fcda4c7f5b2eff93afc0921bcca7d93ab1d18632749",
   "max_source_bytes": 1048576,
   "argv": [
     {

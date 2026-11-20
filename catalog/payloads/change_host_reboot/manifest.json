@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "reboot_scheduled",
-  "source_sha256": "b717f1411e89f268d980e0e7a85786bd3873a358cc57acd0b541fb2f49342ef3",
+  "source_sha256": "cc214c135f44f3c2552c31616bb812a7118a1322517cde821acd6d6bd48ce7c5",
   "max_source_bytes": 1048576,
   "argv": [
     {

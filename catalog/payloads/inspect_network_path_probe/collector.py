@@ -1,30 +1,12 @@
+import estus_runtime
 def main():
-    import json, sys, subprocess, selectors, time, os, ipaddress
-    p = {k:v for k,v in json.loads(sys.argv[1]).items() if v is not None}
-    policy = json.loads(sys.argv[2])
+    import json, os, ipaddress
+    p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
+    policy = estus_runtime.request()[1]
     def run(argv, timeout=5, accepted=(0,)):
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={'LC_ALL':'C','PATH':'/usr/bin:/bin'})
-        sel = selectors.DefaultSelector()
-        sel.register(proc.stdout, selectors.EVENT_READ)
-        sel.register(proc.stderr, selectors.EVENT_READ)
-        data = {proc.stdout: bytearray(), proc.stderr: bytearray()}
-        end = time.monotonic() + timeout
-        try:
-            while sel.get_map():
-                remaining = end - time.monotonic()
-                if remaining <= 0: raise ValueError('network command deadline exceeded')
-                for key, _ in sel.select(min(remaining, .2)):
-                    chunk = os.read(key.fileobj.fileno(), 4096)
-                    if not chunk: sel.unregister(key.fileobj); continue
-                    data[key.fileobj].extend(chunk)
-                    if len(data[key.fileobj]) > 131072: raise ValueError('network command output bound exceeded')
-            rc = proc.wait(timeout=max(.01, end-time.monotonic()))
-            if rc not in accepted: raise ValueError('network command failed: '+bytes(data[proc.stderr])[:1024].decode('utf8','replace'))
-            return bytes(data[proc.stdout]).decode('utf8'), rc
-        finally:
-            sel.close()
-            if proc.poll() is None: proc.kill()
-            proc.wait()
+        result = estus_runtime.run_bounded(
+            argv, timeout=timeout, max_bytes=131072, accepted=accepted)
+        return result['stdout'], result['returncode']
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
         if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')

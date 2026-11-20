@@ -53,6 +53,10 @@ def _make_runtime(request_values):
             raise ValueError('invalid or oversized source string')
         return value
 
+    class CommandFailed(RuntimeError):
+        # Utility ran but reported failure: a dependency problem, not caller input.
+        pass
+
     def allowed(value, allowlist):
         if not isinstance(allowlist, list) or not allowlist:
             return False
@@ -72,7 +76,7 @@ def _make_runtime(request_values):
             raise ValueError('projection bound exceeded')
         print(raw)
 
-    def run_bounded(argv, timeout=15, max_bytes=262144, accepted=(0,)):
+    def run_bounded(argv, timeout=15, max_bytes=262144, accepted=(0,), env=None):
         # One bounded-subprocess implementation: session leader, deadline killpg,
         # both streams bounded, strict UTF-8 stdout, classified failures.
         if not isinstance(argv, (list, tuple)) or not argv:
@@ -86,6 +90,11 @@ def _make_runtime(request_values):
             raise ValueError('invalid output bound')
         if accepted is not None and not isinstance(accepted, (list, tuple)):
             raise ValueError('invalid accepted statuses')
+        if env is not None and not isinstance(env, dict):
+            raise ValueError('invalid environment')
+        child_env = dict(os.environ) if env is not None else None
+        if child_env is not None:
+            child_env.update(env)
         fsize_cap = max(262144, max_bytes + 65536)
         def _limits():
             os.setsid()
@@ -98,6 +107,7 @@ def _make_runtime(request_values):
                 stderr=err,
                 preexec_fn=_limits,
                 close_fds=True,
+                env=child_env,
             )
             timed_out = False
             try:
@@ -119,10 +129,14 @@ def _make_runtime(request_values):
                 errors = errors[:max_bytes]
             stdout = data.decode('utf-8', 'strict')
             stderr = errors.decode('utf-8', 'replace')
-        if timed_out:
-            raise TimeoutError('subprocess deadline exceeded')
-        if accepted is not None and rc not in accepted:
-            raise RuntimeError('subprocess failed with exit ' + str(rc) + ': ' + stderr.strip()[:1024])
+        # accepted=None is the capture contract: mutation receipts need the raw
+        # returncode and timed_out to report an uncertain outcome instead of failing.
+        if accepted is not None:
+            if timed_out:
+                raise TimeoutError('subprocess deadline exceeded')
+            if rc not in accepted:
+                raise CommandFailed(
+                    'subprocess failed with exit ' + str(rc) + ': ' + stderr.strip()[:1024])
         return {'returncode': rc, 'timed_out': timed_out, 'stdout': stdout, 'stderr': stderr}
 
     def run_or_exit(argv, timeout=15, max_bytes=262144, accepted=(0,)):
@@ -131,7 +145,7 @@ def _make_runtime(request_values):
             return run_bounded(argv, timeout=timeout, max_bytes=max_bytes, accepted=accepted)
         except TimeoutError:
             code = 'timeout'
-        except RuntimeError:
+        except CommandFailed:
             code = 'dependency_unavailable'
         except ValueError:
             code = 'policy_violation'
@@ -145,6 +159,7 @@ def _make_runtime(request_values):
     mod.allowed = allowed
     mod.boot_id = boot_id
     mod.emit = emit
+    mod.CommandFailed = CommandFailed
     mod.run_bounded = run_bounded
     mod.run_or_exit = run_or_exit
     return mod
@@ -345,7 +360,7 @@ def classify_stderr_exception(stderr_bytes, stdout_bytes=b''):
             return 'timeout'
         if head == 'ValueError':
             return 'policy_violation'
-        if head == 'RuntimeError':
+        if head in ('CommandFailed', 'RuntimeError'):
             return 'dependency_unavailable'
     return None
 

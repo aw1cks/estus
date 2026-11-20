@@ -1,5 +1,6 @@
+import estus_runtime
 def main():
-    import json, os, re, sys, datetime
+    import json, os, re, datetime
     unavailable=[]
     def read(path,limit=4096):
         try:
@@ -57,7 +58,7 @@ def main():
             elif re.fullmatch(r'0x[0-9a-fA-F]{2,8}',v):result[k]=v.lower()
             else:raise ValueError('PCI numeric identity malformed')
         return result
-    address=sys.argv[1]
+    address=estus_runtime.request()[0]
     device(address)
     path=root+'/'+address
     result={'address':address,'bound':os.path.islink(path+'/driver')}

@@ -1,5 +1,5 @@
 def main():
-    import json, os, re, sys, datetime
+    import json, os, re, datetime
     unavailable=[]
     def read(path,limit=4096):
         try:

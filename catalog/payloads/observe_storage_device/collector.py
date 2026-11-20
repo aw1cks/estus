@@ -95,7 +95,7 @@ def describe(name, unavailable):
 
 
 def main():
-    request = json.loads(sys.argv[1])
+    request = estus_runtime.request()[0]
     name = request.get('device')
     if not isinstance(name, str) or DEVICE_PATTERN.fullmatch(name) is None:
         raise ValueError('invalid device selector')

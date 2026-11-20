@@ -1,3 +1,4 @@
+import estus_runtime
 def main():
     import json, os, re, sys, datetime
     unavailable = []
@@ -46,49 +47,18 @@ def main():
             omitted += 1
         print(out)
 
-    import subprocess, selectors, time
 
-    def run(argv, bound=1048576):
-        p = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'},
-        )
-        sel = selectors.DefaultSelector()
-        data = {}
-        for f in (p.stdout, p.stderr):
-            sel.register(f, selectors.EVENT_READ)
-            data[f] = bytearray()
-        end = time.monotonic() + 6
-        try:
-            while sel.get_map():
-                if time.monotonic() > end:
-                    raise TimeoutError('command timeout')
-                for key, _ in sel.select(.1):
-                    chunk = os.read(key.fd, 4096)
-                    if not chunk:
-                        sel.unregister(key.fileobj)
-                        continue
-                    data[key.fileobj].extend(chunk)
-                    if len(data[key.fileobj]) > bound:
-                        raise ValueError('command output bound')
-            rc = p.wait(timeout=max(.1, end - time.monotonic()))
-            return rc, bytes(data[p.stdout]).decode('utf-8', 'replace'), bytes(data[p.stderr]).decode('utf-8', 'replace')
-        finally:
-            if p.poll() is None:
-                p.kill()
-            p.wait()
-            sel.close()
-            p.stdout.close()
-            p.stderr.close()
+    def run(argv):
+        result = estus_runtime.run_bounded(
+            argv, timeout=6, max_bytes=65536, accepted=None)
+        return result['returncode'], result['stdout'], result['stderr']
 
-    interface = sys.argv[1]
+    interface = estus_runtime.request()[0]
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}', interface):
         raise ValueError('interface')
     filter_text = ''
-    if len(sys.argv) > 2:
-        filter_text = json.loads(sys.argv[2]) or ''
+    if len(estus_runtime.request()) > 1:
+        filter_text = estus_runtime.request()[1] or ''
     if not isinstance(filter_text, str) or len(filter_text) > 64 or '\x00' in filter_text:
         raise ValueError('filter')
     if not os.path.isdir('/sys/class/net/' + interface):

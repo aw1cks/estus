@@ -798,8 +798,19 @@ fn cgroup_collectors_check_unified_hierarchy_file() -> Result<()> {
         "observe_cgroup_stats",
         "observe_cgroup_tree",
     ] {
-        let script = r#"import importlib.util, os, sys
+        // Collectors read their request through estus_runtime.request(); the test supplies
+        // that seam directly rather than injecting process argv.
+        let request = if name == "observe_cgroup_sample" {
+            "['/system.slice', '2', '50']"
+        } else {
+            "['/system.slice', '1']"
+        };
+        let script = format!(
+            r#"import importlib.util, os, sys, types
 from unittest import mock
+runtime = types.ModuleType('estus_runtime')
+runtime.request = lambda: {request}
+sys.modules['estus_runtime'] = runtime
 spec = importlib.util.spec_from_file_location('cg', sys.argv[1])
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -808,17 +819,17 @@ def fake_isfile(p):
     if p == '/sys/fs/cgroup/cgroup.controllers':
         return False
     return orig(p)
-with mock.patch.object(sys, 'argv', ['cg', '"/system.slice"', '1'] if 'sample' not in sys.argv[1] else ['cg', '"/system.slice"', '2', '50']):
-    with mock.patch('os.path.isfile', side_effect=fake_isfile):
-        try:
-            mod.main()
-        except ValueError as e:
-            assert 'cgroup v2 unified hierarchy required' in str(e), str(e)
-            sys.exit(0)
-        raise AssertionError('expected cgroup v2 check failure')
-"#;
+with mock.patch('os.path.isfile', side_effect=fake_isfile):
+    try:
+        mod.main()
+    except ValueError as e:
+        assert 'cgroup v2 unified hierarchy required' in str(e), str(e)
+        sys.exit(0)
+    raise AssertionError('expected cgroup v2 check failure')
+"#
+        );
         let out = std::process::Command::new(&python)
-            .args(["-I", "-B", "-c", script])
+            .args(["-I", "-B", "-c", &script])
             .arg(assets.join(name).join("collector.py"))
             .output()?;
         ensure!(

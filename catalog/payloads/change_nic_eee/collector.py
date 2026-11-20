@@ -1,10 +1,7 @@
 import json
 import os
 import re
-import selectors
-import subprocess
-import sys
-import time
+import estus_runtime
 
 
 # ethtool 7.1 netlink/eee.c: status is configuration/negotiation, tx-lpi
@@ -68,41 +65,8 @@ def parse_eee(text, interface='model0'):
 
 
 def run(args):
-    proc = subprocess.Popen(
-        [os.environ['ESTUS_EXEC_ETHTOOL']] + args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'},
-    )
-    sel = selectors.DefaultSelector()
-    data = {}
-    try:
-        for stream in (proc.stdout, proc.stderr):
-            sel.register(stream, selectors.EVENT_READ)
-            data[stream] = bytearray()
-        end = time.monotonic() + 6
-        while sel.get_map():
-            if time.monotonic() >= end:
-                raise ValueError('ethtool deadline exceeded')
-            for key, _ in sel.select(.1):
-                chunk = os.read(key.fd, 4096)
-                if not chunk:
-                    sel.unregister(key.fileobj)
-                    continue
-                data[key.fileobj].extend(chunk)
-                if len(data[key.fileobj]) > 65536:
-                    raise ValueError('ethtool output exceeded bound')
-        rc = proc.wait(timeout=max(.01, end - time.monotonic()))
-        if rc:
-            raise ValueError('ethtool failed: ' + bytes(data[proc.stderr])[:1024].decode('utf8', 'replace'))
-        return bytes(data[proc.stdout]).decode('utf8')
-    finally:
-        sel.close()
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
-        proc.stdout.close()
-        proc.stderr.close()
+    return estus_runtime.run_bounded(
+        [os.environ['ESTUS_EXEC_ETHTOOL']] + args, timeout=6, max_bytes=65536)['stdout']
 
 
 def identity(p, policy):
@@ -133,8 +97,8 @@ def emit(result):
 
 
 def main():
-    p = json.loads(sys.argv[1])
-    policy = json.loads(sys.argv[2])
+    p = estus_runtime.request()[0]
+    policy = estus_runtime.request()[1]
     if policy.get('allow_runtime_tuning') is not True or os.geteuid() != 0:
         raise ValueError('fixed privileged operator runtime tuning policy required')
     if not isinstance(p, dict) or set(p) != {'interface', 'enabled', 'tx_lpi_timer_us'}:

@@ -32,7 +32,7 @@ def node_count(value):
 
 
 def main():
-    request = json.loads(sys.argv[1])
+    request = estus_runtime.request()[0]
     interface = request.get('interface')
     if not isinstance(interface, str) or INTERFACE_PATTERN.fullmatch(interface) is None:
         raise ValueError('invalid interface selector')
@@ -44,9 +44,14 @@ def main():
     if not executable:
         print(json.dumps({'estus_error': {'code': 'dependency_unavailable'}}))
         sys.exit(1)
-    observed = estus_runtime.run_bounded([executable, '-k', interface], timeout=20, max_bytes=262144)
-    if observed['timed_out']:
+    try:
+        observed = estus_runtime.run_bounded(
+            [executable, '-k', interface], timeout=20, max_bytes=262144)
+    except TimeoutError:
         print(json.dumps({'estus_error': {'code': 'timeout'}}))
+        sys.exit(1)
+    except estus_runtime.CommandFailed:
+        print(json.dumps({'estus_error': {'code': 'unsupported_platform'}}))
         sys.exit(1)
     if observed['returncode'] != 0:
         print(json.dumps({'estus_error': {'code': 'unsupported_platform'}}))

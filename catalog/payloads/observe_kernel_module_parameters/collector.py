@@ -1,8 +1,9 @@
+import estus_runtime
 def main():
-    import datetime, json, os, platform, stat, sys, uuid
+    import datetime, json, os, platform, stat, uuid
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
-    a = json.loads(sys.argv[1])
+    a = estus_runtime.request()[0]
     def read(path, maximum=4096, optional=False):
         try:
             with open(path, 'rb') as f:

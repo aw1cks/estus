@@ -1,3 +1,4 @@
+import estus_runtime
 def parse_fec(text):
     if not isinstance(text, str) or len(text) > 65536 or len(text.encode('utf8')) > 65536:
         raise ValueError('FEC output exceeds bound')
@@ -35,13 +36,9 @@ def main():
     import json
     import os
     import re
-    import selectors
-    import subprocess
-    import sys
-    import time
 
-    p = json.loads(sys.argv[1])
-    policy = json.loads(sys.argv[2])
+    p = estus_runtime.request()[0]
+    policy = estus_runtime.request()[1]
     if policy.get('allow_runtime_tuning') is not True or os.geteuid() != 0:
         raise ValueError('fixed privileged operator runtime tuning policy required')
     if not isinstance(p, dict) or set(p) != {'interface', 'mode'}:
@@ -63,42 +60,8 @@ def main():
         raise ValueError('driver outside reviewed policy')
 
     def run(args):
-        proc = subprocess.Popen(
-            [os.environ['ESTUS_EXEC_ETHTOOL']] + args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'},
-        )
-        sel = selectors.DefaultSelector()
-        data = {}
-        end = time.monotonic() + 6
-        try:
-            for stream in (proc.stdout, proc.stderr):
-                sel.register(stream, selectors.EVENT_READ)
-                data[stream] = bytearray()
-            while sel.get_map():
-                if time.monotonic() >= end:
-                    raise ValueError('ethtool deadline exceeded; mutation may have applied, no automatic recovery')
-                for key, _ in sel.select(.1):
-                    chunk = os.read(key.fd, 4096)
-                    if not chunk:
-                        sel.unregister(key.fileobj)
-                        continue
-                    data[key.fileobj].extend(chunk)
-                    if len(data[key.fileobj]) > 65536:
-                        raise ValueError('ethtool output exceeded bound; mutation may have applied, no automatic recovery')
-            rc = proc.wait(timeout=max(.01, end - time.monotonic()))
-            if rc:
-                detail = bytes(data[proc.stderr])[:1024].decode('utf8', 'replace')
-                raise ValueError('ethtool failed; mutation may have applied, no automatic recovery: ' + detail)
-            return bytes(data[proc.stdout]).decode('utf8')
-        finally:
-            sel.close()
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
-            proc.stdout.close()
-            proc.stderr.close()
+        return estus_runtime.run_bounded(
+            [os.environ['ESTUS_EXEC_ETHTOOL']] + args, timeout=6, max_bytes=65536)['stdout']
 
     def observe():
         return parse_fec(run(['--show-fec', dev]))

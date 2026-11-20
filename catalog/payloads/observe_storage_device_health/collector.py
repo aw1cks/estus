@@ -1,4 +1,5 @@
-import datetime, json, os, selectors, subprocess, sys, time
+import datetime, json, os, selectors, signal, subprocess, time
+import estus_runtime
 
 def parse_smart_log(data):
     if len(data) != 512:
@@ -20,7 +21,7 @@ def parse_smart_log(data):
 
 
 def main():
-    if sys.argv[1] != '/dev/nvme0':
+    if estus_runtime.request()[0] != '/dev/nvme0':
         raise ValueError('device outside reviewed controller scope')
     def attribute(name):
         with open('/sys/class/nvme/nvme0/' + name, 'rb') as stream:
@@ -36,9 +37,13 @@ def main():
         raise ValueError('controller outside reviewed virtual device scope')
     controller_state = attribute('state')
     # nvme-cli raw SMART is the standard 512-byte log; no JSON numeric precision loss.
+    # The SMART log is a raw 512-byte binary structure, so this is the one collector that
+    # cannot use run_bounded (strict UTF-8 stdout). Supervision still matches it: own
+    # session, deadline killpg, bounded streams, classified timeout.
     process = subprocess.Popen([os.environ['ESTUS_EXEC_NVME'], 'smart-log', '/dev/nvme0', '--raw-binary'],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               env={'PATH': '/usr/bin', 'LC_ALL': 'C'}, stdin=subprocess.DEVNULL)
+                               env={'PATH': '/usr/bin', 'LC_ALL': 'C'}, stdin=subprocess.DEVNULL,
+                               start_new_session=True)
     streams = selectors.DefaultSelector()
     buffers = {'out': bytearray(), 'err': bytearray()}
     deadline = time.monotonic() + 8
@@ -49,7 +54,7 @@ def main():
         while streams.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise ValueError('NVMe SMART request timed out')
+                raise TimeoutError('NVMe SMART request timed out')
             for key, _ in streams.select(remaining):
                 chunk = os.read(key.fileobj.fileno(), 1024)
                 if not chunk:
@@ -60,10 +65,11 @@ def main():
                     raise ValueError('NVMe output exceeds bound')
         rc = process.wait(timeout=max(0.001, deadline - time.monotonic()))
         if rc != 0:
-            raise ValueError('NVMe SMART request failed with status ' + str(rc))
+            raise estus_runtime.CommandFailed(
+                'NVMe SMART request failed with status ' + str(rc))
     finally:
         if process.poll() is None:
-            process.kill()
+            os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         streams.close()
         process.stdout.close()

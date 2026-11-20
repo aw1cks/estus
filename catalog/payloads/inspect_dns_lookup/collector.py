@@ -1,7 +1,8 @@
+import estus_runtime
 def main():
-    import json, sys, os, ipaddress, socket, struct
-    p = {k:v for k,v in json.loads(sys.argv[1]).items() if v is not None}
-    policy = json.loads(sys.argv[2])
+    import json, os, ipaddress, socket, struct
+    p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
+    policy = estus_runtime.request()[1]
     def emit(value):
         def measure(v,depth=0):
             if depth>8: raise ValueError('result depth exceeded')
