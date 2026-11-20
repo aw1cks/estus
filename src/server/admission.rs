@@ -586,20 +586,26 @@ impl TargetAdmission {
     }
 
     /// Closes the persistence channel (dropping every gate sender and the
-    /// admission's own sender) so the worker flushes its final record and
-    /// exits. Called from the shutdown path once every task and lease is gone.
-    /// Closes the persistence channel (dropping every gate sender and the
     /// admission's own sender) and waits for the worker to flush its final
     /// record and exit. Called from the shutdown path once every task and
     /// lease is gone, and by tests before a successor instance reloads.
     pub(super) async fn close_persistence(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.gates.clear();
-        let mut tx = self
-            .persist_tx
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *tx = None;
+        // Take everything we need synchronously; no guard is held across the
+        // worker await.
+        {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .gates
+                .clear();
+        }
+        {
+            let mut tx = self
+                .persist_tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *tx = None;
+        }
         let worker = self
             .persist_worker
             .lock()

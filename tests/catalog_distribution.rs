@@ -12,7 +12,8 @@ use std::{
 };
 
 fn canonical_catalog() -> Catalog {
-    Catalog::load(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"))).unwrap()
+    Catalog::load(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog")))
+        .expect("canonical catalog must load")
 }
 
 #[test]
@@ -58,15 +59,15 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
 
 fn small_catalog(root: &Path) {
     let payload = root.join("payloads/observe_cpu");
-    fs::create_dir_all(&payload).unwrap();
-    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["observe_cpu"]},"tools":{"observe_cpu":{"definition":"observe_cpu.toml","executor":{"kind":"native_payload","path":"payloads/observe_cpu"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
+    fs::create_dir_all(&payload).expect("fixture directory");
+    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["observe_cpu"]},"tools":{"observe_cpu":{"definition":"observe_cpu.toml","executor":{"kind":"native_payload","path":"payloads/observe_cpu"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).expect("fixture catalog.json");
     fs::write(
         root.join("observe_cpu.toml"),
         "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\"]\n",
     )
-    .unwrap();
-    fs::write(payload.join("collector.py"), "raise SystemExit(0)\n").unwrap();
-    fs::write(payload.join("manifest.json"), "{}\n").unwrap();
+    .expect("fixture observe_cpu.toml");
+    fs::write(payload.join("collector.py"), "raise SystemExit(0)\n").expect("fixture collector.py");
+    fs::write(payload.join("manifest.json"), "{}\n").expect("fixture manifest.json");
 }
 #[test]
 fn missing_unknown_and_legacy_qualification_formats_fail_closed() {
@@ -206,7 +207,7 @@ fn installed_command(binary: &Path, working: &Path, args: &[&str]) -> Output {
         .env("ESTUS_CATALOG_ROOT", working.join("untrusted-missing"))
         .current_dir(working)
         .output()
-        .unwrap()
+        .expect("spawn installed command")
 }
 
 #[test]
@@ -441,13 +442,14 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
 
 fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]) {
     let path = output.join("catalog-selection.json");
-    let selection: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let selection: Value =
+        serde_json::from_slice(&fs::read(&path).expect("selection file")).expect("selection json");
     assert_eq!(selection["schema"], 3);
     assert_eq!(selection["version"], "9");
     assert_eq!(selection["scope"], "catalog_templates");
-    assert_eq!(selection.as_object().unwrap().len(), 4);
+    assert_eq!(selection.as_object().expect("object").len(), 4);
     assert_eq!(
-        selection["tools"].as_object().unwrap().len(),
+        selection["tools"].as_object().expect("tools object").len(),
         selected.len()
     );
     for &name in selected {
@@ -463,7 +465,11 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
         );
     }
     assert_eq!(
-        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        fs::metadata(path)
+            .expect("selection file")
+            .permissions()
+            .mode()
+            & 0o777,
         0o600
     );
 }

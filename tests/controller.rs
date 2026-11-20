@@ -320,7 +320,12 @@ impl Fixture {
                 format!(
                     "#!{}\nprintf invoked > {}\nexit 99\n",
                     sh.display(),
-                    support::quote(temp.path().join("remote-dispatch").to_str().unwrap())
+                    support::quote(
+                        temp.path()
+                            .join("remote-dispatch")
+                            .to_str()
+                            .context("UTF-8 dispatch path")?
+                    )
                 ),
             )?;
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -349,9 +354,9 @@ input_schema = {{ type = "object", additionalProperties = false, required = ["la
 result = {{ kind = "controller_command" }}
 limits = {{ timeout_secs = {timeout_secs}, max_output_bytes = {output_limit} }}
 "#,
-                root = string(root.to_str().unwrap()),
-                source = string(source.to_str().unwrap()),
-                sh = string(sh.to_str().unwrap())
+                root = string(root.to_str().context("UTF-8 root")?),
+                source = string(source.to_str().context("UTF-8 source")?),
+                sh = string(sh.to_str().context("UTF-8 interpreter")?)
             ),
         )?;
         Ok(Self {
