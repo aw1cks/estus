@@ -5,8 +5,7 @@ use tokio::sync::Semaphore;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    config::{Config, ConfigError, ToolCatalog, ToolId, ToolKey},
-    filesystem::operations,
+    config::{Config, ConfigError, ToolCatalog},
     output::Store as OutputStore,
     ssh::Pool,
 };
@@ -40,7 +39,6 @@ struct State {
     tasks: TaskTracker,
     local_tasks: TaskTracker,
     outputs: OutputStore,
-    directories: Option<operations::DirectoryStore>,
     progress: crate::progress::Registry,
     pending_replies: Arc<crate::progress::PendingReplies>,
     automation: Arc<Semaphore>,
@@ -79,9 +77,6 @@ impl Estus {
             )
         };
         let outputs = OutputStore::new(config.output_limits(), shutdown.clone());
-        let directories = tools
-            .contains(ToolKey::Builtin(ToolId::ListDirectory))
-            .then(|| operations::DirectoryStore::new(config.directory_limits(), shutdown.clone()));
         Ok(Self {
             tool_router,
             state: Arc::new(State {
@@ -106,7 +101,6 @@ impl Estus {
                 tasks: TaskTracker::new(),
                 local_tasks: TaskTracker::new(),
                 outputs,
-                directories,
                 cleanup_quarantine: Arc::new(crate::controller::CleanupQuarantine::new()),
                 previews: preview::PreviewStore::new(),
                 progress: crate::progress::Registry::default(),
@@ -133,9 +127,6 @@ impl Estus {
             self.state.local_tasks.wait(),
             tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()),
         );
-        if let Some(directories) = &self.state.directories {
-            directories.shutdown().await;
-        }
         self.state.payload.shutdown().await;
         self.state.pool.shutdown().await;
         self.state.outputs.shutdown().await;

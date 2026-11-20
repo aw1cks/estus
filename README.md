@@ -206,38 +206,20 @@ SSH/file access. It is not part of sandboxed checks or a hosted CI requirement.
 ## Bounded directory enumeration
 
 With `file_read = true` capability enabled, call `inspect_directory` with a logical host,
-literal UTF-8 path and optional `max_entries` (1–1000, default200). Empty/exhausted
-listings remain one-shot results. A truncated page returns `continuation` and
-`expires_in_secs`; send that token with the identical host/path for the next page
-and replace it with each newly returned token. Page size and timeout may change.
+literal UTF-8 path and optional `max_entries` (1–1000, default200). One request
+returns a single bounded page of at most `max_entries` entries within the entry
+byte budget; `truncated=true` means more entries existed, not an error.
 
-Tokens are single-use, session-owned capabilities. Foreign, expired or consumed
-tokens fail; identity mismatches do not consume the valid idle token. Errors never
-silently reopen enumeration. Keep tokens private. The same open READDIR stream
-preserves raw filename bytes, including lookahead across page limits; non-UTF-8
-names still cannot be addressed directly by the existing UTF-8 path tools.
+The result is not a filesystem snapshot. Mutation during enumeration remains
+server-defined; a truncated or complete page does not establish a consistent
+historical directory view. Raw filename bytes are preserved through
+`name_base64`; non-UTF-8 names still cannot be addressed directly by the
+existing UTF-8 path tools.
 
-This is not a filesystem snapshot. Mutation during enumeration remains
-server-defined; EOF does not establish a consistent historical directory view.
-Continuation changes state, so the tool is read-only but not idempotent.
-
-Retained cursors default to eight globally and at most two per target/authority,
-leaving native channel capacity for other work. Idle cursors hold their channel
-lease, not global request admission. Entry payloads are bounded to1MiB per page
-and the complete reply budget still applies. A single entry that cannot fit fails
-explicitly rather than producing an endless empty page.
-
-Operator-only settings:
-
-```toml
-[directory]
-max_cursors = 8       # 1–8 globally; busy/closing cursors retain their credits
-idle_timeout_secs = 60 # 1–300, reset after each continued page
-```
-
-Discovery reports these limits. Exhaustion, idle expiry, active cancellation,
-connection loss and shutdown close owned enumeration; cleanup uncertainty is
-not a claim of remote quiescence. No sorting, recursion, shell fallback or replay.
+Entry payloads are bounded to1MiB per page and the complete reply budget still
+applies. A single entry that cannot fit fails explicitly rather than producing
+an endless empty page. Discovery reports this limit. No sorting, recursion,
+shell fallback or replay.
 
 ## Ordinary SFTP directory creation
 

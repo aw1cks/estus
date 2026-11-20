@@ -492,8 +492,8 @@ impl Estus {
 
     #[tool(
         name = "inspect_directory",
-        description = "List a literal UTF-8 directory path over an ordinary SFTP enumeration. max_entries defaults to 200 (1–1000); bounded page-entry bytes and the complete 16 MiB reply budget can shorten a page. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. A truncated page returns a session-owned single-use continuation plus idle expiry; continue with the identical logical host/path and use the new token from each page. Expired, foreign or consumed tokens fail; no silent restart. This is not a filesystem snapshot: mutation remains server-defined. Retained cursors are bounded and close on exhaustion, expiry, active cancellation, connection loss or shutdown. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Remote completion is not guaranteed on interruption.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = false),
+        description = "List a literal UTF-8 directory path over an ordinary SFTP enumeration. max_entries defaults to 200 (1–1000); bounded page-entry bytes and the complete 16 MiB reply budget can shorten a page. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. One request returns a single bounded page; truncated=true means more entries existed, not an error, and the result is not a filesystem snapshot: mutation remains server-defined. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Remote completion is not guaranteed on interruption.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ListRequest>(),
         output_schema = schema_for_type::<ToolReply<ListData>>()
     )]

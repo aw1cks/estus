@@ -153,9 +153,6 @@ struct DiscoveryLimits {
     max_command_bytes: usize,
     max_encoded_command_bytes: usize,
     max_response_bytes: usize,
-    max_directory_cursors: usize,
-    max_directory_cursors_per_target: usize,
-    directory_cursor_idle_timeout_secs: u64,
     max_directory_page_bytes: usize,
 }
 
@@ -184,10 +181,6 @@ impl Config {
                 max_command_bytes: MAX_COMMAND_BYTES,
                 max_encoded_command_bytes: MAX_COMMAND_BYTES,
                 max_response_bytes: MAX_RESPONSE_BYTES,
-                max_directory_cursors: self.directory.max_cursors,
-                max_directory_cursors_per_target:
-                    crate::filesystem::data::DIRECTORY_CURSORS_PER_TARGET,
-                directory_cursor_idle_timeout_secs: self.directory.idle_timeout_secs,
                 max_directory_page_bytes: crate::filesystem::data::DIRECTORY_PAGE_BYTES,
             },
             cleanup_quarantine: CleanupDiagnostics {
@@ -516,8 +509,7 @@ programs=['/private/program']
     #[test]
     fn discovery_limits_report_resolved_toml_and_environment_policy_without_clamping() {
         let text = "[limits]\nconnect_timeout_secs=2\noperation_timeout_secs=3\n\
-                    max_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6\n\
-                    [directory]\nmax_cursors=2\nidle_timeout_secs=7";
+                    max_timeout_secs=4\nmax_output_bytes=5\nmax_file_bytes=6";
         let config = load_text(text, &[]).unwrap();
         let limits = serde_json::to_value(config.targets(&catalog())).unwrap()["limits"].clone();
         assert_eq!(
@@ -528,8 +520,7 @@ programs=['/private/program']
                 "max_command_bytes":MAX_COMMAND_BYTES,
                 "max_encoded_command_bytes":MAX_COMMAND_BYTES,
                 "max_response_bytes":MAX_RESPONSE_BYTES,
-                "max_directory_cursors":2, "max_directory_cursors_per_target":2,
-                "directory_cursor_idle_timeout_secs":7, "max_directory_page_bytes":1_048_576
+                "max_directory_page_bytes":1_048_576
             })
         );
         let config = load_text(
@@ -552,8 +543,7 @@ programs=['/private/program']
                 "max_stdin_bytes":30000000, "max_command_bytes":MAX_COMMAND_BYTES,
                 "max_encoded_command_bytes":MAX_COMMAND_BYTES,
                 "max_response_bytes":MAX_RESPONSE_BYTES,
-                "max_directory_cursors":2, "max_directory_cursors_per_target":2,
-                "directory_cursor_idle_timeout_secs":7, "max_directory_page_bytes":1_048_576
+                "max_directory_page_bytes":1_048_576
             })
         );
     }

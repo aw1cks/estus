@@ -95,7 +95,6 @@ struct Document {
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
-    directory: crate::filesystem::data::DirectoryLimits,
     quarantine: QuarantineSettings,
     targets: Option<BTreeMap<String, Target>>,
     rules: BTreeMap<String, rules::RawHostRule>,
@@ -118,7 +117,6 @@ impl Default for Document {
             ssh: Ssh::default(),
             limits: Limits::default(),
             output: crate::output::Limits::default(),
-            directory: crate::filesystem::data::DirectoryLimits::default(),
             quarantine: QuarantineSettings::default(),
             targets: None,
             rules: BTreeMap::new(),
@@ -488,10 +486,6 @@ impl Config {
             .output
             .validate()
             .map_err(|reason| invalid("output", reason))?;
-        document
-            .directory
-            .validate()
-            .map_err(|reason| invalid("directory", reason))?;
         if let Some(targets) = &document.targets {
             validate_targets(targets)?;
         }
@@ -601,7 +595,6 @@ impl Config {
             quarantine_state_dir,
             limits: document.limits,
             output: document.output,
-            directory: document.directory,
             targets: document.targets,
             rules,
             bindings,

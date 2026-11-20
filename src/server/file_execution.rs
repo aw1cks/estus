@@ -8,8 +8,8 @@ use crate::{
     config::ToolId,
     filesystem::{
         data::{
-            ListData, ListRequest, MkdirRequest, ReadRequest, RemoveDirectoryRequest,
-            RemoveFileRequest, RenameRequest, ReplaceRequest, StatRequest, WriteRequest,
+            ListRequest, MkdirRequest, ReadRequest, RemoveDirectoryRequest, RemoveFileRequest,
+            RenameRequest, ReplaceRequest, StatRequest, WriteRequest,
         },
         operations::{self, FileContext, FileOutcome},
     },
@@ -201,18 +201,32 @@ impl Estus {
             context,
             |_, budget| request.take_validated(budget),
             |state, host, validated, context, started, deadline, _| async move {
-                state
-                    .list_directory(
+                match state
+                    .acquire_sftp(
                         &host,
-                        &validated.path,
-                        validated.max_entries,
-                        validated.remaining_bytes,
-                        validated.continuation.as_deref(),
-                        context,
+                        ToolId::ListDirectory,
+                        super::admission::AdmissionMode::SharedRead,
+                        &context,
                         started,
                         deadline,
                     )
                     .await
+                {
+                    Ok((audit, _target_lease, lease, file_ctx)) => {
+                        let outcome = operations::list(
+                            lease.session(),
+                            crate::filesystem::data::ListSpec {
+                                path: &validated.path,
+                                max_entries: validated.max_entries,
+                                remaining_bytes: validated.remaining_bytes,
+                            },
+                            file_ctx,
+                        )
+                        .await;
+                        State::finish_sftp(audit, lease, outcome).await
+                    }
+                    Err(reply) => reply,
+                }
             },
         )
         .await
@@ -622,76 +636,5 @@ impl State {
         }
         audit.finish(None, outcome.reply.error());
         outcome.reply
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn list_directory(
-        &self,
-        host: &str,
-        path: &str,
-        max_entries: usize,
-        remaining_bytes: usize,
-        continuation: Option<&str>,
-        context: RequestContext<RoleServer>,
-        started: Instant,
-        deadline: tokio::time::Instant,
-    ) -> ToolReply<ListData> {
-        let progress = crate::progress::Reporter::from_context(&context);
-        let request_id = context.id;
-        let ct = context.ct;
-        let metadata = file_metadata(host, ToolId::ListDirectory, self, &request_id);
-        if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::cancelled("Request cancelled before dispatch", false);
-            metadata.reject(started, &error);
-            return ToolReply::failure(error);
-        }
-        let target = match self.config.resolve(host, ToolId::ListDirectory) {
-            Ok(target) => target,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let _target_lease = match self
-            .admission
-            .acquire(
-                target.name,
-                super::admission::AdmissionMode::SharedRead,
-                deadline,
-                &ct,
-                &self.shutdown,
-            )
-            .await
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return ToolReply::failure(error);
-            }
-        };
-        let audit = Audit::start(metadata, started);
-        let reply = self
-            .directories
-            .as_ref()
-            .expect("published directory listing owns its bounded store")
-            .page(
-                &self.pool,
-                target,
-                crate::filesystem::data::ListSpec {
-                    path,
-                    max_entries,
-                    remaining_bytes,
-                },
-                continuation,
-                FileContext {
-                    deadline,
-                    ct: &ct,
-                    shutdown: &self.shutdown,
-                    progress,
-                },
-            )
-            .await;
-        audit.finish(None, reply.error());
-        reply
     }
 }

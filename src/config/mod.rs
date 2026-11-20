@@ -329,7 +329,6 @@ pub(crate) struct Config {
     quarantine_state_dir: Option<PathBuf>,
     limits: Limits,
     output: crate::output::Limits,
-    directory: crate::filesystem::data::DirectoryLimits,
     targets: Option<BTreeMap<String, Target>>,
     rules: Vec<HostRule>,
     bindings: Bindings,

@@ -519,19 +519,11 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             }
         }
     }
-    if let Some(value) = root.get("directory") {
-        let directory = table(value, "directory", &["max_cursors", "idle_timeout_secs"])?;
-        for (key, field) in [
-            ("max_cursors", "directory.max_cursors"),
-            ("idle_timeout_secs", "directory.idle_timeout_secs"),
-        ] {
-            if directory
-                .get(key)
-                .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
-            {
-                return Err(invalid(field, "must be a strictly positive integer"));
-            }
-        }
+    if root.get("directory").is_some() {
+        return Err(invalid(
+            "directory",
+            "is no longer supported; remove the [directory] section",
+        ));
     }
     if let Some(value) = root.get("quarantine") {
         let quarantine = table(value, "quarantine", &["state_dir"])?;
@@ -1207,22 +1199,25 @@ mod tests {
     }
 
     #[test]
-    fn directory_resources_reject_invalid_or_unbounded_settings_without_reflection() {
+    fn directory_section_rejects_unknown_keys_without_value_reflection() {
         for policy in [
-            "max_cursors=0",
-            "max_cursors=9",
-            "idle_timeout_secs=0",
-            "idle_timeout_secs=301",
-            "max_cursors=1.5",
+            "max_cursors=8",
+            "idle_timeout_secs=60",
             "max_cursors='DIRECTORY_PRIVATE_VALUE'",
             "DIRECTORY_PRIVATE_KEY='DIRECTORY_PRIVATE_VALUE'",
         ] {
             let error = load_text(&format!("[directory]\n{policy}"), &[])
                 .err()
-                .expect("invalid directory resource policy must fail");
+                .expect("directory section key must fail");
+            assert!(error.to_string().contains("directory"), "{error:?}");
             let diagnostic = format!("{error:?} {error}");
             assert!(!diagnostic.contains("DIRECTORY_PRIVATE"));
         }
+        // An empty section is still a table with an unknown scope: it fails.
+        let error = load_text("[directory]\n", &[])
+            .err()
+            .expect("empty directory section must fail");
+        assert!(error.to_string().contains("directory"), "{error:?}");
     }
 
     #[test]

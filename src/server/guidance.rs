@@ -24,7 +24,7 @@ Uncertainty & Quarantine:
 - Operations are never retried or replayed automatically.
 
 Continuation & Output Handles:
-- Paginated tools (inspect_directory, inspect_journal, inspect_journal_record) return explicit single-use cursors or byte offsets; pass the new token/offset to continue.
+- inspect_journal and inspect_journal_record return explicit single-use cursors or byte offsets; pass the new token/offset to continue. inspect_directory returns one bounded page per call: truncated=true means more entries existed.
 - Command/controller tools support retain_output=true to retain bounded stdout/stderr handles readable via inspect_output for the current session.";
 
 const GUIDE_SYSTEMD: &str = "\

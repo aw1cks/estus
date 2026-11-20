@@ -224,9 +224,6 @@ fn discovery_data<'a>(result: &'a Value, mode: &str) -> Result<&'a Value> {
         "max_command_bytes",
         "max_encoded_command_bytes",
         "max_response_bytes",
-        "max_directory_cursors",
-        "max_directory_cursors_per_target",
-        "directory_cursor_idle_timeout_secs",
         "max_directory_page_bytes",
     ] {
         ensure!(
@@ -238,7 +235,6 @@ fn discovery_data<'a>(result: &'a Value, mode: &str) -> Result<&'a Value> {
     ensure!(limits["max_command_bytes"] == 65_536);
     ensure!(limits["max_encoded_command_bytes"] == 65_536);
     ensure!(limits["max_response_bytes"] == 16_777_216);
-    ensure!(limits["max_directory_cursors_per_target"] == 2);
     ensure!(limits["max_directory_page_bytes"] == 1_048_576);
     let content = result["content"]
         .as_array()
@@ -2002,16 +1998,7 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 }
                 if name == "inspect_directory" {
                     ensure!(tool["annotations"]["readOnlyHint"] == true);
-                    ensure!(tool["annotations"]["idempotentHint"] == false);
-                    for (token, valid) in [
-                        (handle.to_owned(), true), (String::new(), false),
-                        ("a".repeat(31), false), ("a".repeat(33), false),
-                        ("A".repeat(32), false), ("g".repeat(32), false),
-                    ] {
-                        let mut arguments = base.clone();
-                        arguments["continuation"] = json!(token);
-                        cases.push((arguments, valid, if valid { expected } else { "invalid_argument" }));
-                    }
+                    ensure!(tool["annotations"]["idempotentHint"] == true);
                     for (entries, valid) in [(0, false), (1, true), (1000, true), (1001, false)] {
                         let mut arguments = base.clone();
                         arguments["max_entries"] = json!(entries);
@@ -2376,14 +2363,6 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
                 json!({"host":"denied","path":"dir","max_entries":1000}),
                 "policy_denied",
             ),
-            (
-                json!({"host":"denied","path":"dir","continuation":"0123456789abcdef0123456789abcdef"}),
-                "policy_denied",
-            ),
-            (
-                json!({"host":"denied","path":"dir","continuation":"PRIVATE_BAD_TOKEN"}),
-                "invalid_argument",
-            ),
         ]
         .into_iter()
         .enumerate()
@@ -2405,6 +2384,8 @@ async fn listing_limits_and_policy_reject_before_ssh_dispatch() -> Result<()> {
             json!({"host":"denied","path":"dir","max_entries":"1"}),
             json!({"host":"denied","path":"dir","recursive":true}),
             json!({"host":"denied","path":"dir","sudo":true}),
+            json!({"host":"denied","path":"dir","continuation":"PRIVATE_BAD_TOKEN"}),
+            json!({"host":"denied","path":"dir","expires_in_secs":1}),
         ]
         .into_iter()
         .enumerate()
@@ -6406,33 +6387,32 @@ async fn ssh_output_native_controls_are_strict_and_budgeted_before_dispatch() ->
 }
 
 #[tokio::test]
-async fn directory_cursor_discovery_and_output_schema_are_consumer_visible() -> Result<()> {
-    let (mut server, directory) = server_with_config(
-        "capabilities = { file_read = true }\n[directory]\nmax_cursors=1\nidle_timeout_secs=1\n[targets]\n",
-    )?;
+async fn directory_listing_schema_is_consumer_visible() -> Result<()> {
+    let (mut server, directory) =
+        server_with_config("capabilities = { file_read = true }\n[targets]\n")?;
     let scenario = async {
         server.initialize().await?;
         server.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let response = server.response(2).await?;
         let data = discovery_data(&response["result"], "configured")?;
-        ensure!(data["limits"]["max_directory_cursors"] == 1);
-        ensure!(data["limits"]["directory_cursor_idle_timeout_secs"] == 1);
+        ensure!(data["limits"]["max_directory_page_bytes"] == 1_048_576);
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})).await?;
         let response = server.response(3).await?;
         let tool = response["result"]["tools"].as_array().context("tools")?
             .iter().find(|tool| tool["name"] == "inspect_directory").context("listing route")?;
         ensure!(tool["annotations"]["readOnlyHint"] == true);
-        ensure!(tool["annotations"]["idempotentHint"] == false);
+        ensure!(tool["annotations"]["idempotentHint"] == true);
         let input = jsonschema::validator_for(&tool["inputSchema"])?;
-        ensure!(input.is_valid(&json!({"host":"allowed","path":"/literal","continuation":"0123456789abcdef0123456789abcdef"})));
+        ensure!(input.is_valid(&json!({"host":"allowed","path":"/literal"})));
         ensure!(!input.is_valid(&json!({"host":"allowed","path":"/literal","continuation":"PRIVATE_BAD_TOKEN"})));
         let output = jsonschema::validator_for(&tool["outputSchema"])?;
         for data in [
             json!({"entries":[],"truncated":false}),
-            json!({"entries":[],"truncated":true,"continuation":"0123456789abcdef0123456789abcdef","expires_in_secs":1}),
+            json!({"entries":[],"truncated":true}),
         ] {
             ensure!(output.is_valid(&json!({"data":data,"error":null})), "published schema rejects directory response metadata");
         }
+        ensure!(!output.is_valid(&json!({"data":{"entries":[],"truncated":true,"continuation":"0123456789abcdef0123456789abcdef"},"error":null})), "published schema still accepts continuation");
         Ok::<_, anyhow::Error>(())
     }.await;
     let finished = server.finish().await;

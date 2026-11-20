@@ -24,7 +24,6 @@ pub enum Fault {
     None,
     OpenAck,
     RenameAck,
-    DirectoryPageAck,
 }
 
 #[derive(Default, Debug)]
@@ -34,9 +33,6 @@ pub struct Evidence {
     pub renames: usize,
     pub dropped_success: bool,
     pub dropped_open: bool,
-    pub readdirs: usize,
-    pub readdir_ids: Vec<u32>,
-    pub dropped_directory_page: bool,
     pub staged_partial: bool,
     pub writes: usize,
     pub rename_index: Option<usize>,
@@ -332,11 +328,6 @@ impl Relay {
                             let id = uint32(&mut &body[1..])?;
                             seen.directory_open_ids.push(id);
                         }
-                        if body[0] == 12 {
-                            let id = uint32(&mut &body[1..])?;
-                            seen.readdirs += 1;
-                            seen.readdir_ids.push(id);
-                        }
                         if body[0] == 6 {
                             seen.writes += 1;
                             if let Some(oracle) = &oracle {
@@ -468,20 +459,6 @@ impl Relay {
                             ensure!(!seen.dropped_success, "replayed rename STATUS");
                             seen.dropped_success = true;
                             true
-                        } else if matches!(fault, Fault::DirectoryPageAck)
-                            && body[0] == 104
-                            && body.len() >= 9
-                            && seen.readdir_ids.get(1)
-                                == Some(&u32::from_be_bytes(body[1..5].try_into()?))
-                        {
-                            ensure!(!seen.dropped_directory_page, "replayed directory NAME");
-                            ensure!(
-                                u32::from_be_bytes(body[5..9].try_into()?) > 0,
-                                "second READDIR returned an empty NAME"
-                            );
-                            // Observe only a genuine second READDIR page, never a fabricated reply.
-                            seen.dropped_directory_page = true;
-                            true
                         } else {
                             false
                         }
@@ -502,25 +479,6 @@ impl Relay {
             subsystem,
             launches,
         })
-    }
-
-    /// Disconnect only the directly owned real server, never a remembered PID.
-    pub async fn disconnect_server(&mut self) -> Result<()> {
-        let child = self.children.last_mut().context("real sftp-server")?;
-        if child.try_wait()?.is_none() {
-            child.start_kill().context("disconnect real sftp-server")?;
-        }
-        self.wait_server_exit().await
-    }
-
-    /// Prove channel EOF closed the server before teardown can kill it.
-    pub async fn wait_server_exit(&mut self) -> Result<()> {
-        let child = self.children.last_mut().context("real sftp-server")?;
-        timeout(Duration::from_secs(5), child.wait())
-            .await
-            .context("real sftp-server did not exit")?
-            .context("wait for real sftp-server")?;
-        Ok(())
     }
 
     pub async fn stop(mut self) -> Result<()> {

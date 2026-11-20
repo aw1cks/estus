@@ -19,7 +19,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 
 ## 3. Continuation & Output Handles
 - Paginated inspection tools use explicit single-use tokens or byte offsets:
-  - `inspect_directory`: pass returned cursor on identical `host`/`path`.
+  - `inspect_directory`: one bounded page per call, `max_entries` 1–1000 (default 200); `truncated=true` means more entries existed, so re-call the same `host`/`path` with a larger `max_entries` or accept the prefix. The result is not a snapshot.
   - `inspect_journal`: optional `unit`, literal `contains`, `limit` 1–500, `direction` (`backward` default or `forward`), direction-bound `continuation_cursor` packed within 131072 bytes.
   - `inspect_journal_record`: reconstruct long/truncated messages by `boot_id`, `cursor`, `offset`, and `max_bytes` (1–4096 base64 UTF-8 slices) until `eof=true`.
 - Command and local-execution tools support `retain_output=true`, returning session-scoped handles readable via `inspect_output`.

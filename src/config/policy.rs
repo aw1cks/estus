@@ -202,10 +202,6 @@ impl Config {
         self.output
     }
 
-    pub(crate) fn directory_limits(&self) -> crate::filesystem::data::DirectoryLimits {
-        self.directory
-    }
-
     /// A startup prerequisite only; this does not enable automation tools.
     pub(crate) fn automation_required(&self) -> bool {
         self.automation.required

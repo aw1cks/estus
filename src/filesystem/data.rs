@@ -15,38 +15,7 @@ use crate::{
 
 const DEFAULT_READ_BYTES: u64 = 65_536;
 
-pub(crate) const DIRECTORY_MAX_CURSORS: usize = 8;
-pub(crate) const DIRECTORY_CURSORS_PER_TARGET: usize = 2;
 pub(crate) const DIRECTORY_PAGE_BYTES: usize = 1_048_576;
-pub(crate) const DIRECTORY_MAX_IDLE_SECS: u64 = 300;
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct DirectoryLimits {
-    pub(crate) max_cursors: usize,
-    pub(crate) idle_timeout_secs: u64,
-}
-
-impl Default for DirectoryLimits {
-    fn default() -> Self {
-        Self {
-            max_cursors: DIRECTORY_MAX_CURSORS,
-            idle_timeout_secs: 60,
-        }
-    }
-}
-
-impl DirectoryLimits {
-    pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        if !(1..=DIRECTORY_MAX_CURSORS).contains(&self.max_cursors) {
-            return Err("max_cursors must be between 1 and 8");
-        }
-        if !(1..=DIRECTORY_MAX_IDLE_SECS).contains(&self.idle_timeout_secs) {
-            return Err("idle_timeout_secs must be between 1 and 300");
-        }
-        Ok(())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -439,8 +408,6 @@ pub(crate) struct ListRequest {
     pub(crate) host: String,
     #[schemars(length(min = 1), pattern(r"^[^\u0000]*$"))]
     pub(crate) path: String,
-    #[schemars(length(equal = 32), pattern(r"^[0-9a-f]{32}$"))]
-    pub(crate) continuation: Option<String>,
     #[schemars(range(min = 1, max = 1000))]
     pub(crate) max_entries: Option<u64>,
     #[schemars(range(min = 1))]
@@ -455,16 +422,11 @@ pub(crate) struct ListSpec<'a> {
 }
 
 #[derive(Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub(crate) struct ListData {
     #[schemars(length(max = 1000))]
     pub(crate) entries: Vec<ListEntry>,
     pub(crate) truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(length(equal = 32), pattern(r"^[0-9a-f]{32}$"))]
-    pub(crate) continuation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub(crate) expires_in_secs: Option<u64>,
 }
 
 impl ListData {
@@ -472,15 +434,7 @@ impl ListData {
         Self {
             entries: Vec::new(),
             truncated: false,
-            continuation: None,
-            expires_in_secs: None,
         }
-    }
-
-    pub(crate) fn set_continuation(&mut self, handle: String, idle_timeout_secs: u64) {
-        self.truncated = true;
-        self.continuation = Some(handle);
-        self.expires_in_secs = Some(idle_timeout_secs);
     }
 
     // Reject only whole entries, retaining the server's prefix. The rejected
@@ -512,24 +466,13 @@ impl ListRequest {
         if self.timeout_secs == Some(0) {
             return Err(invalid("timeout_secs must be positive"));
         }
-        if self.continuation.as_ref().is_some_and(|handle| {
-            handle.len() != 32
-                || !handle
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        }) {
-            return Err(invalid(
-                "continuation must contain 32 lowercase hexadecimal characters",
-            ));
-        }
         let max_entries = self.max_entries.unwrap_or(200);
         if !(1..=1000).contains(&max_entries) {
             return Err(invalid("max_entries must be between 1 and 1000"));
         }
-        // Reserve the larger, continued-page envelope up front. Empty ASCII
-        // handles reserve the property/quotes; the 32 hex bytes appear twice.
+        // Reserve the truncated-page envelope up front.
         let mut reservation = ListData::empty();
-        reservation.set_continuation(String::new(), DIRECTORY_MAX_IDLE_SECS);
+        reservation.truncated = true;
         let remaining_bytes = budget
             .remaining(&ToolReply::success(reservation))
             .and_then(|remaining| {
@@ -540,11 +483,6 @@ impl ListRequest {
             })
             .map_err(|_| {
                 invalid("Request leaves insufficient response budget for a directory listing")
-            })?;
-        let remaining_bytes = remaining_bytes
-            .checked_sub(64)
-            .ok_or_else(|| {
-                invalid("Request leaves insufficient response budget for directory continuation")
             })?
             .min(DIRECTORY_PAGE_BYTES);
         Ok(ListSpec {
@@ -558,7 +496,6 @@ pub(crate) struct ValidatedList {
     pub(crate) path: String,
     pub(crate) max_entries: usize,
     pub(crate) remaining_bytes: usize,
-    pub(crate) continuation: Option<String>,
 }
 
 impl ListRequest {
@@ -575,7 +512,6 @@ impl ListRequest {
                 path: std::mem::take(&mut self.path),
                 max_entries,
                 remaining_bytes,
-                continuation: self.continuation.take(),
             },
             self.timeout_secs,
         ))
@@ -1127,44 +1063,33 @@ mod tests {
 
     #[test]
     fn listing_counts_both_escaped_representations_and_commas_at_exact_wire_boundary() {
+        // The entry costs exactly its escaped size in both reply
+        // representations; each following entry adds the array comma.
+        let entry = crate::wire::duplicated_size(&list_entry()).unwrap();
         let request: ListRequest =
             serde_json::from_value(json!({"host":"target","path":"directory"})).unwrap();
-        let reply = ToolReply::success(ListData {
-            entries: vec![list_entry(), list_entry()],
-            truncated: true,
-            continuation: Some("0".repeat(32)),
-            expires_in_secs: Some(DIRECTORY_MAX_IDLE_SECS),
-        });
-        let remaining = ReplyBudget::new(&RequestId::String("".into()))
-            .unwrap()
-            .remaining(&reply)
-            .unwrap();
-        for extra in [0, 1] {
-            let id = RequestId::String("x".repeat(remaining + extra).into());
+        let id = RequestId::String("".into());
+        for delta in [-1i64, 0, 1] {
             let budget = ReplyBudget::new(&id).unwrap();
             let mut spec = request.validate(budget).unwrap();
+            spec.remaining_bytes = (2 * entry as i64 + 2 + delta) as usize;
             let mut data = ListData::empty();
-            assert!(data.push(list_entry(), &mut spec).is_ok());
-            assert_eq!(data.push(list_entry(), &mut spec).is_ok(), extra == 0);
-            if extra == 0 {
+            assert!(data.push(list_entry(), &mut spec).is_ok(), "delta={delta}");
+            assert_eq!(
+                data.push(list_entry(), &mut spec).is_ok(),
+                delta >= 0,
+                "delta={delta}"
+            );
+            if delta >= 0 {
                 assert!(!data.truncated, "exact fit was falsely truncated");
-                assert_eq!(spec.remaining_bytes, 0);
-                data.set_continuation("0".repeat(32), DIRECTORY_MAX_IDLE_SECS);
-                let result = budget.result(ToolReply::success(data)).unwrap();
-                let frame = rmcp::model::JsonRpcResponse {
-                    jsonrpc: Default::default(),
-                    id,
-                    result,
-                };
-                assert_eq!(
-                    serde_json::to_vec(&frame).unwrap().len() + 1,
-                    crate::wire::MAX_RESPONSE_BYTES
-                );
-            } else {
+                assert_eq!(spec.remaining_bytes, delta.max(0) as usize);
+                assert!(data.push(list_entry(), &mut spec).is_err());
                 assert!(data.truncated);
+                assert_eq!(data.entries.len(), 2);
+                assert!(budget.remaining(&ToolReply::success(data)).is_ok());
+            } else {
+                assert!(data.truncated, "delta={delta}");
                 assert_eq!(data.entries.len(), 1);
-                data.set_continuation("0".repeat(32), DIRECTORY_MAX_IDLE_SECS);
-                assert!(budget.result(ToolReply::success(data)).is_ok());
             }
         }
     }
