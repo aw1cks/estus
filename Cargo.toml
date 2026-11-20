@@ -19,7 +19,7 @@ rmcp = { version = "3.9.0", default-features = false, features = ["server", "mac
 openssh = { version = "0.11.6", default-features = false, features = ["native-mux"] }
 openssh-sftp-client = { version = "0.15.12", path = "vendor/openssh-sftp-client", default-features = false }
 openssh-sftp-error = { version = "0.5.1", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "signal", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }

@@ -1706,6 +1706,8 @@ The separate `.#automation-msrv` output supplies the optional pinned Ansible run
 see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
 That health check verifies imports and identity, not Ansible workload execution.
 
+The OpenSSH control-socket readiness check requires Tokio's `fs` Cargo feature.
+
 SFTP uses the published `openssh-sftp-protocol` 0.26.1 release for lossless Unix
 filename handling; no vendored protocol fork is required.
 
@@ -1792,6 +1794,9 @@ The generated workflow (`nix/ci.nix`; regenerate with
 | Installed MSRV native | Real SSH/SFTP, controller scripts, doctor and native/controller/SFTP progress |
 | Installed MSRV Ansible | Pinned runtime health and schema import/drift; real SSH/Runner modules, typed projections, roles, playbooks and progress |
 | Linux containers | Default/MSRV SSH baseline; MSRV module/facts smoke, automation authority and shipped host-summary, CPU and memory roles |
+
+The native Nix source filter keeps `skills/estus-sre/SKILL.md`,
+`python/estus/__init__.py`, and `setup.py` for the catalog distribution checks.
 
 Local SSH suites use a private runtime directory under the runner's home.
 Linux automation suites build the dedicated `ssh-automation-fixture-image` and
