@@ -102,7 +102,7 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
         String::from_utf8_lossy(&output.stderr)
     );
     let data: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(data["schema"] == 3 && data["version"] == "7");
+    ensure!(data["schema"] == 3 && data["version"] == "8");
     ensure!(
         data["presets"]["linux-health"]
             == serde_json::json!(["observe_cpu", "observe_memory", "observe_pressure"]),

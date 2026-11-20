@@ -974,7 +974,7 @@ tool_presets = ["linux-health"]
 disabled_tools = []
 
 [catalog]
-version = "7"
+version = "8"
 
 [targets.server]
 ssh_host = "server-ordinary"
@@ -1049,7 +1049,9 @@ are supplied; up to 256 named bindings are supported.
 
 Presets require an explicit catalog version; use the version reported by
 `estus catalog list --json` after reviewing the installed inventory. Catalog
-schema3/version7 adds executor-specific assets and the native catalog cutover.
+schema3/version8 declares per-entry workstation policy, so workstation mode
+loads only reviewed templates; version7 added executor-specific assets and the
+native catalog cutover.
 Review existing pins rather than silently adopting an upgrade. Source/runtime/
 overlay drift still invalidates snapshots; startup never refreshes approval.
 

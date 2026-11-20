@@ -226,7 +226,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     );
     let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listing["schema"], 3);
-    assert_eq!(listing["version"], "7");
+    assert_eq!(listing["version"], "8");
     let canonical: Value = serde_json::from_slice(
         &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json")).unwrap(),
     )
@@ -453,7 +453,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
     let path = output.join("catalog-selection.json");
     let selection: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(selection["schema"], 3);
-    assert_eq!(selection["version"], "7");
+    assert_eq!(selection["version"], "8");
     assert_eq!(selection["scope"], "catalog_templates");
     assert_eq!(selection.as_object().unwrap().len(), 4);
     assert_eq!(
