@@ -267,6 +267,123 @@ pub struct Binding {
     authority: String,
 }
 
+const FIXTURE_UNITS: [&str; 9] = [
+    "estus-fixture.service",
+    "estus-fixture-idle.service",
+    "estus-fixture-fail.service",
+    "estus-fixture.timer",
+    "estus-fixture.socket",
+    "estus-fixture-signal.service",
+    "estus-fixture-block.service",
+    "estus-fixture-manager.service",
+    "estus-fixture@.service",
+];
+
+/// Fixture policy the shipped definitions deliberately omit: allowlists, unit
+/// sets and device inventories belong to the site, so these guests restate them
+/// as site `fixed_args` exactly as an operator would. Caller overrides win.
+fn fixture_fixed_args(name: &str) -> Value {
+    let units = json!(FIXTURE_UNITS);
+    let network = json!({
+        "interface": "catalog0",
+        "interfaces": ["lo", "catalog0"],
+        "destinations": ["127.0.0.1", "192.0.2.2"],
+        "ports": [18080],
+        "addresses": ["192.0.2.9/24"],
+        "routes": ["198.51.100.0/24"],
+        "neighbors": ["192.0.2.2"],
+        "namespaces": ["catalogns"],
+        "dns_names": ["catalog.test"],
+        "resolver": "127.0.0.1",
+        "dns_port": 15353
+    });
+    let nic = |interface: &str, mac: &str, driver: &str, tuning: bool| {
+        let mut policy = json!({"interface": interface, "mac": mac, "driver": driver});
+        if tuning {
+            policy["allow_runtime_tuning"] = json!(true);
+        }
+        policy
+    };
+    match name {
+        "change_boot_default" | "change_boot_oneshot" | "inspect_boot_entry" => {
+            json!({"allowed_entries": ["estus-current.conf", "estus-alternate.conf"]})
+        }
+        "change_sysctl_config" | "change_sysctl_runtime" => {
+            json!({"approved_keys": ["kernel.printk_ratelimit"]})
+        }
+        "observe_sysctl" => {
+            json!({"approved_keys": ["vm.swappiness", "net.ipv4.ip_forward", "kernel.pid_max"]})
+        }
+        "change_systemd_unit" => json!({
+            "allowed_units": units,
+            "allowed_operations": ["start", "stop", "restart", "try_restart", "reload", "reset_failed"]
+        }),
+        "change_systemd_unit_file" => json!({
+            "allowed_units": units,
+            "allowed_operations": ["enable", "disable", "mask", "unmask"]
+        }),
+        "change_systemd_runtime_limits"
+        | "change_systemd_signal"
+        | "inspect_systemd_unit_config"
+        | "observe_systemd_unit"
+        | "observe_systemd_unit_dependencies" => json!({"allowed_units": units}),
+        "inspect_cgroup_processes"
+        | "observe_cgroup_sample"
+        | "observe_cgroup_stats"
+        | "observe_cgroup_tree" => json!({"approved_root": "/system.slice"}),
+        "observe_filesystem_usage" => {
+            json!({"configured_paths": {"data": "/var/lib/estus-catalog"}})
+        }
+        "observe_device_attributes" => json!({
+            "reviewed_devices": {"loopback": {"class": "net", "name": "lo", "attributes": ["mtu", "operstate", "address"]}}
+        }),
+        "change_network_address_add"
+        | "change_network_address_remove"
+        | "change_network_link_down"
+        | "change_network_link_up"
+        | "change_network_neighbor_remove"
+        | "change_network_route_add"
+        | "change_network_route_remove"
+        | "inspect_dns_lookup"
+        | "inspect_icmp_probe"
+        | "inspect_network_path_probe"
+        | "inspect_sockets"
+        | "inspect_tcp_connect_probe"
+        | "observe_network"
+        | "observe_network_namespaces"
+        | "observe_network_route_lookup"
+        | "observe_network_routes"
+        | "observe_network_rules" => json!({"operator_policy": network}),
+        "change_nic_channels" => {
+            json!({"operator_policy": nic("queue0", "52:54:00:12:34:59", "veth", true)})
+        }
+        "change_nic_coalesce" | "change_nic_features" | "change_nic_rings" | "change_nic_rss" => {
+            json!({"operator_policy": nic("tune0", "52:54:00:12:34:57", "virtio_net", true)})
+        }
+        "change_nic_fec" => {
+            let mut policy = nic("fec0", "52:54:00:12:34:59", "netdevsim", true);
+            policy["modes"] = json!(["off", "rs"]);
+            json!({"operator_policy": policy})
+        }
+        "change_nic_pause" => {
+            json!({"operator_policy": nic("pause0", "52:54:00:12:34:58", "e1000e", true)})
+        }
+        "change_nic_eee" => {
+            json!({"operator_policy": nic("model0", "52:54:00:12:34:5a", "estus_nic_model", true)})
+        }
+        "observe_nic_eee" | "observe_nic_transceiver" => {
+            json!({"operator_policy": nic("model0", "52:54:00:12:34:5a", "estus_nic_model", false)})
+        }
+        "observe_nic_fec" => {
+            json!({"operator_policy": nic("fec0", "52:54:00:12:34:59", "netdevsim", false)})
+        }
+        "observe_nic_pause" => {
+            json!({"operator_policy": nic("pause0", "52:54:00:12:34:58", "e1000e", false)})
+        }
+        _ => json!({}),
+    }
+}
+
 impl Binding {
     /// A broken explicitly selected runtime must fail startup, not fall back.
     pub async fn reject_workflow_runtime(&self) -> Result<()> {
@@ -510,9 +627,15 @@ impl Binding {
             )?,
         );
         // Site policy only: the definition, contract and result stay the
-        // catalog's, so an override cannot widen what a tool claims.
+        // catalog's, so an override cannot widen what a tool claims. The
+        // fixture policy stands in for what the site must review.
         let mut fixed = toml::Table::new();
         fixed.insert("target_python".into(), "/usr/bin/python3".into());
+        if let Some(policy) = fixture_fixed_args(name).as_object() {
+            for (key, value) in policy {
+                fixed.insert(key.clone(), toml::Value::try_from(value)?);
+            }
+        }
         if let Some(overrides) = overrides.as_object() {
             for (key, value) in overrides {
                 fixed.insert(key.clone(), toml::Value::try_from(value)?);

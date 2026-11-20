@@ -1,29 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_nic_pause/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_nic_pause"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.change_nic_pause]
 description = "Set one interface's pause and autonegotiation parameters at runtime and read them back. Disruptive, not persistent."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read","runtime_write","availability"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_nic_pause/collector.py", no_log = false }
-fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "pause0","mac" = "52:54:00:12:34:58","driver" = "e1000e","allow_runtime_tuning" = true}}
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = {"interface" = "interface","rx" = "rx","tx" = "tx"}
 limits = { timeout_secs = 40 }
 input_schema = {"type" = "object","properties" = {"interface" = {"type" = "string","enum" = ["pause0"],"maxLength" = 15},"rx" = {"type" = "boolean"},"tx" = {"type" = "boolean"}},"required" = ["interface","rx","tx"],"additionalProperties" = false}

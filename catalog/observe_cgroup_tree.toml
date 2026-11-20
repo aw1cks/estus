@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_cgroup_tree/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_cgroup_tree"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_cgroup_tree]
 description = "Walk one approved cgroup subtree to a bounded depth. Ancestor limits are context, not an effective capacity."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_cgroup_tree/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice" }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "depth" = "depth", "limit" = "limit" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "depth" = { "type" = "integer", "minimum" = 0, "maximum" = 4 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 8 } }, "required" = ["depth", "limit"], "additionalProperties" = false }

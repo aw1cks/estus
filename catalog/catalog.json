@@ -1,6 +1,6 @@
 {
   "schema": 3,
-  "version": "9",
+  "version": "10",
   "presets": {
     "linux-health": [
       "observe_cpu",

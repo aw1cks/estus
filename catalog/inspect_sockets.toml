@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/inspect_sockets/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["inspect_sockets"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.inspect_sockets]
 description = "List sockets filtered by protocol, state, address or port. No process attribution and no namespace execution."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/inspect_sockets/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "protocol" = "protocol", "state" = "state", "address" = "address", "local_port" = "local_port", "limit" = "limit" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "protocol" = { "type" = "string", "enum" = ["tcp", "udp"], "maxLength" = 8 }, "state" = { "type" = "string", "enum" = ["all", "listening", "established"], "maxLength" = 16 }, "address" = { "type" = "string", "minLength" = 1, "maxLength" = 64 }, "local_port" = { "type" = "integer", "minimum" = 1, "maximum" = 65535 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }

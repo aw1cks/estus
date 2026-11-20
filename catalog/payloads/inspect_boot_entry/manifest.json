@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "297da79bee95588c779406a4a7d660ed484e83589bf1b8a51745950d3bd628fd",
+  "source_sha256": "9b389107da1a83772984cee3b406bfbdfc3551f5aebfde0b8d45288506b2e227",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -11,6 +11,9 @@
       "fields": {
         "entry_id": {
           "name": "entry_id"
+        },
+        "allowed_entries": {
+          "name": "allowed_entries"
         }
       }
     }
@@ -51,15 +54,24 @@
         },
         "entry_id": {
           "type": "string",
-          "enum": [
-            "estus-current.conf",
-            "estus-alternate.conf"
-          ]
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "allowed_entries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "minItems": 1,
+          "maxItems": 32
         }
       },
       "required": [
         "target_python",
-        "entry_id"
+        "entry_id",
+        "allowed_entries"
       ],
       "additionalProperties": false
     },
@@ -73,6 +85,14 @@
         "entry_id": {
           "aliases": {},
           "properties": {}
+        },
+        "allowed_entries": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
         }
       }
     },

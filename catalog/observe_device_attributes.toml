@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_device_attributes/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_device_attributes"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_device_attributes]
 description = "Read reviewed sysfs attributes of an allowlisted net or block device. No privileged controls, resets or unbinds."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_device_attributes/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "reviewed_devices" = { "loopback" = { "class" = "net", "name" = "lo", "attributes" = ["mtu", "operstate", "address"] } } }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "device" = "device", "attributes" = "attributes" }
 limits = { timeout_secs = 20 }
 [tools.observe_device_attributes.input_schema]

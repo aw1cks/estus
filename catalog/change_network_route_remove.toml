@@ -1,29 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_network_route_remove/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_network_route_remove"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.change_network_route_remove]
 description = "Remove one approved route at runtime and read the result back. Not persistent, and removing a default route can cut connectivity."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_network_route_remove/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "interface" = "interface", "destination" = "destination" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "destination" = { "type" = "string", "minLength" = 1, "maxLength" = 64 } }, "required" = ["interface", "destination"], "additionalProperties" = false }

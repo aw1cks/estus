@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_nic_stats/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_nic_stats"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_nic_stats]
 description = "Read an interface's driver-specific cumulative counters, optionally filtered by name. Not the standard interface counters, and not rates."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_nic_stats/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { "interface" = "interface", "filter" = "filter" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "filter" = { "type" = "string", "minLength" = 1, "maxLength" = 64 } }, "required" = ["interface"], "additionalProperties" = false }

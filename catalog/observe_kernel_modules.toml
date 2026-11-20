@@ -1,26 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_kernel_modules/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_kernel_modules"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
 [tools.observe_kernel_modules]
 description = "List loaded modules with size, reference count, state and holders. Presence is not device health."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_kernel_modules/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { "offset" = "offset" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 512 } }, "required" = [], "additionalProperties" = false }

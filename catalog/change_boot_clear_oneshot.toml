@@ -1,30 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_boot_clear_oneshot/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_boot_clear_oneshot"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog-admin"
-python = "/usr/bin/python3"
-
 [tools.change_boot_clear_oneshot]
 description = "Clear the systemd-boot next-boot override and confirm it is gone. Leaves the persistent default and the current boot alone."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "runtime_write"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_boot_clear_oneshot/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = {  }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }

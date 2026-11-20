@@ -235,7 +235,7 @@ fn installed_catalog_lists_and_exports_offline_without_checkout_or_runtime() {
     );
     let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listing["schema"], 3);
-    assert_eq!(listing["version"], "9");
+    assert_eq!(listing["version"], "10");
     let canonical: Value = serde_json::from_slice(
         &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json")).unwrap(),
     )
@@ -453,7 +453,7 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
     let selection: Value =
         serde_json::from_slice(&fs::read(&path).expect("selection file")).expect("selection json");
     assert_eq!(selection["schema"], 3);
-    assert_eq!(selection["version"], "9");
+    assert_eq!(selection["version"], "10");
     assert_eq!(selection["scope"], "catalog_templates");
     assert_eq!(selection.as_object().expect("object").len(), 4);
     assert_eq!(
@@ -553,6 +553,46 @@ fn all_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail()
     fs::write(bad_root.join("payloads/legacy_tool/collector.py"), "").unwrap();
     fs::write(bad_root.join("payloads/legacy_tool/manifest.json"), "{}").unwrap();
     assert!(Catalog::load(Some(&bad_root)).is_err());
+}
+
+/// Fixture policy belongs to the acceptance harness, never to a shipped
+/// definition: an operator must never inherit an allowlist they did not review.
+#[test]
+fn shipped_definitions_contain_only_tools_tables_and_no_fixture_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+    let catalog = canonical_catalog();
+    let forbidden = [
+        "estus-fixture",
+        "estus-current",
+        "estus-alternate",
+        "estus-catalog",
+        "catalog0",
+        "catalogns",
+        "catalog.test",
+        "192.0.2.",
+        "198.51.100.",
+    ];
+    for name in catalog.manifest().tools.keys() {
+        let text = fs::read_to_string(root.join(format!("{name}.toml"))).unwrap();
+        for needle in forbidden {
+            assert!(
+                !text.contains(needle),
+                "{name}: shipped definition carries fixture value {needle}"
+            );
+        }
+        let definition: toml::Table = text.parse().unwrap();
+        assert_eq!(
+            definition.keys().collect::<Vec<_>>(),
+            vec!["tools"],
+            "{name}: definitions hold tool tables only"
+        );
+        let tool = definition["tools"][name.as_str()].as_table().unwrap();
+        assert!(tool.get("targets").is_none(), "{name}: site targets");
+        assert!(
+            tool.get("constraints").is_none(),
+            "{name}: site constraints"
+        );
+    }
 }
 
 #[test]

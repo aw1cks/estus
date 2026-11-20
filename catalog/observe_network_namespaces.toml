@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_network_namespaces/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_network_namespaces"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_network_namespaces]
-description = "network namespaces list. Bounded Linux observations; operator-approved interfaces; no process attribution, flags, namespace execution or mutation."
+description = "List the operator-approved named network namespaces and their IDs. Use it to confirm which namespaces the site permits before inspecting or changing interfaces inside one. Namespace execution is never attempted here."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_network_namespaces/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "limit" = "limit" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }

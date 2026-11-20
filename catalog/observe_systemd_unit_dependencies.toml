@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_systemd_unit_dependencies/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_systemd_unit_dependencies"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_systemd_unit_dependencies]
 description = "Read one unit's forward or reverse dependencies to a bounded depth. Depth is not the full blast radius of a change."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_systemd_unit_dependencies/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+
 input_map = { "unit" = "unit", "direction" = "direction", "depth" = "depth" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 }, "direction" = { "type" = "string", "enum" = ["forward", "reverse"] }, "depth" = { "type" = "integer", "minimum" = 1, "maximum" = 3 } }, "required" = ["unit", "direction", "depth"], "additionalProperties" = false }

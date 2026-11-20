@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import datetime, json, os, platform, resource, uuid
+    import datetime, json, os, platform
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     a = estus_runtime.request()[0]
@@ -16,21 +16,6 @@ def main():
             raise ValueError('source read exceeds bound')
         return b
 
-    def text(value, maximum=4096):
-        if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
-            raise ValueError('invalid or oversized source string')
-        return value
-
-    def boot_id():
-        v = read('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
-        if str(uuid.UUID(v)) != v:
-            raise ValueError('invalid boot ID')
-        return v
-
-    def child_limits():
-        os.setsid()
-        resource.setrlimit(resource.RLIMIT_FSIZE, (262144, 262144))
-
     def run(argv):
         return estus_runtime.run_bounded(
             argv, timeout=12, max_bytes=262144, accepted=None,
@@ -39,7 +24,7 @@ def main():
     def checked(argv):
         return run(argv)['stdout']
 
-    result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
+    result = {'boot_id':estus_runtime.boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 
     def entries():
         data = json.loads(checked([os.environ['ESTUS_EXEC_BOOTCTL'], '--json=short', '--no-pager', 'list']))
@@ -48,22 +33,22 @@ def main():
         selected = []
         ids = set()
         for e in data:
-            ident = text(e.get('id'), 255)
+            ident = estus_runtime.check_text(e.get('id'), 255)
             if not ident or ident in ids:
                 raise ValueError('missing or duplicate exact entry ID')
             ids.add(ident)
-            v = {'entry_id':ident, 'source':text(e.get('source', 'unknown'), 128),
-                 'type':text(e.get('type', 'unknown'), 128), 'command_line_sensitive':True,
+            v = {'entry_id':ident, 'source':estus_runtime.check_text(e.get('source', 'unknown'), 128),
+                 'type':estus_runtime.check_text(e.get('type', 'unknown'), 128), 'command_line_sensitive':True,
                  'unknown':[]}
             for key, alias in [('linux','linux'), ('efi','efi'), ('title','title'), ('path','path')]:
                 if key in e:
-                    v[alias] = text(e[key], 2048)
+                    v[alias] = estus_runtime.check_text(e[key], 2048)
                 else:
                     v['unknown'].append(alias)
             if 'initrd' in e:
                 if not isinstance(e['initrd'], list) or len(e['initrd']) > 16:
                     raise ValueError('initrd list exceeds bound')
-                v['initrd'] = [text(i, 2048) for i in e['initrd']]
+                v['initrd'] = [estus_runtime.check_text(i, 2048) for i in e['initrd']]
             else:
                 v['unknown'].append('initrd')
             selected.append((v, e))
@@ -71,7 +56,7 @@ def main():
 
     def selected_entry():
         ident = a['entry_id']
-        if ident not in ('estus-current.conf', 'estus-alternate.conf'):
+        if not estus_runtime.allowed(ident, a.get('allowed_entries')):
             raise ValueError('entry ID not approved')
         matches = [(v,e) for v,e in entries() if v['entry_id'] == ident]
         if len(matches) != 1:
@@ -79,7 +64,7 @@ def main():
         return matches[0]
     v,e = selected_entry()
     if 'options' in e:
-        v['command_line'] = text(e['options'],4096)
+        v['command_line'] = estus_runtime.check_text(e['options'],4096)
     else:
         v['unknown'].append('command_line')
     v['command_line_source'] = 'bootctl Boot Loader Specification entry options'

@@ -1,30 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_host_reboot/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_host_reboot"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog-admin"
-python = "/usr/bin/python3"
-
 [tools.change_host_reboot]
 description = "Schedule a host reboot in five seconds and return a scheduling receipt. Confirm it independently by reconnecting and comparing boot IDs; SSH loss proves nothing."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "runtime_write", "availability"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_host_reboot/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = {  }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }

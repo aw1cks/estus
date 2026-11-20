@@ -224,7 +224,7 @@ Keys: `description`, `revision`, `targets`, `authority`, `effects`, `execution`,
 ```toml
 [catalog]
 root = "/opt/estus/catalog"   # explicit installed asset directory
-version = "9"                 # optional assertion against the installed inventory
+version = "10"                # optional assertion against the installed inventory
 ```
 
 An explicit invalid root fails rather than selecting another catalog. When

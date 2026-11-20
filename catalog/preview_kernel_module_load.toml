@@ -1,26 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/preview_kernel_module_load/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["preview_kernel_module_load"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
 [tools.preview_kernel_module_load]
 description = "Preview one module's dependencies and effective modprobe hooks without loading it. The plan text is not a promise of what will happen."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/preview_kernel_module_load/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { "name" = "name" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "enum" = ["dummy", "estus_catalog"], "minLength" = 1, "maxLength" = 64 } }, "required" = ["name"], "additionalProperties" = false }

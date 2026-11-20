@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_storage_raid/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_storage_raid"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_storage_raid]
 description = "Read the reviewed MD RAID1 array's state, degraded count, sync action and member errors from sysfs. Reported redundancy only; never assembles or repairs."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_storage_raid/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { device = "device" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "required" = ["device"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "enum" = ["/dev/md0"] } } }

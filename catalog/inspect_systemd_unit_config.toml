@@ -1,31 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/inspect_systemd_unit_config/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["inspect_systemd_unit_config"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-[automation.authorities.catalog.become]
-method = "sudo"
-user = "root"
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.inspect_systemd_unit_config]
 description = "Read one allowed unit's fragment and drop-in configuration. Sensitive: it may contain credentials."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/inspect_systemd_unit_config/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+
 input_map = { "unit" = "unit" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }

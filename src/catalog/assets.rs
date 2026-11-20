@@ -29,6 +29,22 @@ const PAYLOAD_LIMIT: u64 = 8 * 1024 * 1024;
 const PAYLOAD_FILES: usize = 256;
 const MAX_PATH_NAME: usize = 255;
 
+/// Fixed arguments that carry site policy: allowlists, reviewed paths and
+/// device sets only a site can truthfully state. Shipped definitions never
+/// contain them, so nothing an operator did not review is inherited.
+/// (`allowed_operations` is not here: the catalog ships the tool's full
+/// operation set, which a site narrows through the key-by-key merge.)
+const POLICY_FIXED_ARGS: [&str; 8] = [
+    "allowed_entries",
+    "allowed_packages",
+    "allowed_units",
+    "approved_keys",
+    "approved_root",
+    "configured_paths",
+    "operator_policy",
+    "reviewed_devices",
+];
+
 /// A catalog problem, grouped by what an operator does about it: fix the
 /// installed files, re-review the catalog data, or enable a different name.
 /// Context is always a tool name or a relative asset path, never contents.
@@ -476,6 +492,13 @@ impl Catalog {
             .map_err(|_| CatalogError::Malformed {
                 asset: definition.to_owned(),
             })?;
+        // A definition holds tool tables and nothing else: targets, authority
+        // and policy belong to the site, never to the shipped asset.
+        if table.keys().any(|key| key != "tools") {
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
+        }
         let tools = table
             .get("tools")
             .and_then(toml::Value::as_table)
@@ -514,6 +537,19 @@ impl Catalog {
                 tool: name.to_owned(),
             });
         }
+        if tool
+            .get("fixed_args")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|fixed| {
+                fixed
+                    .keys()
+                    .any(|key| POLICY_FIXED_ARGS.contains(&key.as_str()))
+            })
+        {
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
+        }
         Ok(table)
     }
 
@@ -532,13 +568,18 @@ impl Catalog {
     /// directory and to the site's own targets.
     ///
     /// `overrides` is the config's `[tools.<name>]` table when it carries no
-    /// `execution`; each key it names replaces the installed one wholesale.
-    /// `targets` and `constraints` never survive from the catalog: they name
-    /// hosts and allowlists that only the site knows. Targets default to every
-    /// configured destination (per-host permission is still checked
-    /// separately). A `policy_required` template must restate its fixed
-    /// arguments or supply constraints, so an example allowlist can never be
-    /// inherited by an operator who did not review it.
+    /// `execution`. `fixed_args`, `constraints` and `limits` merge key by key
+    /// over the installed values, so a site that restates one argument never
+    /// drops the interpreter or manager scope beside it; `targets`,
+    /// `authority`, `input_schema` and `input_map` replace the installed value
+    /// wholly, because they name hosts, credentials and a contract only the
+    /// site can state.
+    ///
+    /// `targets` and `constraints` never survive from the catalog, and shipped
+    /// definitions carry no site policy at all: a collector that needs an
+    /// allowlist fails closed until the site supplies one. A `policy_required`
+    /// template must restate policy in `fixed_args` or `constraints` before it
+    /// is materialised.
     pub(crate) fn site_definition(
         &self,
         name: &str,
@@ -570,11 +611,12 @@ impl Catalog {
                 tool: name.to_owned(),
             });
         }
+        // Shipped definitions carry no site policy, so a policy-required
+        // template is materialised only when the site states its own fixed
+        // arguments or constraints. A schema alone names no allowlist.
         if template.policy_required
             && overrides.is_none_or(|table| {
-                !(table.contains_key("fixed_args")
-                    || table.contains_key("constraints")
-                    || table.contains_key("input_schema"))
+                !(table.contains_key("fixed_args") || table.contains_key("constraints"))
             })
         {
             return Err(CatalogError::SitePolicyRequired {
@@ -624,7 +666,23 @@ impl Catalog {
         }
         if let Some(overrides) = overrides {
             for (key, value) in overrides {
-                table.insert(key.clone(), value.clone());
+                match (key.as_str(), table.get_mut(key)) {
+                    ("fixed_args" | "constraints" | "limits", Some(existing))
+                        if existing.is_table() && value.is_table() =>
+                    {
+                        let merged = existing.as_table_mut().ok_or_else(|| {
+                            CatalogError::InvalidDefinition {
+                                tool: name.to_owned(),
+                            }
+                        })?;
+                        for (argument, argument_value) in value.as_table().into_iter().flatten() {
+                            merged.insert(argument.clone(), argument_value.clone());
+                        }
+                    }
+                    _ => {
+                        table.insert(key.clone(), value.clone());
+                    }
+                }
             }
         }
         if !table.contains_key("targets") {
@@ -929,6 +987,97 @@ fn collect_payload(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod site_overlay_tests {
+    use super::*;
+
+    fn catalog_root() -> Catalog {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+        Catalog::load(Some(&root)).expect("load catalog")
+    }
+
+    /// A site that restates one fixed argument keeps every sibling the catalog
+    /// supplies; a full replacement would silently drop the interpreter and
+    /// leave the collector unrunnable.
+    #[test]
+    fn fixed_args_merge_key_by_key_and_targets_replace_wholly() {
+        let catalog = catalog_root();
+        let mut overrides = toml::Table::new();
+        overrides.insert(
+            "fixed_args".into(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "target_python".to_owned(),
+                toml::Value::from("/opt/python3"),
+            )])),
+        );
+        overrides.insert(
+            "targets".into(),
+            toml::Value::Array(vec![toml::Value::from("site")]),
+        );
+        let definition = catalog
+            .site_definition(
+                "observe_systemd_jobs",
+                Some(&overrides),
+                &["other".to_owned()],
+            )
+            .expect("site overlay");
+        let fixed = &definition["fixed_args"];
+        assert_eq!(fixed["target_python"].as_str(), Some("/opt/python3"));
+        assert_eq!(fixed["manager_scope"].as_str(), Some("system"));
+        assert_eq!(definition["targets"].as_array().map(Vec::len), Some(1));
+        assert_eq!(definition["targets"][0].as_str(), Some("site"));
+        assert_eq!(
+            definition["execution"]["kind"].as_str(),
+            Some("native_payload")
+        );
+    }
+
+    /// Policy-required templates cannot be materialised from the catalog alone,
+    /// and no shipped definition carries an allowlist an operator did not review.
+    #[test]
+    fn policy_required_templates_need_site_policy_and_shipped_files_carry_none() {
+        let catalog = catalog_root();
+        let names: Vec<String> = catalog.manifest().tools.keys().cloned().collect();
+        let mut missing = Vec::new();
+        for name in &names {
+            let template = &catalog.manifest().tools[name];
+            let definition = catalog.definition(name).expect("definition");
+            let tool = definition["tools"][name].as_table().expect("tool table");
+            assert_eq!(definition.len(), 1, "{name}: non-tool top-level keys");
+            if let Some(fixed) = tool.get("fixed_args").and_then(toml::Value::as_table) {
+                for key in fixed.keys() {
+                    assert!(
+                        !POLICY_FIXED_ARGS.contains(&key.as_str()),
+                        "{name}: shipped definition carries site policy {key}"
+                    );
+                }
+            }
+            assert!(tool.get("targets").is_none(), "{name}: shipped targets");
+            if template.policy_required
+                && catalog
+                    .site_definition(name, None, &["host".to_owned()])
+                    .is_ok()
+            {
+                missing.push(name.clone());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "policy-required without site policy: {missing:?}"
+        );
+        let bare = toml::Table::from_iter([(
+            "input_schema".to_owned(),
+            toml::Value::Table(toml::Table::new()),
+        )]);
+        assert!(matches!(
+            catalog
+                .site_definition("observe_systemd_unit", Some(&bare), &["host".to_owned()])
+                .unwrap_err(),
+            CatalogError::SitePolicyRequired { .. }
+        ));
+    }
 }
 
 #[cfg(test)]

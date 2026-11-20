@@ -1,24 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_hardware_system/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_hardware_system"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
 [tools.observe_hardware_system]
 description = "Read selected DMI fields the firmware reports, such as vendor, product and BIOS version. Not an authenticated identity."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_hardware_system/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = {  }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }

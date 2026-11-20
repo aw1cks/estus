@@ -1,29 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_storage_device_health/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_storage_device_health"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog-admin"
-python = "/usr/bin/python3"
 [tools.observe_storage_device_health]
 description = "Read SMART log 02 and controller state of the reviewed lab NVMe device. Virtual controller scope only; it does not run self-tests."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_storage_device_health/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { device = "device" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "required" = ["device"], "additionalProperties" = false, "properties" = { "device" = { "type" = "string", "maxLength" = 32, "enum" = ["/dev/nvme0"] } } }

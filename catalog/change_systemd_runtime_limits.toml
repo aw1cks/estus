@@ -1,31 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_systemd_runtime_limits/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_systemd_runtime_limits"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-[automation.authorities.catalog.become]
-method = "sudo"
-user = "root"
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.change_systemd_runtime_limits]
 description = "Set runtime memory, task or CPU-quota limits on one allowed unit and read them back. Never persistent, and tighter limits can throttle or OOM the unit."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_runtime_limits/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+
 input_map = { "unit" = "unit", "limits" = "limits" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 }, "limits" = { "type" = "object", "properties" = { "memory_max_bytes" = { "type" = "integer", "minimum" = 16777216, "maximum" = 1099511627776 }, "tasks_max" = { "type" = "integer", "minimum" = 8, "maximum" = 65536 }, "cpu_quota_percent" = { "type" = "integer", "minimum" = 1, "maximum" = 800 } }, "required" = [], "additionalProperties" = false, "minProperties" = 1 } }, "required" = ["unit", "limits"], "additionalProperties" = false }

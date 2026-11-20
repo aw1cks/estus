@@ -1,26 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_cpu/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_cpu"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
 [tools.observe_cpu]
 description = "Read aggregate CPU tick counters and topology IDs, optionally sampling twice. The view may be host-wide, not your affinity or quota."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_cpu/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { limit = "limit", sample_ms = "sample_ms" }
 limits = { timeout_secs = 20 }
 

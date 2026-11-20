@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_network_device/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_network_device"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_network_device]
 description = "Read a network interface's driver-reported device facts through a fixed ethtool query. Absent capabilities are named, never filled with zeros."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_network_device/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 input_map = { "interface" = "interface" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 } }, "required" = ["interface"], "additionalProperties" = false }

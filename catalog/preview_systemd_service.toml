@@ -1,32 +1,11 @@
-# Check-mode preview for systemd unit transitions via offline Ansible bundle.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["preview_systemd_service"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
-
 [tools.preview_systemd_service]
 description = "Preview a systemd unit state, enablement or mask transition without changing anything. A change then needs the same fields to be authorized."
 revision = "1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
 execution = { kind = "ansible_module", module = "ansible.builtin.systemd_service", no_log = false, check_mode = true, diff = false }
 fixed_args = { scope = "system", daemon_reload = false }
+
 input_map = { name = "name", state = "state", enabled = "enabled", masked = "masked" }
 limits = { timeout_secs = 30 }
 input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 128 }, state = { type = "string", enum = ["started", "stopped", "restarted", "reloaded"] }, enabled = { type = "boolean" }, masked = { type = "boolean" } }, required = ["name"], additionalProperties = false }

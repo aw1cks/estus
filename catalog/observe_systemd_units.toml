@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_systemd_units/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_systemd_units"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_systemd_units]
 description = "List loaded units or installed unit files and templates. Installed file state differs from active state."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_systemd_units/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+
 input_map = { "view" = "view", "unit_type" = "unit_type", "state" = "state", "unit_pattern" = "unit_pattern" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "view" = { "type" = "string", "enum" = ["loaded", "installed"] }, "unit_type" = { "type" = "string", "enum" = ["service", "socket", "timer", "target", "mount", "path", "slice"] }, "state" = { "type" = "string", "enum" = ["all", "active", "inactive", "failed"] }, "unit_pattern" = { "type" = "string", "minLength" = 1, "maxLength" = 128 } }, "required" = ["view", "unit_type", "state", "unit_pattern"], "additionalProperties" = false }

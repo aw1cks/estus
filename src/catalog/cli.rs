@@ -262,8 +262,10 @@ fn export(
         let mut document = toml::Table::new();
         document.insert("tools".into(), toml::Value::Table(definitions));
         let text = format!(
-            "# Inert definitions for review. Edit fixed_args/constraints here, then\n\
-             # enable these names (and this file's [tools] table) in your site configuration.\n{}",
+            "# Inert definitions for review: tool tables only, with no site policy.\n\
+             # Copy each [tools.<name>] table into your site configuration and add\n\
+             # targets, authority and the fixed_args/constraints allowlists it needs\n\
+             # (or write a [tools.<name>] overlay that restates them, without execution).\n{}",
             toml::to_string_pretty(&document)
                 .map_err(|_| Failure::Code("catalog_output_invalid"))?
         );

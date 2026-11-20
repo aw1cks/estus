@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_sysctl/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_sysctl"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_sysctl]
 description = "Read reviewed side-effect-free sysctl keys by name. Missing and denied keys are explicit; it never enumerates /proc/sys."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_sysctl/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "approved_keys" = ["vm.swappiness", "net.ipv4.ip_forward", "kernel.pid_max"] }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "keys" = "keys" }
 limits = { timeout_secs = 20 }
 [tools.observe_sysctl.input_schema]

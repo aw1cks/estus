@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_pressure/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_pressure"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_pressure]
 description = "Read PSI some/full averages and cumulative stall time. Procfs view, not cgroup-effective pressure."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_pressure/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = {  }
 limits = { timeout_secs = 20 }
 [tools.observe_pressure.input_schema]

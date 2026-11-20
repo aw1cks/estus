@@ -1,32 +1,11 @@
-# Check-mode preview for Debian/Ubuntu apt package transitions via offline Ansible bundle.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["preview_apt"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
-
 [tools.preview_apt]
 description = "Preview an apt change in check mode, including a diff where apt supports one. Nothing is installed."
 revision = "1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
 execution = { kind = "ansible_module", module = "ansible.builtin.apt", no_log = false, check_mode = true, diff = true }
 fixed_args = { auto_install_module_deps = false }
+
 input_map = { name = "name", state = "state", update_cache = "update_cache", purge = "purge", allow_downgrade = "allow_downgrade" }
 limits = { timeout_secs = 60 }
 input_schema = { type = "object", properties = { name = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, minItems = 1, maxItems = 32 }, state = { type = "string", enum = ["present", "absent", "latest"] }, update_cache = { type = "boolean" }, purge = { type = "boolean" }, allow_downgrade = { type = "boolean" } }, required = ["name", "state"], additionalProperties = false }

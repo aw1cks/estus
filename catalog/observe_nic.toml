@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_nic/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_nic"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_nic]
 description = "Read one interface's link settings, ring sizes, channel counts or coalescing parameters through fixed read-only ethtool queries. Values stay as driver-reported text; unsupported fields are listed as unavailable."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_nic/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
+
 limits = { timeout_secs = 30 }
 input_map = { interface = "interface", aspect = "aspect" }
 input_schema = { type = "object", properties = { interface = { type = "string", minLength = 1, maxLength = 15 }, aspect = { type = "string", enum = ["channels", "coalesce", "link", "rings"] } }, required = ["interface", "aspect"], additionalProperties = false }

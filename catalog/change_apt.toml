@@ -1,32 +1,11 @@
-# Debian/Ubuntu apt escape-hatch package mutation via offline Ansible bundle.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_apt"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
-
 [tools.change_apt]
 description = "Install, upgrade or remove Debian/Ubuntu packages, optionally purging and allowing downgrades. Invalid or interrupted transitions are not replayed."
 revision = "1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["persistent_write", "read"]
 execution = { kind = "ansible_module", module = "ansible.builtin.apt", no_log = false, check_mode = false, diff = false }
 fixed_args = { auto_install_module_deps = false }
+
 input_map = { name = "name", state = "state", update_cache = "update_cache", purge = "purge", allow_downgrade = "allow_downgrade" }
 limits = { timeout_secs = 120 }
 input_schema = { type = "object", properties = { name = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, minItems = 1, maxItems = 32 }, state = { type = "string", enum = ["present", "absent", "latest"] }, update_cache = { type = "boolean" }, purge = { type = "boolean" }, allow_downgrade = { type = "boolean" } }, required = ["name", "state"], additionalProperties = false }

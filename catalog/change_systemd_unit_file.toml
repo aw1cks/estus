@@ -1,33 +1,10 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_systemd_unit_file/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-# Named catalog authority uses a separate reviewed SSH identity and sudo root.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_systemd_unit_file"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-[automation.authorities.catalog.become]
-method = "sudo"
-user = "root"
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
-
 [tools.change_systemd_unit_file]
 description = "Enable, disable, mask or unmask one allowed unit's unit file without reloading the manager, and return the on-disk state. Run change_systemd_manager_reload before relying on the change."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["persistent_write", "read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_unit_file/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_operations" = ["enable", "disable", "mask", "unmask"], "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_operations" = ["enable", "disable", "mask", "unmask"] }
 input_map = { "unit" = "unit", "operation" = "operation" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 }, "operation" = { "type" = "string", "enum" = ["enable", "disable", "mask", "unmask"] } }, "required" = ["unit", "operation"], "additionalProperties" = false }

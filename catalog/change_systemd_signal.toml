@@ -1,31 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_systemd_signal/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["change_systemd_signal"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-[automation.authorities.catalog.become]
-method = "sudo"
-user = "root"
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.change_systemd_signal]
 description = "Send one approved signal to the main process of an allowed unit and return the post-state. Delivery is not application health."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_signal/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "allowed_units" = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+
 input_map = { "unit" = "unit", "signal" = "signal" }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 }, "signal" = { "type" = "string", "enum" = ["HUP", "USR1", "USR2", "TERM"] } }, "required" = ["unit", "signal"], "additionalProperties" = false }

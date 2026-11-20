@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_cgroup_sample/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_cgroup_sample"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.observe_cgroup_sample]
 description = "Sample one approved cgroup's cumulative CPU use over a real interval. Rates are withheld when the counter resets."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_cgroup_sample/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice" }
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "duration_ms" = "duration_ms", "samples" = "samples" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "duration_ms" = { "type" = "integer", "minimum" = 100, "maximum" = 5000 }, "samples" = { "type" = "integer", "minimum" = 2, "maximum" = 4 } }, "required" = ["duration_ms", "samples"], "additionalProperties" = false }

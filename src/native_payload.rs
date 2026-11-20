@@ -432,7 +432,14 @@ mod tests {
                 schema.get("minimum").cloned().unwrap_or_else(|| json!(0))
             }
             Some("boolean") => json!(false),
-            Some("array") => json!([]),
+            Some("array") => {
+                let floor = schema.get("minItems").and_then(Value::as_u64).unwrap_or(0);
+                let item = schema
+                    .get("items")
+                    .map(sample)
+                    .unwrap_or_else(|| json!("x"));
+                Value::Array((0..floor).map(|_| item.clone()).collect())
+            }
             Some("object") => {
                 // Populate required children, and honour minProperties by adding
                 // the first declared optional property for closed policy objects.
@@ -506,11 +513,52 @@ mod tests {
             }
             let manifest: Manifest =
                 serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-            // Site policy lives in the shipped definition; the manifest carries
-            // only the collector contract and its adapter.
+            // Shipped definitions omit site policy (allowlists, operator policy),
+            // so stand in for the site: every contract-required or adapter-consumed
+            // field that is neither fixed, caller-mapped nor defaulted gets a
+            // schema-satisfying value.
             let definition = std::fs::read_to_string(catalog.join(format!("{name}.toml"))).unwrap();
-            let overlay = crate::bindings::definition_overlay(&definition, name).unwrap();
-            let binding = compile_binding(&manifest.contract, &overlay).unwrap();
+            let mut overlay = crate::bindings::definition_overlay(&definition, name).unwrap();
+            let mapped: Vec<String> = overlay
+                .get("input_map")
+                .and_then(Value::as_object)
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default();
+            let contract = &manifest.contract["schema"];
+            let adapter_needs = manifest.argv.iter().flat_map(|arg| match arg {
+                Arg::Argument { name, default, .. } => {
+                    vec![(name.as_str(), default.is_some())]
+                }
+                Arg::Object { fields } => fields
+                    .values()
+                    .map(|field| (field.name.as_str(), field.default.is_some()))
+                    .collect(),
+            });
+            let required = contract["required"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|field| (field, false));
+            let site_policy: Vec<(String, Value)> = required
+                .chain(adapter_needs)
+                .filter(|(field, defaulted)| {
+                    !defaulted
+                        && !mapped.iter().any(|key| key == field)
+                        && overlay["fixed_args"].get(*field).is_none()
+                })
+                .map(|(field, _)| (field.to_owned(), sample(&contract["properties"][field])))
+                .collect();
+            let fixed = overlay
+                .as_object_mut()
+                .unwrap()
+                .entry("fixed_args")
+                .or_insert_with(|| json!({}));
+            for (field, value) in site_policy {
+                fixed[field] = value;
+            }
+            let binding = compile_binding(&manifest.contract, &overlay)
+                .unwrap_or_else(|code| panic!("{}: {code}", manifest_path.display()));
             // Scalar format means "a bare string", so the reviewed schema must
             // agree and every default must already be a string.
             let properties = overlay

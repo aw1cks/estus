@@ -1,23 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/inspect_processes/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["inspect_processes"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
 [tools.inspect_processes]
 description = "List processes by exact real UID and literal name substring, with boot ID and start ticks for identity. No arguments, environment or memory contents."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/inspect_processes/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "uid" = "uid", "name_contains" = "name_contains", "limit" = "limit" }
 limits = { timeout_secs = 20 }
 [tools.inspect_processes.input_schema]

@@ -6,7 +6,7 @@ manifest.json}`. Installing a package ships it under `share/estus/catalog`
 (`_catalog` in the wheel); `catalog/` in this repository is the canonical asset
 source.
 
-Current inventory: 104 templates, manifest schema 3, inventory version 9.
+Current inventory: 104 templates, manifest schema 3, inventory version 10.
 96 are native Python payloads that need only a target interpreter; 8 are
 `ansible_module` entries that need an operator-built bundle. Installing the
 package enables nothing and grants no credential or sudo.
@@ -28,10 +28,16 @@ least one `--tool` or `--preset`, at most 256 names, and a new output directory
 (existing paths are never replaced, and a partial export is removed).
 
 Export writes mode-0700 directories and mode-0600 files:
-`tools.toml` (inert definitions, with `execution.source` rewritten to the copied
-collector), `payloads/<tool>/…` for payload tools, and
+`tools.toml` (inert `[tools.<name>]` tables only, with `execution.source`
+rewritten to the copied collector), `payloads/<tool>/…` for payload tools, and
 `catalog-selection.json` describing schema/version/qualification. It creates no
 credentials, approvals or configuration.
+
+An export is a review starting point, not a site configuration: the shipped
+definitions hold no targets, authority or policy. Copy each table into your
+`[tools.<name>]` keys, or keep the file beside the site and restate policy with a
+`[tools.<name>]` overlay — then add `[selection]`, `[targets]` and
+`[automation]` yourself.
 
 `list` prints one line per template:
 `name<TAB>qualification<TAB>policy note<TAB>description<TAB>requires`.
@@ -79,7 +85,7 @@ capabilities = { named = true }
 allow = ["observe_cpu", "observe_memory", "observe_pressure"]
 
 [catalog]
-version = "9"
+version = "10"
 
 [targets.server]
 ssh_host = "server-ordinary"
@@ -94,9 +100,15 @@ Unit names, interfaces, paths, module parameters, package names and repositories
 outside `linux-health` are generally **fixture policies**: adapt the closed input
 enums, fixed policy and allowlists together.
 
-Catalog `targets` and `constraints` are never inherited: targets default to every
-configured destination (and per-target permission is still checked separately),
-and a `policy_required` template must restate its domain policy.
+Shipped definitions are tool tables only: they name no targets and no
+allowlists. Targets default to every configured destination (and per-target
+permission is still checked separately); a `policy_required` template must be
+given `fixed_args` or `constraints` by the site before it can be materialised.
+Policy arguments — `allowed_units`, `allowed_keys`, `allowed_entries`,
+`approved_keys`, `approved_root`, `allowed_packages`, `operator_policy`,
+`configured_paths`, `reviewed_devices` — are therefore absent from the catalog,
+and a collector that needs one fails closed until you supply it. The systemd
+tools ship their full `allowed_operations` set; restate it to narrow.
 
 ## Site overlays
 
@@ -105,6 +117,11 @@ Only `targets`, `authority`, `fixed_args`, `constraints`, `input_schema`,
 `input_map` and `limits` may be overridden; description, revision, effects,
 result and contract come from the catalog and are rejected as site overrides, so
 a site cannot rewrite what a tool claims.
+
+`fixed_args`, `constraints` and `limits` merge key by key: restating
+`allowed_units` keeps `target_python` and `manager_scope` from the catalog.
+`targets`, `authority`, `input_schema` and `input_map` replace the catalog value
+wholesale.
 
 ```toml
 [tools.change_systemd_unit]

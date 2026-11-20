@@ -1,29 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_nic_transceiver/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_nic_transceiver"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog-admin"
-python = "/usr/bin/python3"
 [tools.observe_nic_transceiver]
 description = "Read nonserial identity and typed sensor fields from a lab-only synthetic SFP EEPROM via real ethtool. Not physical optical measurement."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_nic_transceiver/collector.py", no_log = false }
-fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "model0","mac" = "52:54:00:12:34:5a","driver" = "estus_nic_model"}}
+fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = {"interface" = "interface"}
 limits = { timeout_secs = 40 }
 input_schema = {"type" = "object","properties" = {"interface" = {"type" = "string","enum" = ["model0"],"maxLength" = 15}},"required" = ["interface"],"additionalProperties" = false}

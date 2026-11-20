@@ -1,30 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_journal_boots/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_journal_boots"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-# Separate reviewed root automation identity; independent of native sudo allowlists.
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.observe_journal_boots]
 description = "List retained journal boots with their timestamps. Retention may omit older boots."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_journal_boots/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "limit" = "limit" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 8 } }, "required" = ["limit"], "additionalProperties" = false }

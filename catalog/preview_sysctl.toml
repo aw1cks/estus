@@ -1,32 +1,11 @@
-# Check-mode preview for sysctl changes via offline Ansible bundle.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["preview_sysctl"]
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
-
 [tools.preview_sysctl]
 description = "Preview a sysctl change and its file diff without touching runtime or persistent configuration."
 revision = "1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
 execution = { kind = "ansible_module", module = "ansible.posix.sysctl", no_log = false, check_mode = true, diff = true }
 fixed_args = { reload = false }
+
 input_map = { name = "name", value = "value", state = "state", sysctl_file = "sysctl_file", sysctl_set = "sysctl_set" }
 limits = { timeout_secs = 30 }
 input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 128 }, value = { type = "string", minLength = 1, maxLength = 256 }, state = { type = "string", enum = ["present", "absent"] }, sysctl_file = { type = "string", minLength = 1, maxLength = 256 }, sysctl_set = { type = "boolean" } }, required = ["name", "state"], additionalProperties = false }

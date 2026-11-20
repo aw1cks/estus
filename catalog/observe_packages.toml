@@ -1,24 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_packages/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["observe_packages"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-
 [tools.observe_packages]
 description = "List installed packages from the maintained apt inventory. It does not refresh the cache or install anything."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_packages/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "offset" = "offset", "limit" = "limit", "name" = "name" }
 limits = { timeout_secs = 30 }
 input_schema = { "type" = "object", "properties" = { "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 65536 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 100 }, "name" = { "type" = "string", "minLength" = 1, "maxLength" = 64 } }, "required" = [], "additionalProperties" = false }

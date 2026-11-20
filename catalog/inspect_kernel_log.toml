@@ -1,30 +1,11 @@
-# Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/inspect_kernel_log/manifest.json and the fixed policy here, then enable it by name.
-# The site supplies targets, authority and fixed policy; the collector digest is checked at load.
-mode = "headless"
-capabilities = { named = true }
-[selection]
-allow = ["inspect_kernel_log"]
-[targets.server]
-ssh_host = "server-ordinary"
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-# Separate reviewed root automation identity; independent of native sudo allowlists.
-[automation.authorities.catalog]
-ssh_config_file = "/etc/estus/catalog-ssh.conf"
-become = { method = "sudo", user = "root" }
-[automation.authorities.catalog.targets.server]
-destination = "server-catalog"
-python = "/usr/bin/python3"
 [tools.inspect_kernel_log]
 description = "Read bounded kernel-only journal records for one boot and time window. Cursor expiry means incomplete, not no records."
 revision = "1_native1"
-targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/inspect_kernel_log/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+
 input_map = { "boot_id" = "boot_id", "since" = "since", "journal_until" = "until", "priority" = "priority", "cursor" = "cursor", "limit" = "limit" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "maxLength" = 32 }, "since" = { "type" = "integer", "minimum" = 0, "maximum" = 4102444800 }, "until" = { "type" = "integer", "minimum" = 0, "maximum" = 4102444800 }, "priority" = { "type" = "integer", "minimum" = 0, "maximum" = 7 }, "cursor" = { "type" = "string", "maxLength" = 256 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 4 } }, "required" = ["boot_id", "since", "until", "priority", "limit"], "additionalProperties" = false }
