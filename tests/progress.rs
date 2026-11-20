@@ -312,6 +312,9 @@ async fn progress_native_correlation_clipping_suppression_and_terminal_outcomes(
                 ensure!(!done.exists(), "interruption waited for remote completion");
                 fs::write(&interrupted_release, b"release")?;
                 Fixture::await_file(&done).await?;
+                call(&mut server, 150 + id, "change_target_quarantine_clear", json!({"host":"plain","acknowledge_remote_state_reconciled":true}), None).await?;
+                let cleared = response(&mut server, 150 + id, None).await?;
+                ensure!(envelope(&cleared)?["data"]["cleared"] == true, "quarantine clear failed: {cleared}");
                 barrier(&mut server, 140 + id).await?;
             }
             Ok::<_, anyhow::Error>(())

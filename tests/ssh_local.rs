@@ -944,6 +944,20 @@ async fn lost_command_is_not_replayed(fixture: &mut Fixture, client: &Client) ->
     ensure!(reply["data"]["remote_may_still_be_running"] == true);
     Fixture::await_file(&done).await?;
     assert_masters_gone(std::slice::from_ref(&owned)).await?;
+    let blocked = client
+        .call(
+            "exec_command",
+            json!({"host":"resource","command":"printf BLOCKED_WHILE_QUARANTINED"}),
+        )
+        .await?;
+    failed(&blocked, "target_quarantined")?;
+    let cleared = client
+        .call(
+            "change_target_quarantine_clear",
+            json!({"host":"resource","acknowledge_remote_state_reconciled":true}),
+        )
+        .await?;
+    ensure!(succeeded(&cleared)?["cleared"] == true);
     let recovered = client
         .call(
             "exec_command",
