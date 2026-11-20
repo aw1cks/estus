@@ -40,7 +40,10 @@ and open resolution never elevates: dynamic catalog bindings that require
 `automation:<authority>` stay unpublished unless a configured target grants
 unrestricted root sudo or a matching `[automation.authorities.<name>]` mapping
 exists. Per-target `[targets.<name>.capabilities]` fields only narrow the global
-set.
+set: an omitted field inherits the global capability, an explicit `false` narrows it
+for that target, and an explicit `true` is accepted as a no-op because a target can
+never widen past the global ceiling. An absent `[capabilities]` table is unchanged:
+no narrowing at all.
 
 ## Base wheel
 

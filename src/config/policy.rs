@@ -68,16 +68,16 @@ impl Capabilities {
 }
 
 impl Target {
-    pub(super) fn permits_binding(&self, name: &str) -> bool {
-        Capabilities::from(self.capabilities).permits_bindings()
+    pub(super) fn permits_binding(&self, global: Capabilities, name: &str) -> bool {
+        self.capabilities.resolve_with(global).permits_bindings()
             && self
                 .selected_bindings
                 .as_ref()
                 .is_none_or(|names| names.contains(name))
     }
 
-    pub(super) fn permits_workstation_sudo(&self) -> bool {
-        Capabilities::from(self.capabilities).sudo
+    pub(super) fn permits_workstation_sudo(&self, global: Capabilities) -> bool {
+        self.capabilities.resolve_with(global).sudo
             && matches!(
                 self.sudo.workstation_route(),
                 WorkstationSudoRoute::SameAccountRoot | WorkstationSudoRoute::SeparateIdentity(_)
@@ -446,7 +446,7 @@ impl Config {
                 None => None,
             };
             if let Some(target) = target
-                && !target.permits_binding(&binding.name)
+                && !target.permits_binding(self.capabilities, &binding.name)
             {
                 return Err(denied());
             }
@@ -487,7 +487,7 @@ impl Config {
                     // program list would otherwise be silently bypassed. An open
                     // destination policy has no target, hence no grant.
                     let target = target.ok_or_else(denied)?;
-                    if !target.permits_workstation_sudo() {
+                    if !target.permits_workstation_sudo(self.capabilities) {
                         return Err(denied());
                     }
                     Some(&*WORKSTATION_SUDO)
@@ -535,7 +535,7 @@ impl Config {
                 .targets
                 .as_ref()
                 .and_then(|targets| targets.get(host))
-                .is_some_and(|target| target.permits_binding(&binding.name))
+                .is_some_and(|target| target.permits_binding(self.capabilities, &binding.name))
         {
             return Err(denied());
         }
@@ -612,7 +612,9 @@ impl Config {
                             self.targets
                                 .as_ref()
                                 .and_then(|targets| targets.get(name))
-                                .is_some_and(|target| target.permits_binding(&binding.name))
+                                .is_some_and(|target| {
+                                    target.permits_binding(self.capabilities, &binding.name)
+                                })
                         }))
             })
     }
@@ -630,7 +632,7 @@ impl Config {
         };
         let authority = binding.automation_authority();
         targets.iter().any(|(host_name, target)| {
-            target.permits_binding(&binding.name)
+            target.permits_binding(self.capabilities, &binding.name)
                 && match authority {
                     Some(AutomationAuthority::Ordinary) => true,
                     Some(AutomationAuthority::Named(name)) => {
@@ -638,7 +640,8 @@ impl Config {
                             .authorities
                             .get(name)
                             .is_some_and(|authority| authority.targets.contains_key(host_name))
-                            || (self.capabilities.sudo && target.permits_workstation_sudo())
+                            || (self.capabilities.sudo
+                                && target.permits_workstation_sudo(self.capabilities))
                     }
                     None => false,
                 }
@@ -671,7 +674,7 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target.permits_binding(&binding.name) {
+        if !target.permits_binding(self.capabilities, &binding.name) {
             return Err(denied());
         }
         rules::check_host_tool(
@@ -745,7 +748,12 @@ impl Config {
             .targets
             .as_ref()
             .and_then(|targets| targets.get(host))
-            .is_some_and(|target| !Capabilities::from(target.capabilities).permits(tool))
+            .is_some_and(|target| {
+                !target
+                    .capabilities
+                    .resolve_with(self.capabilities)
+                    .permits(tool)
+            })
         {
             return Err(denied());
         }
@@ -831,7 +839,11 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !Capabilities::from(target.capabilities).permits(ToolId::Sudo) {
+        if !target
+            .capabilities
+            .resolve_with(self.capabilities)
+            .permits(ToolId::Sudo)
+        {
             return Err(denied());
         }
         rules::check_host_tool(
@@ -1671,6 +1683,54 @@ mod tests {
                     .contains(&serde_json::json!("m-elevate"))
             );
         }
+    }
+
+    #[test]
+    fn present_target_table_inherits_global_for_omitted_fields_and_false_narrows() {
+        // Global grants files; each target table narrows or inherits differently.
+        let config = load_text(
+            r#"
+capabilities = { named = true, file_read = true, file_write = true }
+[targets.inherit]
+ssh_host = 'inherit-alias'
+[targets.narrow]
+ssh_host = 'narrow-alias'
+capabilities = { file_write = false }
+[targets.widen]
+ssh_host = 'widen-alias'
+capabilities = { exec = true }
+[targets.empty]
+ssh_host = 'empty-alias'
+capabilities = {}
+"#,
+            &[],
+        )
+        .unwrap();
+        // Inherited: a present table that omits a field keeps the global grant.
+        for name in ["inherit", "widen", "empty"] {
+            assert!(config.resolve(name, ToolId::ReadFile).is_ok());
+            assert!(config.resolve(name, ToolId::WriteFile).is_ok());
+            // A table cannot widen past the global ceiling.
+            assert!(config.resolve(name, ToolId::Exec).is_err());
+            assert!(config.resolve(name, ToolId::Sudo).is_err());
+        }
+        // Explicit false narrows; omitted fields still inherit the global grant.
+        assert!(config.resolve("narrow", ToolId::ReadFile).is_ok());
+        assert!(config.resolve("narrow", ToolId::WriteFile).is_err());
+        assert!(config.resolve("narrow", ToolId::Exec).is_err());
+        // Absent table: unchanged "no narrowing" behavior.
+        let absent = load_text(
+            &format!(
+                "{}
+[targets.plain]
+ssh_host='plain-alias'",
+                super::super::test_support::capabilities_toml("baseline")
+            ),
+            &[],
+        )
+        .unwrap();
+        assert!(absent.resolve("plain", ToolId::Exec).is_ok());
+        assert!(absent.resolve("plain", ToolId::Sudo).is_err());
     }
 
     #[test]

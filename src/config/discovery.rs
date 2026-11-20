@@ -55,7 +55,7 @@ impl Serialize for TargetSummaries<'_> {
                     rules: self.rules,
                     target_name: name,
                     sudo: &target.sudo,
-                    effective_capabilities: self.capabilities.intersect(target.capabilities.into()),
+                    effective_capabilities: target.capabilities.resolve_with(self.capabilities),
                     selection: target.selected_bindings.as_ref(),
                 },
                 observed_capabilities: ObservedCapabilities::Unknown,
@@ -209,7 +209,7 @@ impl Config {
                     let target = targets.get(host)?;
                     (
                         true,
-                        self.capabilities.intersect(target.capabilities.into()),
+                        target.capabilities.resolve_with(self.capabilities),
                         Some(&target.sudo),
                         target.selected_bindings.as_ref(),
                         target.description.as_deref(),

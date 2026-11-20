@@ -21,9 +21,15 @@ pub(super) fn capabilities_toml(profile: &str) -> &'static str {
         "baseline" => {
             "capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }"
         }
-        "actions-only" => "capabilities = { named = true }",
-        "read-only-files" => "capabilities = { file_read = true }",
-        "files-only" => "capabilities = { file_read = true, file_write = true }",
+        "actions-only" => {
+            "capabilities = { named = true, file_read = false, file_write = false, exec = false, sudo = false }"
+        }
+        "read-only-files" => {
+            "capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }"
+        }
+        "files-only" => {
+            "capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }"
+        }
         _ => panic!("unknown test capability preset {profile}"),
     }
 }

@@ -141,40 +141,32 @@ impl Capabilities {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct TargetCapabilities(Capabilities);
-
-impl Default for TargetCapabilities {
-    fn default() -> Self {
-        Self(Capabilities::all())
-    }
+/// Per-target capability narrowing. Each field is `Option<bool>`: an omitted
+/// field inherits the global capability, an explicit `false` narrows the global
+/// set for this target, and an explicit `true` is accepted as a no-op (it can
+/// never widen past the global ceiling).
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TargetCapabilities {
+    named: Option<bool>,
+    file_read: Option<bool>,
+    file_write: Option<bool>,
+    exec: Option<bool>,
+    sudo: Option<bool>,
 }
 
-impl<'de> Deserialize<'de> for TargetCapabilities {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(default, deny_unknown_fields)]
-        struct Explicit {
-            named: bool,
-            file_read: bool,
-            file_write: bool,
-            exec: bool,
-            sudo: bool,
-        }
-        let explicit = Explicit::deserialize(deserializer)?;
-        Ok(Self(Capabilities {
-            named: explicit.named,
-            file_read: explicit.file_read,
-            file_write: explicit.file_write,
-            exec: explicit.exec,
-            sudo: explicit.sudo,
-        }))
-    }
-}
-
-impl From<TargetCapabilities> for Capabilities {
-    fn from(value: TargetCapabilities) -> Self {
-        value.0
+impl TargetCapabilities {
+    /// Narrows `global` for this target. Omitted fields never narrow (they
+    /// inherit `global`), explicit `false` narrows, and explicit `true` is a
+    /// no-op: a target can never widen past the global ceiling.
+    pub(super) fn resolve_with(self, global: Capabilities) -> Capabilities {
+        global.intersect(Capabilities {
+            named: self.named.unwrap_or(true),
+            file_read: self.file_read.unwrap_or(true),
+            file_write: self.file_write.unwrap_or(true),
+            exec: self.exec.unwrap_or(true),
+            sudo: self.sudo.unwrap_or(true),
+        })
     }
 }
 
