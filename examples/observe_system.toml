@@ -2,7 +2,8 @@
 # one literal label argument. No source upload or remote script fetch occurs.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_system"]
+[selection]
+allow = ["observe_system"]
 
 [targets.server]
 ssh_host = "server-ordinary"

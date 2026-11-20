@@ -4,7 +4,8 @@
 # Approved inputs are data, not a sandbox; cancellation does not prove remote termination.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_account"]
+[selection]
+allow = ["observe_account"]
 
 [targets.server]
 ssh_host = "server-ordinary"

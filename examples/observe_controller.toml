@@ -5,7 +5,8 @@
 # The controller source digest is verified at startup. Review it and restart to update.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_controller"]
+[selection]
+allow = ["observe_controller"]
 
 [controller]
 workspace_root = "/tmp/estus-controller"

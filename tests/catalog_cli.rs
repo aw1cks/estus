@@ -151,7 +151,7 @@ fn export_is_inert_and_writes_only_reviewable_inputs() -> Result<()> {
     let definitions: toml::Value =
         toml::from_str(&std::fs::read_to_string(destination.join("tools.toml"))?)?;
     ensure!(
-        definitions.get("automation").is_none() && definitions.get("enabled_tools").is_none(),
+        definitions.get("automation").is_none() && definitions.get("selection").is_none(),
         "export generated authority or activation policy"
     );
     let pressure = &definitions["tools"]["observe_pressure"];
@@ -327,7 +327,8 @@ print(json.dumps({"ok": True}))
         &site,
         format!(
             r#"capabilities = {{ named = true }}
-enabled_tools = ["observe_probe"]
+[selection]
+allow = ["observe_probe"]
 
 [targets.local]
 ssh_host = "local"
@@ -449,7 +450,8 @@ fn modified_collector_bytes_are_rejected_before_connecting() -> Result<()> {
         &site,
         format!(
             r#"capabilities = {{ named = true }}
-enabled_tools = ["observe_probe"]
+[selection]
+allow = ["observe_probe"]
 
 [targets.local]
 ssh_host = "local"

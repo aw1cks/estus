@@ -9,7 +9,8 @@
 # MCP: change_dnf {"host":"server","inputs":{"name":["tmux"],"state":"latest","enablerepo":["epel"]}}
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_dnf"]
+[selection]
+allow = ["change_dnf"]
 
 [targets.server]
 ssh_host = "server-ordinary"

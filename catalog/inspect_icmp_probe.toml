@@ -3,7 +3,8 @@
 # The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["inspect_icmp_probe"]
+[selection]
+allow = ["inspect_icmp_probe"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]

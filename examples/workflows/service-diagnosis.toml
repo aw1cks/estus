@@ -7,7 +7,7 @@ tool = "observe_systemd_unit"
 authority = "automation"
 allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service"]
 #
-# enabled_tools = ["observe_systemd_unit"]
+# [selection] allow = ["observe_systemd_unit"]
 # [tools.observe_systemd_unit]
 # targets = ["plain"]
 # constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service"] }

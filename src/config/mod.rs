@@ -17,13 +17,11 @@ use crate::{
 mod discovery;
 mod loading;
 mod policy;
-mod rules;
 mod validation;
 
 pub(crate) use discovery::{CleanupDiagnostics, TargetDiscovery};
 pub(crate) use loading::{Cli, CliCommand, DoctorArgs, RuntimeKind};
 pub(crate) use policy::{risk_tier_for_binding, risk_tier_for_builtin};
-pub(crate) use rules::HostRule;
 pub(crate) use validation::{account_name, destination};
 #[cfg(test)]
 mod test_support;
@@ -48,6 +46,25 @@ pub(crate) enum ToolId {
 }
 
 impl ToolId {
+    /// Every builtin, so a selection can name one and discovery can filter it.
+    pub(crate) const ALL: [Self; 15] = [
+        Self::Targets,
+        Self::ReadOutput,
+        Self::Exec,
+        Self::Run,
+        Self::ReadFile,
+        Self::WriteFile,
+        Self::Mkdir,
+        Self::Rename,
+        Self::RemoveFile,
+        Self::RemoveDirectory,
+        Self::ReplaceFile,
+        Self::Stat,
+        Self::ListDirectory,
+        Self::Sudo,
+        Self::ClearTargetQuarantine,
+    ];
+
     pub(crate) const fn wire_name(self) -> &'static str {
         match self {
             Self::Targets => "observe_targets",
@@ -73,6 +90,22 @@ impl ToolId {
 pub(crate) enum ToolKey {
     Builtin(ToolId),
     Binding(BindingId),
+}
+
+/// One per-target selection. `presets` and `allow` add names, `deny` removes
+/// them, and the result is intersected with the global `[selection]`: a target
+/// can only narrow what the operator published globally. A present table with
+/// every list empty therefore denies every named tool on that target.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Selection {
+    pub(crate) presets: Vec<String>,
+    pub(crate) allow: Vec<String>,
+    pub(crate) deny: Vec<String>,
+    /// Resolved builtin wire names, filled in by loading; builtins have no
+    /// `[tools]` definition, so they never reach the binding compiler.
+    #[serde(skip)]
+    pub(crate) builtins: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -129,45 +162,6 @@ impl Capabilities {
             sudo: false,
         }
     }
-
-    pub(crate) const fn intersect(self, other: Self) -> Self {
-        Self {
-            named: self.named && other.named,
-            file_read: self.file_read && other.file_read,
-            file_write: self.file_write && other.file_write,
-            exec: self.exec && other.exec,
-            sudo: self.sudo && other.sudo,
-        }
-    }
-}
-
-/// Per-target capability narrowing. Each field is `Option<bool>`: an omitted
-/// field inherits the global capability, an explicit `false` narrows the global
-/// set for this target, and an explicit `true` is accepted as a no-op (it can
-/// never widen past the global ceiling).
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(super) struct TargetCapabilities {
-    named: Option<bool>,
-    file_read: Option<bool>,
-    file_write: Option<bool>,
-    exec: Option<bool>,
-    sudo: Option<bool>,
-}
-
-impl TargetCapabilities {
-    /// Narrows `global` for this target. Omitted fields never narrow (they
-    /// inherit `global`), explicit `false` narrows, and explicit `true` is a
-    /// no-op: a target can never widen past the global ceiling.
-    pub(super) fn resolve_with(self, global: Capabilities) -> Capabilities {
-        global.intersect(Capabilities {
-            named: self.named.unwrap_or(true),
-            file_read: self.file_read.unwrap_or(true),
-            file_write: self.file_write.unwrap_or(true),
-            exec: self.exec.unwrap_or(true),
-            sudo: self.sudo.unwrap_or(true),
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -211,13 +205,6 @@ impl ToolCatalog {
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.name.as_ref())
-    }
-
-    pub(crate) fn get_by_name(&self, name: &str) -> Option<ToolKey> {
-        self.entries
-            .iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| entry.id)
     }
 }
 
@@ -322,7 +309,9 @@ pub(crate) struct Config {
     limits: Limits,
     output: crate::output::Limits,
     targets: Option<BTreeMap<String, Target>>,
-    rules: Vec<HostRule>,
+    /// Builtin wire names the global selection published.
+    builtins: BTreeSet<String>,
+    require_preview: bool,
     bindings: Bindings,
     automation: Automation,
 }
@@ -423,19 +412,20 @@ impl Default for Limits {
 struct Target {
     ssh_host: String,
     #[serde(default)]
-    capabilities: TargetCapabilities,
-    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     labels: BTreeMap<String, String>,
     #[serde(default)]
     sudo: Sudo,
+    /// Omitted means "inherit the global selection"; a present table narrows it.
     #[serde(default)]
-    tool_presets: Option<Vec<String>>,
+    selection: Option<Selection>,
+    /// Deny every tool whose published risk tier exceeds this one.
     #[serde(default)]
-    enabled_tools: Option<Vec<String>>,
+    max_tier: Option<RiskTier>,
+    /// Overrides the global `require_preview` for this target.
     #[serde(default)]
-    disabled_tools: Vec<String>,
+    require_preview: Option<bool>,
     #[serde(skip)]
     selected_bindings: Option<BTreeSet<String>>,
 }

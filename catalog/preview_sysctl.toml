@@ -1,7 +1,8 @@
 # Check-mode preview for sysctl changes via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["preview_sysctl"]
+[selection]
+allow = ["preview_sysctl"]
 
 [targets.server]
 ssh_host = "server-ordinary"

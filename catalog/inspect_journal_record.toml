@@ -3,7 +3,8 @@
 # The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["inspect_journal_record"]
+[selection]
+allow = ["inspect_journal_record"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]

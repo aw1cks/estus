@@ -4,7 +4,8 @@
 # Named catalog authority uses a separate reviewed SSH identity and sudo root.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_systemd_unit"]
+[selection]
+allow = ["change_systemd_unit"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]

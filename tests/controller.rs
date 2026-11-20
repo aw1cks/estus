@@ -337,7 +337,8 @@ impl Fixture {
             format!(
                 r#"
 capabilities = {{ named = true }}
-enabled_tools = ["observe_controller"]
+[selection]
+allow = ["observe_controller"]
 [controller]
 workspace_root = {root}
 [limits]

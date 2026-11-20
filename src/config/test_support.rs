@@ -16,6 +16,25 @@ python='/private-authority/python'
 "#
 }
 
+/// Per-target narrowing for the old profile names. A profile that kept named
+/// tools subtracts the builtin kinds it dropped (`deny` keeps the inherited
+/// list), and a profile that dropped named tools lists the builtins it kept.
+pub(super) fn target_narrowing(profile: &str) -> &'static str {
+    match profile {
+        "baseline" => "",
+        "actions-only" => {
+            "selection = { deny = [\"inspect_file\", \"inspect_directory\", \"change_file_write\", \"change_mkdir\", \"change_rename\", \"change_file_remove\", \"change_directory_remove\", \"change_file_replace\", \"exec_command\", \"exec_argv\", \"exec_sudo\"] }"
+        }
+        "read-only-files" => {
+            "selection = { allow = [\"observe_stat\", \"inspect_file\", \"inspect_directory\"] }"
+        }
+        "files-only" => {
+            "selection = { allow = [\"observe_stat\", \"inspect_file\", \"inspect_directory\", \"change_file_write\", \"change_mkdir\", \"change_rename\", \"change_file_remove\", \"change_directory_remove\", \"change_file_replace\"] }"
+        }
+        _ => panic!("unknown test target profile {profile}"),
+    }
+}
+
 pub(super) fn capabilities_toml(profile: &str) -> &'static str {
     match profile {
         "baseline" => {
@@ -38,7 +57,8 @@ pub(super) fn automation_text(global: &str, target: &str, enabled: bool) -> Stri
     format!(
         r#"
 {global_caps}
-enabled_tools={enabled}
+[selection]
+allow={enabled}
 [targets.server]
 ssh_host='native-alias'
 {target_caps}
@@ -58,7 +78,7 @@ result={{kind='ansible_summary'}}
 input_schema={{type='object',additionalProperties=false,required=[],properties={{}}}}
 "#,
         global_caps = capabilities_toml(global),
-        target_caps = capabilities_toml(target),
+        target_caps = target_narrowing(target),
         enabled = if enabled { "['probe']" } else { "[]" }
     )
 }

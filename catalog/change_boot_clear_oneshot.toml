@@ -3,7 +3,8 @@
 # The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_boot_clear_oneshot"]
+[selection]
+allow = ["change_boot_clear_oneshot"]
 
 [targets.server]
 ssh_host = "server-ordinary"

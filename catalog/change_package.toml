@@ -1,7 +1,8 @@
 # Generic cross-distro package state transition via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_package"]
+[selection]
+allow = ["change_package"]
 
 [targets.server]
 ssh_host = "server-ordinary"

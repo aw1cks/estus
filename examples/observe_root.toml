@@ -4,7 +4,8 @@
 # Revision identifies the definition, not the remote executable's content.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_root"]
+[selection]
+allow = ["observe_root"]
 
 [targets.server]
 ssh_host = "server-ordinary"

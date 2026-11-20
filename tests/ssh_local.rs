@@ -4126,7 +4126,8 @@ async fn ssh_named_bindings() -> Result<()> {
         let sleep_path = serde_json::to_string(&sleeper.to_string_lossy())?;
         fs::write(&config, formatdoc! {r#"
             capabilities = {{ named = true }}
-            enabled_tools = ["literal_values", "ordinary_identity", "missing_account", "bounded_pause"]
+            [selection]
+            allow = ["literal_values", "ordinary_identity", "missing_account", "bounded_pause"]
             [ssh]
             config_file = {ssh_config}
             [limits]
@@ -6373,7 +6374,8 @@ async fn ssh_output_argv_and_named_native() -> Result<()> {
         let config = fixture.root.path().join("output-bindings.toml");
         fs::write(&config, formatdoc! {r#"
             capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
-            enabled_tools = ["retained_native"]
+            [selection]
+            allow = ["retained_native"]
             [ssh]
             config_file = {ssh_config}
             [limits]
@@ -6552,7 +6554,8 @@ print(json.dumps({"ok": True}))
             &config,
             formatdoc! {r#"
                 capabilities = {{ named = true }}
-                enabled_tools = ["read_probe", "write_probe"]
+                [selection]
+                allow = ["read_probe", "write_probe"]
                 [ssh]
                 config_file = {ssh_config}
                 [limits]
@@ -7087,7 +7090,8 @@ async fn ssh_native_payload_candidate_and_python_min_discovery_failures() -> Res
                 r#"
 mode = "headless"
 capabilities = {{ named = true }}
-enabled_tools = ["observe_missing_exec", "observe_high_py"]
+[selection]
+allow = ["observe_missing_exec", "observe_high_py"]
 [ssh]
 config_file = {ssh_config:?}
 [targets.plain]
@@ -7321,10 +7325,9 @@ async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
         let config_doc = json!({
             "mode": "headless",
             "capabilities": {"named": true},
-            "enabled_tools": ["preview_kernel_module_load", "change_kernel_module_load"],
+            "selection": {"allow": ["preview_kernel_module_load", "change_kernel_module_load"]},
             "ssh": {"config_file": fixture.ssh_config},
-            "targets": {"plain": {"ssh_host": "plain"}},
-            "rules": {"plain": {"require_preview": true}},
+            "targets": {"plain": {"ssh_host": "plain", "require_preview": true}},
             "automation": {"targets": {"plain": {"destination": "plain", "python": python.to_string_lossy()}}},
             "tools": {
                 "preview_kernel_module_load": {

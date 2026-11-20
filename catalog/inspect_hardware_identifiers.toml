@@ -4,7 +4,8 @@
 # Named catalog authority uses a separate reviewed SSH identity and sudo root.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["inspect_hardware_identifiers"]
+[selection]
+allow = ["inspect_hardware_identifiers"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]

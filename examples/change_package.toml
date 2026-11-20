@@ -13,7 +13,8 @@
 # MCP: change_package {"host":"server","inputs":{"name":["tmux"],"state":"present"}}
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_package"]
+[selection]
+allow = ["change_package"]
 
 [targets.server]
 ssh_host = "server-ordinary"

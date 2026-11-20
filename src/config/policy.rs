@@ -68,20 +68,29 @@ impl Capabilities {
 }
 
 impl Target {
-    pub(super) fn permits_binding(&self, global: Capabilities, name: &str) -> bool {
-        self.capabilities.resolve_with(global).permits_bindings()
-            && self
-                .selected_bindings
-                .as_ref()
-                .is_none_or(|names| names.contains(name))
+    /// The per-target test for a named tool: the operator either selected this
+    /// tool for this host or did not. A named tool's own reviewed tier is
+    /// published metadata, not a second per-host switch.
+    pub(super) fn permits(&self, name: &str) -> bool {
+        self.selected_bindings
+            .as_ref()
+            .is_none_or(|names| names.contains(name))
     }
 
-    pub(super) fn permits_workstation_sudo(&self, global: Capabilities) -> bool {
-        self.capabilities.resolve_with(global).sudo
-            && matches!(
-                self.sudo.workstation_route(),
-                WorkstationSudoRoute::SameAccountRoot | WorkstationSudoRoute::SeparateIdentity(_)
-            )
+    /// The per-target ceiling on the generic builtin surface.
+    pub(super) fn permits_tier(&self, tier: RiskTier) -> bool {
+        self.max_tier.is_none_or(|ceiling| tier <= ceiling)
+    }
+
+    pub(super) fn permits_workstation_sudo(&self) -> bool {
+        matches!(
+            self.sudo.workstation_route(),
+            WorkstationSudoRoute::SameAccountRoot | WorkstationSudoRoute::SeparateIdentity(_)
+        )
+    }
+
+    pub(super) fn requires_preview(&self, global: bool) -> bool {
+        self.require_preview.unwrap_or(global)
     }
 }
 
@@ -384,43 +393,6 @@ impl Config {
         self.targets.is_none()
     }
 
-    pub(crate) fn check_builtin_params(
-        &self,
-        host: &str,
-        tool_name: &str,
-        tool: ToolId,
-        params: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), ToolError> {
-        rules::check_host_params(
-            &self.rules,
-            host,
-            tool_name,
-            risk_tier_for_builtin(tool),
-            params,
-        )
-    }
-
-    pub(crate) fn check_binding_params(
-        &self,
-        host: &str,
-        id: BindingId,
-        params: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), ToolError> {
-        let Some(binding) = self.bindings.get(id) else {
-            return Err(ToolError::policy_denied(
-                "Operation is not authorized",
-                false,
-            ));
-        };
-        rules::check_host_params(
-            &self.rules,
-            host,
-            &binding.name,
-            risk_tier_for_binding(binding),
-            params,
-        )
-    }
-
     pub(crate) fn automation_target(
         &self,
         id: BindingId,
@@ -446,16 +418,10 @@ impl Config {
                 None => None,
             };
             if let Some(target) = target
-                && !target.permits_binding(self.capabilities, &binding.name)
+                && !target.permits(&binding.name)
             {
                 return Err(denied());
             }
-            rules::check_host_tool(
-                &self.rules,
-                host,
-                &binding.name,
-                risk_tier_for_binding(binding),
-            )?;
             static WORKSTATION_SUDO: std::sync::LazyLock<AutomationBecome> =
                 std::sync::LazyLock::new(|| AutomationBecome::Sudo {
                     user: "root".to_owned(),
@@ -487,7 +453,7 @@ impl Config {
                     // program list would otherwise be silently bypassed. An open
                     // destination policy has no target, hence no grant.
                     let target = target.ok_or_else(denied)?;
-                    if !target.permits_workstation_sudo(self.capabilities) {
+                    if !self.capabilities.sudo || !target.permits_workstation_sudo() {
                         return Err(denied());
                     }
                     Some(&*WORKSTATION_SUDO)
@@ -535,16 +501,10 @@ impl Config {
                 .targets
                 .as_ref()
                 .and_then(|targets| targets.get(host))
-                .is_some_and(|target| target.permits_binding(self.capabilities, &binding.name))
+                .is_some_and(|target| target.permits(&binding.name))
         {
             return Err(denied());
         }
-        rules::check_host_tool(
-            &self.rules,
-            host,
-            &binding.name,
-            risk_tier_for_binding(binding),
-        )?;
         match binding.automation_authority() {
             Some(AutomationAuthority::Ordinary) => Ok(ResolvedAutomation {
                 target: Cow::Borrowed(self.automation.targets.get(host).ok_or_else(denied)?),
@@ -596,8 +556,15 @@ impl Config {
         &self.bindings
     }
 
+    /// A target's own flag overrides the global one; an unknown host (raw
+    /// destination mode) uses the global default.
     pub(crate) fn requires_preview(&self, host: &str) -> bool {
-        rules::requires_preview(&self.rules, host)
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .map_or(self.require_preview, |target| {
+                target.requires_preview(self.require_preview)
+            })
     }
 
     pub(crate) fn binding_enabled(&self, id: BindingId) -> bool {
@@ -612,9 +579,7 @@ impl Config {
                             self.targets
                                 .as_ref()
                                 .and_then(|targets| targets.get(name))
-                                .is_some_and(|target| {
-                                    target.permits_binding(self.capabilities, &binding.name)
-                                })
+                                .is_some_and(|target| target.permits(&binding.name))
                         }))
             })
     }
@@ -632,7 +597,7 @@ impl Config {
         };
         let authority = binding.automation_authority();
         targets.iter().any(|(host_name, target)| {
-            target.permits_binding(self.capabilities, &binding.name)
+            target.permits(&binding.name)
                 && match authority {
                     Some(AutomationAuthority::Ordinary) => true,
                     Some(AutomationAuthority::Named(name)) => {
@@ -640,8 +605,7 @@ impl Config {
                             .authorities
                             .get(name)
                             .is_some_and(|authority| authority.targets.contains_key(host_name))
-                            || (self.capabilities.sudo
-                                && target.permits_workstation_sudo(self.capabilities))
+                            || (self.capabilities.sudo && target.permits_workstation_sudo())
                     }
                     None => false,
                 }
@@ -674,15 +638,9 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target.permits_binding(self.capabilities, &binding.name) {
+        if !target.permits(&binding.name) {
             return Err(denied());
         }
-        rules::check_host_tool(
-            &self.rules,
-            host,
-            &binding.name,
-            risk_tier_for_binding(binding),
-        )?;
         let resolved = match binding.sudo() {
             Some((user, program)) => target.sudo.resolve(host, &target.ssh_host, user, program),
             None => self.resolve_ordinary(host),
@@ -701,7 +659,9 @@ impl Config {
     }
 
     pub(crate) fn tool_enabled(&self, tool: ToolId) -> bool {
-        self.capabilities.permits(tool) && (tool != ToolId::Sudo || self.has_sudo())
+        self.capabilities.permits(tool)
+            && self.builtins.contains(tool.wire_name())
+            && (tool != ToolId::Sudo || self.has_sudo())
     }
 
     pub(crate) fn has_sudo(&self) -> bool {
@@ -741,7 +701,7 @@ impl Config {
             | ToolId::Stat
             | ToolId::ListDirectory => {}
         }
-        if !self.capabilities.permits(tool) {
+        if !self.capabilities.permits(tool) || !self.builtins.contains(tool.wire_name()) {
             return Err(denied());
         }
         if self
@@ -749,20 +709,12 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .is_some_and(|target| {
-                !target
-                    .capabilities
-                    .resolve_with(self.capabilities)
-                    .permits(tool)
+                !target.permits(tool.wire_name())
+                    || !target.permits_tier(risk_tier_for_builtin(tool))
             })
         {
             return Err(denied());
         }
-        rules::check_host_tool(
-            &self.rules,
-            host,
-            tool.wire_name(),
-            risk_tier_for_builtin(tool),
-        )?;
         let resolved = self.resolve_ordinary(host)?;
         if matches!(
             risk_tier_for_builtin(tool),
@@ -831,7 +783,7 @@ impl Config {
         let denied = || {
             ToolError::policy_denied("Elevated target, user, or program is not authorized", false)
         };
-        if !self.capabilities.permits(ToolId::Sudo) {
+        if !self.capabilities.permits(ToolId::Sudo) || !self.builtins.contains("exec_sudo") {
             return Err(denied());
         }
         let target = self
@@ -839,19 +791,11 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target
-            .capabilities
-            .resolve_with(self.capabilities)
-            .permits(ToolId::Sudo)
+        if !target.permits(ToolId::Sudo.wire_name())
+            || !target.permits_tier(risk_tier_for_builtin(ToolId::Sudo))
         {
             return Err(denied());
         }
-        rules::check_host_tool(
-            &self.rules,
-            host,
-            ToolId::Sudo.wire_name(),
-            risk_tier_for_builtin(ToolId::Sudo),
-        )?;
         let resolved = target.sudo.resolve(host, &target.ssh_host, user, program)?;
         if self.requires_preview(host) {
             return Err(ToolError::preview_required(
@@ -1106,7 +1050,7 @@ mod tests {
         // The operator-only restriction must not close native open-host mode.
         let open = load_text(
             &format!(
-                "{}\ndestination_policy='open'",
+                "mode='workstation'\n{}",
                 super::super::test_support::capabilities_toml("baseline")
             ),
             &[],
@@ -1128,11 +1072,11 @@ mod tests {
                     "[targets.one.sudo]\nmode='separate-identity'\nssh_host='private-elevated'\n",
                 ] {
                     let g_caps = super::super::test_support::capabilities_toml(global);
-                    let t_caps = super::super::test_support::capabilities_toml(target);
+                    let t_tier = super::super::test_support::target_narrowing(target);
                     let config = load_text(
                         &format!(
                             "{g_caps}\n[targets.one]\n\
-                             ssh_host='private-ordinary'\n{t_caps}\n{sudo}"
+                             ssh_host='private-ordinary'\n{t_tier}\n{sudo}"
                         ),
                         &[],
                     )
@@ -1202,10 +1146,10 @@ mod tests {
             ] {
                 for selected in [false, true] {
                     let g_caps = super::super::test_support::capabilities_toml(global);
-                    let t_caps = super::super::test_support::capabilities_toml(target);
+                    let t_tier = super::super::test_support::target_narrowing(target);
                     let text = format!(
-                        "{g_caps}\nenabled_tools={enabled}\n\
-                         [targets.one]\nssh_host='ordinary-private'\n{t_caps}\n\
+                        "{g_caps}\n[selection]\nallow={enabled}\n\
+                         [targets.one]\nssh_host='ordinary-private'\n{t_tier}\n\
                          [targets.one.sudo]\nmode='separate-identity'\nssh_host='elevated-private'\n\
                          [targets.two]\nssh_host='other-private'\n{definition}",
                         enabled = if selected { "['observe']" } else { "[]" },
@@ -1213,8 +1157,13 @@ mod tests {
                     );
                     let config = load_text(&text, &[]).unwrap();
                     let (id, binding) = config.bindings().entries().next().unwrap();
-                    assert_eq!(config.binding_enabled(id), selected && globally_allowed);
+                    // Publication and dispatch share one per-target answer.
                     let allowed = selected && globally_allowed && target_allowed;
+                    assert_eq!(
+                        config.binding_enabled(id),
+                        allowed,
+                        "{global}/{target}/{selected}"
+                    );
                     let result = config.resolve_binding("one", id);
                     assert_eq!(result.is_ok(), allowed, "{global}/{target}/{selected}");
                     if let Ok(resolved) = result {
@@ -1286,11 +1235,11 @@ mod tests {
                 ] {
                     for selected in [false, true] {
                         let g_caps = super::super::test_support::capabilities_toml(global);
-                        let t_caps = super::super::test_support::capabilities_toml(profile);
+                        let t_tier = super::super::test_support::target_narrowing(profile);
                         let config = load_text(
                             &format!(
-                                "{g_caps}\nenabled_tools={enabled}\n\
-                                 [targets.one]\nssh_host='ordinary-private'\n{t_caps}\n\
+                                "{g_caps}\n[selection]\nallow={enabled}\n\
+                                 [targets.one]\nssh_host='ordinary-private'\n{t_tier}\n\
                                  [targets.one.sudo]\nmode='{mode}'\n{alias}\
                                  users=['root']\nprograms=['/usr/bin/id']\n\
                                  [targets.two]\nssh_host='other-private'\n{elevated}{ordinary}",
@@ -1309,7 +1258,7 @@ mod tests {
                         }];
                         for (id, binding) in config.bindings().entries() {
                             let allowed = selected && global_allowed && target_allowed;
-                            assert_eq!(config.binding_enabled(id), selected && global_allowed);
+                            assert_eq!(config.binding_enabled(id), allowed);
                             let result = config.resolve_binding("one", id);
                             assert_eq!(
                                 result.is_ok(),
@@ -1342,6 +1291,8 @@ mod tests {
                         let discovery = serde_json::to_value(config.targets(&tools)).unwrap();
                         let rows = discovery["targets"].as_array().unwrap();
                         let one = rows.iter().find(|row| row["name"] == "one").unwrap();
+                        // Generic sudo is exec tier, so only a target without a
+                        // narrower ceiling keeps it.
                         let generic_allowed = global == "baseline" && profile == "baseline";
                         let mut expected = Vec::new();
                         if generic_allowed {
@@ -1395,8 +1346,8 @@ mod tests {
             let caps = super::super::test_support::capabilities_toml("actions-only");
             let mut config = load_text(
                 &format!(
-                    "{caps}\nenabled_tools=['observe','ordinary']\n\
-                     [targets.one]\nssh_host='ordinary-private'\n{caps}\n\
+                    "{caps}\n[selection]\nallow=['observe','ordinary']\n\
+                     [targets.one]\nssh_host='ordinary-private'\n\
                      [targets.one.sudo]\nmode='same-account'\n{definition}{ordinary}",
                 ),
                 &[],
@@ -1604,9 +1555,9 @@ mod tests {
                  [targets.actions]\nssh_host='actions-alias'\n{}\n\
                  [targets.implicit]\nssh_host='implicit-alias'",
                 super::super::test_support::capabilities_toml("files-only"),
-                super::super::test_support::capabilities_toml("baseline"),
-                super::super::test_support::capabilities_toml("read-only-files"),
-                super::super::test_support::capabilities_toml("actions-only"),
+                super::super::test_support::target_narrowing("baseline"),
+                super::super::test_support::target_narrowing("read-only-files"),
+                super::super::test_support::target_narrowing("actions-only"),
             ),
             &[],
         )
@@ -1653,11 +1604,11 @@ mod tests {
                  [targets.empty]\nssh_host='private-empty'\n{}\n\
                  [targets.empty.sudo]\nmode='same-account'\nprograms=[]",
                 super::super::test_support::capabilities_toml("baseline"),
-                super::super::test_support::capabilities_toml("read-only-files"),
-                super::super::test_support::capabilities_toml("files-only"),
-                super::super::test_support::capabilities_toml("actions-only"),
-                super::super::test_support::capabilities_toml("baseline"),
-                super::super::test_support::capabilities_toml("baseline"),
+                super::super::test_support::target_narrowing("read-only-files"),
+                super::super::test_support::target_narrowing("files-only"),
+                super::super::test_support::target_narrowing("actions-only"),
+                super::super::test_support::target_narrowing("baseline"),
+                super::super::test_support::target_narrowing("baseline"),
             ),
             &[],
         )
@@ -1686,58 +1637,41 @@ mod tests {
     }
 
     #[test]
-    fn present_target_table_inherits_global_for_omitted_fields_and_false_narrows() {
-        // Global grants files; each target table narrows or inherits differently.
+    fn omitted_target_narrowing_inherits_and_max_tier_only_narrows() {
         let config = load_text(
             r#"
 capabilities = { named = true, file_read = true, file_write = true }
 [targets.inherit]
 ssh_host = 'inherit-alias'
-[targets.narrow]
-ssh_host = 'narrow-alias'
-capabilities = { file_write = false }
-[targets.widen]
-ssh_host = 'widen-alias'
-capabilities = { exec = true }
-[targets.empty]
-ssh_host = 'empty-alias'
-capabilities = {}
+[targets.observe-only]
+ssh_host = 'observe-alias'
+max_tier = "observe"
+[targets.inspect-only]
+ssh_host = 'inspect-alias'
+max_tier = "inspect"
 "#,
             &[],
         )
         .unwrap();
-        // Inherited: a present table that omits a field keeps the global grant.
-        for name in ["inherit", "widen", "empty"] {
-            assert!(config.resolve(name, ToolId::ReadFile).is_ok());
-            assert!(config.resolve(name, ToolId::WriteFile).is_ok());
-            // A table cannot widen past the global ceiling.
-            assert!(config.resolve(name, ToolId::Exec).is_err());
-            assert!(config.resolve(name, ToolId::Sudo).is_err());
-        }
-        // Explicit false narrows; omitted fields still inherit the global grant.
-        assert!(config.resolve("narrow", ToolId::ReadFile).is_ok());
-        assert!(config.resolve("narrow", ToolId::WriteFile).is_err());
-        assert!(config.resolve("narrow", ToolId::Exec).is_err());
-        // Absent table: unchanged "no narrowing" behavior.
-        let absent = load_text(
-            &format!(
-                "{}
-[targets.plain]
-ssh_host='plain-alias'",
-                super::super::test_support::capabilities_toml("baseline")
-            ),
-            &[],
-        )
-        .unwrap();
-        assert!(absent.resolve("plain", ToolId::Exec).is_ok());
-        assert!(absent.resolve("plain", ToolId::Sudo).is_err());
+        // An absent `max_tier` inherits every tier the global ceiling permits.
+        assert!(config.resolve("inherit", ToolId::Stat).is_ok());
+        assert!(config.resolve("inherit", ToolId::ReadFile).is_ok());
+        assert!(config.resolve("inherit", ToolId::WriteFile).is_ok());
+        // The ceiling never widens past the global capabilities.
+        assert!(config.resolve("inherit", ToolId::Exec).is_err());
+        assert!(config.resolve("inherit", ToolId::Sudo).is_err());
+        assert!(config.resolve("observe-only", ToolId::Stat).is_ok());
+        assert!(config.resolve("observe-only", ToolId::ReadFile).is_err());
+        assert!(config.resolve("observe-only", ToolId::WriteFile).is_err());
+        assert!(config.resolve("inspect-only", ToolId::ReadFile).is_ok());
+        assert!(config.resolve("inspect-only", ToolId::WriteFile).is_err());
     }
 
     #[test]
     fn profile_policy_preserves_open_validation_closed_targets_and_resolver_boundaries() {
         let open = load_text(
             &format!(
-                "destination_policy='open'\n{}",
+                "mode='workstation'\n{}",
                 super::super::test_support::capabilities_toml("read-only-files")
             ),
             &[],
@@ -1825,7 +1759,7 @@ ssh_host='plain-alias'",
 workspace_root={root:?}
 [targets.server]
 ssh_host="never-used"
-capabilities = {{ file_read = true }}
+max_tier = "inspect"
 [tools.local]
 description="Controller observation"
 revision="1"
@@ -1841,7 +1775,7 @@ result={{kind="controller_command"}}
         for profile in ["baseline", "actions-only"] {
             let caps = super::super::test_support::capabilities_toml(profile);
             let config = load_text(
-                &format!("{caps}\nenabled_tools=['local']\n{definition}"),
+                &format!("{caps}\n[selection]\nallow=['local']\n{definition}"),
                 &[],
             )
             .unwrap();
@@ -1862,7 +1796,7 @@ result={{kind="controller_command"}}
         for profile in ["files-only", "read-only-files"] {
             let caps = super::super::test_support::capabilities_toml(profile);
             let config = load_text(
-                &format!("{caps}\nenabled_tools=['local']\n{definition}"),
+                &format!("{caps}\n[selection]\nallow=['local']\n{definition}"),
                 &[],
             )
             .unwrap();
@@ -1870,12 +1804,12 @@ result={{kind="controller_command"}}
             assert!(!config.controller_enabled(BindingId(0)));
         }
         assert!(load_text(&definition, &[]).is_ok());
-        assert!(load_text(&format!("enabled_tools=['local']\n{definition}"), &[]).is_err());
+        assert!(load_text(&format!("[selection]\nallow=['local']\n{definition}"), &[]).is_err());
     }
 
     #[test]
     fn missing_and_empty_targets_are_closed_and_open_mode_is_explicit() {
-        for source in ["", "[targets]", "destination_policy='configured'"] {
+        for source in ["", "[targets]"] {
             let config = load_text(source, &[]).unwrap();
             let discovery = serde_json::to_value(config.targets(&catalog())).unwrap();
             assert_eq!(discovery["mode"], "configured", "{source}");
@@ -1892,7 +1826,7 @@ result={{kind="controller_command"}}
         }
         let open = load_text(
             &format!(
-                "{}\ndestination_policy='open'",
+                "mode='workstation'\n{}",
                 super::super::test_support::capabilities_toml("baseline")
             ),
             &[],
@@ -1901,10 +1835,10 @@ result={{kind="controller_command"}}
         assert!(open.resolve("user@example", ToolId::Exec).is_ok());
         let discovery = serde_json::to_value(open.targets(&catalog())).unwrap();
         assert_eq!(discovery["mode"], "open");
+        // The retired switch has its own message and no alias.
         for source in [
-            "destination_policy='open'\n[targets]",
-            "destination_policy='open'\n[targets.one]\nssh_host='one'",
-            "destination_policy='unknown'",
+            "destination_policy='open'",
+            "destination_policy='configured'",
             "destination_policy=true",
         ] {
             assert!(load_text(source, &[]).is_err(), "{source}");
@@ -1992,7 +1926,7 @@ result={{kind="controller_command"}}
         );
         let open = load_text(
             &format!(
-                "{}\ndestination_policy='open'",
+                "mode='workstation'\n{}",
                 super::super::test_support::capabilities_toml("baseline")
             ),
             &[],
@@ -2108,74 +2042,66 @@ mode = "same-account"
     }
 
     #[test]
-    fn capabilities_combine_independently_and_rules_narrow_by_intersection() {
+    fn capabilities_narrow_builtins_and_max_tier_denies_above_the_ceiling() {
         let config = load_text(
             r#"
 mode = "headless"
-capabilities = { named = true, file_read = true }
+capabilities = { named = true, file_read = true, file_write = true }
 [targets.prod-web-01]
 ssh_host = "prod-web-01"
+max_tier = "inspect"
 [targets.dev-01]
 ssh_host = "dev-01"
-[rules."prod-*"]
-deny_tiers = ["exec", "change"]
-allow_tools = ["observe_stat", "inspect_file", "observe_cpu"]
-[rules."*-web-*".constraints.inspect_file.path]
-enum = ["/etc/nginx/nginx.conf", "/etc/hosts"]
-[rules."prod-web-*"]
-allow_tools = ["observe_stat", "inspect_file"]
 "#,
             &[],
         )
         .unwrap();
         assert!(config.tool_enabled(ToolId::Stat));
         assert!(config.tool_enabled(ToolId::ReadFile));
-        assert!(config.tool_enabled(ToolId::ClearTargetQuarantine));
-        assert!(!config.tool_enabled(ToolId::WriteFile));
+        assert!(config.tool_enabled(ToolId::WriteFile));
         assert!(!config.tool_enabled(ToolId::Exec));
         assert!(config.resolve("prod-web-01", ToolId::Stat).is_ok());
         assert!(config.resolve("prod-web-01", ToolId::ReadFile).is_ok());
+        // `max_tier` denies the change-tier write on prod-web-01 only.
+        assert!(config.resolve("prod-web-01", ToolId::WriteFile).is_err());
+        assert!(config.resolve("dev-01", ToolId::WriteFile).is_ok());
         assert!(config.resolve("prod-web-01", ToolId::Exec).is_err());
-        // Rule intersection on prod-web-01 drops observe_cpu (not in prod-web-* allow_tools).
-        assert!(
-            rules::check_host_tool(
-                &config.rules,
-                "prod-web-01",
-                "observe_cpu",
-                RiskTier::Observe
+    }
+
+    #[test]
+    fn per_target_preview_flag_overrides_the_global_default_both_ways() {
+        let text = |global: bool, target: &str| {
+            format!(
+                r#"
+capabilities = {{ named = true }}
+require_preview = {global}
+[targets.one]
+ssh_host = "one"
+{target}
+"#
             )
-            .is_err()
-        );
-        // Parameter constraint on prod-web-01 permits /etc/hosts, denies /etc/shadow.
-        let ok_params = serde_json::json!({"path": "/etc/hosts"})
-            .as_object()
-            .unwrap()
-            .clone();
-        let bad_params = serde_json::json!({"path": "/etc/shadow"})
-            .as_object()
-            .unwrap()
-            .clone();
+        };
         assert!(
-            config
-                .check_builtin_params("prod-web-01", "inspect_file", ToolId::ReadFile, &ok_params)
-                .is_ok()
+            load_text(&text(false, "require_preview = true"), &[])
+                .unwrap()
+                .requires_preview("one")
         );
         assert!(
-            config
-                .check_builtin_params("prod-web-01", "inspect_file", ToolId::ReadFile, &bad_params,)
-                .is_err()
+            !load_text(&text(true, "require_preview = false"), &[])
+                .unwrap()
+                .requires_preview("one")
         );
-        // Conflicting constraints across overlapping wildcard patterns reject configuration.
-        let conflict = load_text(
-            r#"
-[rules."prod-*".constraints.inspect_file.path]
-enum = ["/etc/hosts"]
-[rules."*-web".constraints.inspect_file.path]
-enum = ["/etc/passwd"]
-"#,
-            &[],
+        // An omitted target flag inherits the global one.
+        assert!(
+            load_text(&text(true, ""), &[])
+                .unwrap()
+                .requires_preview("one")
         );
-        assert_eq!(conflict.err().unwrap().field, "rules");
+        assert!(
+            !load_text(&text(false, ""), &[])
+                .unwrap()
+                .requires_preview("one")
+        );
     }
 
     /// Dynamic workstation tool with an ordinary and a named authority route.
@@ -2185,8 +2111,8 @@ enum = ["/etc/passwd"]
             r#"
 mode = "workstation"
 capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
-destination_policy = "configured"
-enabled_tools = ["automation", "catalog"]
+[selection]
+allow = ["automation", "catalog"]
 {targets}
 {authority}
 [tools.automation]
@@ -2231,11 +2157,8 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
         // Workstation mode without a `[targets]` table carries no per-target sudo
         // grant, so a named (privileged) authority must not be published and must
         // never resolve to the uncontrolled workstation root fallback.
-        let text = dynamic_workstation_text("", "").replace(
-            "destination_policy = \"configured\"",
-            "destination_policy = \"open\"",
-        );
-        let config = load_text(&text, &[]).unwrap();
+        // An absent `[targets]` table in workstation mode is the open policy.
+        let config = load_text(&dynamic_workstation_text("", ""), &[]).unwrap();
         assert!(config.targets.is_none(), "open policy has no targets table");
         assert_eq!(config.capabilities, Capabilities::all());
         let (ordinary, named) = dynamic_ids(&config);

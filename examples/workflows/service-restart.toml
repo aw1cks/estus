@@ -9,7 +9,7 @@ tool = "change_systemd_unit"
 authority = "automation:catalog"
 allowed_units = ["estus-fixture.service"]
 #
-# enabled_tools = ["change_systemd_unit"]
+# [selection] allow = ["change_systemd_unit"]
 # [tools.change_systemd_unit]
 # targets = ["plain"]
 # authority = "automation:catalog"

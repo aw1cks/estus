@@ -1,6 +1,7 @@
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["record_identity"]
+[selection]
+allow = ["record_identity"]
 
 [ssh]
 config_file = "/etc/estus/outbound_ssh_config"

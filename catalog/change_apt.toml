@@ -1,7 +1,8 @@
 # Debian/Ubuntu apt escape-hatch package mutation via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_apt"]
+[selection]
+allow = ["change_apt"]
 
 [targets.server]
 ssh_host = "server-ordinary"

@@ -1,7 +1,8 @@
 # RHEL/AlmaLinux/Rocky/Fedora dnf/dnf5 escape-hatch package mutation via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_dnf"]
+[selection]
+allow = ["change_dnf"]
 
 [targets.server]
 ssh_host = "server-ordinary"

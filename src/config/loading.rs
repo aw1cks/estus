@@ -91,17 +91,14 @@ struct Document {
     mode: Mode,
     capabilities: Option<RawCapabilities>,
     disclose_sudo_policy: bool,
-    destination_policy: Option<TargetMode>,
+    require_preview: bool,
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
     quarantine: QuarantineSettings,
     targets: Option<BTreeMap<String, Target>>,
-    rules: BTreeMap<String, rules::RawHostRule>,
     tools: BTreeMap<String, toml::Value>,
-    enabled_tools: Vec<String>,
-    tool_presets: Vec<String>,
-    disabled_tools: Vec<String>,
+    selection: Selection,
     catalog: CatalogSettings,
     controller: Controller,
     automation: Automation,
@@ -113,17 +110,14 @@ impl Default for Document {
             mode: Mode::Headless,
             capabilities: None,
             disclose_sudo_policy: false,
-            destination_policy: None,
+            require_preview: false,
             ssh: Ssh::default(),
             limits: Limits::default(),
             output: crate::output::Limits::default(),
             quarantine: QuarantineSettings::default(),
             targets: None,
-            rules: BTreeMap::new(),
             tools: BTreeMap::new(),
-            enabled_tools: Vec::new(),
-            tool_presets: Vec::new(),
-            disabled_tools: Vec::new(),
+            selection: Selection::default(),
             catalog: CatalogSettings::default(),
             controller: Controller::default(),
             automation: Automation::default(),
@@ -142,23 +136,42 @@ struct QuarantineSettings {
     state_dir: Option<PathBuf>,
 }
 
-fn resolve_catalog_selection(
+/// Resolve the two selection layers: the global `[selection]` publishes names,
+/// and each `[targets.<name>.selection]` narrows that set for its own target.
+/// Everything else about a tool lives in its `[tools]` definition.
+fn resolve_selection(
     document: &mut Document,
+    capabilities: Capabilities,
     base: &Path,
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<(), ConfigError> {
+    // A locally defined name never consults the catalog; a selected name with
+    // no local definition is a catalog template, which is what pulls the
+    // installed inventory in at all. Presets are always catalog data.
+    // Builtin wire names are always definable, so naming one never means "load
+    // the catalog"; only a site tool with no `[tools]` entry does.
+    let builtin_names: BTreeSet<&str> = ToolId::ALL
+        .into_iter()
+        .map(|tool| tool.wire_name())
+        .collect();
     let defined: BTreeSet<String> = document.tools.keys().cloned().collect();
-    let unknown = |names: &[String]| names.iter().any(|n| !defined.contains(n));
-    let target_needs_catalog = document.targets.iter().flat_map(|t| t.values()).any(|t| {
-        t.tool_presets.as_ref().is_some_and(|v| !v.is_empty())
-            || t.enabled_tools.as_deref().is_some_and(unknown)
-            || unknown(&t.disabled_tools)
-    });
+    let unknown = |names: &[String]| {
+        names
+            .iter()
+            .any(|name| !defined.contains(name) && !builtin_names.contains(name.as_str()))
+    };
+    let selection_needs_catalog = |selection: &Selection| {
+        !selection.presets.is_empty() || unknown(&selection.allow) || unknown(&selection.deny)
+    };
+    let target_needs_catalog = document
+        .targets
+        .iter()
+        .flat_map(|t| t.values())
+        .filter_map(|t| t.selection.as_ref())
+        .any(&selection_needs_catalog);
     // A name that has no local definition is enabled from the installed catalog.
-    let needs_catalog = !document.tool_presets.is_empty()
+    let needs_catalog = selection_needs_catalog(&document.selection)
         || target_needs_catalog
-        || unknown(&document.enabled_tools)
-        || unknown(&document.disabled_tools)
         || document.catalog.version.is_some()
         || document.catalog.root.is_some();
     let catalog = if needs_catalog {
@@ -196,81 +209,105 @@ fn resolve_catalog_selection(
     if let Some(manifest) = manifest {
         definitions.extend(manifest.tools.keys().cloned());
     }
-    let selected = crate::catalog::selection::expand(
-        &definitions,
-        manifest,
-        &document.enabled_tools,
-        &document.tool_presets,
-        &document.disabled_tools,
-    )
-    .map_err(|reason| invalid("enabled_tools", reason))?;
+    // A selection names any callable tool. The global default is every builtin
+    // the capability ceiling permits, plus whatever the operator lists; `deny`
+    // always subtracts. Only named tools reach the binding compiler.
+    let permitted_builtins: BTreeSet<String> = ToolId::ALL
+        .into_iter()
+        .filter(|tool| capabilities.permits(*tool))
+        .map(|tool| tool.wire_name().to_owned())
+        .collect();
+    // Name validation accepts every builtin, even one the ceiling removed: a
+    // target may still name it, and the intersection below denies it.
+    let mut definable = definitions.clone();
+    definable.extend(ToolId::ALL.map(|tool| tool.wire_name().to_owned()));
+    let mut global = permitted_builtins.clone();
+    global.extend(
+        crate::catalog::selection::expand(
+            &definable,
+            manifest,
+            &document.selection.allow,
+            &document.selection.presets,
+            &document.selection.deny,
+        )
+        .map_err(|reason| invalid("selection", reason))?,
+    );
+    global.retain(|name| !document.selection.deny.contains(name));
     // Workstation exposure is its own reviewed path; site definitions here
     // describe a configured destination policy and do not apply.
     if let Some(catalog) = &catalog
         && document.mode == Mode::Headless
     {
-        materialize_catalog_tools(document, catalog, &selected)?;
+        // Builtins have no catalog template and need no materialization.
+        let named: BTreeSet<String> = global.difference(&permitted_builtins).cloned().collect();
+        materialize_catalog_tools(document, catalog, &named)?;
     }
     if let Some(targets) = &mut document.targets {
         for target in targets.values_mut() {
-            if target.enabled_tools.is_some()
-                || target.tool_presets.is_some()
-                || !target.disabled_tools.is_empty()
+            // An absent table inherits the global set. A present table either
+            // lists this host's names (`allow`/`presets`) or subtracts from the
+            // inherited set (`deny` only); a table with every list empty denies
+            // every named tool. Nothing can exceed the global set.
+            let Some(selection) = &target.selection else {
+                continue;
+            };
+            let mut names = if selection.presets.is_empty() && selection.allow.is_empty() {
+                global.clone()
+            } else {
+                crate::catalog::selection::expand(
+                    &definable,
+                    manifest,
+                    &selection.allow,
+                    &selection.presets,
+                    &[],
+                )
+                .map_err(|reason| invalid("targets.*.selection", reason))?
+            };
+            if selection.presets.is_empty()
+                && selection.allow.is_empty()
+                && selection.deny.is_empty()
             {
-                let mut allowed = if target.enabled_tools.is_some() || target.tool_presets.is_some()
-                {
-                    crate::catalog::selection::expand(
-                        &definitions,
-                        manifest,
-                        target.enabled_tools.as_deref().unwrap_or(&[]),
-                        target.tool_presets.as_deref().unwrap_or(&[]),
-                        &target.disabled_tools,
-                    )
-                    .map_err(|reason| invalid("targets.*.enabled_tools", reason))?
-                } else {
-                    // Validate disable names even when none is globally selected.
-                    crate::catalog::selection::expand(
-                        &definitions,
-                        manifest,
-                        &[],
-                        &[],
-                        &target.disabled_tools,
-                    )
-                    .map_err(|reason| invalid("targets.*.disabled_tools", reason))?;
-                    let mut inherited = selected.clone();
-                    for name in &target.disabled_tools {
-                        inherited.remove(name);
-                    }
-                    inherited
-                };
-                allowed.retain(|name| selected.contains(name));
-                target.selected_bindings = Some(allowed);
+                names.clear();
             }
+            names.retain(|name| !selection.deny.contains(name) && global.contains(name));
+            target.selected_bindings = Some(names);
         }
     }
-    document.enabled_tools = selected
+    // Builtins are published by the capability ceiling; only named tools are
+    // compiled, so the compiler sees the difference.
+    document.selection.builtins = global.intersection(&permitted_builtins).cloned().collect();
+    // A name every declared target now denies is not published at all, so the
+    // tool list and the per-host answer agree.
+    document.selection.allow = global
         .into_iter()
+        .filter(|name| !permitted_builtins.contains(name))
         .filter(|name| {
             let Some(hosts) = document
                 .tools
                 .get(name)
-                .and_then(|v| v.get("targets"))
+                .and_then(|value| value.get("targets"))
                 .and_then(toml::Value::as_array)
             else {
                 return true;
             };
             hosts.iter().any(|host| {
-                host.as_str()
-                    .and_then(|host| document.targets.as_ref().and_then(|t| t.get(host)))
-                    .is_none_or(|target| {
-                        target
-                            .selected_bindings
-                            .as_ref()
-                            .is_none_or(|allowed| allowed.contains(name))
-                    })
+                host.as_str().is_none_or(|host| {
+                    document
+                        .targets
+                        .as_ref()
+                        .and_then(|targets| targets.get(host))
+                        .is_none_or(|target| {
+                            target
+                                .selected_bindings
+                                .as_ref()
+                                .is_none_or(|allowed| allowed.contains(name))
+                        })
+                })
             })
         })
         .collect();
+    document.selection.presets.clear();
+    document.selection.deny.clear();
     Ok(())
 }
 
@@ -379,7 +416,6 @@ impl Config {
             // no configuration file has to state that it trusts the caller.
             let document = Document {
                 mode: Mode::Workstation,
-                destination_policy: Some(TargetMode::Open),
                 ..Default::default()
             };
             (document, cwd.to_path_buf())
@@ -403,25 +439,14 @@ impl Config {
             }),
         };
 
-        let destination_policy = match (document.mode, document.destination_policy.take()) {
-            (_, Some(policy)) => policy,
-            (Mode::Workstation, None) if document.targets.is_none() => TargetMode::Open,
-            (_, None) => TargetMode::Configured,
-        };
-        match destination_policy {
-            TargetMode::Configured => {
-                document.targets.get_or_insert_with(BTreeMap::new);
-            }
-            TargetMode::Open if document.targets.is_some() => {
-                return Err(invalid(
-                    "destination_policy",
-                    "open mode must not include a targets table",
-                ));
-            }
-            TargetMode::Open => {}
+        // Destination policy is structural, not a second switch: a `[targets]`
+        // table (even an empty one) closes the server to the names it lists,
+        // and its absence leaves the caller naming a raw SSH destination.
+        if document.targets.is_none() && document.mode != Mode::Workstation {
+            document.targets = Some(BTreeMap::new());
         }
 
-        resolve_catalog_selection(&mut document, &base, &env)?;
+        resolve_selection(&mut document, capabilities, &base, &env)?;
         let ssh_override = cli
             .ssh_config
             .or_else(|| env("ESTUS_SSH_CONFIG").map(PathBuf::from));
@@ -515,10 +540,9 @@ impl Config {
             &document.automation,
             document.targets.as_ref(),
         )?;
-        let rules = rules::compile_rules(document.rules)?;
         let mut bindings = Bindings::compile_with_mode(
             document.tools,
-            &document.enabled_tools,
+            &document.selection.allow,
             &document.limits,
             |name| {
                 document
@@ -545,9 +569,7 @@ impl Config {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
                     .map_err(|e| invalid("catalog", e.reason()))?;
                 for name in catalog.workstation_tool_names() {
-                    if document.disabled_tools.iter().any(|d| d == name)
-                        || bindings.entries().any(|(_, b)| b.name == name)
-                    {
+                    if bindings.entries().any(|(_, b)| b.name == name) {
                         continue;
                     }
                     match catalog
@@ -617,7 +639,8 @@ impl Config {
             limits: document.limits,
             output: document.output,
             targets: document.targets,
-            rules,
+            builtins: document.selection.builtins,
+            require_preview: document.require_preview,
             bindings,
             automation: document.automation,
         })
@@ -1323,14 +1346,15 @@ result = {{ kind = "command" }}
         let config = load(&format!(
             r#"
 capabilities = {{ named = true }}
-enabled_tools = ["observe", "other"]
-disabled_tools = ["other"]
+[selection]
+allow = ["observe", "other"]
+deny = ["other"]
 [targets.one]
 ssh_host = "ordinary-one"
-enabled_tools = ["observe"]
+selection = {{ allow = ["observe"] }}
 [targets.two]
 ssh_host = "ordinary-two"
-enabled_tools = ["other"]
+selection = {{ allow = ["other"] }}
 {}{}
 "#,
             definition("observe"),
@@ -1389,13 +1413,14 @@ enabled_tools = ["other"]
         let config = load(&format!(
             r#"
 capabilities = {{ named = true }}
-enabled_tools = ["observe"]
+[selection]
+allow = ["observe"]
 [targets.one]
 ssh_host = "ordinary-one"
-enabled_tools = []
+selection = {{}}
 [targets.two]
 ssh_host = "ordinary-two"
-tool_presets = []
+selection = {{ deny = ["observe"] }}
 {}
 "#,
             definition("observe")
@@ -1423,7 +1448,7 @@ tool_presets = []
         // The health templates run through the automation authority, which the
         // site must configure (and provision separately) exactly as before.
         let text = format!(
-            "capabilities = {{ named = true }}\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[automation.targets.one]\ndestination='one'\npython='/usr/bin/python3'\n"
+            "capabilities = {{ named = true }}\n[selection]\npresets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[automation.targets.one]\ndestination='one'\npython='/usr/bin/python3'\n"
         );
         let config = load(&text).unwrap();
         let enabled: Vec<_> = config

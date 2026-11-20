@@ -10,7 +10,8 @@
 # The base wheel and native package stay independent unless required = true.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = []
+[selection]
+allow = []
 
 [automation]
 required = true

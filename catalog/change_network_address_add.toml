@@ -3,7 +3,8 @@
 # The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_network_address_add"]
+[selection]
+allow = ["change_network_address_add"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]

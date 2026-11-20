@@ -9,7 +9,8 @@
 # MCP: change_apt {"host":"server","inputs":{"name":["tmux"],"state":"absent","purge":true}}
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_apt"]
+[selection]
+allow = ["change_apt"]
 
 [targets.server]
 ssh_host = "server-ordinary"

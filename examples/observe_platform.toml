@@ -8,7 +8,8 @@
 # MCP input: {"host":"server","inputs":{}}
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_platform"]
+[selection]
+allow = ["observe_platform"]
 
 [targets.server]
 ssh_host = "server-ordinary"

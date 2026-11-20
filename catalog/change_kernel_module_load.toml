@@ -3,7 +3,8 @@
 # The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["change_kernel_module_load"]
+[selection]
+allow = ["change_kernel_module_load"]
 
 [targets.server]
 ssh_host = "server-ordinary"

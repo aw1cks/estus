@@ -2,14 +2,12 @@
 # The dev-mcp wrapper itself starts the server with no --config (zero-config
 # workstation mode), so this file is only for:
 #   nix run --no-write-lock-file . -- --config /absolute/path/to/dev-no-targets.toml
-# An empty [targets] table with destination_policy = "configured" authorizes no
-# remote destination: every named tool and exec/sudo request is rejected. Implicit
-# no-config workstation mode is deliberately NOT used here, because that resolves
-# ordinary SSH destinations for any caller.
+# An empty [targets] table authorizes no remote destination: every named tool and
+# exec/sudo request is rejected. Implicit no-config workstation mode is
+# deliberately NOT used here, because that resolves ordinary SSH destinations for
+# any caller.
 mode = "workstation"
 capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
-destination_policy = "configured"
-
 [targets]
 
 [limits]

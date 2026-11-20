@@ -344,8 +344,8 @@ impl Binding {
         site["capabilities"] = toml::Value::try_from(json!({"named":true}))?;
         let site_table = site.as_table_mut().context("site table")?;
         site_table.insert(
-            "enabled_tools".into(),
-            toml::Value::try_from(json!([name]))?,
+            "selection".into(),
+            toml::Value::try_from(json!({"allow": [name]}))?,
         );
         site_table
             .entry("automation")
@@ -477,8 +477,8 @@ impl Binding {
             toml::Value::try_from(json!({"named":true}))?,
         );
         site.insert(
-            "enabled_tools".into(),
-            toml::Value::try_from(json!([name]))?,
+            "selection".into(),
+            toml::Value::try_from(json!({"allow": [name]}))?,
         );
         if !native {
             site.entry("controller")

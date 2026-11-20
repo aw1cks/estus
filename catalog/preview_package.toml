@@ -1,7 +1,8 @@
 # Check-mode preview for generic cross-distro package transitions via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["preview_package"]
+[selection]
+allow = ["preview_package"]
 
 [targets.server]
 ssh_host = "server-ordinary"

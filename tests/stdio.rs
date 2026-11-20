@@ -3103,7 +3103,7 @@ async fn startup_profiles_publish_exact_routes_and_matching_discovery() -> Resul
                 )?;
                 let target = match target_kind {
                     "sudo" => {
-                        "[targets.one]\nssh_host = 'private-backend.invalid'\ncapabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }\n[targets.one.sudo]\nmode = 'same-account'\n"
+                        "[targets.one]\nssh_host = 'private-backend.invalid'\n[targets.one.sudo]\nmode = 'same-account'\n"
                     }
                     "ordinary" => "[targets.one]\nssh_host = 'private-backend.invalid'\n",
                     _ => "[targets]\n",
@@ -3245,26 +3245,24 @@ async fn target_profiles_intersect_policy_before_ssh_without_granting_sudo() -> 
         operation_timeout_secs = 2
         [targets.read]
         ssh_host = 'private-backend-read.invalid'
-        capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }
+        max_tier = 'inspect'
         [targets.read.sudo]
         mode = 'separate-identity'
         ssh_host = 'private-identity.invalid'
         [targets.files]
         ssh_host = 'private-backend-files.invalid'
-        capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }
+        max_tier = 'change'
         [targets.files.sudo]
         mode = 'same-account'
         [targets.actions]
         ssh_host = 'private-backend-actions.invalid'
-        capabilities = { named = true, file_read = false, file_write = false, exec = false, sudo = false }
+        selection = {}
         [targets.actions.sudo]
         mode = 'same-account'
         [targets.base]
         ssh_host = 'private-backend-base.invalid'
-        capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
         [targets.empty]
         ssh_host = 'private-backend-empty.invalid'
-        capabilities = { named = true, file_read = true, file_write = true, exec = true, sudo = true }
         [targets.empty.sudo]
         mode = 'same-account'
         programs = []
@@ -3539,7 +3537,12 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
             "config",
         ),
         ("mode = 'private-profile-secret'\n", "config"),
-        ("[rules.'*']\nunknown_rule_key = true\n", "config"),
+        ("[rules.'*']\nunknown_rule_key = true\n", "rules"),
+        ("enabled_tools = ['private-profile-secret']\n", "selection"),
+        (
+            "[targets.secret]\nssh_host='private-backend.invalid'\ncapabilities = { file_read = true }\n",
+            "targets.*.selection",
+        ),
     ] {
         std::fs::write(&path, text)?;
         let output = timeout(
@@ -3559,7 +3562,8 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
 
 const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
     capabilities = { named = true }
-    enabled_tools = ["inspect_account", "change_account"]
+    [selection]
+    allow = ["inspect_account", "change_account"]
     [ssh]
     config_file = "replacement.conf"
     [limits]
@@ -3574,10 +3578,12 @@ const NAMED_TOOL_CONFIG: &str = indoc::indoc! {r#"
     ssh_host = "private-binding-elevated.invalid"
     [targets.read]
     ssh_host = "private-binding-read.invalid"
-    capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }
+    selection = { deny = ["inspect_account", "change_account"] }
+    max_tier = "inspect"
     [targets.files]
     ssh_host = "private-binding-files.invalid"
-    capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }
+    selection = { deny = ["inspect_account", "change_account"] }
+    max_tier = "change"
     [targets.other]
     ssh_host = "private-binding-other.invalid"
     [tools.inspect_account]
@@ -4028,7 +4034,8 @@ async fn named_tool_output_schema_matches_the_actual_command_route() -> Result<(
 
 const FIXED_SUDO_TOOL_CONFIG: &str = indoc::indoc! {r#"
     capabilities = { named = true }
-    enabled_tools = ["fixed_id", "fixed_printf"]
+    [selection]
+    allow = ["fixed_id", "fixed_printf"]
     [ssh]
     config_file = "replacement.conf"
     [limits]
@@ -4045,19 +4052,20 @@ const FIXED_SUDO_TOOL_CONFIG: &str = indoc::indoc! {r#"
     programs = ["/usr/bin/id", "/usr/bin/printf"]
     [targets.same]
     ssh_host = "private-binding-same.invalid"
-    capabilities = { named = true }
     [targets.same.sudo]
     mode = "same-account"
     users = ["root"]
     programs = ["/usr/bin/id", "/usr/bin/printf"]
     [targets.read]
     ssh_host = "private-binding-read.invalid"
-    capabilities = { named = false, file_read = true, file_write = false, exec = false, sudo = false }
+    selection = { deny = ["fixed_id", "fixed_printf"] }
+    max_tier = "inspect"
     [targets.read.sudo]
     mode = "same-account"
     [targets.files]
     ssh_host = "private-binding-files.invalid"
-    capabilities = { named = false, file_read = true, file_write = true, exec = false, sudo = false }
+    selection = { deny = ["fixed_id", "fixed_printf"] }
+    max_tier = "change"
     [targets.files.sudo]
     mode = "same-account"
     [targets.other]
@@ -4349,10 +4357,7 @@ async fn fixed_sudo_invalid_or_unauthorized_definitions_fail_sanitized_startup()
         FIXED_SUDO_TOOL_CONFIG.replace("users = [\"root\"]", "users = [\"operator\"]");
     cases.push((
         "disabled unauthorized definition",
-        unauthorized.replace(
-            "enabled_tools = [\"fixed_id\", \"fixed_printf\"]",
-            "enabled_tools = []",
-        ),
+        unauthorized.replace("allow = [\"fixed_id\", \"fixed_printf\"]", "allow = []"),
     ));
     cases.push((
         "profile-hidden unauthorized definition",
@@ -4365,10 +4370,7 @@ async fn fixed_sudo_invalid_or_unauthorized_definitions_fail_sanitized_startup()
     cases.push((
         "disabled malformed definition",
         FIXED_SUDO_TOOL_CONFIG
-            .replace(
-                "enabled_tools = [\"fixed_id\", \"fixed_printf\"]",
-                "enabled_tools = []",
-            )
+            .replace("allow = [\"fixed_id\", \"fixed_printf\"]", "allow = []")
             .replace(
                 "authority = { sudo = \"root\" }",
                 "authority = { sudo = \"BINDING_CONFIG_SECRET value\" }",
@@ -4413,7 +4415,8 @@ async fn remote_script_definitions_fail_sanitized_startup_before_mcp() -> Result
     )?;
     let config = indoc::indoc! {r#"
         capabilities = { named = true }
-        enabled_tools = ["observe_script"]
+        [selection]
+        allow = ["observe_script"]
         [ssh]
         config_file = "replacement.conf"
         [targets.base]
@@ -4502,7 +4505,8 @@ impl ControllerProtocolFixture {
         };
         let config = format!(
             r#"capabilities = {{ named = true }}
-enabled_tools = ["observe_controller"]
+[selection]
+allow = ["observe_controller"]
 [ssh]
 config_file = "replacement.conf"
 [limits]
@@ -4515,7 +4519,7 @@ max_file_bytes = 8192
 workspace_root = {}
 [targets.base]
 ssh_host = "controller-protocol-never-connect.invalid"
-capabilities = {{ file_read = true }}
+max_tier = "inspect"
 [tools.observe_controller]
 description = "Observe explicit controller authority."
 revision = "review-controller-1"
@@ -4827,7 +4831,7 @@ async fn controller_enablement_profiles_and_inactive_native_independence() -> Re
         (
             "actions-only",
             "capabilities = { named = true }",
-            Some("enabled_tools = []"),
+            Some("allow = []"),
         ),
         (
             "baseline",
@@ -4837,12 +4841,12 @@ async fn controller_enablement_profiles_and_inactive_native_independence() -> Re
         (
             "files-only",
             "capabilities = { file_read = true, file_write = true }",
-            Some("enabled_tools = [\"observe_controller\"]"),
+            Some("allow = [\"observe_controller\"]"),
         ),
         (
             "read-only-files",
             "capabilities = { file_read = true }",
-            Some("enabled_tools = [\"observe_controller\"]"),
+            Some("allow = [\"observe_controller\"]"),
         ),
     ] {
         let fixture = ControllerProtocolFixture::new()?;
@@ -4854,10 +4858,7 @@ async fn controller_enablement_profiles_and_inactive_native_independence() -> Re
         let mut config = fixture
             .config
             .replace("capabilities = { named = true }", caps)
-            .replace(
-                "enabled_tools = [\"observe_controller\"]",
-                selection.unwrap_or(""),
-            );
+            .replace("allow = [\"observe_controller\"]", selection.unwrap_or(""));
         if selection.is_none() {
             let root_line = format!(
                 "workspace_root = {}\n",
@@ -4962,8 +4963,8 @@ async fn controller_malformed_definitions_fail_sanitized_startup_even_when_inact
         ("built-in collision", "observe_controller", "exec_argv"),
         (
             "duplicate selection",
-            "enabled_tools = [\"observe_controller\"]",
-            "enabled_tools = [\"observe_controller\", \"observe_controller\"]",
+            "allow = [\"observe_controller\"]",
+            "allow = [\"observe_controller\", \"observe_controller\"]",
         ),
     ] {
         let config = fixture.config.replace(from, to);
@@ -4992,10 +4993,7 @@ async fn controller_malformed_definitions_fail_sanitized_startup_even_when_inact
             &fixture
                 .config
                 .replace(&fixture.hash, "CONTROLLER_CONFIG_SECRET")
-                .replace(
-                    "enabled_tools = [\"observe_controller\"]",
-                    "enabled_tools = []",
-                ),
+                .replace("allow = [\"observe_controller\"]", "allow = []"),
         )
         .await?;
     let source_path = serde_json::to_string(fixture.source.to_str().context("source path")?)?;
@@ -5037,10 +5035,7 @@ async fn controller_malformed_definitions_fail_sanitized_startup_even_when_inact
         fixture
             .rejects_startup(
                 &format!("disabled {label}"),
-                &config.replace(
-                    "enabled_tools = [\"observe_controller\"]",
-                    "enabled_tools = []",
-                ),
+                &config.replace("allow = [\"observe_controller\"]", "allow = []"),
             )
             .await?;
     }
@@ -5155,10 +5150,7 @@ async fn remote_transport_failure_never_executes_controller_source_as_fallback()
     );
     let config = fixture
         .config
-        .replace(
-            "enabled_tools = [\"observe_controller\"]",
-            "enabled_tools = [\"remote_only\"]",
-        )
+        .replace("allow = [\"observe_controller\"]", "allow = [\"remote_only\"]")
         .replace("[tools.observe_controller]", "[tools.remote_only]")
         .replace(
             "authority = \"controller\"",
@@ -6752,7 +6744,7 @@ async fn empty_config_defaults_to_headless_named_only() -> Result<()> {
 }
 
 #[tokio::test]
-async fn host_rules_enforce_deny_tiers_allow_tools_and_constraints_before_ssh() -> Result<()> {
+async fn target_tier_denies_above_the_ceiling_before_ssh() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let probe = directory.path().join("rules-probe");
     let replacement = directory.path().join("replacement.conf");
@@ -6773,21 +6765,16 @@ capabilities = { named = true, file_read = true, file_write = true, exec = true 
 config_file = "replacement.conf"
 [targets.prod-web]
 ssh_host = "prod-web.invalid"
-[rules."prod-*"]
-deny_tiers = ["exec", "change"]
-allow_tools = ["observe_stat", "inspect_file"]
-[rules."*-web".constraints.inspect_file.path]
-enum = ["/etc/hosts"]
+max_tier = "inspect"
 "#,
     )?;
     let mut server = Server::start(&["--config", config_path.to_str().context("config")?])?;
     let scenario = async {
         server.initialize().await?;
+        // Above the ceiling: denied before transport.
         for (id, name, arguments) in [
             (2, "exec_command", json!({"host": "prod-web", "command": "true"})),
             (3, "change_file_write", json!({"host": "prod-web", "path": "/tmp/a", "content": "x"})),
-            (4, "inspect_directory", json!({"host": "prod-web", "path": "/etc"})),
-            (5, "inspect_file", json!({"host": "prod-web", "path": "/etc/shadow"})),
         ] {
             server
                 .send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}))
@@ -6795,6 +6782,18 @@ enum = ["/etc/hosts"]
             let reply = server.response(id).await?;
             profile_policy_denied(&reply)?;
         }
+        // At or below the ceiling: policy allows it, so the call proceeds to
+        // transport. There is no per-host argument filtering left to apply, so
+        // any path on an `inspect`-tier tool reaches SSH.
+        server
+            .send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"inspect_file","arguments":{"host":"prod-web","path":"/etc/shadow"}}}))
+            .await?;
+        let reply = server.response(4).await?;
+        ensure!(
+            reply["result"]["structuredContent"]["error"]["code"] == "ssh_connect_failed",
+            "tier-permitted call did not reach transport: {reply}"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -6802,17 +6801,17 @@ enum = ["/etc/hosts"]
     scenario?;
     let (status, stderr) = finished?;
     ensure!(status.success());
-    for line in stderr
+    // Only the tier-permitted call may acquire a transport; no denial may.
+    let masters = stderr
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-    {
-        let record: Value = serde_json::from_slice(line)?;
-        ensure!(
-            record["event"] != "master_start",
-            "rule denial launched SSH: {record}"
-        );
-    }
-    ensure!(!probe.exists(), "rule denial probed SSH");
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter(|record| record["event"] == "master_start")
+        .count();
+    ensure!(
+        masters == 1,
+        "expected one transport for the permitted call, saw {masters}"
+    );
     Ok(())
 }
 
@@ -6828,15 +6827,12 @@ config_file = "replacement.conf"
 [targets.prod-web]
 ssh_host = "private-ssh-target.invalid"
 description = "Production web node"
+max_tier = "inspect"
+require_preview = true
 [targets.prod-web.sudo]
 mode = "same-account"
 users = ["PRIVATE_SUDO_USER"]
 programs = ["/usr/local/bin/PRIVATE_SUDO_PROG"]
-[rules."prod-*"]
-deny_tiers = ["exec", "change"]
-allow_tools = ["observe_stat", "inspect_file"]
-[rules."*-web".constraints.inspect_file.path]
-enum = ["/etc/hosts"]
 "#;
     std::fs::write(directory.path().join("replacement.conf"), "")?;
     std::fs::write(&config_path, base_toml)?;
@@ -6863,7 +6859,7 @@ enum = ["/etc/hosts"]
             .as_str()
             .context("prompt text")?;
         ensure!(text.contains("prod-web") && text.contains("nginx.service"));
-        ensure!(text.contains("deny_tiers") && text.contains("/etc/hosts"));
+        ensure!(text.contains("\"max_tier\": \"inspect\"") && text.contains("\"require_preview\": true"));
         ensure!(!text.contains("observe_systemd_unit`") && !text.contains("inspect_journal`"));
         ensure!(text.contains("`observe_stat`") && text.contains("`inspect_file`"));
         ensure!(!text.contains("private-ssh-target.invalid"));
@@ -6947,10 +6943,10 @@ async fn require_preview_rejects_unqualified_mutations_without_connecting() -> R
         &config_path,
         indoc::indoc! {r#"
             capabilities = { named = true, file_read = true, file_write = true, exec = true }
-            enabled_tools = ["change_ping"]
+            [selection]
+            allow = ["change_ping"]
             [targets.alpha]
             ssh_host = "alpha.invalid"
-            [rules."alpha"]
             require_preview = true
             [tools.change_ping]
             description = "Unqualified native argv mutation."

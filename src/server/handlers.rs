@@ -697,47 +697,6 @@ impl ServerHandler for Estus {
             );
             return Err(ErrorData::invalid_params("Tool is not registered", None));
         }
-        if let Some(args) = &request.arguments
-            && let Some(serde_json::Value::String(host)) = args.get("host")
-            && self
-                .state
-                .input_schemas
-                .get(request.name.as_ref())
-                .is_some_and(|route| {
-                    route
-                        .validator
-                        .is_valid(&serde_json::Value::Object(args.clone()))
-                })
-        {
-            let check = match self.state.tools.get_by_name(request.name.as_ref()) {
-                Some(crate::config::ToolKey::Builtin(id)) => self
-                    .state
-                    .config
-                    .check_builtin_params(host, request.name.as_ref(), id, args),
-                Some(crate::config::ToolKey::Binding(id)) => {
-                    self.state.config.check_binding_params(host, id, args)
-                }
-                None => Ok(()),
-            };
-            if let Err(error) = check {
-                let budget = ReplyBudget::new(&context.id)?;
-                let metadata = Metadata {
-                    request_id: &context.id,
-                    tool: request.name.as_ref(),
-                    host: self.state.admission.contains(host).then_some(host.as_str()),
-                    identity_role: IdentityRole::Ordinary,
-                    sudo_mode: None,
-                    user: None,
-                    program: None,
-                    binding_revision: None,
-                    executor: None,
-                };
-                metadata.reject(Instant::now(), &error);
-                return budget
-                    .result(ToolReply::<serde_json::Value>::failure(error))
-                    .map(Into::into);
-            }
-        }
         let scope = self
             .state
             .progress

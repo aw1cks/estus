@@ -5,7 +5,7 @@
 tool = "observe_host_summary"
 authority = "automation"
 #
-# enabled_tools = ["observe_host_summary"] in provisioned-site.toml; no input or
+# [selection] allow = ["observe_host_summary"] in provisioned-site.toml; no input or
 # fixed policy changes are needed. To read the collector first:
 # estus catalog export --tool observe_host_summary --output health-export
 # Review health-export/payloads/observe_host_summary/{collector.py,manifest.json}.

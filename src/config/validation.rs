@@ -17,12 +17,60 @@ fn authority_path(value: &str, field: &'static str) -> Result<(), ConfigError> {
 
 /// Retired sections need their own message: serde would report them as an
 /// unknown field, which is true but does not tell an operator what to do.
+/// Every retired spelling names its replacement; no alias is accepted.
 pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     if value.get("directory").is_some() {
         return Err(invalid(
             "directory",
             "is no longer supported; remove the [directory] section",
         ));
+    }
+    if value.get("rules").is_some() {
+        return Err(invalid(
+            "rules",
+            "is no longer supported; use [targets.<host>].selection, max_tier and require_preview, plus [tools.<name>].constraints",
+        ));
+    }
+    if value.get("destination_policy").is_some() {
+        return Err(invalid(
+            "destination_policy",
+            "is no longer supported; a [targets] table lists destinations and its absence allows raw ones",
+        ));
+    }
+    for key in ["enabled_tools", "tool_presets", "disabled_tools"] {
+        if value.get(key).is_some() {
+            return Err(invalid(
+                "selection",
+                "replaces enabled_tools, tool_presets and disabled_tools with preset, allow and deny lists",
+            ));
+        }
+    }
+    if let Some(targets) = value.get("targets").and_then(toml::Value::as_table) {
+        for target in targets.values().filter_map(toml::Value::as_table) {
+            for key in [
+                "enabled_tools",
+                "tool_presets",
+                "disabled_tools",
+                "capabilities",
+            ] {
+                if target.get(key).is_some() {
+                    return Err(invalid(
+                        "targets.*.selection",
+                        "replaces per-target enabled_tools, tool_presets and disabled_tools; per-target capabilities moved to selection, max_tier and sudo",
+                    ));
+                }
+            }
+            if let Some(tools) = target.get("tools").and_then(toml::Value::as_table) {
+                for tool in tools.values().filter_map(toml::Value::as_table) {
+                    if tool.get("constraints").is_some() {
+                        return Err(invalid(
+                            "targets.*.selection",
+                            "does not accept per-host constraints; restrict the domain site-wide in [tools.<name>].constraints",
+                        ));
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -538,8 +586,8 @@ mod tests {
                             };
                             let result = load_text(
                                 &format!(
-                                    "{caps}\nenabled_tools={enabled}\n\
-                                     [targets.one]\nssh_host='secret_ordinary'\n{caps}\n\
+                                    "{caps}\n[selection]\nallow={enabled}\n\
+                                     [targets.one]\nssh_host='secret_ordinary'\n\
                                      [targets.one.sudo]\nmode='{mode}'\n{alias}{policy}\n\
                                      [targets.two]\nssh_host='secret_second'\n{definition}",
                                 ),
@@ -566,7 +614,7 @@ mod tests {
         for enabled in ["[]", "['observe']"] {
             let error = load_text(
                 &format!(
-                    "enabled_tools={enabled}\n\
+                    "[selection]\nallow={enabled}\n\
                      [targets.one]\nssh_host='secret_ordinary'\n{definition}",
                 ),
                 &[],
@@ -581,11 +629,15 @@ mod tests {
     fn binding_startup_rejects_missing_targets_selection_and_invalid_disabled_definitions() {
         let definition = binding_definition();
         for text in [
-            format!("enabled_tools=['observe']\n{definition}"),
-            format!("enabled_tools=['observe']\n[targets.two]\nssh_host='private'\n{definition}"),
-            format!("enabled_tools=['missing']\n[targets.one]\nssh_host='private'\n{definition}"),
+            format!("[selection]\nallow=['observe']\n{definition}"),
             format!(
-                "enabled_tools=['observe','observe']\n[targets.one]\nssh_host='private'\n{definition}"
+                "[selection]\nallow=['observe']\n[targets.two]\nssh_host='private'\n{definition}"
+            ),
+            format!(
+                "[selection]\nallow=['missing']\n[targets.one]\nssh_host='private'\n{definition}"
+            ),
+            format!(
+                "[selection]\nallow=['observe','observe']\n[targets.one]\nssh_host='private'\n{definition}"
             ),
             format!(
                 "[targets.one]\nssh_host='private'\n{}",
@@ -620,19 +672,27 @@ mod tests {
             ),
             (
                 "[targets.secret_target]\nssh_host='secret_alias'\ncapabilities={exec='secret_payload'}".to_owned(),
-                "config",
+                "targets.*.selection",
             ),
             (
                 "[rules.'*']\nunknown_rule_key=true".to_owned(),
-                "config",
+                "rules",
             ),
             (
                 "[rules.'*']\nrequire_preview='secret_payload'".to_owned(),
-                "config",
+                "rules",
             ),
             (
                 "[rules.'*']\ndeny_tiers=['secret_payload']".to_owned(),
-                "config",
+                "rules",
+            ),
+            (
+                "enabled_tools=['secret_payload']".to_owned(),
+                "selection",
+            ),
+            (
+                "[targets.secret_target]\nssh_host='secret_alias'\ndisabled_tools=['secret_payload']".to_owned(),
+                "targets.*.selection",
             ),
         ] {
             let error = load_text(&text, &[]).err().unwrap();

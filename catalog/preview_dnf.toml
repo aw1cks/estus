@@ -1,7 +1,8 @@
 # Check-mode preview for RHEL/AlmaLinux/Rocky/Fedora dnf/dnf5 package transitions via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["preview_dnf"]
+[selection]
+allow = ["preview_dnf"]
 
 [targets.server]
 ssh_host = "server-ordinary"

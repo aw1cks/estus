@@ -1116,7 +1116,8 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
                 "{}{baseline}{}",
                 indoc::indoc! {r#"
                     capabilities = { named = true }
-                    enabled_tools = ["ordinary_identity", "root_identity", "root_literal"]
+                    [selection]
+                    allow = ["ordinary_identity", "root_identity", "root_literal"]
                 "#},
                 indoc::indoc! {r#"
                     [targets.locked]

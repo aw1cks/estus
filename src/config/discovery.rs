@@ -37,8 +37,8 @@ struct TargetSummaries<'a> {
     targets: Option<&'a BTreeMap<String, Target>>,
     tools: &'a ToolCatalog,
     capabilities: Capabilities,
+    builtins: &'a BTreeSet<String>,
     bindings: &'a Bindings,
-    rules: &'a [HostRule],
 }
 
 impl Serialize for TargetSummaries<'_> {
@@ -52,11 +52,10 @@ impl Serialize for TargetSummaries<'_> {
                 permitted_operations: PermittedOperations {
                     tools: self.tools,
                     bindings: self.bindings,
-                    rules: self.rules,
                     target_name: name,
-                    sudo: &target.sudo,
-                    effective_capabilities: target.capabilities.resolve_with(self.capabilities),
-                    selection: target.selected_bindings.as_ref(),
+                    capabilities: self.capabilities,
+                    builtins: self.builtins,
+                    target: Some(target),
                 },
                 observed_capabilities: ObservedCapabilities::Unknown,
             },
@@ -64,14 +63,19 @@ impl Serialize for TargetSummaries<'_> {
     }
 }
 
+/// The published answer for one host. It repeats the dispatch decision with
+/// the same per-target test, so an operator and an agent read one policy.
 struct PermittedOperations<'a> {
     tools: &'a ToolCatalog,
     bindings: &'a Bindings,
-    rules: &'a [HostRule],
     target_name: &'a str,
-    sudo: &'a Sudo,
-    effective_capabilities: Capabilities,
-    selection: Option<&'a BTreeSet<String>>,
+    /// The global `[capabilities]` ceiling is the only capability gate.
+    capabilities: Capabilities,
+    /// Builtin names the global selection published.
+    builtins: &'a BTreeSet<String>,
+    /// `None` is raw-destination mode: no configured target, hence no sudo
+    /// grant and no selection or tier narrowing.
+    target: Option<&'a Target>,
 }
 
 impl Serialize for PermittedOperations<'_> {
@@ -82,53 +86,37 @@ impl Serialize for PermittedOperations<'_> {
                 .iter()
                 .filter(|entry| match entry.id {
                     ToolKey::Builtin(id) => {
-                        self.effective_capabilities.permits(id)
-                            && rules::check_host_tool(
-                                self.rules,
-                                self.target_name,
-                                entry.name.as_ref(),
-                                super::policy::risk_tier_for_builtin(id),
-                            )
-                            .is_ok()
+                        // The test catalogue renames builtins, so match by ID
+                        // rather than by published name.
+                        let callable = self.capabilities.permits(id)
+                            && self.builtins.contains(id.wire_name())
                             && match id {
                                 ToolId::Targets
                                 | ToolId::ReadOutput
                                 | ToolId::ClearTargetQuarantine => false,
-                                ToolId::Sudo => self.sudo.permits_programs(),
-                                ToolId::Exec
-                                | ToolId::Run
-                                | ToolId::ReadFile
-                                | ToolId::WriteFile
-                                | ToolId::Mkdir
-                                | ToolId::Rename
-                                | ToolId::RemoveFile
-                                | ToolId::RemoveDirectory
-                                | ToolId::ReplaceFile
-                                | ToolId::Stat
-                                | ToolId::ListDirectory => true,
-                            }
-                    }
-                    ToolKey::Binding(id) => {
-                        self.effective_capabilities.permits_bindings()
-                            && self.bindings.get(id).is_some_and(|binding| {
-                                binding.enabled()
-                                    && self
-                                        .selection
-                                        .is_none_or(|names| names.contains(entry.name.as_ref()))
-                                    && !binding.is_controller()
-                                    && binding.permits_host(self.target_name)
-                                    && rules::check_host_tool(
-                                        self.rules,
-                                        self.target_name,
-                                        entry.name.as_ref(),
-                                        super::policy::risk_tier_for_binding(binding),
-                                    )
-                                    .is_ok()
-                                    && binding.sudo().is_none_or(|(user, program)| {
-                                        self.sudo.permits(user, program)
-                                    })
+                                ToolId::Sudo => self
+                                    .target
+                                    .is_some_and(|target| target.sudo.permits_programs()),
+                                _ => true,
+                            };
+                        callable
+                            && self.target.is_none_or(|target| {
+                                target.permits(id.wire_name())
+                                    && target.permits_tier(super::policy::risk_tier_for_builtin(id))
                             })
                     }
+                    ToolKey::Binding(id) => self.bindings.get(id).is_some_and(|binding| {
+                        self.capabilities.permits_bindings()
+                            && binding.enabled()
+                            && !binding.is_controller()
+                            && binding.permits_host(self.target_name)
+                            && self.target.is_none_or(|target| {
+                                target.permits(entry.name.as_ref())
+                                    && binding.sudo().is_none_or(|(user, program)| {
+                                        target.sudo.permits(user, program)
+                                    })
+                            })
+                    }),
                 })
                 .map(|entry| entry.name.as_ref()),
         )
@@ -168,8 +156,8 @@ impl Config {
                 targets: self.targets.as_ref(),
                 tools,
                 capabilities: self.capabilities,
+                builtins: &self.builtins,
                 bindings: &self.bindings,
-                rules: &self.rules,
             },
             limits: DiscoveryLimits {
                 connect_timeout_secs: self.limits.connect_timeout_secs,
@@ -203,89 +191,30 @@ impl Config {
         tools: &ToolCatalog,
         quarantine: Option<(String, &'static str, &'static str)>,
     ) -> Option<serde_json::Value> {
-        let (configured, effective_caps, sudo_ref, selection, description, labels) =
-            match self.targets.as_ref() {
-                Some(targets) => {
-                    let target = targets.get(host)?;
-                    (
-                        true,
-                        target.capabilities.resolve_with(self.capabilities),
-                        Some(&target.sudo),
-                        target.selected_bindings.as_ref(),
-                        target.description.as_deref(),
-                        &target.labels,
-                    )
+        let target = match self.targets.as_ref() {
+            Some(targets) => Some(targets.get(host)?),
+            None => {
+                if !self.allows_dynamic_hosts() || destination(host, "host").is_err() {
+                    return None;
                 }
-                None => {
-                    if !self.allows_dynamic_hosts() || destination(host, "host").is_err() {
-                        return None;
-                    }
-                    static EMPTY_LABELS: BTreeMap<String, String> = BTreeMap::new();
-                    (false, self.capabilities, None, None, None, &EMPTY_LABELS)
-                }
-            };
+                None
+            }
+        };
+        static EMPTY_LABELS: BTreeMap<String, String> = BTreeMap::new();
+        let (configured, description, labels) = match target {
+            Some(target) => (true, target.description.as_deref(), &target.labels),
+            None => (false, None, &EMPTY_LABELS),
+        };
+        let sudo_ref = target.map(|target| &target.sudo);
         let permitted = PermittedOperations {
             tools,
             bindings: &self.bindings,
-            rules: &self.rules,
             target_name: host,
-            sudo: sudo_ref.unwrap_or(&Sudo::Disabled),
-            effective_capabilities: effective_caps,
-            selection,
+            capabilities: self.capabilities,
+            builtins: &self.builtins,
+            target,
         };
-        let matching_rules: Vec<serde_json::Value> = self
-            .rules
-            .iter()
-            .filter(|rule| rules::wildcard_match(&rule.pattern, host))
-            .map(|rule| {
-                let constraints: BTreeMap<&str, BTreeMap<&str, serde_json::Value>> = rule
-                    .constraints
-                    .iter()
-                    .map(|(tool, params)| {
-                        let map = params
-                            .iter()
-                            .map(|(param, c)| {
-                                let mut obj = serde_json::Map::new();
-                                if let Some(values) = &c.allowed_values {
-                                    obj.insert(
-                                        "enum".into(),
-                                        serde_json::to_value(values)
-                                            .unwrap_or(serde_json::Value::Null),
-                                    );
-                                }
-                                if let Some(val) = &c.exact_value {
-                                    obj.insert(
-                                        "const".into(),
-                                        serde_json::to_value(val)
-                                            .unwrap_or(serde_json::Value::Null),
-                                    );
-                                }
-                                if let Some(n) = c.min_length {
-                                    obj.insert("min_length".into(), n.into());
-                                }
-                                if let Some(n) = c.max_length {
-                                    obj.insert("max_length".into(), n.into());
-                                }
-                                if let Some(n) = c.minimum {
-                                    obj.insert("minimum".into(), n.into());
-                                }
-                                if let Some(n) = c.maximum {
-                                    obj.insert("maximum".into(), n.into());
-                                }
-                                (param.as_str(), serde_json::Value::Object(obj))
-                            })
-                            .collect();
-                        (tool.as_str(), map)
-                    })
-                    .collect();
-                serde_json::json!({
-                    "pattern": rule.pattern,
-                    "deny_tiers": rule.deny_tiers,
-                    "allow_tools": rule.allow_tools,
-                    "constraints": constraints,
-                })
-            })
-            .collect();
+        let capabilities = self.capabilities;
         let sudo_mode = sudo_ref.map_or(SudoMode::Disabled, Sudo::mode);
         let mut summary = serde_json::json!({
             "host": host,
@@ -294,14 +223,15 @@ impl Config {
             "description": description,
             "labels": labels,
             "capabilities": {
-                "named": effective_caps.named,
-                "file_read": effective_caps.file_read,
-                "file_write": effective_caps.file_write,
-                "exec": effective_caps.exec,
-                "sudo": effective_caps.sudo,
+                "named": capabilities.named,
+                "file_read": capabilities.file_read,
+                "file_write": capabilities.file_write,
+                "exec": capabilities.exec,
+                "sudo": capabilities.sudo,
             },
+            "max_tier": target.and_then(|target| target.max_tier),
+            "require_preview": self.requires_preview(host),
             "sudo_mode": sudo_mode,
-            "matching_rules": matching_rules,
             "permitted_operations": permitted,
             "quarantine": match quarantine {
                 Some((authority, executor, cause)) => serde_json::json!({

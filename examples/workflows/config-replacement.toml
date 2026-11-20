@@ -11,11 +11,9 @@
 # delete .estus-replace-* paths whose ownership/outcome is uncertain.
 mode = "headless"
 capabilities = { file_read = true, file_write = true }
-destination_policy = "configured"
 
 [ssh]
 config_file = "/etc/estus/replacement_ssh_config"
 
 [targets.configuration]
 ssh_host = "replacement"
-capabilities = { file_read = true, file_write = true }

@@ -20,12 +20,12 @@ Move the setting to `[ssh] executable = "/path/to/ssh"` (preserving any existing
 `config_file` in that table), or use the shared `ESTUS_SSH` environment variable.
 The selection now applies to native SSH, doctor and automation alike.
 
-Destination authority is closed by default: no configuration, an omitted targets
-table and an empty `[targets]` table all authorize no remote destination.
-Configurations that deliberately accept caller-selected SSH destinations must
-set `destination_policy = "open"` at the TOML root and omit the targets table.
-Combining open mode with any targets table is rejected. Otherwise only exact
-configured logical names are accepted; backend aliases do not grant authority.
+Destination authority is closed by default and is decided by shape alone: any
+`[targets]` table (even an empty one) authorizes exactly the logical names it
+lists, and its absence means the caller supplies a raw SSH destination. In
+headless mode an absent table is filled in as an empty one, so a headless
+configuration is always closed. Only exact configured logical names are
+accepted; backend aliases never grant authority. There is no second switch.
 
 Workstation mode is an explicit opt-in: pass `--workstation` (or set
 `ESTUS_WORKSTATION`) and omit the targets table, or declare
@@ -39,11 +39,8 @@ exposure. `mode = "workstation"` enables all five capability ceilings (`named`,
 and open resolution never elevates: dynamic catalog bindings that require
 `automation:<authority>` stay unpublished unless a configured target grants
 unrestricted root sudo or a matching `[automation.authorities.<name>]` mapping
-exists. Per-target `[targets.<name>.capabilities]` fields only narrow the global
-set: an omitted field inherits the global capability, an explicit `false` narrows it
-for that target, and an explicit `true` is accepted as a no-op because a target can
-never widen past the global ceiling. An absent `[capabilities]` table is unchanged:
-no narrowing at all.
+exists. There is no per-target capability table: a target narrows by naming the
+tools it keeps (`selection`) and by setting a `max_tier` ceiling.
 
 ## Base wheel
 
@@ -939,10 +936,12 @@ and fixed arguments:
 ```toml
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_cpu", "observe_memory", "observe_pressure"]
+
+[selection]
+allow = ["observe_cpu", "observe_memory", "observe_pressure"]
 
 [catalog]
-version = "8"          # optional assertion; must match the installed inventory
+version = "9"          # optional assertion; must match the installed inventory
 
 [targets.server]
 ssh_host = "server-ordinary"
@@ -959,7 +958,8 @@ estus catalog export --preset linux-health --output ./health   # review only
 estus --config ./site.toml
 ```
 
-`tool_presets` works the same way and needs no export. Each selected catalog name
+`[selection] presets = ["linux-health"]` works the same way and needs no export.
+Each selected catalog name
 whose `[tools.<name>]` table is absent — or present without `execution` — is
 materialized from the installed definition, and the table's keys override the
 installed ones:
@@ -994,11 +994,30 @@ rejected rather than silently ignored.
 
 ### Selection, authority and upgrades
 
-Global named selection is preset membership plus `enabled_tools`, minus
-`disabled_tools`. Target selectors only narrow that result; omission inherits,
-explicit empty selection denies, and global disable always wins. Unknown or
-duplicate names fail. Catalog templates are inert until reviewed definitions
-are supplied; up to 256 named bindings are supported.
+Effective permission for one `(host, tool)` pair is decided in two places:
+
+1. the global `[capabilities]` ceiling, which publishes the builtin surface and
+   gates catalog bindings (`named`);
+2. that host's `[targets.<host>]` entry: its `selection`, `max_tier`,
+   `require_preview` and `sudo` grant.
+
+A third place exists only for catalog tools: the site-wide
+`[tools.<name>]` overlay (`targets`, `authority`, `fixed_args`, `constraints`,
+`input_schema`, `input_map`, `limits`).
+
+`[selection]` has `presets`, `allow` and `deny`. Presets are catalog data and
+only name tools. The global default is every builtin the capability ceiling
+permits, plus `allow`/`presets`; `deny` always subtracts. A target's
+`[targets.<host>.selection]` is the same shape and only narrows the global set:
+`allow`/`presets` re-list what that host may call, `deny` subtracts, an empty
+table denies every named tool, and an omitted table inherits. Unknown or
+duplicate names fail. Catalog templates are inert until reviewed definitions are
+supplied; up to 256 named bindings are supported.
+
+`max_tier` (`observe` < `inspect` < `preview` < `change` < `exec`) denies any
+builtin whose published tier exceeds it on that host. `require_preview` is one
+global flag with an optional per-target override, and applies to `change`/`exec`
+tier work.
 
 `catalog.version` is an optional assertion: when present it must equal the
 installed inventory version, so a reviewed pin cannot silently adopt an upgrade.
@@ -1012,8 +1031,66 @@ activation; an edited collector fails to load.
 independent exposure ceilings, **not** task presets. Explicit configuration files
 default to `mode = "headless"` (`named = true` only); no-config startup needs the
 explicit `--workstation` opt-in to enable all five ceilings with dynamic ordinary
-SSH resolution. `[rules."<pattern>"]` narrows per-host permissions via `deny_tiers`,
-`allow_tools`, and per-tool `constraints`. Capabilities are not OS/account sandboxes.
+SSH resolution. Capabilities are not OS/account sandboxes.
+
+#### Per-host policy for catalog tools
+
+Catalog domain policy is site-wide, in `[tools.<name>].constraints`. When two
+hosts genuinely need different allowlists, declare a distinct definition name and
+select it only where it applies:
+
+```toml
+[selection]
+allow = ["change_systemd_unit", "change_systemd_unit_web"]
+
+[tools.change_systemd_unit]
+targets = ["db-1"]
+authority = "automation:catalog"
+constraints = { allowed_units = ["postgresql.service"] }
+
+[tools.change_systemd_unit_web]
+targets = ["web-1"]
+authority = "automation:catalog"
+constraints = { allowed_units = ["nginx.service"] }
+
+[targets.db-1]
+ssh_host = "db-1-ordinary"
+selection = { allow = ["change_systemd_unit"] }
+
+[targets.web-1]
+ssh_host = "web-1-ordinary"
+selection = { allow = ["change_systemd_unit_web"] }
+```
+
+There is no longer any per-host argument filtering for the generic `exec_*` and
+file tools: `inspect_file`, `change_file_write`, `exec_command` and friends take
+whatever the caller sends, on any host whose ceiling and tier permit them. A
+pathname or command boundary is an OS boundary, not a config one — use the
+target's `sudo` `programs` allowlist, a capability ceiling that removes the tool,
+and the account's own permissions.
+
+#### Migrating an older configuration
+
+Every retired key is rejected at startup with a message naming its replacement;
+no alias is accepted.
+
+| Retired | Replacement |
+| --- | --- |
+| `enabled_tools`, `tool_presets`, `disabled_tools` | `[selection] allow`, `presets`, `deny` |
+| `[targets.<t>] enabled_tools`, `tool_presets`, `disabled_tools` | `[targets.<t>.selection]` with the same three keys |
+| `[targets.<t>.capabilities]` | `[targets.<t>.selection]` to name the tools that stay, and `max_tier` for a whole-tier ceiling |
+| `[rules."<pattern>"] deny_tiers` | `[targets.<t>] max_tier` (exact host names, no globs) |
+| `[rules."<pattern>"] allow_tools` | `[selection]` and `[targets.<t>.selection]` |
+| `[rules."<pattern>"] require_preview` | global `require_preview`, or `[targets.<t>] require_preview` |
+| `[rules."<pattern>".constraints]` | `[tools.<name>].constraints`, site-wide; a host-specific allowlist is a second definition name |
+| `destination_policy` | a `[targets]` table lists destinations; its absence allows raw ones |
+
+An argument allowlist under `[rules]` was only ever a request filter — it ran
+before dispatch on the raw argument map, with no path canonicalisation, no
+`..`/symlink resolution and no protection against an equivalent spelling — so
+removing it removes no enforcement boundary. What it did enforce, whole-tool
+denial and a risk-tier ceiling, survives unchanged as `selection` and
+`max_tier`.
 
 Every registered tool publishes `_meta.risk_tier` (`observe`, `inspect`, `preview`,
 `change`, `exec`). For MCP client approval rules, allow exact `observe_*` tools
@@ -1223,7 +1300,8 @@ Configure the `server-ordinary` SSH alias, identity and host-key policy, then
 enable the tool by name in a site configuration:
 
 ```toml
-enabled_tools = ["observe_host_summary"]
+[selection]
+allow = ["observe_host_summary"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]
@@ -1286,7 +1364,8 @@ changes services/sysctls or hotplugs CPUs.
 Enable it by name in the site configuration from above:
 
 ```toml
-enabled_tools = ["observe_cpu"]
+[selection]
+allow = ["observe_cpu"]
 ```
 
 The example permits only `server`, read effects and a20-second execution budget.
@@ -1364,7 +1443,8 @@ Accounting and topology semantics follow the kernel's
 No sudo, service changes or sysctl writes occur.
 
 ```toml
-enabled_tools = ["observe_memory"]
+[selection]
+allow = ["observe_memory"]
 ```
 
 Nothing is executed until a call arrives. The definition permits only `server`,

@@ -3,7 +3,8 @@
 # The site supplies targets, authority and fixed policy; the collector digest is checked at load.
 mode = "headless"
 capabilities = { named = true }
-enabled_tools = ["observe_storage_mounts"]
+[selection]
+allow = ["observe_storage_mounts"]
 [targets.server]
 ssh_host = "server-ordinary"
 [automation.targets.server]
