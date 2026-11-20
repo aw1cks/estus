@@ -3,9 +3,13 @@
   "mcpServers": {
     "estus-dev": {
       "type": "stdio",
-      "enabled": false,
+      "enabled": true,
       "command": "nix",
-      "args": ["run", "--no-write-lock-file", ".#dev-mcp"],
+      "args": [
+        "run",
+        "--no-write-lock-file",
+        ".#dev-mcp"
+      ],
       "cwd": ".",
       "timeout": 300000
     }

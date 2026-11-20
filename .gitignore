@@ -1,3 +1,4 @@
+/.omp/mcp.json.lock
 /target/
 /result
 /result-*
