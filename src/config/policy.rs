@@ -77,7 +77,11 @@ impl Target {
     }
 
     pub(super) fn permits_workstation_sudo(&self) -> bool {
-        Capabilities::from(self.capabilities).sudo && self.sudo.workstation_route().is_some()
+        Capabilities::from(self.capabilities).sudo
+            && matches!(
+                self.sudo.workstation_route(),
+                WorkstationSudoRoute::SameAccountRoot | WorkstationSudoRoute::SeparateIdentity(_)
+            )
     }
 }
 
@@ -144,18 +148,47 @@ impl Sudo {
     /// Elevation route a dynamic workstation binding may use. Dynamic Python and
     /// Ansible payloads never pin the native program a sudo policy allowlists, so
     /// only an unrestricted root policy is equivalent to workstation sudo.
-    /// `Some(None)` is same-account root; `Some(Some(host))` is separate identity.
-    pub(super) fn workstation_route(&self) -> Option<Option<&str>> {
+    pub(super) fn workstation_route(&self) -> WorkstationSudoRoute<'_> {
         match self {
-            Self::Disabled => None,
+            Self::Disabled => WorkstationSudoRoute::Denied,
             Self::SameAccount { users, programs } => {
-                unrestricted_root(users, programs).then_some(None)
+                if unrestricted_root(users, programs) {
+                    WorkstationSudoRoute::SameAccountRoot
+                } else {
+                    WorkstationSudoRoute::Denied
+                }
             }
             Self::SeparateIdentity {
                 ssh_host,
                 users,
                 programs,
-            } => unrestricted_root(users, programs).then_some(Some(ssh_host.as_str())),
+            } => {
+                if unrestricted_root(users, programs) {
+                    WorkstationSudoRoute::SeparateIdentity(ssh_host)
+                } else {
+                    WorkstationSudoRoute::Denied
+                }
+            }
+        }
+    }
+}
+
+/// The elevation a dynamic workstation binding is allowed to use on one target.
+/// `Denied` covers both "no unrestricted root grant" and "no configured target",
+/// so an open destination policy can never resolve to elevation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkstationSudoRoute<'a> {
+    Denied,
+    SameAccountRoot,
+    SeparateIdentity(&'a str),
+}
+
+impl<'a> WorkstationSudoRoute<'a> {
+    /// Destination override for separate-identity elevation, if any.
+    pub(super) fn elevated_destination(self) -> Option<&'a str> {
+        match self {
+            Self::SeparateIdentity(host) => Some(host),
+            Self::Denied | Self::SameAccountRoot => None,
         }
     }
 }
@@ -459,10 +492,10 @@ impl Config {
                     // Workstation sudo fallback: the per-target policy must grant
                     // unrestricted root elevation. Dynamic payloads run Python
                     // scripts, not an allowlisted native program, so a pinned
-                    // program list would otherwise be silently bypassed.
-                    if let Some(target) = target
-                        && !target.permits_workstation_sudo()
-                    {
+                    // program list would otherwise be silently bypassed. An open
+                    // destination policy has no target, hence no grant.
+                    let target = target.ok_or_else(denied)?;
+                    if !target.permits_workstation_sudo() {
                         return Err(denied());
                     }
                     Some(&*WORKSTATION_SUDO)
@@ -471,9 +504,9 @@ impl Config {
             };
             // Separate-identity elevation must connect to its own SSH host, and
             // only when this binding actually elevates.
-            let elevated_destination = workstation_become
-                .as_ref()
-                .and_then(|_| target.and_then(|target| target.sudo.workstation_route().flatten()));
+            let elevated_destination = workstation_become.as_ref().and_then(|_| {
+                target.and_then(|target| target.sudo.workstation_route().elevated_destination())
+            });
             if let Some(mapped) = self.automation.targets.get(host) {
                 let destination =
                     elevated_destination.map_or_else(|| mapped.destination.clone(), str::to_owned);
@@ -612,10 +645,15 @@ impl Config {
     }
 
     /// A dynamic workstation binding is exposed only when a configured target
-    /// would actually authorize it; an empty `[targets]` table exposes none.
+    /// would actually authorize it; an empty `[targets]` table exposes none, and
+    /// an open destination policy never exposes privileged bindings because it
+    /// carries no per-target sudo grant to check.
     fn dynamic_workstation_enabled(&self, binding: &crate::bindings::CompiledBinding) -> bool {
         let Some(targets) = &self.targets else {
-            return true;
+            return !matches!(
+                binding.automation_authority(),
+                Some(AutomationAuthority::Named(_))
+            );
         };
         let authority = binding.automation_authority();
         targets.iter().any(|(host_name, target)| {
@@ -2147,6 +2185,33 @@ input_schema = {{ type = "object", additionalProperties = false, required = [], 
             ordinary.expect("ordinary dynamic binding missing"),
             named.expect("named dynamic binding missing"),
         )
+    }
+
+    #[test]
+    fn open_destination_policy_never_exposes_or_elevates_privileged_bindings() {
+        // Workstation mode without a `[targets]` table carries no per-target sudo
+        // grant, so a named (privileged) authority must not be published and must
+        // never resolve to the uncontrolled workstation root fallback.
+        let text = dynamic_workstation_text("", "").replace(
+            "destination_policy = \"configured\"",
+            "destination_policy = \"open\"",
+        );
+        let config = load_text(&text, &[]).unwrap();
+        assert!(config.targets.is_none(), "open policy has no targets table");
+        assert_eq!(config.capabilities, Capabilities::all());
+        let (ordinary, named) = dynamic_ids(&config);
+        assert!(config.binding_enabled(ordinary));
+        assert!(
+            !config.binding_enabled(named),
+            "privileged binding must not be published in open mode"
+        );
+        for host in ["db", "unlisted", "server"] {
+            let error = config.automation_target(named, host).err().unwrap();
+            assert_eq!(error.code(), "policy_denied", "{host}");
+        }
+        let resolved = config.automation_target(ordinary, "db").unwrap();
+        assert_eq!(resolved.target.destination, "db");
+        assert!(resolved.r#become.is_none(), "ordinary must not elevate");
     }
 
     #[test]
