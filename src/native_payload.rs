@@ -590,7 +590,7 @@ mod tests {
             checked += 1;
         }
         assert!(
-            checked >= 99,
+            checked >= 96,
             "expected every shipped manifest, saw {checked}"
         );
     }

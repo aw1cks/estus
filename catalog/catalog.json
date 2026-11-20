@@ -1145,8 +1145,8 @@
         "path": "payloads/observe_network_rules"
       }
     },
-    "observe_nic_channels": {
-      "definition": "observe_nic_channels.toml",
+    "observe_nic": {
+      "definition": "observe_nic.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
@@ -1156,21 +1156,7 @@
       ],
       "executor": {
         "kind": "native_payload",
-        "path": "payloads/observe_nic_channels"
-      }
-    },
-    "observe_nic_coalesce": {
-      "definition": "observe_nic_coalesce.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "ethtool"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_nic_coalesce"
+        "path": "payloads/observe_nic"
       }
     },
     "observe_nic_eee": {
@@ -1217,20 +1203,6 @@
         "path": "payloads/observe_nic_fec"
       }
     },
-    "observe_nic_link": {
-      "definition": "observe_nic_link.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "ethtool"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_nic_link"
-      }
-    },
     "observe_nic_pause": {
       "definition": "observe_nic_pause.toml",
       "qualification": "site_policy_template",
@@ -1243,20 +1215,6 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_nic_pause"
-      }
-    },
-    "observe_nic_rings": {
-      "definition": "observe_nic_rings.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "ethtool"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_nic_rings"
       }
     },
     "observe_nic_rss": {

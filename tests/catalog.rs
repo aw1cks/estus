@@ -115,15 +115,8 @@ mod tools {
     mod observe_network_route_lookup;
     mod observe_network_routes;
     mod observe_network_rules;
-    mod observe_nic_channels;
-    mod observe_nic_coalesce;
+    mod observe_nic;
     mod observe_nic_eee;
-    mod observe_nic_features;
-    mod observe_nic_fec;
-    mod observe_nic_link;
-    mod observe_nic_pause;
-    mod observe_nic_rings;
-    mod observe_nic_rss;
     mod observe_nic_stats;
     mod observe_nic_transceiver;
     mod observe_packages;

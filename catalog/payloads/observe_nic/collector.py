@@ -1,6 +1,12 @@
 import estus_runtime
 def main():
     import json, os, re, datetime
+    ASPECTS={
+        'channels': ('-l', ['maximum_rx', 'maximum_tx', 'maximum_other', 'maximum_combined', 'current_rx', 'current_tx', 'current_other', 'current_combined']),
+        'coalesce': ('-c', ['rx_usecs', 'rx_frames', 'rx_usecs_irq', 'rx_frames_irq', 'tx_usecs', 'tx_frames', 'tx_usecs_irq', 'tx_frames_irq', 'stats_block_usecs', 'pkt_rate_low', 'rx_usecs_low', 'rx_frames_low', 'tx_usecs_low', 'tx_frames_low', 'pkt_rate_high', 'rx_usecs_high', 'rx_frames_high', 'tx_usecs_high', 'tx_frames_high', 'sample_interval']),
+        'link': ('', ['speed', 'duplex', 'auto_negotiation', 'port', 'link_detected']),
+        'rings': ('-g', ['maximum_rx', 'maximum_rx_mini', 'maximum_rx_jumbo', 'maximum_tx', 'maximum_rx_buf_len', 'maximum_cqe_size', 'current_rx', 'current_rx_mini', 'current_rx_jumbo', 'current_tx', 'current_rx_buf_len', 'current_cqe_size']),
+    }
     unavailable=[]
     def read(path,limit=4096):
         try:
@@ -51,11 +57,17 @@ def main():
         result = estus_runtime.run_bounded(
             argv, timeout=6, max_bytes=65536, accepted=None)
         return result['returncode'], result['stdout'], result['stderr']
-    interface=estus_runtime.request()[0]
+    request=estus_runtime.request()[0]
+    interface=request.get('interface')
+    aspect=request.get('aspect')
+    if aspect not in ASPECTS:raise ValueError('unsupported NIC aspect')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',interface):raise ValueError('interface')
     if not os.path.isdir('/sys/class/net/'+interface):raise ValueError('interface absent')
-    rc,text,error=run([os.environ['ESTUS_EXEC_ETHTOOL']]+[interface])
-    keys=['speed', 'duplex', 'auto_negotiation', 'port', 'link_detected']
+    flag,keys=ASPECTS[aspect]
+    argv=[os.environ['ESTUS_EXEC_ETHTOOL']]
+    if flag:argv.append(flag)
+    argv.append(interface)
+    rc,text,error=run(argv)
     values={}
     section=''
     if rc==0:
@@ -73,7 +85,7 @@ def main():
         if not any(x in (text+error).lower() for x in ('not supported','unsupported','cannot get','operation not permitted')):raise ValueError('ethtool query failed')
     for key in keys:
         if key not in values:unavailable.append(key)
-    publish({'interface':interface,'supported':rc==0,'values':values},'ethtool fixed read-only driver query; non-atomic')
+    publish({'interface':interface,'aspect':aspect,aspect:{'supported':rc==0,'values':values}},'ethtool fixed read-only driver query; non-atomic')
 
 
 if __name__ == "__main__":

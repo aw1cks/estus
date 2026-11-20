@@ -3,13 +3,19 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "ed3b0134d8f125a5fc59c7e483668986b1a3702d6770a6925974704f238d4848",
+  "source_sha256": "c761f588a9660b68d11c1d092579abccbc2e0945bc39973aa197d4b3cda22455",
   "max_source_bytes": 1048576,
   "argv": [
     {
-      "kind": "argument",
-      "name": "interface",
-      "format": "scalar"
+      "kind": "object",
+      "fields": {
+        "interface": {
+          "name": "interface"
+        },
+        "aspect": {
+          "name": "aspect"
+        }
+      }
     }
   ],
   "requirements": {
@@ -18,14 +24,10 @@
       8
     ],
     "modules": [
-      "datetime",
       "json",
       "os",
       "re",
-      "selectors",
-      "subprocess",
-      "sys",
-      "time"
+      "datetime"
     ],
     "executables": [],
     "paths": [],
@@ -33,7 +35,8 @@
       "ethtool": [
         "/usr/sbin/ethtool",
         "/usr/bin/ethtool",
-        "/sbin/ethtool"
+        "/sbin/ethtool",
+        "/bin/ethtool"
       ]
     }
   },
@@ -46,11 +49,21 @@
         },
         "interface": {
           "type": "string"
+        },
+        "aspect": {
+          "type": "string",
+          "enum": [
+            "channels",
+            "coalesce",
+            "link",
+            "rings"
+          ]
         }
       },
       "required": [
         "target_python",
-        "interface"
+        "interface",
+        "aspect"
       ],
       "additionalProperties": false
     },
@@ -62,6 +75,10 @@
           "properties": {}
         },
         "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "aspect": {
           "aliases": {},
           "properties": {}
         }
