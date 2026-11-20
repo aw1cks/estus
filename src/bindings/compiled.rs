@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{
     config::{ConfigError, Limits, account_name},
-    reply::ToolError,
+    reply::{ErrorCode, ToolError},
 };
 
 use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot, SiteConstraints};
@@ -318,7 +318,7 @@ fn invalid(reason: &'static str) -> ConfigError {
     ConfigError::new("tools", reason)
 }
 fn bound(reason: &'static str) -> ToolError {
-    ToolError::invalid_argument(reason, false)
+    ToolError::new(ErrorCode::InvalidArgument, reason, false)
 }
 fn shape() -> ErrorData {
     ErrorData::invalid_params("Invalid named tool argument shape", None)

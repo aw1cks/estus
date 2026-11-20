@@ -22,7 +22,7 @@ impl Estus {
         request: bindings::AutomationRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        use crate::reply::AutomationData;
+        use crate::reply::{AutomationData, ErrorCode};
         let started = Instant::now();
         let budget = ReplyBudget::new(&context.id)?;
         // Resolved once at dispatch (see Estus::binding).
@@ -52,7 +52,8 @@ impl Estus {
             budget.result(ToolReply::<AutomationData>::failure(error))
         };
         if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-            return reject(ToolError::cancelled(
+            return reject(ToolError::new(
+                ErrorCode::Cancelled,
                 "Request cancelled before dispatch",
                 false,
             ));
@@ -82,7 +83,8 @@ impl Estus {
             && self.state.config.requires_preview(&request.host);
         let preview_meta = if is_preview || requires_preview {
             if requires_preview && !super::preview::is_qualified_module(&activated.module) {
-                return reject(ToolError::preview_required(
+                return reject(ToolError::new(
+                    ErrorCode::PreviewRequired,
                     "Operation has no qualified preview path under require_preview policy",
                     false,
                 ));
@@ -90,7 +92,8 @@ impl Estus {
             let Some(spec) =
                 super::preview::PreviewSpec::for_ansible(&activated.module, &prepared.arguments)
             else {
-                return reject(ToolError::preview_required(
+                return reject(ToolError::new(
+                    ErrorCode::PreviewRequired,
                     "Operation has no qualified preview path under require_preview policy",
                     false,
                 ));
@@ -189,7 +192,8 @@ impl Estus {
                             ) {
                                 error
                             } else {
-                                ToolError::preview_required(
+                                ToolError::new(
+                                    ErrorCode::PreviewRequired,
                                     "Independent pre-state digest could not be obtained",
                                     false,
                                 )
@@ -208,7 +212,8 @@ impl Estus {
                         pre_state_digest,
                     };
                     if !state.previews.consume(&key) {
-                        let error = ToolError::preview_required(
+                        let error = ToolError::new(
+                            ErrorCode::PreviewRequired,
                             "A matching non-expired preview is required before apply",
                             false,
                         );
@@ -289,7 +294,8 @@ impl Estus {
                     } else if reply.error().is_none()
                         && reply.data().is_some_and(|d| d.tasks.skipped > 0)
                     {
-                        reply.set_error(ToolError::invalid_result(
+                        reply.set_error(ToolError::new(
+                            ErrorCode::InvalidResult,
                             "Preview was skipped; no target observation was produced",
                             false,
                         ));
@@ -306,7 +312,8 @@ impl Estus {
             })
             .await
             .unwrap_or_else(|| {
-                ToolReply::failure(ToolError::io_error(
+                ToolReply::failure(ToolError::new(
+                    ErrorCode::IoError,
                     "Automation operation could not complete; remote state is unknown",
                     true,
                 ))
@@ -331,19 +338,24 @@ impl Estus {
             Err(error) => {
                 metadata.reject_controller(
                     started,
-                    &ControllerError::invalid_argument("Insufficient controller response budget"),
+                    &ControllerError::new(
+                        ErrorCode::InvalidArgument,
+                        "Insufficient controller response budget",
+                    ),
                 );
                 return Err(error);
             }
         };
         let prepared = (|| {
             if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-                return Err(ControllerError::cancelled(
+                return Err(ControllerError::new(
+                    ErrorCode::Cancelled,
                     "Controller request cancelled before dispatch",
                 ));
             }
             if !self.state.config.controller_enabled(id) {
-                return Err(ControllerError::policy_denied(
+                return Err(ControllerError::new(
+                    ErrorCode::PolicyDenied,
                     "Controller operation is not authorized",
                 ));
             }
@@ -353,7 +365,10 @@ impl Estus {
                 self.state.config.limits(),
             )?;
             let deadline = request_deadline(started, prepared.duration).map_err(|_| {
-                ControllerError::invalid_argument("Controller request deadline expired")
+                ControllerError::new(
+                    ErrorCode::InvalidArgument,
+                    "Controller request deadline expired",
+                )
             })?;
             Ok((prepared, deadline))
         })();
@@ -365,8 +380,10 @@ impl Estus {
             }
         };
         let Some(cleanup_slot) = self.state.cleanup_quarantine.try_reserve() else {
-            let error =
-                ControllerError::resource_limit("Controller cleanup quarantine limit reached");
+            let error = ControllerError::new(
+                ErrorCode::ResourceLimit,
+                "Controller cleanup quarantine limit reached",
+            );
             metadata.reject_controller(started, &error);
             return budget.controller_result(ControllerReply::failure(error));
         };
@@ -378,11 +395,15 @@ impl Estus {
             Ok(permit) => permit,
             Err(error) => {
                 let ctrl_err = if error.code() == ErrorCode::Timeout {
-                    ControllerError::timeout(
+                    ControllerError::new(
+                        ErrorCode::Timeout,
                         "Controller operation deadline expired waiting for slot",
                     )
                 } else {
-                    ControllerError::cancelled("Controller request cancelled before dispatch")
+                    ControllerError::new(
+                        ErrorCode::Cancelled,
+                        "Controller request cancelled before dispatch",
+                    )
                 };
                 metadata.reject_controller(started, &ctrl_err);
                 return budget.controller_result(ControllerReply::failure(ctrl_err));
@@ -421,7 +442,8 @@ impl Estus {
             })
             .await
             .unwrap_or_else(|| {
-                ControllerReply::failure(ControllerError::io_error(
+                ControllerReply::failure(ControllerError::new(
+                    ErrorCode::IoError,
                     "Controller operation could not complete; effects may be incomplete",
                 ))
             });

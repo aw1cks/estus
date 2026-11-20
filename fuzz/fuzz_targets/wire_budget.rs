@@ -6,7 +6,9 @@ use estus::internal::{reply, wire};
 use std::io::{self, Write};
 
 use libfuzzer_sys::fuzz_target;
-use reply::{CommandData, Termination, ToolError, ToolReply};
+use reply:: {
+    CommandData, Termination, ToolError, ToolReply, ErrorCode,
+};
 use rmcp::model::{CallToolResult, JsonRpcResponse, RequestId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -148,7 +150,7 @@ impl Fixture {
         let error = match self.error % 3 {
             0 if data.is_some() => None,
             1 => Some(ToolError::SSH_CONNECT_FAILED),
-            _ => Some(ToolError::connection_lost(
+            _ => Some(ToolError::new(ErrorCode::ConnectionLost,
                 "SSH command channel was lost; remote execution state is unknown",
                 self.remote_state_unknown,
             )),

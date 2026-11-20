@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     bindings::{BindingId, Bindings},
-    reply::ToolError,
+    reply::{ErrorCode, ToolError},
 };
 
 mod discovery;

@@ -463,7 +463,11 @@ impl Drop for Audit<'_> {
                 "finish",
                 Some(millis(self.started.elapsed())),
                 None,
-                Some(&ToolError::cancelled("Request cleanup interrupted", true)),
+                Some(&ToolError::new(
+                    ErrorCode::Cancelled,
+                    "Request cleanup interrupted",
+                    true,
+                )),
             );
         }
     }

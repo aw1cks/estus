@@ -70,14 +70,15 @@ struct Failure {
 impl Failure {
     fn io() -> Self {
         Self {
-            error: ToolError::io_error("SFTP file operation failed", false),
+            error: ToolError::new(ErrorCode::IoError, "SFTP file operation failed", false),
             check_master: false,
         }
     }
 
     fn cleanup() -> Self {
         Self {
-            error: ToolError::io_error(
+            error: ToolError::new(
+                ErrorCode::IoError,
                 "SFTP channel cleanup did not complete within its deadline",
                 true,
             ),
@@ -89,19 +90,31 @@ impl Failure {
 fn io_failure(error: &io::Error) -> Failure {
     let (error, check_master) = match error.kind() {
         io::ErrorKind::NotFound => (
-            ToolError::not_found("Remote file was not found", false),
+            ToolError::new(ErrorCode::NotFound, "Remote file was not found", false),
             false,
         ),
         io::ErrorKind::AlreadyExists => (
-            ToolError::already_exists("Remote destination already exists", false),
+            ToolError::new(
+                ErrorCode::AlreadyExists,
+                "Remote destination already exists",
+                false,
+            ),
             false,
         ),
         io::ErrorKind::PermissionDenied => (
-            ToolError::permission_denied("Remote file access was denied", false),
+            ToolError::new(
+                ErrorCode::PermissionDenied,
+                "Remote file access was denied",
+                false,
+            ),
             false,
         ),
         io::ErrorKind::Unsupported => (
-            ToolError::unsupported("SFTP operation is not supported", false),
+            ToolError::new(
+                ErrorCode::Unsupported,
+                "SFTP operation is not supported",
+                false,
+            ),
             false,
         ),
         io::ErrorKind::BrokenPipe
@@ -110,7 +123,11 @@ fn io_failure(error: &io::Error) -> Failure {
         | io::ErrorKind::ConnectionAborted
         | io::ErrorKind::ConnectionRefused
         | io::ErrorKind::NotConnected => (
-            ToolError::connection_lost("SFTP channel connection was lost", false),
+            ToolError::new(
+                ErrorCode::ConnectionLost,
+                "SFTP channel connection was lost",
+                false,
+            ),
             true,
         ),
         _ => return Failure::io(),
@@ -124,16 +141,20 @@ fn io_failure(error: &io::Error) -> Failure {
 fn sftp_failure(error: SftpError) -> Failure {
     let error = match error {
         SftpError::SftpError(SftpErrorKind::NoSuchFile, _) => {
-            ToolError::not_found("Remote file was not found", false)
+            ToolError::new(ErrorCode::NotFound, "Remote file was not found", false)
         }
-        SftpError::SftpError(SftpErrorKind::PermDenied, _) => {
-            ToolError::permission_denied("Remote file access was denied", false)
-        }
+        SftpError::SftpError(SftpErrorKind::PermDenied, _) => ToolError::new(
+            ErrorCode::PermissionDenied,
+            "Remote file access was denied",
+            false,
+        ),
         SftpError::SftpError(SftpErrorKind::OpUnsupported, _)
         | SftpError::UnsupportedSftpProtocol { .. }
-        | SftpError::UnsupportedExtension(_) => {
-            ToolError::unsupported("SFTP operation is not supported", false)
-        }
+        | SftpError::UnsupportedExtension(_) => ToolError::new(
+            ErrorCode::Unsupported,
+            "SFTP operation is not supported",
+            false,
+        ),
         SftpError::IOError(error) => return io_failure(&error),
         SftpError::RecursiveErrors(errors) => {
             let mut original = sftp_failure(errors.original_error);
@@ -148,7 +169,11 @@ fn sftp_failure(error: SftpError) -> Failure {
         }
         SftpError::AwaitableError(_) | SftpError::BackgroundTaskFailure(_) => {
             return Failure {
-                error: ToolError::connection_lost("SFTP channel connection was lost", false),
+                error: ToolError::new(
+                    ErrorCode::ConnectionLost,
+                    "SFTP channel connection was lost",
+                    false,
+                ),
                 check_master: true,
             };
         }
@@ -169,7 +194,8 @@ fn ssh_failure(error: openssh::Error) -> Failure {
         | openssh::Error::SshMux(_)
         | openssh::Error::Disconnected
         | openssh::Error::RemoteProcessTerminated => Failure {
-            error: ToolError::connection_lost(
+            error: ToolError::new(
+                ErrorCode::ConnectionLost,
                 "SFTP channel could not be opened or was lost",
                 false,
             ),
@@ -350,7 +376,8 @@ async fn write_sftp(
             match metadata {
                 Ok(_) => {
                     return Err(Failure {
-                        error: ToolError::already_exists(
+                        error: ToolError::new(
+                            ErrorCode::AlreadyExists,
                             "Remote destination already exists",
                             false,
                         ),
@@ -436,7 +463,8 @@ async fn replace_sftp(
         // OPEN, chmod, WRITE or any other filesystem mutation.
         if !sftp.support_posix_rename() {
             return Err(Failure {
-                error: ToolError::unsupported(
+                error: ToolError::new(
+                    ErrorCode::Unsupported,
                     "Atomic overwrite rename requires the SFTP POSIX-rename extension",
                     false,
                 ),
@@ -512,7 +540,11 @@ async fn mkdir_sftp(
         match fs.symlink_metadata(spec.path).await {
             Ok(_) => {
                 return Err(Failure {
-                    error: ToolError::already_exists("Remote destination already exists", false),
+                    error: ToolError::new(
+                        ErrorCode::AlreadyExists,
+                        "Remote destination already exists",
+                        false,
+                    ),
                     check_master: false,
                 });
             }
@@ -542,7 +574,8 @@ async fn rename_sftp(
         // equivalent: OpenSSH can fall back to a racy stat-then-rename.
         if !spec.overwrite {
             return Err(Failure {
-                error: ToolError::unsupported(
+                error: ToolError::new(
+                    ErrorCode::Unsupported,
                     "Atomic no-overwrite rename is unavailable on this SFTP backend",
                     false,
                 ),
@@ -553,7 +586,8 @@ async fn rename_sftp(
         // extension; reject before mutation rather than weaken atomicity.
         if !sftp.support_posix_rename() {
             return Err(Failure {
-                error: ToolError::unsupported(
+                error: ToolError::new(
+                    ErrorCode::Unsupported,
                     "Atomic overwrite rename requires the SFTP POSIX-rename extension",
                     false,
                 ),
@@ -812,7 +846,8 @@ async fn list_sftp(sftp: Sftp, mut spec: ListSpec<'_>) -> Result<ListData, Failu
                     .is_none_or(|cost| cost > super::data::DIRECTORY_PAGE_BYTES)
             {
                 return Err(Failure {
-                    error: ToolError::resource_limit(
+                    error: ToolError::new(
+                        ErrorCode::ResourceLimit,
                         "Directory entry exceeds the page payload limit",
                         false,
                     ),
@@ -933,15 +968,15 @@ where
         tokio::select! {
             biased;
             () = context.ct.cancelled() => Err(Failure {
-                error: ToolError::cancelled("SFTP file operation cancelled", false),
+                error: ToolError::new(ErrorCode::Cancelled, "SFTP file operation cancelled", false),
                 check_master: false,
             }),
             () = context.shutdown.cancelled() => Err(Failure {
-                error: ToolError::cancelled("SFTP file operation cancelled", false),
+                error: ToolError::new(ErrorCode::Cancelled, "SFTP file operation cancelled", false),
                 check_master: false,
             }),
             () = tokio::time::sleep_until(context.deadline) => Err(Failure {
-                error: ToolError::timeout("SFTP file operation deadline exceeded", false),
+                error: ToolError::new(ErrorCode::Timeout, "SFTP file operation deadline exceeded", false),
                 check_master: false,
             }),
             result = operation => result,

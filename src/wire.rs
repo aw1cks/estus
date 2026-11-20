@@ -9,9 +9,8 @@ use serde::Serialize;
 
 use crate::reply::{
     CommandData, ControllerData, ControllerError, ControllerReply, ControllerTermination,
-    GroupCleanup, Termination, ToolError, ToolReply,
+    ErrorCode, GroupCleanup, Termination, ToolError, ToolReply,
 };
-
 pub const MAX_RESPONSE_BYTES: usize = 16_777_216;
 
 // The SDK encoder appends exactly one newline after each compact JSON frame, so
@@ -320,7 +319,8 @@ impl ReplyBudget {
                 owned_group_cleanup: GroupCleanup::SignalledAndReaped,
                 output: None,
             },
-            ControllerError::controller_resource_limit(
+            ControllerError::new(
+                ErrorCode::ControllerResourceLimit,
                 "Controller execution could not complete within the configured resource limits",
             ),
         );
@@ -592,7 +592,8 @@ mod tests {
         data.exit_code = None;
         data.termination = Termination::ConnectionLost;
         data.remote_may_still_be_running = true;
-        reply.set_error(ToolError::connection_lost(
+        reply.set_error(ToolError::new(
+            ErrorCode::ConnectionLost,
             "SSH command channel was lost; remote execution state is unknown",
             true,
         ));
@@ -667,7 +668,10 @@ mod tests {
                 owned_group_cleanup: GroupCleanup::Incomplete,
                 output: None,
             },
-            ControllerError::controller_timeout("Controller execution timed out"),
+            ControllerError::new(
+                ErrorCode::ControllerTimeout,
+                "Controller execution timed out",
+            ),
         )
     }
 

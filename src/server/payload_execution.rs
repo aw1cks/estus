@@ -43,7 +43,8 @@ impl Estus {
             budget.result(ToolReply::<AutomationData>::failure(error))
         };
         if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-            return reject(ToolError::cancelled(
+            return reject(ToolError::new(
+                ErrorCode::Cancelled,
                 "Request cancelled before dispatch",
                 false,
             ));
@@ -78,7 +79,8 @@ impl Estus {
             ) {
                 Some(spec) => Some(spec),
                 None if requires_preview => {
-                    return reject(ToolError::preview_required(
+                    return reject(ToolError::new(
+                        ErrorCode::PreviewRequired,
                         "Operation has no qualified preview path under require_preview policy",
                         false,
                     ));
@@ -181,7 +183,8 @@ impl Estus {
                             ) {
                                 error
                             } else {
-                                ToolError::preview_required(
+                                ToolError::new(
+                                    ErrorCode::PreviewRequired,
                                     "Independent pre-state digest could not be obtained",
                                     false,
                                 )
@@ -200,7 +203,8 @@ impl Estus {
                         pre_state_digest,
                     };
                     if !state.previews.consume(&key) {
-                        let error = ToolError::preview_required(
+                        let error = ToolError::new(
+                            ErrorCode::PreviewRequired,
                             "A matching non-expired preview is required before apply",
                             false,
                         );
@@ -278,7 +282,8 @@ impl Estus {
             })
             .await
             .unwrap_or_else(|| {
-                ToolReply::failure(ToolError::io_error(
+                ToolReply::failure(ToolError::new(
+                    ErrorCode::IoError,
                     "Native payload worker lost; remote state is unknown",
                     true,
                 ))

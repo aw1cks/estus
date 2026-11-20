@@ -404,7 +404,8 @@ impl TargetGate {
                 Ok(Ok(true))
             );
             if !queued || !acked {
-                return Err(ToolError::io_error(
+                return Err(ToolError::new(
+                    ErrorCode::IoError,
                     "Persistent target quarantine state could not be cleared",
                     false,
                 ));
@@ -709,7 +710,13 @@ impl TargetAdmission {
             Arc::clone(&gate.reads).acquire_owned(),
         )
         .await?
-        .map_err(|_| ToolError::cancelled("Target gate closed before dispatch", false))?;
+        .map_err(|_| {
+            ToolError::new(
+                ErrorCode::Cancelled,
+                "Target gate closed before dispatch",
+                false,
+            )
+        })?;
         let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).read_owned()).await?;
         Ok(ReadLease {
             _guard: guard,
@@ -737,13 +744,15 @@ impl TargetAdmission {
         shutdown: &CancellationToken,
     ) -> Result<ExecLease, ToolError> {
         if ct.is_cancelled() || shutdown.is_cancelled() {
-            return Err(ToolError::cancelled(
+            return Err(ToolError::new(
+                ErrorCode::Cancelled,
                 "Request cancelled before dispatch",
                 false,
             ));
         }
         if Instant::now() >= deadline {
-            return Err(ToolError::timeout(
+            return Err(ToolError::new(
+                ErrorCode::Timeout,
                 "Operation deadline expired waiting for target gate",
                 false,
             ));
@@ -799,7 +808,8 @@ impl TargetAdmission {
             return Ok(Arc::clone(&entry.gate));
         }
         if !self.dynamic_hosts {
-            return Err(ToolError::policy_denied(
+            return Err(ToolError::new(
+                ErrorCode::PolicyDenied,
                 "Operation is not authorized",
                 false,
             ));
@@ -817,7 +827,8 @@ impl TargetAdmission {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(name, _)| name.clone());
             let Some(victim) = victim else {
-                return Err(ToolError::resource_limit(
+                return Err(ToolError::new(
+                    ErrorCode::ResourceLimit,
                     "Dynamic target gate capacity reached",
                     false,
                 ));
@@ -842,7 +853,8 @@ impl TargetAdmission {
 }
 
 fn quarantined_error() -> ToolError {
-    ToolError::target_quarantined(
+    ToolError::new(
+        ErrorCode::TargetQuarantined,
         "Target is quarantined after an uncertain remote mutation; inspect target state and run change_target_quarantine_clear after independent reconciliation",
         false,
     )
@@ -858,28 +870,30 @@ where
     F: Future,
 {
     if ct.is_cancelled() || shutdown.is_cancelled() {
-        return Err(ToolError::cancelled(
+        return Err(ToolError::new(
+            ErrorCode::Cancelled,
             "Request cancelled before dispatch",
             false,
         ));
     }
     if Instant::now() >= deadline {
-        return Err(ToolError::timeout(
+        return Err(ToolError::new(
+            ErrorCode::Timeout,
             "Operation deadline expired waiting for target gate",
             false,
         ));
     }
     tokio::select! {
         biased;
-        _ = ct.cancelled() => Err(ToolError::cancelled(
+        _ = ct.cancelled() => Err(ToolError::new(ErrorCode::Cancelled,
             "Request cancelled before dispatch",
             false,
         )),
-        _ = shutdown.cancelled() => Err(ToolError::cancelled(
+        _ = shutdown.cancelled() => Err(ToolError::new(ErrorCode::Cancelled,
             "Server shutting down before dispatch",
             false,
         )),
-        _ = sleep_until(deadline) => Err(ToolError::timeout(
+        _ = sleep_until(deadline) => Err(ToolError::new(ErrorCode::Timeout,
             "Operation deadline expired waiting for target gate",
             false,
         )),

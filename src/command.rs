@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::reply::ToolError;
+use crate::reply::{ErrorCode, ToolError};
 
 pub const MAX_COMMAND_BYTES: usize = 65_536;
 const CWD_PREFIX: &str = "cd '";
@@ -121,7 +121,7 @@ fn root_user() -> String {
 }
 
 fn invalid(message: &'static str) -> ToolError {
-    ToolError::invalid_argument(message, false)
+    ToolError::new(ErrorCode::InvalidArgument, message, false)
 }
 
 impl ExecRequest {

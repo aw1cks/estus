@@ -6,7 +6,7 @@ use crate::{
     audit::{Audit, Metadata},
     command::Invocation,
     exec::{self, RunContext},
-    reply::{CommandData, Termination, ToolError, ToolReply},
+    reply::{CommandData, ErrorCode, Termination, ToolError, ToolReply},
     ssh::MasterHealth,
     wire::ReplyBudget,
 };
@@ -30,13 +30,21 @@ impl Estus {
             Err(error) => {
                 metadata.reject(
                     started,
-                    &ToolError::invalid_argument("Insufficient response budget", false),
+                    &ToolError::new(
+                        ErrorCode::InvalidArgument,
+                        "Insufficient response budget",
+                        false,
+                    ),
                 );
                 return Err(error);
             }
         };
         if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-            let error = ToolError::cancelled("Request cancelled before dispatch", false);
+            let error = ToolError::new(
+                ErrorCode::Cancelled,
+                "Request cancelled before dispatch",
+                false,
+            );
             metadata.reject(started, &error);
             return budget.result(ToolReply::<CommandData>::failure(error));
         }
@@ -75,7 +83,8 @@ impl Estus {
             {
                 Some((_permit, reply)) => reply,
                 None => {
-                    return budget.result(ToolReply::<CommandData>::failure(ToolError::io_error(
+                    return budget.result(ToolReply::<CommandData>::failure(ToolError::new(
+                        ErrorCode::IoError,
                         "Command task could not complete; remote state is unknown",
                         true,
                     )));
@@ -98,7 +107,11 @@ impl State {
         let ct = context.ct;
         let metadata = request.metadata(self, &request_id);
         if self.shutdown.is_cancelled() || ct.is_cancelled() {
-            let error = ToolError::cancelled("Request cancelled before dispatch", false);
+            let error = ToolError::new(
+                ErrorCode::Cancelled,
+                "Request cancelled before dispatch",
+                false,
+            );
             metadata.reject(started, &error);
             return ToolReply::failure(error);
         }

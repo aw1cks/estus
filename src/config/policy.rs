@@ -126,7 +126,8 @@ impl Sudo {
         program: &str,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         if !self.permits(user, program) {
-            return Err(ToolError::policy_denied(
+            return Err(ToolError::new(
+                ErrorCode::PolicyDenied,
                 "Elevated target, user, or program is not authorized",
                 false,
             ));
@@ -398,7 +399,13 @@ impl Config {
         id: BindingId,
         host: &str,
     ) -> Result<ResolvedAutomation<'_>, ToolError> {
-        let denied = || ToolError::policy_denied("Operation is not authorized", false);
+        let denied = || {
+            ToolError::new(
+                ErrorCode::PolicyDenied,
+                "Operation is not authorized",
+                false,
+            )
+        };
         let binding = self.bindings.get(id).ok_or_else(denied)?;
         if !self.binding_enabled(id) || binding.automation_authority().is_none() {
             return Err(denied());
@@ -409,7 +416,11 @@ impl Config {
                 return Err(denied());
             }
             destination(host, "host").map_err(|_| {
-                ToolError::invalid_argument("Host must be a safe nonempty SSH destination", false)
+                ToolError::new(
+                    ErrorCode::InvalidArgument,
+                    "Host must be a safe nonempty SSH destination",
+                    false,
+                )
             })?;
             // A configured destination policy is an allowlist, not a default:
             // an unlisted host is denied rather than used as a raw destination.
@@ -625,7 +636,13 @@ impl Config {
         host: &'a str,
         id: BindingId,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
-        let denied = || ToolError::policy_denied("Operation is not authorized", false);
+        let denied = || {
+            ToolError::new(
+                ErrorCode::PolicyDenied,
+                "Operation is not authorized",
+                false,
+            )
+        };
         let binding = self.bindings.get(id).ok_or_else(denied)?;
         if binding.is_controller()
             || !self.binding_enabled(id)
@@ -650,7 +667,8 @@ impl Config {
             RiskTier::Change | RiskTier::Exec
         ) && self.requires_preview(host)
         {
-            return Err(ToolError::preview_required(
+            return Err(ToolError::new(
+                ErrorCode::PreviewRequired,
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -684,7 +702,13 @@ impl Config {
         host: &'a str,
         tool: ToolId,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
-        let denied = || ToolError::policy_denied("Operation is not authorized", false);
+        let denied = || {
+            ToolError::new(
+                ErrorCode::PolicyDenied,
+                "Operation is not authorized",
+                false,
+            )
+        };
         match tool {
             ToolId::Targets | ToolId::ReadOutput | ToolId::ClearTargetQuarantine | ToolId::Sudo => {
                 return Err(denied());
@@ -721,7 +745,8 @@ impl Config {
             RiskTier::Change | RiskTier::Exec
         ) && self.requires_preview(host)
         {
-            return Err(ToolError::preview_required(
+            return Err(ToolError::new(
+                ErrorCode::PreviewRequired,
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -740,7 +765,11 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(|| {
-                ToolError::policy_denied("Host is not a configured logical target", false)
+                ToolError::new(
+                    ErrorCode::PolicyDenied,
+                    "Host is not a configured logical target",
+                    false,
+                )
             })?;
         Ok(ResolvedTarget {
             name: host,
@@ -755,11 +784,16 @@ impl Config {
                 .get(host)
                 .map(|target| target.ssh_host.as_str())
                 .ok_or_else(|| {
-                    ToolError::policy_denied("Host is not a configured logical target", false)
+                    ToolError::new(
+                        ErrorCode::PolicyDenied,
+                        "Host is not a configured logical target",
+                        false,
+                    )
                 })?,
             None => {
                 destination(host, "host").map_err(|_| {
-                    ToolError::invalid_argument(
+                    ToolError::new(
+                        ErrorCode::InvalidArgument,
                         "Host must be a safe nonempty SSH destination",
                         false,
                     )
@@ -781,7 +815,11 @@ impl Config {
         program: &str,
     ) -> Result<ResolvedTarget<'a>, ToolError> {
         let denied = || {
-            ToolError::policy_denied("Elevated target, user, or program is not authorized", false)
+            ToolError::new(
+                ErrorCode::PolicyDenied,
+                "Elevated target, user, or program is not authorized",
+                false,
+            )
         };
         if !self.capabilities.permits(ToolId::Sudo) || !self.builtins.contains("exec_sudo") {
             return Err(denied());
@@ -798,7 +836,8 @@ impl Config {
         }
         let resolved = target.sudo.resolve(host, &target.ssh_host, user, program)?;
         if self.requires_preview(host) {
-            return Err(ToolError::preview_required(
+            return Err(ToolError::new(
+                ErrorCode::PreviewRequired,
                 "Operation has no qualified preview path under require_preview policy",
                 false,
             ));
@@ -809,7 +848,8 @@ impl Config {
     pub(crate) fn timeout(&self, seconds: Option<u64>) -> Result<std::time::Duration, ToolError> {
         let seconds = seconds.unwrap_or(self.limits.operation_timeout_secs);
         if seconds == 0 || seconds > self.limits.max_timeout_secs {
-            return Err(ToolError::invalid_argument(
+            return Err(ToolError::new(
+                ErrorCode::InvalidArgument,
                 "timeout_secs must be positive and not exceed the configured maximum",
                 false,
             ));

@@ -7,7 +7,7 @@ use crate::{
     bindings::{BindingId, BindingRequest, CompiledBinding},
     command::{ExecRequest, Invocation, RunRequest, SudoRequest},
     config::{Config, IdentityRole, ResolvedTarget, SudoMode, ToolId, ToolKey},
-    reply::ToolError,
+    reply::{ErrorCode, ToolError},
 };
 
 use super::State;
@@ -250,7 +250,11 @@ pub(super) fn request_deadline(
     tokio::time::Instant::from_std(started)
         .checked_add(duration)
         .ok_or_else(|| {
-            ToolError::invalid_argument("timeout_secs exceeds the supported clock range", false)
+            ToolError::new(
+                ErrorCode::InvalidArgument,
+                "timeout_secs exceeds the supported clock range",
+                false,
+            )
         })
 }
 
@@ -262,33 +266,35 @@ impl State {
         ct: &tokio_util::sync::CancellationToken,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, ToolError> {
         if ct.is_cancelled() || self.shutdown.is_cancelled() {
-            return Err(ToolError::cancelled(
+            return Err(ToolError::new(
+                ErrorCode::Cancelled,
                 "Request cancelled before dispatch",
                 false,
             ));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(ToolError::timeout(
+            return Err(ToolError::new(
+                ErrorCode::Timeout,
                 "Operation deadline expired waiting for execution slot",
                 false,
             ));
         }
         tokio::select! {
             biased;
-            () = ct.cancelled() => Err(ToolError::cancelled(
+            () = ct.cancelled() => Err(ToolError::new(ErrorCode::Cancelled,
                 "Request cancelled before dispatch",
                 false,
             )),
-            () = self.shutdown.cancelled() => Err(ToolError::cancelled(
+            () = self.shutdown.cancelled() => Err(ToolError::new(ErrorCode::Cancelled,
                 "Server shutting down before dispatch",
                 false,
             )),
-            () = tokio::time::sleep_until(deadline) => Err(ToolError::timeout(
+            () = tokio::time::sleep_until(deadline) => Err(ToolError::new(ErrorCode::Timeout,
                 "Operation deadline expired waiting for execution slot",
                 false,
             )),
             permit = std::sync::Arc::clone(semaphore).acquire_owned() => permit.map_err(|_| {
-                ToolError::cancelled("Server shutting down before dispatch", false)
+                ToolError::new(ErrorCode::Cancelled, "Server shutting down before dispatch", false)
             }),
         }
     }

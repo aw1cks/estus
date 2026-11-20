@@ -5,7 +5,7 @@ mod engine;
 use crate::{
     config::ConfigError,
     contracts::{module_schema, projection},
-    reply::ToolError,
+    reply::{ErrorCode, ToolError},
     strict_json::parse,
 };
 pub(crate) use engine::{BundleRun, Engine, PayloadRun, PreviewPrestateRequest};
@@ -330,7 +330,11 @@ impl PayloadPlan {
         inputs: &Value,
     ) -> Result<(Vec<Value>, Value), ToolError> {
         let args = self.binding.prepare(inputs).map_err(|_| {
-            ToolError::invalid_argument("Payload inputs violate reviewed contract", false)
+            ToolError::new(
+                ErrorCode::InvalidArgument,
+                "Payload inputs violate reviewed contract",
+                false,
+            )
         })?;
         let request = adapt(&self.manifest.argv, &args)?;
         Ok((request, args))
@@ -346,7 +350,13 @@ impl PayloadPlan {
     }
 }
 fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
-    let invalid = || ToolError::invalid_argument("Payload adapter is invalid", false);
+    let invalid = || {
+        ToolError::new(
+            ErrorCode::InvalidArgument,
+            "Payload adapter is invalid",
+            false,
+        )
+    };
     let mut output = Vec::with_capacity(adapter.len());
     let mut bytes = 0usize;
     for arg in adapter {

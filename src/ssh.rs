@@ -1,5 +1,9 @@
 //! Owned foreground OpenSSH masters; native mux channels never fall back to ssh.
-use crate::{audit, config::IdentityRole, reply::ToolError};
+use crate::{
+    audit,
+    config::IdentityRole,
+    reply::{ErrorCode, ToolError},
+};
 use futures_util::FutureExt;
 use openssh::Session;
 use std::{
@@ -105,14 +109,23 @@ enum Failure {
 impl Failure {
     fn error(self) -> ToolError {
         match self {
-            Self::Launch => ToolError::ssh_spawn_failed(
+            Self::Launch => ToolError::new(
+                ErrorCode::SshSpawnFailed,
                 "Local SSH process failed to start; run `estus doctor --target <host>` for diagnostics",
                 false,
             ),
             Self::Connect => ToolError::SSH_CONNECT_FAILED,
-            Self::Timeout => ToolError::timeout("SSH connection deadline expired", false),
-            Self::Cancelled => ToolError::cancelled("SSH connection cancelled", false),
-            Self::Lost => ToolError::connection_lost("SSH connection is unavailable", false),
+            Self::Timeout => {
+                ToolError::new(ErrorCode::Timeout, "SSH connection deadline expired", false)
+            }
+            Self::Cancelled => {
+                ToolError::new(ErrorCode::Cancelled, "SSH connection cancelled", false)
+            }
+            Self::Lost => ToolError::new(
+                ErrorCode::ConnectionLost,
+                "SSH connection is unavailable",
+                false,
+            ),
         }
     }
 }
@@ -353,7 +366,11 @@ impl Pool {
                         }
                     }
                     let Some((_, _, victim)) = victim else {
-                        return Err(ToolError::resource_limit("SSH master limit reached", false));
+                        return Err(ToolError::new(
+                            ErrorCode::ResourceLimit,
+                            "SSH master limit reached",
+                            false,
+                        ));
                     };
                     let done = {
                         let state = lock(&victim.state);
@@ -383,7 +400,11 @@ impl Pool {
                     let permit = Arc::clone(&entry.channels)
                         .try_acquire_owned()
                         .map_err(|_| {
-                            ToolError::resource_limit("SSH channel limit reached", false)
+                            ToolError::new(
+                                ErrorCode::ResourceLimit,
+                                "SSH channel limit reached",
+                                false,
+                            )
                         })?;
                     entries.insert(key.clone(), Arc::clone(&entry));
                     AcquireStep::Launch { entry, permit }

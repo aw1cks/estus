@@ -34,9 +34,9 @@ use crate::config::CleanupDiagnostics;
 use crate::process::Children;
 use crate::progress::Reporter;
 use crate::reply::{
-    ControllerData, ControllerError, ControllerReply, ControllerTermination, GroupCleanup,
+    ControllerData, ControllerError, ControllerReply, ControllerTermination, ErrorCode,
+    GroupCleanup,
 };
-
 const GRACE: Duration = Duration::from_millis(250);
 const POLL: Duration = Duration::from_millis(10);
 pub(crate) const QUARANTINE_CAPACITY: usize = 16;
@@ -699,14 +699,18 @@ pub(crate) async fn run(
             if status.success() {
                 None
             } else {
-                Some(ControllerError::command_failed("Controller command failed"))
+                Some(ControllerError::new(
+                    ErrorCode::CommandFailed,
+                    "Controller command failed",
+                ))
             },
         ),
         Outcome::Timeout => (
             None,
             None,
             ControllerTermination::Timeout,
-            Some(ControllerError::timeout(
+            Some(ControllerError::new(
+                ErrorCode::Timeout,
                 "Controller command deadline exceeded",
             )),
         ),
@@ -714,19 +718,26 @@ pub(crate) async fn run(
             None,
             None,
             ControllerTermination::Cancelled,
-            Some(ControllerError::cancelled("Controller command cancelled")),
+            Some(ControllerError::new(
+                ErrorCode::Cancelled,
+                "Controller command cancelled",
+            )),
         ),
         Outcome::Io => (
             None,
             None,
             ControllerTermination::IoError,
-            Some(ControllerError::io_error("Controller command I/O failed")),
+            Some(ControllerError::new(
+                ErrorCode::IoError,
+                "Controller command I/O failed",
+            )),
         ),
         Outcome::Spawn => (
             None,
             None,
             ControllerTermination::IoError,
-            Some(ControllerError::spawn_failed(
+            Some(ControllerError::new(
+                ErrorCode::SpawnFailed,
                 "Controller command could not start",
             )),
         ),
@@ -734,7 +745,8 @@ pub(crate) async fn run(
             None,
             None,
             ControllerTermination::IoError,
-            Some(ControllerError::resource_unavailable(
+            Some(ControllerError::new(
+                ErrorCode::ResourceUnavailable,
                 "Controller private workspace preparation failed",
             )),
         ),
@@ -742,7 +754,8 @@ pub(crate) async fn run(
     if failure.is_none()
         && (!cleanup_ok || (started && !owner.children.clean()) || !out_complete || !err_complete)
     {
-        failure = Some(ControllerError::cleanup_incomplete(
+        failure = Some(ControllerError::new(
+            ErrorCode::CleanupIncomplete,
             "Controller cleanup is incomplete",
         ));
     }

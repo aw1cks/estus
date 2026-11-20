@@ -16,7 +16,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     filesystem::data::{self, Encoding, RawRead, ReadData},
-    reply::{OutputReceipt, StreamInfo, ToolError, ToolReply},
+    reply::{ErrorCode, OutputReceipt, StreamInfo, ToolError, ToolReply},
     wire::ReplyBudget,
 };
 
@@ -308,7 +308,8 @@ impl Store {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            return ToolReply::failure(ToolError::invalid_argument(
+            return ToolReply::failure(ToolError::new(
+                ErrorCode::InvalidArgument,
                 "handle must contain 32 lowercase hexadecimal characters",
                 false,
             ));
@@ -336,7 +337,8 @@ impl Store {
             // each reading at most one per_stream_bytes artifact. A full
             // storage reservation must not make its own artifacts unreadable.
             if usage.readers >= self.inner.limits.max_handles {
-                return ToolReply::failure(ToolError::resource_limit(
+                return ToolReply::failure(ToolError::new(
+                    ErrorCode::ResourceLimit,
                     "Output read resource limit reached",
                     false,
                 ));
@@ -356,7 +358,11 @@ impl Store {
             let _quota = quota;
             let _artifact = artifact;
             if worker_cancel.is_cancelled() {
-                return Err(ToolError::shutdown("Output read cancelled", false));
+                return Err(ToolError::new(
+                    ErrorCode::Shutdown,
+                    "Output read cancelled",
+                    false,
+                ));
             }
             let mut bytes = BytesMut::zeroed(count as usize);
             if count != 0 {
@@ -367,7 +373,11 @@ impl Store {
                 file.read_exact(&mut bytes).map_err(|_| io_error())?;
             }
             if worker_cancel.is_cancelled() {
-                return Err(ToolError::shutdown("Output read cancelled", false));
+                return Err(ToolError::new(
+                    ErrorCode::Shutdown,
+                    "Output read cancelled",
+                    false,
+                ));
             }
             data::encode_range(
                 RawRead {
@@ -382,12 +392,12 @@ impl Store {
         });
         tokio::select! {
             biased;
-            _ = self.inner.stop.cancelled() => ToolReply::failure(ToolError::shutdown("Output read cancelled", false)),
+            _ = self.inner.stop.cancelled() => ToolReply::failure(ToolError::new(ErrorCode::Shutdown, "Output read cancelled", false)),
             result = tokio::time::timeout(READ_GRACE, worker) => match result {
                 Ok(Ok(Ok(data))) => ToolReply::success(data),
                 Ok(Ok(Err(error))) => ToolReply::failure(error),
                 Ok(Err(_)) => ToolReply::failure(io_error()),
-                Err(_) => ToolReply::failure(ToolError::timeout("Output read timed out", false)),
+                Err(_) => ToolReply::failure(ToolError::new(ErrorCode::Timeout, "Output read timed out", false)),
             }
         }
     }
@@ -567,10 +577,10 @@ fn unavailable(reason: &'static str) -> OutputReceipt {
     OutputReceipt::Unavailable { reason }
 }
 fn io_error() -> ToolError {
-    ToolError::io_error("Unable to read retained output", false)
+    ToolError::new(ErrorCode::IoError, "Unable to read retained output", false)
 }
 fn not_found() -> ToolError {
-    ToolError::not_found("Retained output not found", false)
+    ToolError::new(ErrorCode::NotFound, "Retained output not found", false)
 }
 
 #[cfg(test)]

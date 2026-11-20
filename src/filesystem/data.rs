@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::metadata::{FileKind, ListEntry, StatData};
 use crate::{
-    reply::{ToolError, ToolReply},
+    reply::{ErrorCode, ToolError, ToolReply},
     wire::{ReplyBudget, duplicated_size},
 };
 
@@ -640,7 +640,11 @@ fn decode_base64(input: &[u8], max_file_bytes: u64) -> Result<Vec<u8>, ToolError
 }
 
 fn invalid_base64() -> ToolError {
-    ToolError::invalid_encoding("content must be canonical padded standard base64", false)
+    ToolError::new(
+        ErrorCode::InvalidEncoding,
+        "content must be canonical padded standard base64",
+        false,
+    )
 }
 
 impl StatRequest {
@@ -689,7 +693,7 @@ impl StatRequest {
 }
 
 fn invalid(message: &'static str) -> ToolError {
-    ToolError::invalid_argument(message, false)
+    ToolError::new(ErrorCode::InvalidArgument, message, false)
 }
 
 impl ReadRequest {
@@ -843,7 +847,8 @@ pub(crate) fn encode_range(
     raw.bytes.truncate(max_bytes);
     let digest: [u8; 32] = Sha256::digest(&raw.bytes).into();
     if expected_content_sha256.is_some_and(|expected| expected != digest) {
-        return Err(ToolError::checksum_mismatch(
+        return Err(ToolError::new(
+            ErrorCode::ChecksumMismatch,
             "Returned bytes do not match expected_content_sha256",
             false,
         ));
@@ -853,7 +858,7 @@ pub(crate) fn encode_range(
         .checked_add(bytes_read)
         .ok_or_else(|| invalid("Returned file offset cannot be represented"))?;
     let content = match encoding {
-        Encoding::Utf8 => String::from_utf8(raw.bytes.into()).map_err(|_| ToolError::invalid_encoding(
+        Encoding::Utf8 => String::from_utf8(raw.bytes.into()).map_err(|_| ToolError::new(ErrorCode::InvalidEncoding,
             "Returned bytes are not complete UTF-8; use encoding base64 for lossless byte ranges",
             false,
         ))?,
@@ -876,26 +881,34 @@ pub(crate) fn verify_script(
     max_bytes: usize,
 ) -> Result<String, ToolError> {
     if !eof || bytes.len() > max_bytes {
-        return Err(ToolError::resource_limit(
+        return Err(ToolError::new(
+            ErrorCode::ResourceLimit,
             "Script source exceeds its complete byte bound",
             false,
         ));
     }
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
     if digest != *expected_content_sha256 {
-        return Err(ToolError::checksum_mismatch(
+        return Err(ToolError::new(
+            ErrorCode::ChecksumMismatch,
             "Script source does not match its reviewed content_sha256",
             false,
         ));
     }
     if bytes.contains(&0) {
-        return Err(ToolError::invalid_encoding(
+        return Err(ToolError::new(
+            ErrorCode::InvalidEncoding,
             "Script source must be NUL-free UTF-8",
             false,
         ));
     }
-    String::from_utf8(bytes)
-        .map_err(|_| ToolError::invalid_encoding("Script source must be NUL-free UTF-8", false))
+    String::from_utf8(bytes).map_err(|_| {
+        ToolError::new(
+            ErrorCode::InvalidEncoding,
+            "Script source must be NUL-free UTF-8",
+            false,
+        )
+    })
 }
 
 #[cfg(test)]

@@ -137,71 +137,52 @@ impl JsonSchema for ErrorCode {
 }
 
 #[derive(Clone, Debug)]
-enum ReplyOutcome<T, E = ToolError> {
+enum Outcome<T, E> {
     Success(T),
     Failure(E),
     Partial { data: T, error: E },
 }
 
-impl<T, E> ReplyOutcome<T, E> {
-    fn data(&self) -> Option<&T> {
-        match self {
-            Self::Success(data) | Self::Partial { data, .. } => Some(data),
-            Self::Failure(_) => None,
-        }
-    }
-
-    fn data_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Self::Success(data) | Self::Partial { data, .. } => Some(data),
-            Self::Failure(_) => None,
-        }
-    }
-
-    fn error(&self) -> Option<&E> {
-        match self {
-            Self::Failure(error) | Self::Partial { error, .. } => Some(error),
-            Self::Success(_) => None,
-        }
-    }
-
-    fn error_mut(&mut self) -> Option<&mut E> {
-        match self {
-            Self::Failure(error) | Self::Partial { error, .. } => Some(error),
-            Self::Success(_) => None,
-        }
-    }
-}
-
 fn serialize_reply<S: serde::Serializer, T: Serialize, E: Serialize>(
     name: &'static str,
-    outcome: &ReplyOutcome<T, E>,
+    outcome: &Outcome<T, E>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
+    let (data, error) = match outcome {
+        Outcome::Success(data) => (Some(data), None),
+        Outcome::Failure(error) => (None, Some(error)),
+        Outcome::Partial { data, error } => (Some(data), Some(error)),
+    };
     let mut state = serializer.serialize_struct(name, 2)?;
-    state.serialize_field("data", &outcome.data())?;
-    state.serialize_field("error", &outcome.error())?;
+    state.serialize_field("data", &data)?;
+    state.serialize_field("error", &error)?;
     state.end()
 }
 
-pub struct ToolReply<T> {
-    outcome: ReplyOutcome<T>,
+/// The one reply envelope for tool and controller calls: data, error, or both
+/// (partial). The wire shape is always `{"data": …, "error": …}` with nulls.
+#[derive(Clone, Debug)]
+pub struct Reply<T, E = ToolError> {
+    outcome: Outcome<T, E>,
 }
+
+/// Tool replies are generic over their execution evidence.
+pub type ToolReply<T> = Reply<T, ToolError>;
 
 #[derive(JsonSchema)]
 #[allow(dead_code)]
-struct ToolReplySchema<T> {
+struct ReplySchema<T, E> {
     data: Option<T>,
-    error: Option<ToolError>,
+    error: Option<E>,
 }
 
-impl<T: Serialize> Serialize for ToolReply<T> {
+impl<T: Serialize, E: Serialize> Serialize for Reply<T, E> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serialize_reply("ToolReply", &self.outcome, serializer)
     }
 }
 
-impl<T: JsonSchema> JsonSchema for ToolReply<T> {
+impl<T: JsonSchema> JsonSchema for Reply<T, ToolError> {
     fn schema_name() -> Cow<'static, str> {
         Cow::Owned(format!("ToolReply_for_{}", T::schema_name()))
     }
@@ -211,30 +192,45 @@ impl<T: JsonSchema> JsonSchema for ToolReply<T> {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        ToolReplySchema::<T>::json_schema(generator)
+        ReplySchema::<T, ToolError>::json_schema(generator)
     }
 }
 
-impl<T> ToolReply<T> {
-    pub fn success(data: T) -> Self {
+/// The controller's published output schema keeps its historical identity.
+impl<T: JsonSchema> JsonSchema for Reply<T, ControllerError> {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ControllerReply")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Owned(format!("{}::ControllerReply", module_path!()))
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ReplySchema::<T, ControllerError>::json_schema(generator)
+    }
+}
+
+impl<T, E> Reply<T, E> {
+    pub const fn success(data: T) -> Self {
         Self {
-            outcome: ReplyOutcome::Success(data),
+            outcome: Outcome::Success(data),
         }
     }
 
-    pub fn failure(error: ToolError) -> Self {
+    pub const fn failure(error: E) -> Self {
         Self {
-            outcome: ReplyOutcome::Failure(error),
+            outcome: Outcome::Failure(error),
         }
     }
 
-    pub fn partial(data: T, error: ToolError) -> Self {
+    pub const fn partial(data: T, error: E) -> Self {
         Self {
-            outcome: ReplyOutcome::Partial { data, error },
+            outcome: Outcome::Partial { data, error },
         }
     }
 
-    pub(crate) fn with_optional_error(data: T, error: Option<ToolError>) -> Self {
+    pub(crate) fn with_optional_error(data: T, error: Option<E>) -> Self {
         match error {
             Some(error) => Self::partial(data, error),
             None => Self::success(data),
@@ -242,42 +238,57 @@ impl<T> ToolReply<T> {
     }
 
     pub fn data(&self) -> Option<&T> {
-        self.outcome.data()
+        match &self.outcome {
+            Outcome::Success(data) | Outcome::Partial { data, .. } => Some(data),
+            Outcome::Failure(_) => None,
+        }
     }
 
     pub fn data_mut(&mut self) -> Option<&mut T> {
-        self.outcome.data_mut()
+        match &mut self.outcome {
+            Outcome::Success(data) | Outcome::Partial { data, .. } => Some(data),
+            Outcome::Failure(_) => None,
+        }
     }
 
-    pub fn error(&self) -> Option<&ToolError> {
-        self.outcome.error()
+    pub fn error(&self) -> Option<&E> {
+        match &self.outcome {
+            Outcome::Failure(error) | Outcome::Partial { error, .. } => Some(error),
+            Outcome::Success(_) => None,
+        }
     }
 
-    pub(crate) fn error_mut(&mut self) -> Option<&mut ToolError> {
-        self.outcome.error_mut()
+    pub(crate) fn error_mut(&mut self) -> Option<&mut E> {
+        match &mut self.outcome {
+            Outcome::Failure(error) | Outcome::Partial { error, .. } => Some(error),
+            Outcome::Success(_) => None,
+        }
     }
 
-    pub(crate) fn set_error(&mut self, error: ToolError) {
-        let placeholder = ReplyOutcome::Failure(ToolError::io_error("", false));
+    pub(crate) fn set_error(&mut self, error: E)
+    where
+        E: Clone,
+    {
+        let placeholder = Outcome::Failure(error.clone());
         let current = std::mem::replace(&mut self.outcome, placeholder);
         self.outcome = match current {
-            ReplyOutcome::Success(data) | ReplyOutcome::Partial { data, .. } => {
-                ReplyOutcome::Partial { data, error }
+            Outcome::Success(data) | Outcome::Partial { data, .. } => {
+                Outcome::Partial { data, error }
             }
-            ReplyOutcome::Failure(_) => ReplyOutcome::Failure(error),
+            Outcome::Failure(_) => Outcome::Failure(error),
         };
     }
 
-    pub(crate) fn map_ok<U>(self, f: impl FnOnce(T) -> Result<U, ToolError>) -> ToolReply<U> {
+    pub(crate) fn map_ok<U>(self, f: impl FnOnce(T) -> Result<U, E>) -> Reply<U, E> {
         match self.outcome {
-            ReplyOutcome::Success(data) => match f(data) {
-                Ok(mapped) => ToolReply::success(mapped),
-                Err(error) => ToolReply::failure(error),
+            Outcome::Success(data) => match f(data) {
+                Ok(mapped) => Reply::success(mapped),
+                Err(error) => Reply::failure(error),
             },
-            ReplyOutcome::Failure(error) => ToolReply::failure(error),
-            ReplyOutcome::Partial { data, error } => match f(data) {
-                Ok(mapped) => ToolReply::partial(mapped, error),
-                Err(mapped_err) => ToolReply::failure(mapped_err),
+            Outcome::Failure(error) => Reply::failure(error),
+            Outcome::Partial { data, error } => match f(data) {
+                Ok(mapped) => Reply::partial(mapped, error),
+                Err(mapped_err) => Reply::failure(mapped_err),
             },
         }
     }
@@ -336,7 +347,7 @@ impl PayloadFailureReason {
     }
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ToolError {
     code: ErrorCode,
     pub message: Cow<'static, str>,
@@ -356,7 +367,7 @@ impl ToolError {
         false,
     );
 
-    const fn new(code: ErrorCode, message: &'static str, remote_state_unknown: bool) -> Self {
+    pub const fn new(code: ErrorCode, message: &'static str, remote_state_unknown: bool) -> Self {
         Self {
             code,
             message: Cow::Borrowed(message),
@@ -371,49 +382,6 @@ impl ToolError {
         self.code
     }
 
-    pub(crate) const fn already_exists(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::AlreadyExists, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn automation_failed(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::AutomationFailed, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn cancelled(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::Cancelled, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn checksum_mismatch(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::ChecksumMismatch, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn command_failed(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::CommandFailed, message, remote_state_unknown)
-    }
-
-    pub const fn connection_lost(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::ConnectionLost, message, remote_state_unknown)
-    }
-
-    /// A declared target prerequisite (interpreter version, module or
-    /// executable) is absent. The collector never ran, so remote state is known.
-    pub(crate) const fn resource_unavailable(message: &'static str) -> Self {
-        Self::new(ErrorCode::ResourceUnavailable, message, false)
-    }
-
-    pub(crate) const fn invalid_argument(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::InvalidArgument, message, remote_state_unknown)
-    }
-
     pub(crate) fn invalid_argument_owned(message: String) -> Self {
         Self {
             code: ErrorCode::InvalidArgument,
@@ -423,20 +391,6 @@ impl ToolError {
             schema_path: None,
             constraint: None,
         }
-    }
-
-    pub(crate) const fn invalid_encoding(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::InvalidEncoding, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn invalid_projection(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::InvalidProjection, message, remote_state_unknown)
     }
 
     pub(crate) fn invalid_projection_at(schema_path: String, constraint: &'static str) -> Self {
@@ -456,22 +410,6 @@ impl ToolError {
         }
     }
 
-    pub(crate) const fn invalid_result(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::InvalidResult, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn io_error(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::IoError, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn not_found(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::NotFound, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn payload_failed(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::PayloadFailed, message, remote_state_unknown)
-    }
-
     pub(crate) const fn payload_failed_with_reason(
         reason: PayloadFailureReason,
         remote_state_unknown: bool,
@@ -484,61 +422,6 @@ impl ToolError {
             schema_path: None,
             constraint: None,
         }
-    }
-
-    pub(crate) const fn payload_rejected(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::PayloadRejected, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn permission_denied(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::PermissionDenied, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn policy_denied(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::PolicyDenied, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn preview_required(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::PreviewRequired, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn resource_limit(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::ResourceLimit, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn shutdown(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::Shutdown, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn ssh_spawn_failed(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::SshSpawnFailed, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn target_quarantined(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::TargetQuarantined, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn timeout(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::Timeout, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn unsupported(message: &'static str, remote_state_unknown: bool) -> Self {
-        Self::new(ErrorCode::Unsupported, message, remote_state_unknown)
     }
 }
 
@@ -596,136 +479,18 @@ pub(crate) struct ControllerError {
 }
 
 impl ControllerError {
-    const fn new(code: ErrorCode, message: &'static str) -> Self {
+    pub const fn new(code: ErrorCode, message: &'static str) -> Self {
         Self { code, message }
     }
 
     pub(crate) const fn code(&self) -> &'static str {
         self.code.as_str()
     }
-
-    pub(crate) const fn cancelled(message: &'static str) -> Self {
-        Self::new(ErrorCode::Cancelled, message)
-    }
-
-    pub(crate) const fn cleanup_incomplete(message: &'static str) -> Self {
-        Self::new(ErrorCode::CleanupIncomplete, message)
-    }
-
-    pub(crate) const fn command_failed(message: &'static str) -> Self {
-        Self::new(ErrorCode::CommandFailed, message)
-    }
-
-    pub(crate) const fn controller_resource_limit(message: &'static str) -> Self {
-        Self::new(ErrorCode::ControllerResourceLimit, message)
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn controller_timeout(message: &'static str) -> Self {
-        Self::new(ErrorCode::ControllerTimeout, message)
-    }
-
-    pub(crate) const fn invalid_argument(message: &'static str) -> Self {
-        Self::new(ErrorCode::InvalidArgument, message)
-    }
-
-    pub(crate) const fn io_error(message: &'static str) -> Self {
-        Self::new(ErrorCode::IoError, message)
-    }
-
-    pub(crate) const fn policy_denied(message: &'static str) -> Self {
-        Self::new(ErrorCode::PolicyDenied, message)
-    }
-
-    pub(crate) const fn resource_limit(message: &'static str) -> Self {
-        Self::new(ErrorCode::ResourceLimit, message)
-    }
-
-    pub(crate) const fn resource_unavailable(message: &'static str) -> Self {
-        Self::new(ErrorCode::ResourceUnavailable, message)
-    }
-
-    pub(crate) const fn spawn_failed(message: &'static str) -> Self {
-        Self::new(ErrorCode::SpawnFailed, message)
-    }
-
-    pub(crate) const fn timeout(message: &'static str) -> Self {
-        Self::new(ErrorCode::Timeout, message)
-    }
 }
 
-pub(crate) struct ControllerReply {
-    outcome: ReplyOutcome<ControllerData, ControllerError>,
-}
-
-#[derive(JsonSchema)]
-#[allow(dead_code)]
-struct ControllerReplySchema {
-    data: Option<ControllerData>,
-    error: Option<ControllerError>,
-}
-
-impl Serialize for ControllerReply {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_reply("ControllerReply", &self.outcome, serializer)
-    }
-}
-
-impl JsonSchema for ControllerReply {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("ControllerReply")
-    }
-
-    fn schema_id() -> Cow<'static, str> {
-        Cow::Owned(format!("{}::ControllerReply", module_path!()))
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        ControllerReplySchema::json_schema(generator)
-    }
-}
-
-impl ControllerReply {
-    pub(crate) fn success(data: ControllerData) -> Self {
-        Self {
-            outcome: ReplyOutcome::Success(data),
-        }
-    }
-
-    pub(crate) fn failure(error: ControllerError) -> Self {
-        Self {
-            outcome: ReplyOutcome::Failure(error),
-        }
-    }
-
-    pub(crate) fn partial(data: ControllerData, error: ControllerError) -> Self {
-        Self {
-            outcome: ReplyOutcome::Partial { data, error },
-        }
-    }
-
-    pub(crate) fn with_optional_error(
-        data: ControllerData,
-        error: Option<ControllerError>,
-    ) -> Self {
-        match error {
-            Some(error) => Self::partial(data, error),
-            None => Self::success(data),
-        }
-    }
-
-    pub(crate) fn data(&self) -> Option<&ControllerData> {
-        self.outcome.data()
-    }
-
-    pub(crate) fn data_mut(&mut self) -> Option<&mut ControllerData> {
-        self.outcome.data_mut()
-    }
-
-    pub(crate) fn error(&self) -> Option<&ControllerError> {
-        self.outcome.error()
-    }
-}
+/// Controller replies share the tool reply envelope; their evidence and error
+/// types differ, so this is the one non-alias over the generic `Reply`.
+pub(crate) type ControllerReply = Reply<ControllerData, ControllerError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -865,7 +630,11 @@ mod tests {
         );
 
         let mut partial_reply = ToolReply::success("partial");
-        partial_reply.set_error(ToolError::timeout("deadline exceeded", true));
+        partial_reply.set_error(ToolError::new(
+            ErrorCode::Timeout,
+            "deadline exceeded",
+            true,
+        ));
         let partial = serde_json::to_value(partial_reply).unwrap();
         assert_eq!(
             partial,
@@ -898,7 +667,8 @@ mod tests {
                 .is_null()
         );
         assert!(
-            serde_json::to_value(ControllerReply::failure(ControllerError::cancelled(
+            serde_json::to_value(ControllerReply::failure(ControllerError::new(
+                ErrorCode::Cancelled,
                 "stopped"
             )))
             .unwrap()["data"]
@@ -906,11 +676,22 @@ mod tests {
         );
         let c_partial = serde_json::to_value(ControllerReply::partial(
             controller_data(),
-            ControllerError::cleanup_incomplete("dirty"),
+            ControllerError::new(ErrorCode::CleanupIncomplete, "dirty"),
         ))
         .unwrap();
         assert_eq!(c_partial["data"]["stdout"], "out");
         assert_eq!(c_partial["error"]["code"], "cleanup_incomplete");
+
+        // The controller's published output schema keeps its historical title.
+        let controller_schema: Value = serde_json::to_value(
+            schemars::generate::SchemaSettings::draft2020_12()
+                .for_serialize()
+                .with(|s| s.inline_subschemas = true)
+                .into_generator()
+                .into_root_schema_for::<ControllerReply>(),
+        )
+        .unwrap();
+        assert_eq!(controller_schema["title"], "ControllerReply");
 
         let generator = schemars::generate::SchemaSettings::draft2020_12()
             .for_serialize()
@@ -1026,49 +807,88 @@ mod tests {
     #[test]
     fn every_error_code_serializes_with_exact_snake_case_name() {
         let tool_cases = [
-            ("already_exists", ToolError::already_exists("m", false)),
+            (
+                "already_exists",
+                ToolError::new(ErrorCode::AlreadyExists, "m", false),
+            ),
             (
                 "automation_failed",
-                ToolError::automation_failed("m", false),
+                ToolError::new(ErrorCode::AutomationFailed, "m", false),
             ),
-            ("cancelled", ToolError::cancelled("m", true)),
+            ("cancelled", ToolError::new(ErrorCode::Cancelled, "m", true)),
             (
                 "checksum_mismatch",
-                ToolError::checksum_mismatch("m", false),
+                ToolError::new(ErrorCode::ChecksumMismatch, "m", false),
             ),
-            ("command_failed", ToolError::command_failed("m", false)),
-            ("connection_lost", ToolError::connection_lost("m", true)),
-            ("invalid_argument", ToolError::invalid_argument("m", false)),
+            (
+                "command_failed",
+                ToolError::new(ErrorCode::CommandFailed, "m", false),
+            ),
+            (
+                "connection_lost",
+                ToolError::new(ErrorCode::ConnectionLost, "m", true),
+            ),
+            (
+                "invalid_argument",
+                ToolError::new(ErrorCode::InvalidArgument, "m", false),
+            ),
             (
                 "invalid_argument",
                 ToolError::invalid_argument_owned("m".into()),
             ),
-            ("invalid_encoding", ToolError::invalid_encoding("m", false)),
+            (
+                "invalid_encoding",
+                ToolError::new(ErrorCode::InvalidEncoding, "m", false),
+            ),
             (
                 "invalid_projection",
-                ToolError::invalid_projection("m", false),
+                ToolError::new(ErrorCode::InvalidProjection, "m", false),
             ),
-            ("invalid_result", ToolError::invalid_result("m", true)),
-            ("io_error", ToolError::io_error("m", false)),
-            ("not_found", ToolError::not_found("m", false)),
-            ("payload_failed", ToolError::payload_failed("m", false)),
-            ("payload_rejected", ToolError::payload_rejected("m", false)),
+            (
+                "invalid_result",
+                ToolError::new(ErrorCode::InvalidResult, "m", true),
+            ),
+            ("io_error", ToolError::new(ErrorCode::IoError, "m", false)),
+            ("not_found", ToolError::new(ErrorCode::NotFound, "m", false)),
+            (
+                "payload_failed",
+                ToolError::new(ErrorCode::PayloadFailed, "m", false),
+            ),
+            (
+                "payload_rejected",
+                ToolError::new(ErrorCode::PayloadRejected, "m", false),
+            ),
             (
                 "permission_denied",
-                ToolError::permission_denied("m", false),
+                ToolError::new(ErrorCode::PermissionDenied, "m", false),
             ),
-            ("policy_denied", ToolError::policy_denied("m", false)),
-            ("preview_required", ToolError::preview_required("m", false)),
-            ("resource_limit", ToolError::resource_limit("m", false)),
-            ("shutdown", ToolError::shutdown("m", false)),
+            (
+                "policy_denied",
+                ToolError::new(ErrorCode::PolicyDenied, "m", false),
+            ),
+            (
+                "preview_required",
+                ToolError::new(ErrorCode::PreviewRequired, "m", false),
+            ),
+            (
+                "resource_limit",
+                ToolError::new(ErrorCode::ResourceLimit, "m", false),
+            ),
+            ("shutdown", ToolError::new(ErrorCode::Shutdown, "m", false)),
             ("ssh_connect_failed", ToolError::SSH_CONNECT_FAILED),
-            ("ssh_spawn_failed", ToolError::ssh_spawn_failed("m", false)),
+            (
+                "ssh_spawn_failed",
+                ToolError::new(ErrorCode::SshSpawnFailed, "m", false),
+            ),
             (
                 "target_quarantined",
-                ToolError::target_quarantined("m", false),
+                ToolError::new(ErrorCode::TargetQuarantined, "m", false),
             ),
-            ("timeout", ToolError::timeout("m", true)),
-            ("unsupported", ToolError::unsupported("m", false)),
+            ("timeout", ToolError::new(ErrorCode::Timeout, "m", true)),
+            (
+                "unsupported",
+                ToolError::new(ErrorCode::Unsupported, "m", false),
+            ),
         ];
         for (expected, err) in &tool_cases {
             assert_eq!(err.code().as_str(), *expected);
@@ -1079,30 +899,45 @@ mod tests {
         }
 
         let controller_cases = [
-            ("cancelled", ControllerError::cancelled("m")),
+            ("cancelled", ControllerError::new(ErrorCode::Cancelled, "m")),
             (
                 "cleanup_incomplete",
-                ControllerError::cleanup_incomplete("m"),
+                ControllerError::new(ErrorCode::CleanupIncomplete, "m"),
             ),
-            ("command_failed", ControllerError::command_failed("m")),
+            (
+                "command_failed",
+                ControllerError::new(ErrorCode::CommandFailed, "m"),
+            ),
             (
                 "controller_resource_limit",
-                ControllerError::controller_resource_limit("m"),
+                ControllerError::new(ErrorCode::ControllerResourceLimit, "m"),
             ),
             (
                 "controller_timeout",
-                ControllerError::controller_timeout("m"),
+                ControllerError::new(ErrorCode::ControllerTimeout, "m"),
             ),
-            ("invalid_argument", ControllerError::invalid_argument("m")),
-            ("io_error", ControllerError::io_error("m")),
-            ("policy_denied", ControllerError::policy_denied("m")),
-            ("resource_limit", ControllerError::resource_limit("m")),
+            (
+                "invalid_argument",
+                ControllerError::new(ErrorCode::InvalidArgument, "m"),
+            ),
+            ("io_error", ControllerError::new(ErrorCode::IoError, "m")),
+            (
+                "policy_denied",
+                ControllerError::new(ErrorCode::PolicyDenied, "m"),
+            ),
+            (
+                "resource_limit",
+                ControllerError::new(ErrorCode::ResourceLimit, "m"),
+            ),
             (
                 "resource_unavailable",
-                ControllerError::resource_unavailable("m"),
+                ControllerError::new(ErrorCode::ResourceUnavailable, "m"),
             ),
-            ("spawn_failed", ControllerError::spawn_failed("m")),
-            ("timeout", ControllerError::timeout("m")),
+            (
+                "spawn_failed",
+                ControllerError::new(ErrorCode::SpawnFailed, "m"),
+            ),
+            ("timeout", ControllerError::new(ErrorCode::Timeout, "m")),
         ];
         for (expected, err) in &controller_cases {
             assert_eq!(err.code(), *expected);

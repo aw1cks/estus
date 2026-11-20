@@ -148,7 +148,13 @@ impl Engine {
             "become": target.r#become,
             "python": target.target.python,
         }))
-        .map_err(|_| ToolError::invalid_argument("Invalid transport identity", false))?;
+        .map_err(|_| {
+            ToolError::new(
+                ErrorCode::InvalidArgument,
+                "Invalid transport identity",
+                false,
+            )
+        })?;
         if matches!(target.agent, AutomationAgent::Inherit)
             && let Some(shared) = &self.shared_pool
             && shared.matches_native_transport(target.ssh_executable, target.ssh_config)
@@ -160,7 +166,8 @@ impl Engine {
             return Ok(Arc::clone(pool));
         }
         if pools.len() >= 16 {
-            return Err(ToolError::resource_limit(
+            return Err(ToolError::new(
+                ErrorCode::ResourceLimit,
                 "Native authority pool limit reached",
                 false,
             ));
@@ -221,38 +228,54 @@ impl Engine {
                     continue;
                 };
                 let (out, err) = tokio::join!(bounded(stdout, 64), bounded(stderr, 0));
-                let (stdout, overflow) = out
-                    .map_err(|_| ToolError::resource_unavailable("Package manager probe failed"))?;
+                let (stdout, overflow) = out.map_err(|_| {
+                    ToolError::new(
+                        ErrorCode::ResourceUnavailable,
+                        "Package manager probe failed",
+                        false,
+                    )
+                })?;
                 let _ = err;
-                let status = child
-                    .wait()
-                    .await
-                    .map_err(|_| ToolError::resource_unavailable("Package manager probe failed"))?;
+                let status = child.wait().await.map_err(|_| {
+                    ToolError::new(
+                        ErrorCode::ResourceUnavailable,
+                        "Package manager probe failed",
+                        false,
+                    )
+                })?;
                 if !status.success() || overflow {
-                    last = Some(ToolError::resource_unavailable(
+                    last = Some(ToolError::new(
+                        ErrorCode::ResourceUnavailable,
                         "Target package manager is unavailable",
+                        false,
                     ));
                     continue;
                 }
                 let name = String::from_utf8_lossy(&stdout);
                 let name = name.trim();
                 if name.is_empty() || name.len() > 32 {
-                    last = Some(ToolError::resource_unavailable(
+                    last = Some(ToolError::new(
+                        ErrorCode::ResourceUnavailable,
                         "Target package manager is unavailable",
+                        false,
                     ));
                     continue;
                 }
                 return Ok(name.to_owned());
             }
             Err(last.unwrap_or_else(|| {
-                ToolError::resource_unavailable("Target package manager is unavailable")
+                ToolError::new(
+                    ErrorCode::ResourceUnavailable,
+                    "Target package manager is unavailable",
+                    false,
+                )
             }))
         };
         tokio::select! {
             biased;
-            _ = ct.cancelled() => Err(ToolError::cancelled("Request cancelled before package manager probe", false)),
-            _ = self.shutdown.cancelled() => Err(ToolError::cancelled("Server shutting down", false)),
-            _ = sleep_until(deadline) => Err(ToolError::timeout("Request deadline exceeded during package manager probe", false)),
+            _ = ct.cancelled() => Err(ToolError::new(ErrorCode::Cancelled, "Request cancelled before package manager probe", false)),
+            _ = self.shutdown.cancelled() => Err(ToolError::new(ErrorCode::Cancelled, "Server shutting down", false)),
+            _ = sleep_until(deadline) => Err(ToolError::new(ErrorCode::Timeout, "Request deadline exceeded during package manager probe", false)),
             result = operation => result,
         }
     }
@@ -284,8 +307,9 @@ impl Engine {
             } else {
                 crate::config::IdentityRole::Ordinary
             };
-            let requirements = serde_json::to_value(&plan.manifest.requirements)
-                .map_err(|_| ToolError::invalid_argument("Invalid requirements", false))?;
+            let requirements = serde_json::to_value(&plan.manifest.requirements).map_err(|_| {
+                ToolError::new(ErrorCode::InvalidArgument, "Invalid requirements", false)
+            })?;
             let mut last = None;
             for python in &candidates {
                 let lease = pool
@@ -296,7 +320,8 @@ impl Engine {
                     .saturating_duration_since(Instant::now())
                     .as_secs_f64();
                 if remaining <= 0.0 {
-                    return Err(ToolError::timeout(
+                    return Err(ToolError::new(
+                        ErrorCode::Timeout,
                         "Payload deadline expired before dispatch",
                         false,
                     ));
@@ -341,7 +366,11 @@ impl Engine {
                 return terminal(out, &id);
             }
             Err(last.unwrap_or_else(|| {
-                ToolError::resource_unavailable("No approved target interpreter could be started")
+                ToolError::new(
+                    ErrorCode::ResourceUnavailable,
+                    "No approved target interpreter could be started",
+                    false,
+                )
             }))
         }
         .await;
@@ -448,7 +477,8 @@ impl Engine {
                     .saturating_duration_since(Instant::now())
                     .as_secs_f64();
                 if remaining <= 0.0 {
-                    return Err(ToolError::timeout(
+                    return Err(ToolError::new(
+                        ErrorCode::Timeout,
                         "Bundle deadline expired before dispatch",
                         false,
                     ));
@@ -525,7 +555,11 @@ impl Engine {
                 return terminal(out, &id);
             }
             Err(last.unwrap_or_else(|| {
-                ToolError::resource_unavailable("No approved target interpreter could be started")
+                ToolError::new(
+                    ErrorCode::ResourceUnavailable,
+                    "No approved target interpreter could be started",
+                    false,
+                )
             }))
         }
         .await;
@@ -598,7 +632,8 @@ impl Engine {
                 vec!["python3"]
             }
         } else {
-            return Err(ToolError::preview_required(
+            return Err(ToolError::new(
+                ErrorCode::PreviewRequired,
                 "Independent pre-state probe interpreter is unavailable",
                 false,
             ));
@@ -607,12 +642,19 @@ impl Engine {
             "module": module,
             "arguments": arguments,
         }))
-        .map_err(|_| ToolError::preview_required("Invalid pre-state request", false))?;
+        .map_err(|_| {
+            ToolError::new(
+                ErrorCode::PreviewRequired,
+                "Invalid pre-state request",
+                false,
+            )
+        })?;
         let r#become = target.r#become;
         let shutdown = &self.shutdown;
         let operation = async {
             let unavailable = || {
-                ToolError::preview_required(
+                ToolError::new(
+                    ErrorCode::PreviewRequired,
                     "Independent pre-state digest could not be obtained",
                     false,
                 )
@@ -672,9 +714,9 @@ impl Engine {
         };
         tokio::select! {
             biased;
-            _ = ct.cancelled() => Err(ToolError::cancelled("Request cancelled before preview pre-state probe", false)),
-            _ = shutdown.cancelled() => Err(ToolError::cancelled("Server shutting down", false)),
-            _ = sleep_until(deadline) => Err(ToolError::timeout("Request deadline exceeded during preview pre-state probe", false)),
+            _ = ct.cancelled() => Err(ToolError::new(ErrorCode::Cancelled, "Request cancelled before preview pre-state probe", false)),
+            _ = shutdown.cancelled() => Err(ToolError::new(ErrorCode::Cancelled, "Server shutting down", false)),
+            _ = sleep_until(deadline) => Err(ToolError::new(ErrorCode::Timeout, "Request deadline exceeded during preview pre-state probe", false)),
             result = operation => result,
         }
     }
@@ -688,8 +730,10 @@ fn interpreters<'a>(
 ) -> Result<Vec<&'a str>, ToolError> {
     if !configured.is_empty() {
         if !configured.starts_with('/') || configured.contains('\0') {
-            return Err(ToolError::resource_unavailable(
+            return Err(ToolError::new(
+                ErrorCode::ResourceUnavailable,
                 "An approved absolute target interpreter is required",
+                false,
             ));
         }
         return Ok(vec![configured]);
@@ -733,8 +777,10 @@ fn interpreters<'a>(
                 || !(path.starts_with('/') || !elevated && dynamic_python && *path == "python3")
         })
     {
-        return Err(ToolError::resource_unavailable(
+        return Err(ToolError::new(
+            ErrorCode::ResourceUnavailable,
             "An approved absolute target interpreter is required",
+            false,
         ));
     }
     Ok(candidates)
@@ -785,7 +831,11 @@ fn complete_reply(
     };
     let mut error = (rc != 0).then(|| match failure_reason {
         Some(reason) => ToolError::payload_failed_with_reason(reason, false),
-        None => ToolError::payload_failed("Payload operation completed with failure", false),
+        None => ToolError::new(
+            ErrorCode::PayloadFailed,
+            "Payload operation completed with failure",
+            false,
+        ),
     });
     let changed = if no_log {
         None
@@ -795,13 +845,15 @@ fn complete_reply(
     if !no_log && error.is_none() {
         match output_status {
             OutputStatus::Overflow => {
-                error = Some(crate::reply::ToolError::resource_limit(
+                error = Some(crate::reply::ToolError::new(
+                    ErrorCode::ResourceLimit,
                     "Payload output exceeded retention limit",
                     false,
                 ));
             }
             OutputStatus::InvalidUtf8 => {
-                error = Some(crate::reply::ToolError::invalid_projection(
+                error = Some(crate::reply::ToolError::new(
+                    ErrorCode::InvalidProjection,
                     "Payload output was not valid UTF-8",
                     false,
                 ));
@@ -835,7 +887,8 @@ fn complete_reply(
                     },
                     None => {
                         if error.is_none() {
-                            error = Some(crate::reply::ToolError::invalid_projection(
+                            error = Some(crate::reply::ToolError::new(
+                                ErrorCode::InvalidProjection,
                                 "Payload output is not valid strict JSON",
                                 false,
                             ));
@@ -876,8 +929,10 @@ fn bundle_interpreters(
 ) -> Result<Vec<&str>, ToolError> {
     if !configured.is_empty() {
         if !configured.starts_with('/') || configured.contains('\0') {
-            return Err(ToolError::resource_unavailable(
+            return Err(ToolError::new(
+                ErrorCode::ResourceUnavailable,
                 "An approved absolute target interpreter is required",
+                false,
             ));
         }
         return Ok(vec![configured]);
@@ -941,24 +996,31 @@ fn complete_bundle_reply(
     };
     let mut error = failed.then(|| match failure_reason {
         Some(reason) => ToolError::payload_failed_with_reason(reason, false),
-        None => ToolError::automation_failed("Ansible module execution failed", false),
+        None => ToolError::new(
+            ErrorCode::AutomationFailed,
+            "Ansible module execution failed",
+            false,
+        ),
     });
     if !censored && error.is_none() {
         match output_status {
             OutputStatus::Overflow => {
-                error = Some(ToolError::resource_limit(
+                error = Some(ToolError::new(
+                    ErrorCode::ResourceLimit,
                     "Module output exceeded retention limit",
                     false,
                 ));
             }
             OutputStatus::InvalidUtf8 => {
-                error = Some(ToolError::invalid_projection(
+                error = Some(ToolError::new(
+                    ErrorCode::InvalidProjection,
                     "Module output was not valid UTF-8",
                     false,
                 ));
             }
             OutputStatus::Complete if parsed.is_none() => {
-                error = Some(ToolError::invalid_result(
+                error = Some(ToolError::new(
+                    ErrorCode::InvalidResult,
                     "Module output was not valid JSON",
                     false,
                 ));
@@ -1044,7 +1106,8 @@ fn complete_bundle_reply(
 /// A bootstrap terminal record and its SSH exit status must agree independently.
 fn terminal(out: Output, id: &str) -> Result<(i32, Value, OutputStatus), ToolError> {
     let invalid = || {
-        ToolError::invalid_result(
+        ToolError::new(
+            ErrorCode::InvalidResult,
             "Payload terminal evidence is invalid; remote state is unknown",
             true,
         )
@@ -1061,26 +1124,33 @@ fn terminal(out: Output, id: &str) -> Result<(i32, Value, OutputStatus), ToolErr
             // A declared prerequisite failed, so the collector never ran and no
             // mutation is possible. Distinguish that from a frame/protocol rejection.
             return Err(match value.get("error_reason").and_then(Value::as_str) {
-                Some("unsupported_platform") => ToolError::resource_unavailable(
+                Some("unsupported_platform") => ToolError::new(
+                    ErrorCode::ResourceUnavailable,
                     "Target interpreter does not meet the approved minimum version",
+                    false,
                 ),
-                Some("dependency_unavailable") => ToolError::resource_unavailable(
+                Some("dependency_unavailable") => ToolError::new(
+                    ErrorCode::ResourceUnavailable,
                     "A declared target module or executable is unavailable",
+                    false,
                 ),
-                _ => ToolError::payload_rejected(
+                _ => ToolError::new(
+                    ErrorCode::PayloadRejected,
                     "Payload rejected before execution; frame or source drift",
                     false,
                 ),
             });
         }
         (Some("timeout"), 124) => {
-            return Err(ToolError::timeout(
+            return Err(ToolError::new(
+                ErrorCode::Timeout,
                 "Payload deadline exceeded; remote descendants may continue",
                 true,
             ));
         }
         (Some("cancelled"), 125) => {
-            return Err(ToolError::cancelled(
+            return Err(ToolError::new(
+                ErrorCode::Cancelled,
                 "Payload cancelled; remote descendants may continue",
                 true,
             ));
@@ -1155,11 +1225,16 @@ fn frame_bounded<'a>(
     source: &'a [u8],
     max_source: usize,
 ) -> Result<Frame<'a>, Failure> {
-    let data = serde_json::to_vec(spec)
-        .map_err(|_| failed(ToolError::invalid_argument, "Invalid payload frame", false))?;
+    let data = serde_json::to_vec(spec).map_err(|_| {
+        failed(
+            |m, u| ToolError::new(ErrorCode::InvalidArgument, m, u),
+            "Invalid payload frame",
+            false,
+        )
+    })?;
     if data.len() > MAX_INPUT || source.len() > max_source {
         return Err(failed(
-            ToolError::resource_limit,
+            |m, u| ToolError::new(ErrorCode::ResourceLimit, m, u),
             "Payload frame exceeds bounds",
             false,
         ));
@@ -1275,23 +1350,32 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             .stderr(Stdio::piped());
         let mut child = command.spawn().await.map_err(|_| {
             failed(
-                ToolError::connection_lost,
+                |m, u| ToolError::new(ErrorCode::ConnectionLost, m, u),
                 "Payload channel failed; remote state is unknown",
                 true,
             )
         })?;
-        let mut stdin = child
-            .stdin()
-            .take()
-            .ok_or_else(|| failed(ToolError::io_error, "Missing payload input pipe", true))?;
-        let stdout = child
-            .stdout()
-            .take()
-            .ok_or_else(|| failed(ToolError::io_error, "Missing payload output pipe", true))?;
-        let stderr = child
-            .stderr()
-            .take()
-            .ok_or_else(|| failed(ToolError::io_error, "Missing payload error pipe", true))?;
+        let mut stdin = child.stdin().take().ok_or_else(|| {
+            failed(
+                |m, u| ToolError::new(ErrorCode::IoError, m, u),
+                "Missing payload input pipe",
+                true,
+            )
+        })?;
+        let stdout = child.stdout().take().ok_or_else(|| {
+            failed(
+                |m, u| ToolError::new(ErrorCode::IoError, m, u),
+                "Missing payload output pipe",
+                true,
+            )
+        })?;
+        let stderr = child.stderr().take().ok_or_else(|| {
+            failed(
+                |m, u| ToolError::new(ErrorCode::IoError, m, u),
+                "Missing payload error pipe",
+                true,
+            )
+        })?;
         let (out, err, write) =
             tokio::join!(bounded(stdout, limit), bounded(stderr, 0), async move {
                 let script = BOOTSTRAP.as_bytes();
@@ -1305,35 +1389,35 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             },);
         let (stdout, overflow) = out.map_err(|_| {
             failed(
-                ToolError::io_error,
+                |m, u| ToolError::new(ErrorCode::IoError, m, u),
                 "Payload output failed; remote state is unknown",
                 true,
             )
         })?;
         err.map_err(|_| {
             failed(
-                ToolError::io_error,
+                |m, u| ToolError::new(ErrorCode::IoError, m, u),
                 "Payload error stream failed; remote state is unknown",
                 true,
             )
         })?;
         write.map_err(|_| {
             failed(
-                ToolError::io_error,
+                |m, u| ToolError::new(ErrorCode::IoError, m, u),
                 "Payload input failed; remote state is unknown",
                 true,
             )
         })?;
         let status = child.wait().await.map_err(|_| {
             failed(
-                ToolError::connection_lost,
+                |m, u| ToolError::new(ErrorCode::ConnectionLost, m, u),
                 "Payload channel lost; remote state is unknown",
                 true,
             )
         })?;
         let rc = status.code().ok_or_else(|| {
             failed(
-                ToolError::connection_lost,
+                |m, u| ToolError::new(ErrorCode::ConnectionLost, m, u),
                 "Payload exit unavailable; remote state is unknown",
                 true,
             )
@@ -1346,9 +1430,12 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
     };
     tokio::select! {
         biased;
-        _ = ct.cancelled() => Err(failed(ToolError::cancelled, "Payload cancelled; remote execution may continue", true)),
-        _ = shutdown.cancelled() => Err(failed(ToolError::cancelled, "Server stopped; remote execution may continue", true)),
-        _ = sleep_until(deadline) => Err(failed(ToolError::timeout, "Payload deadline exceeded; remote execution may continue", true)),
+        _ = ct.cancelled() => Err(failed(
+            |m, u| ToolError::new(ErrorCode::Cancelled, m, u), "Payload cancelled; remote execution may continue", true)),
+        _ = shutdown.cancelled() => Err(failed(
+            |m, u| ToolError::new(ErrorCode::Cancelled, m, u), "Server stopped; remote execution may continue", true)),
+        _ = sleep_until(deadline) => Err(failed(
+            |m, u| ToolError::new(ErrorCode::Timeout, m, u), "Payload deadline exceeded; remote execution may continue", true)),
         result = operation => result,
     }
 }

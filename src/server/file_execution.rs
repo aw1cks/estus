@@ -13,7 +13,7 @@ use crate::{
         },
         operations::{self, FileContext, FileOutcome},
     },
-    reply::{ToolError, ToolReply},
+    reply::{ErrorCode, ToolError, ToolReply},
     ssh::MasterHealth,
     wire::ReplyBudget,
 };
@@ -49,7 +49,8 @@ impl Estus {
         let budget = ReplyBudget::new(&context.id)?;
         let (validated, deadline) = match (|| {
             if self.state.shutdown.is_cancelled() || context.ct.is_cancelled() {
-                return Err(ToolError::cancelled(
+                return Err(ToolError::new(
+                    ErrorCode::Cancelled,
                     "Request cancelled before dispatch",
                     false,
                 ));
@@ -91,7 +92,8 @@ impl Estus {
         });
         match task.await {
             Ok((_permit, reply)) => budget.result(reply),
-            Err(_) => budget.result(ToolReply::<T>::failure(ToolError::io_error(
+            Err(_) => budget.result(ToolReply::<T>::failure(ToolError::new(
+                ErrorCode::IoError,
                 "File operation task could not complete; remote state is unknown",
                 true,
             ))),
@@ -579,7 +581,11 @@ impl State {
         let progress = crate::progress::Reporter::from_context(context);
         let metadata = file_metadata(host, tool, self, &context.id);
         if self.shutdown.is_cancelled() || context.ct.is_cancelled() {
-            let error = ToolError::cancelled("Request cancelled before dispatch", false);
+            let error = ToolError::new(
+                ErrorCode::Cancelled,
+                "Request cancelled before dispatch",
+                false,
+            );
             metadata.reject(started, &error);
             return Err(ToolReply::failure(error));
         }

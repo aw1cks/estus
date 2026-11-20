@@ -28,7 +28,9 @@ use crate::{
         metadata::StatData,
     },
     output::ReadOutputRequest,
-    reply::{ClearTargetQuarantineData, CommandData, ControllerError, ToolError, ToolReply},
+    reply::{
+        ClearTargetQuarantineData, CommandData, ControllerError, ErrorCode, ToolError, ToolReply,
+    },
     wire::ReplyBudget,
 };
 
@@ -90,8 +92,11 @@ impl<T: DeserializeOwned> FromContextPart<ToolCallContext<'_, Estus>> for Argume
     fn from_context_part(context: &mut ToolCallContext<'_, Estus>) -> Result<Self, ErrorData> {
         let value = serde_json::Value::Object(context.arguments.take().unwrap_or_default());
         T::deserialize(&value).map(Self).map_err(|_| {
-            let error =
-                ToolError::invalid_argument("Arguments do not match the tool input schema", false);
+            let error = ToolError::new(
+                ErrorCode::InvalidArgument,
+                "Arguments do not match the tool input schema",
+                false,
+            );
             let metadata = Metadata {
                 request_id: &context.request_context.id,
                 tool: &context.name,
@@ -162,7 +167,8 @@ impl Estus {
                         .controller_metadata(id, binding, &context.id)
                         .reject_controller(
                             Instant::now(),
-                            &ControllerError::invalid_argument(
+                            &ControllerError::new(
+                                ErrorCode::InvalidArgument,
                                 "Invalid controller tool argument shape",
                             ),
                         );
@@ -191,7 +197,11 @@ impl Estus {
                 }
                 .reject(
                     Instant::now(),
-                    &ToolError::invalid_argument("Invalid named tool argument shape", false),
+                    &ToolError::new(
+                        ErrorCode::InvalidArgument,
+                        "Invalid named tool argument shape",
+                        false,
+                    ),
                 );
                 Err(error)
             }
@@ -270,7 +280,11 @@ impl Estus {
         let budget = ReplyBudget::new(&context.id)?;
         let metadata = self.state.output_metadata(&context.id);
         if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-            let error = ToolError::cancelled("Output read cancelled before dispatch", false);
+            let error = ToolError::new(
+                ErrorCode::Cancelled,
+                "Output read cancelled before dispatch",
+                false,
+            );
             metadata.reject(started, &error);
             return budget.result(ToolReply::<ReadData>::failure(error));
         }
@@ -301,8 +315,8 @@ impl Estus {
             let audit = Audit::start(state.output_metadata(&context.id), started);
             let reply = tokio::select! {
                 biased;
-                () = context.ct.cancelled() => ToolReply::failure(ToolError::cancelled("Output read cancelled", false)),
-                () = state.shutdown.cancelled() => ToolReply::failure(ToolError::cancelled("Output read cancelled", false)),
+                () = context.ct.cancelled() => ToolReply::failure(ToolError::new(ErrorCode::Cancelled, "Output read cancelled", false)),
+                () = state.shutdown.cancelled() => ToolReply::failure(ToolError::new(ErrorCode::Cancelled, "Output read cancelled", false)),
                 reply = state.outputs.read(request, state.config.limits().max_file_bytes, budget) => reply,
             };
             audit.finish(None, reply.error());
@@ -310,7 +324,8 @@ impl Estus {
         });
         match task.await {
             Ok(reply) => budget.result(reply),
-            Err(_) => budget.result(ToolReply::<ReadData>::failure(ToolError::io_error(
+            Err(_) => budget.result(ToolReply::<ReadData>::failure(ToolError::new(
+                ErrorCode::IoError,
                 "Output read could not complete",
                 false,
             ))),
@@ -528,7 +543,8 @@ impl Estus {
             budget.result(ToolReply::<ClearTargetQuarantineData>::failure(error))
         };
         if context.ct.is_cancelled() || self.state.shutdown.is_cancelled() {
-            return reject(ToolError::cancelled(
+            return reject(ToolError::new(
+                ErrorCode::Cancelled,
                 "Quarantine clear cancelled before execution",
                 false,
             ));
@@ -538,7 +554,8 @@ impl Estus {
             .config
             .tool_enabled(ToolId::ClearTargetQuarantine)
         {
-            return reject(ToolError::policy_denied(
+            return reject(ToolError::new(
+                ErrorCode::PolicyDenied,
                 "Operation is not authorized",
                 false,
             ));
@@ -548,10 +565,15 @@ impl Estus {
             || request.host.contains('\0')
             || request.host.chars().any(char::is_control)
         {
-            return reject(ToolError::invalid_argument("Invalid target host", false));
+            return reject(ToolError::new(
+                ErrorCode::InvalidArgument,
+                "Invalid target host",
+                false,
+            ));
         }
         if !request.acknowledge_remote_state_reconciled {
-            return reject(ToolError::invalid_argument(
+            return reject(ToolError::new(
+                ErrorCode::InvalidArgument,
                 "Clearing target quarantine requires acknowledge_remote_state_reconciled=true",
                 false,
             ));
@@ -693,7 +715,7 @@ impl ServerHandler for Estus {
             }
             .reject(
                 Instant::now(),
-                &ToolError::invalid_argument("Tool is not registered", false),
+                &ToolError::new(ErrorCode::InvalidArgument, "Tool is not registered", false),
             );
             return Err(ErrorData::invalid_params("Tool is not registered", None));
         }

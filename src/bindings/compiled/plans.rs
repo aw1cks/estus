@@ -19,7 +19,7 @@ use crate::{
     bundle::BundlePack,
     command::Invocation,
     config::{ConfigError, Limits},
-    reply::{ControllerError, ToolError},
+    reply::{ControllerError, ErrorCode, ToolError},
 };
 
 use super::super::raw::RawInterpreter;
@@ -398,7 +398,8 @@ impl CompiledBinding {
     ) -> Result<PreparedController, ControllerError> {
         let Execution::ControllerScript(super::ControllerState::Activated(plan)) = &self.execution
         else {
-            return Err(ControllerError::policy_denied(
+            return Err(ControllerError::new(
+                ErrorCode::PolicyDenied,
                 "Operation is not authorized",
             ));
         };
@@ -411,7 +412,8 @@ impl CompiledBinding {
         request: &ControllerRequest,
         limits: &Limits,
     ) -> Result<PreparedController, ControllerError> {
-        let invalid = || ControllerError::invalid_argument("Invalid controller tool inputs");
+        let invalid =
+            || ControllerError::new(ErrorCode::InvalidArgument, "Invalid controller tool inputs");
         let timeout = request
             .timeout_secs
             .unwrap_or(self.timeout_secs.unwrap_or(limits.operation_timeout_secs));
@@ -450,7 +452,12 @@ impl CompiledBinding {
                 values: &request.values,
             },
         )
-        .map_err(|_| ControllerError::resource_limit("Controller input exceeds byte bound"))?;
+        .map_err(|_| {
+            ControllerError::new(
+                ErrorCode::ResourceLimit,
+                "Controller input exceeds byte bound",
+            )
+        })?;
         Ok(PreparedController {
             plan: Arc::clone(plan),
             input_json: writer.bytes,

@@ -20,7 +20,11 @@ use sha2::{Digest, Sha256};
 use tokio::{io::AsyncWriteExt, process::Command};
 use tokio_util::sync::CancellationToken;
 
-use crate::{contracts::module_schema, reply::ToolError, strict_json};
+use crate::{
+    contracts::module_schema,
+    reply::{ErrorCode, ToolError},
+    strict_json,
+};
 
 const BUILDER_PY: &str = include_str!("bundle/builder.py");
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
@@ -377,20 +381,26 @@ impl BundlePack {
     ) -> Result<(Arc<BundledModule>, Value), ToolError> {
         if requested_module == "ansible.builtin.package" {
             let router = self.routers.get("ansible.builtin.package").ok_or_else(|| {
-                ToolError::unsupported("Generic package router is unavailable in bundle", false)
+                ToolError::new(
+                    ErrorCode::Unsupported,
+                    "Generic package router is unavailable in bundle",
+                    false,
+                )
             })?;
             let normalized_mgr = match pkg_mgr {
                 "yum" | "yum4" | "dnf4" => "dnf",
                 other => other,
             };
             let target_fqcn = router.routes.get(normalized_mgr).ok_or_else(|| {
-                ToolError::unsupported(
+                ToolError::new(
+                    ErrorCode::Unsupported,
                     "Target OS package manager is not supported by the active bundle",
                     false,
                 )
             })?;
             let bundled = self.modules.get(target_fqcn).cloned().ok_or_else(|| {
-                ToolError::unsupported(
+                ToolError::new(
+                    ErrorCode::Unsupported,
                     "Target package backend module is missing from bundle",
                     false,
                 )
@@ -430,16 +440,24 @@ impl BundlePack {
         }
 
         let bundled = self.modules.get(requested_module).cloned().ok_or_else(|| {
-            ToolError::unsupported("Requested Ansible module is not present in bundle", false)
+            ToolError::new(
+                ErrorCode::Unsupported,
+                "Requested Ansible module is not present in bundle",
+                false,
+            )
         })?;
         Ok((bundled, args.clone()))
     }
 }
 
 fn rewrite_generic_package_args(pkg_mgr: &str, args: &Value) -> Result<Value, ToolError> {
-    let obj = args
-        .as_object()
-        .ok_or_else(|| ToolError::invalid_argument("Package arguments must be an object", false))?;
+    let obj = args.as_object().ok_or_else(|| {
+        ToolError::new(
+            ErrorCode::InvalidArgument,
+            "Package arguments must be an object",
+            false,
+        )
+    })?;
     let state = obj
         .get("state")
         .and_then(Value::as_str)
@@ -449,7 +467,8 @@ fn rewrite_generic_package_args(pkg_mgr: &str, args: &Value) -> Result<Value, To
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty());
     if version.is_some() && state != "present" {
-        return Err(ToolError::invalid_argument(
+        return Err(ToolError::new(
+            ErrorCode::InvalidArgument,
             "Package version pin requires state=\"present\"",
             false,
         ));
@@ -462,18 +481,22 @@ fn rewrite_generic_package_args(pkg_mgr: &str, args: &Value) -> Result<Value, To
                 item.as_str()
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
-                    .ok_or_else(|| ToolError::invalid_argument("Invalid package name", false))
+                    .ok_or_else(|| {
+                        ToolError::new(ErrorCode::InvalidArgument, "Invalid package name", false)
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?,
         _ => {
-            return Err(ToolError::invalid_argument(
+            return Err(ToolError::new(
+                ErrorCode::InvalidArgument,
                 "Package name must be a non-empty string or list",
                 false,
             ));
         }
     };
     if version.is_some() && names.len() > 1 {
-        return Err(ToolError::invalid_argument(
+        return Err(ToolError::new(
+            ErrorCode::InvalidArgument,
             "Exact version pin applies to a single package name",
             false,
         ));

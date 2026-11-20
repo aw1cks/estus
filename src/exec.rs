@@ -7,8 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::capture::{Capture, drain};
 use crate::command::{Invocation, shell_script, sudo_arguments};
-use crate::reply::{CommandData, Termination, ToolError, ToolReply};
-
+use crate::reply::{CommandData, ErrorCode, Termination, ToolError, ToolReply};
 pub(crate) struct RunContext<'a> {
     pub max_output_bytes: u64,
     pub deadline: tokio::time::Instant,
@@ -203,9 +202,17 @@ pub(crate) async fn run(
     let (exit_code, termination, error, unknown) = match outcome {
         Outcome::Completed(completion) => {
             let error = if completion.io_failed {
-                Some(ToolError::io_error("Command stream I/O failed", false))
+                Some(ToolError::new(
+                    ErrorCode::IoError,
+                    "Command stream I/O failed",
+                    false,
+                ))
             } else if completion.exit_code != 0 {
-                Some(ToolError::command_failed("Remote command failed", false))
+                Some(ToolError::new(
+                    ErrorCode::CommandFailed,
+                    "Remote command failed",
+                    false,
+                ))
             } else {
                 None
             };
@@ -219,7 +226,8 @@ pub(crate) async fn run(
         Outcome::Timeout => (
             None,
             Termination::Timeout,
-            Some(ToolError::timeout(
+            Some(ToolError::new(
+                ErrorCode::Timeout,
                 "Command deadline exceeded; remote execution may continue",
                 true,
             )),
@@ -228,7 +236,8 @@ pub(crate) async fn run(
         Outcome::Cancelled => (
             None,
             Termination::Cancelled,
-            Some(ToolError::cancelled(
+            Some(ToolError::new(
+                ErrorCode::Cancelled,
                 "Command cancelled; remote execution may continue",
                 true,
             )),
@@ -237,12 +246,14 @@ pub(crate) async fn run(
         Outcome::Backend(error) => {
             let lost = connection_lost(&error);
             let error = if lost {
-                ToolError::connection_lost(
+                ToolError::new(
+                    ErrorCode::ConnectionLost,
                     "SSH command channel was lost; remote execution state is unknown",
                     true,
                 )
             } else {
-                ToolError::io_error(
+                ToolError::new(
+                    ErrorCode::IoError,
                     "SSH command channel failed; remote execution state is unknown",
                     true,
                 )
