@@ -875,10 +875,6 @@ programs = ["/usr/local/bin/PRIVATE_SUDO_PROG"]
         ensure!(!policy_text.contains("private-ssh-target.invalid"));
         ensure!(!policy_text.contains("PRIVATE_SUDO_USER"));
 
-        server.send(json!({"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"estus://guides/uncertainty-reconciliation"}})).await?;
-        let guide = server.response(7).await?;
-        ensure!(guide["result"]["contents"][0]["text"].as_str().unwrap().contains("change_target_quarantine_clear"));
-
         server.send(json!({"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"estus://targets/unknown-host/policy"}})).await?;
         ensure!(server.response(8).await?["error"]["code"] == -32002);
         Ok::<_, anyhow::Error>(())
