@@ -108,7 +108,7 @@ impl Estus {
             super::admission::AdmissionMode::ExclusiveWrite
         };
         let revision = binding.revision.clone();
-        let argv = prepared.argv;
+        let payload_request = prepared.request;
         let output_limit = prepared.output_limit;
         let operation = match self
             .state
@@ -228,7 +228,7 @@ impl Estus {
                     host: &request.host,
                     authority: &authority,
                     target,
-                    argv,
+                    request: payload_request,
                     output_limit,
                     connect_timeout: Duration::from_secs(
                         state.config.limits().connect_timeout_secs,

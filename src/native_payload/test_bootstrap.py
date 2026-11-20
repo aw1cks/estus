@@ -19,6 +19,7 @@ def invoke(raw):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
 
 def collector_frame(source, request=()):
+    # The request is a JSON array of typed values; nothing is stringified here.
     raw = json.dumps(list(request), separators=(',', ':')).encode()
     return b'ESTUSCL1' + struct.pack('!II', len(source), len(raw)) + source + raw
 
@@ -73,15 +74,37 @@ class Execution(unittest.TestCase):
         )
         exit_code, evidence = self.execute(
             source,
-            request=['{"unit": "demo.service"}', '"approved"', 'plain'],
+            request=[{'unit': 'demo.service'}, 'approved', 'plain'],
             argv=None,
         )
         self.assertEqual(exit_code, 0)
         self.assertEqual(evidence['phase'], 'complete')
         self.assertEqual(json.loads(evidence['stdout']), ['demo.service', 'approved', 'plain'])
 
-    def test_request_frame_rejects_non_list_oversize_and_nul(self):
-        for request in ('not-a-list', ['a', 'b'] * 40, ['a\x00b']):
+    def test_request_values_keep_their_json_type(self):
+        # A unit, interface or address that looks like JSON must not change type:
+        # the frame carries typed values and the harness decodes exactly once.
+        source = (
+            b'import estus_runtime, json\n'
+            b'request = estus_runtime.request()\n'
+            b'print(json.dumps([[value, type(value).__name__] for value in request]))\n'
+        )
+        exit_code, evidence = self.execute(
+            source,
+            request=['123', 'true', 'null', '1e3', 123, {'unit': 'demo.service'}],
+        )
+        self.assertEqual(exit_code, 0, evidence)
+        self.assertEqual(evidence['phase'], 'complete')
+        self.assertEqual(
+            json.loads(evidence['stdout']),
+            [['123', 'str'], ['true', 'str'], ['null', 'str'], ['1e3', 'str'],
+             [123, 'int'], [{'unit': 'demo.service'}, 'dict']],
+        )
+
+    def test_request_frame_rejects_non_list_oversize_and_non_finite(self):
+        # JSON escapes NUL, so the wire never carries a literal one; collectors
+        # reject it in their own bounds checks (check_text).
+        for request in ('not-a-list', ['a', 'b'] * 40, [float('inf')]):
             with self.subTest(request=request):
                 exit_code, evidence = self.execute(
                     b'raise SystemExit("must not run")', request=request

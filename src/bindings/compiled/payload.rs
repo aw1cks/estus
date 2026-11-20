@@ -46,7 +46,7 @@ impl PayloadState {
 }
 
 pub(crate) struct PreparedPayload {
-    pub(crate) argv: Vec<String>,
+    pub(crate) request: Vec<Value>,
     pub(crate) merged_args: Value,
     pub(crate) duration: Duration,
     pub(crate) output_limit: usize,
@@ -258,9 +258,9 @@ impl CompiledBinding {
             .max_output_bytes
             .unwrap_or(limits.max_output_bytes)
             .min(16_777_216);
-        let (argv, merged_args) = activated.plan.arguments_with_merged(&request.inputs)?;
+        let (values, merged_args) = activated.plan.request_with_merged(&request.inputs)?;
         Ok(PreparedPayload {
-            argv,
+            request: values,
             merged_args,
             duration: Duration::from_secs(timeout),
             output_limit: usize::try_from(output_limit)

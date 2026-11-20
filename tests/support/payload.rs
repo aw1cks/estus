@@ -12,9 +12,7 @@ bootstrap = importlib.util.module_from_spec(runtime_spec)
 runtime_spec.loader.exec_module(bootstrap)
 namespace = {'types': types}
 exec(compile(bootstrap.COLLECTOR_RUNTIME, '<estus_runtime>', 'exec'), namespace)
-sys.modules['estus_runtime'] = namespace['_make_runtime'](
-    [namespace['_decode_request'](value) for value in request.get('request', [])]
-)
+sys.modules['estus_runtime'] = namespace['_make_runtime'](request.get('request', []))
 spec = importlib.util.spec_from_file_location('catalog_payload', sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

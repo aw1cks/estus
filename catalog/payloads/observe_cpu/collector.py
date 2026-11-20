@@ -34,8 +34,11 @@ def main():
 
     if platform.system() != 'Linux':
         raise ValueError('CPU observation requires Linux')
-    limit = integer(estus_runtime.request()[0].encode('ascii'), 16)
-    sample_ms = integer(estus_runtime.request()[1].encode('ascii'), 2000)
+    limit_value, sample_value = estus_runtime.request()[:2]
+    if not isinstance(limit_value, str) or not isinstance(sample_value, str):
+        raise ValueError('CPU observation requires string scalars')
+    limit = integer(limit_value.encode('ascii'), 16)
+    sample_ms = integer(sample_value.encode('ascii'), 2000)
     if limit < 1:
         raise ValueError('topology limit must be positive')
     hz = os.sysconf('SC_CLK_TCK')

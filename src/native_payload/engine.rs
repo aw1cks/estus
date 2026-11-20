@@ -312,7 +312,7 @@ impl Engine {
             host,
             authority,
             target,
-            argv,
+            request,
             connect_timeout,
             output_limit,
             deadline,
@@ -398,7 +398,7 @@ impl Engine {
                 let spec = json!({
                     "schema": 1, "operation": "execute", "id": id,
                     "requirements": requirements, "identity": identity,
-                    "sha256": plan.manifest.source_sha256, "request": argv,
+                    "sha256": plan.manifest.source_sha256, "request": request,
                     "timeout": remaining.min(600.0), "output_limit": output_limit,
                 });
                 let input = frame(&spec, &plan.source).map_err(Failure::tool)?;
@@ -1354,7 +1354,7 @@ pub(crate) struct PayloadRun<'a> {
     pub(crate) host: &'a str,
     pub(crate) authority: &'a str,
     pub(crate) target: ResolvedAutomation<'a>,
-    pub(crate) argv: Vec<String>,
+    pub(crate) request: Vec<Value>,
     pub(crate) connect_timeout: Duration,
     pub(crate) output_limit: usize,
     pub(crate) deadline: Instant,

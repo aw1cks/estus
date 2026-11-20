@@ -422,24 +422,27 @@ impl PayloadPlan {
             projection: approval.projection.clone(),
         })
     }
-    pub(crate) fn arguments_with_merged(
+    /// The request is the reviewed adapter evaluated to typed JSON values, in order.
+    /// Nothing is stringified on the way out, so a scalar interface named "123"
+    /// stays the string "123" instead of becoming a number at the collector.
+    pub(crate) fn request_with_merged(
         &self,
         inputs: &Value,
-    ) -> Result<(Vec<String>, Value), ToolError> {
+    ) -> Result<(Vec<Value>, Value), ToolError> {
         let args = self.binding.prepare(inputs).map_err(|_| {
             ToolError::invalid_argument("Payload inputs violate reviewed contract", false)
         })?;
-        let argv = adapt(&self.manifest.argv, &args)?;
-        Ok((argv, args))
+        let request = adapt(&self.manifest.argv, &args)?;
+        Ok((request, args))
     }
 }
-fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<String>, ToolError> {
-    let invalid = || ToolError::invalid_argument("Payload argv violates reviewed adapter", false);
+fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
+    let invalid = || ToolError::invalid_argument("Payload adapter is invalid", false);
     let mut output = Vec::with_capacity(adapter.len());
     let mut bytes = 0usize;
     for arg in adapter {
         let value = match arg {
-            Arg::Fixed { value } => value.clone(),
+            Arg::Fixed { value } => Value::String(value.clone()),
             Arg::Object { fields } => {
                 let mut object = serde_json::Map::new();
                 for (key, field) in fields {
@@ -449,7 +452,7 @@ fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<String>, ToolError> {
                         .ok_or_else(invalid)?;
                     object.insert(key.clone(), value.clone());
                 }
-                serde_json::to_string(&object).map_err(|_| invalid())?
+                Value::Object(object)
             }
             Arg::Argument {
                 name,
@@ -465,23 +468,25 @@ fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<String>, ToolError> {
                     }
                 };
                 match format {
-                    Format::Json => serde_json::to_string(value).map_err(|_| invalid())?,
+                    // Already a JSON value: parsed by the collector from typed input.
+                    Format::Json => value.clone(),
+                    // A bare scalar stays a string so target-side parsing cannot
+                    // reinterpret the caller's value as a different JSON type.
                     Format::Scalar => match value {
-                        Value::String(s) => s.clone(),
-                        Value::Bool(b) => b.to_string(),
-                        Value::Number(n) => n.to_string(),
+                        Value::String(_) => value.clone(),
                         _ => return Err(invalid()),
                     },
                     Format::PythonBool => match value.as_bool() {
-                        Some(true) => "True".into(),
-                        Some(false) => "False".into(),
+                        Some(true) => Value::String("True".into()),
+                        Some(false) => Value::String("False".into()),
                         None => return Err(invalid()),
                     },
                 }
             }
         };
-        bytes += value.len();
-        if bytes > MAX_INPUT || value.contains('\0') {
+        let encoded = value.to_string();
+        bytes += encoded.len();
+        if bytes > MAX_INPUT || encoded.contains('\0') {
             return Err(invalid());
         }
         output.push(value);
@@ -509,8 +514,27 @@ mod tests {
         let adapter:Vec<Arg>=serde_json::from_value(json!([{"kind":"argument","name":"x","format":"json"},{"kind":"argument","name":"optional","format":"scalar","default":""},{"kind":"argument","name":"gone","format":"scalar","omit_if_absent":true}])).unwrap();
         assert_eq!(
             adapt(&adapter, &json!({"x":{"literal":"{{ x }};\n☃"}})).unwrap(),
-            vec!["{\"literal\":\"{{ x }};\\n☃\"}", ""]
+            vec![json!({"literal":"{{ x }};\n☃"}), json!("")]
         );
+    }
+
+    #[test]
+    fn scalar_strings_keep_their_type_through_the_adapter() {
+        // A unit, interface or address that reads like JSON must not become one.
+        let adapter: Vec<Arg> =
+            serde_json::from_value(json!([{"kind":"argument","name":"unit","format":"scalar"}]))
+                .unwrap();
+        for literal in ["123", "true", "null", "1e3", "0123", "-1"] {
+            assert_eq!(
+                adapt(&adapter, &json!({"unit": literal})).unwrap(),
+                vec![json!(literal)],
+                "{literal} must stay a string"
+            );
+        }
+        // Non-string scalars are rejected rather than coerced.
+        for value in [json!(123), json!(true), json!(null), json!(["123"])] {
+            assert!(adapt(&adapter, &json!({"unit": value})).is_err());
+        }
     }
 
     #[test]
@@ -573,7 +597,7 @@ mod receipt_tests {
         let args:Vec<Arg>=serde_json::from_value(json!([{"kind":"object","fields":{"literal":{"name":"x"},"optional":{"name":"absent","default":null}}}])).unwrap();
         assert_eq!(
             adapt(&args, &json!({"x":["{{ executable }}","; shell"]})).unwrap(),
-            vec!["{\"literal\":[\"{{ executable }}\",\"; shell\"],\"optional\":null}"]
+            vec![json!({"literal":["{{ executable }}","; shell"],"optional":null})]
         );
         assert!(adapt(&args, &json!({})).is_err());
     }

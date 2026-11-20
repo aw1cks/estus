@@ -22,12 +22,6 @@ def _exact(stream, count):
         raise ValueError('truncated collector frame')
     return data
 
-def _decode_request(raw):
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return raw
-
 def _make_runtime(request_values):
     mod = types.ModuleType('estus_runtime')
 
@@ -181,10 +175,9 @@ if sys.stdin.buffer.read(1):
     raise ValueError('trailing collector frame')
 sys.stdin.close()
 _request = json.loads(_request_raw.decode('utf-8', 'strict')) if _request_raw else []
-if (not isinstance(_request, list) or len(_request) > 64
-        or any(not isinstance(value, str) or not value for value in _request)):
+if not isinstance(_request, list) or len(_request) > 64:
     raise ValueError('invalid collector request')
-sys.modules['estus_runtime'] = _make_runtime([_decode_request(value) for value in _request])
+sys.modules['estus_runtime'] = _make_runtime(_request)
 sys.argv = ['-']
 exec(compile(_source, '<estus_collector>', 'exec'), {'__name__': '__main__'})
 """
@@ -388,7 +381,7 @@ COLLECTOR_FRAME = b'ESTUSCL1'
 
 def collector_frame(source, request):
     raw = json.dumps(request, ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('utf-8')
-    if len(raw) > MAX_JSON:
+    if len(raw) > MAX_REQUEST:
         raise ValueError('request frame bounds')
     return COLLECTOR_FRAME + struct.pack('!II', len(source), len(raw)) + source + raw
 
@@ -425,9 +418,15 @@ def run():
             if hashlib.sha256(source).hexdigest() != spec['sha256']:
                 raise ValueError('source drift')
             request = spec['request']
-            if (not isinstance(request, list) or len(request) > 64
-                    or any(not isinstance(x, str) or not x or len(x) > 8192 or '\0' in x for x in request)
-                    or len(json.dumps(request)) > MAX_REQUEST):
+            if not isinstance(request, list) or len(request) > 64:
+                raise ValueError('request')
+            try:
+                # Typed JSON values travel as-is: a scalar string stays a string.
+                encoded_request = json.dumps(
+                    request, ensure_ascii=True, allow_nan=False, separators=(',', ':'))
+            except (TypeError, ValueError):
+                raise ValueError('request') from None
+            if len(encoded_request) > MAX_REQUEST or '\0' in encoded_request:
                 raise ValueError('request')
             child_env = build_child_env(selected_execs, utf8_locale=False)
             stdin_bytes = collector_frame(source, request)

@@ -801,9 +801,9 @@ fn cgroup_collectors_check_unified_hierarchy_file() -> Result<()> {
         // Collectors read their request through estus_runtime.request(); the test supplies
         // that seam directly rather than injecting process argv.
         let request = if name == "observe_cgroup_sample" {
-            "['/system.slice', '2', '50']"
+            "['/system.slice', 2, 50]"
         } else {
-            "['/system.slice', '1']"
+            "['/system.slice', 1]"
         };
         let script = format!(
             r#"import importlib.util, os, sys, types
