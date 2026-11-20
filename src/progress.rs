@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use crate::wire::{frame_fits, size_error};
+use crate::wire::{frame_fits, frame_len, size_error};
 use rmcp::{
     RoleServer,
     model::{
@@ -20,6 +20,10 @@ use tokio::{sync::watch, task::AbortHandle};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const MAX_ACTIVE: usize = 16;
+const MAX_IN_FLIGHT: usize = 64;
+// Aggregate serialized reply bytes allowed behind a stalled stdout consumer.
+const MAX_BLOCKED_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 256;
 const INTERVAL: Duration = Duration::from_millis(250);
 const SEND_WAIT: Duration = Duration::from_millis(100);
@@ -27,13 +31,11 @@ const SEND_WAIT: Duration = Duration::from_millis(100);
 const MAX_VALUE: u64 = (1 << 53) - 1;
 
 #[derive(Clone, Copy)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Stage {
     SftpOpened,
     SftpReady,
     SftpAcknowledged,
-    RunnerStarted,
-    RunnerReady,
-    RunnerTask,
 }
 
 impl Stage {
@@ -42,9 +44,6 @@ impl Stage {
             Self::SftpOpened => "SFTP channel opened",
             Self::SftpReady => "SFTP session ready",
             Self::SftpAcknowledged => "SFTP operation acknowledged",
-            Self::RunnerStarted => "Runner started",
-            Self::RunnerReady => "Runner ready",
-            Self::RunnerTask => "Runner task observed",
         }
     }
 }
@@ -318,8 +317,18 @@ enum CreditState {
     Sending,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReserveOutcome {
+    Admitted,
+    Busy,
+    Overloaded,
+}
+
 struct PendingState {
     entries: HashMap<RequestId, CreditState>,
+    // Serialized bytes of every frame that has entered `CreditState::Sending`
+    // and has not yet finished its wire write.
+    queued_bytes: usize,
     overloaded: bool,
 }
 
@@ -334,6 +343,7 @@ impl PendingReplies {
         Arc::new(Self {
             state: Mutex::new(PendingState {
                 entries: HashMap::new(),
+                queued_bytes: 0,
                 overloaded: false,
             }),
             shutdown,
@@ -349,45 +359,81 @@ impl PendingReplies {
         lock(&self.state).overloaded
     }
 
-    fn reserve(&self, id: &RequestId) -> bool {
-        let overloaded = {
-            let mut state = lock(&self.state);
-            if state.overloaded
-                || state.entries.len() >= MAX_ACTIVE
-                || state.entries.contains_key(id)
-            {
-                state.overloaded = true;
-                true
-            } else {
-                state.entries.insert(id.clone(), CreditState::Dispatched);
-                false
-            }
-        };
-        if overloaded {
-            self.shutdown.cancel();
-            self.overload.cancel();
-            return false;
-        }
-        true
+    fn trip_overload(&self) {
+        lock(&self.state).overloaded = true;
+        self.shutdown.cancel();
+        self.overload.cancel();
     }
 
-    fn mark_sending(&self, id: &RequestId) {
-        let mut state = lock(&self.state);
-        if let Some(slot) = state.entries.get_mut(id) {
-            *slot = CreditState::Sending;
+    fn reserve(&self, id: &RequestId, writer_blocked: bool) -> ReserveOutcome {
+        let outcome = {
+            let mut state = lock(&self.state);
+            if state.overloaded
+                || state.entries.contains_key(id)
+                || (writer_blocked
+                    && (state.entries.len() >= MAX_ACTIVE
+                        || state.queued_bytes >= MAX_BLOCKED_BYTES))
+            {
+                state.overloaded = true;
+                ReserveOutcome::Overloaded
+            } else if state.entries.len() >= MAX_IN_FLIGHT
+                || state.queued_bytes >= MAX_BLOCKED_BYTES
+            {
+                ReserveOutcome::Busy
+            } else {
+                state.entries.insert(id.clone(), CreditState::Dispatched);
+                ReserveOutcome::Admitted
+            }
+        };
+        if matches!(outcome, ReserveOutcome::Overloaded) {
+            self.shutdown.cancel();
+            self.overload.cancel();
+        }
+        outcome
+    }
+
+    /// Charge the frame's serialized size so the matching drop refunds exactly
+    /// those bytes. Every frame that reaches the wire owes its bytes, tracked
+    /// reply or untracked error frame alike.
+    fn mark_sending(self: &Arc<Self>, id: &RequestId, bytes: usize) -> ReplyCredit {
+        let (tracked, trip) = {
+            let mut state = lock(&self.state);
+            let tracked = if state.entries.contains_key(id) {
+                state.entries.insert(id.clone(), CreditState::Sending);
+                true
+            } else {
+                false
+            };
+            state.queued_bytes = state.queued_bytes.saturating_add(bytes);
+            let trip = state.queued_bytes > MAX_PENDING_BYTES && !state.overloaded;
+            if trip {
+                state.overloaded = true;
+            }
+            (tracked, trip)
+        };
+        if trip {
+            self.shutdown.cancel();
+            self.overload.cancel();
+        }
+        ReplyCredit {
+            pending: Arc::clone(self),
+            id: tracked.then(|| id.clone()),
+            bytes,
         }
     }
 
     fn mark_cancelled(&self, id: &RequestId) {
         let mut state = lock(&self.state);
         match state.entries.get_mut(id) {
-            Some(CreditState::Dispatched | CreditState::CompletedAwaitingRmcp) => {
+            // A completed reply is already produced and heading to `send()`;
+            // dropping it here would skip its `queued_bytes` accounting.
+            Some(CreditState::Dispatched) => {
                 state.entries.remove(id);
             }
             Some(CreditState::InHandler { cancelled }) => {
                 *cancelled = true;
             }
-            Some(CreditState::Sending) | None => {}
+            Some(CreditState::CompletedAwaitingRmcp) | Some(CreditState::Sending) | None => {}
         }
     }
 
@@ -438,16 +484,20 @@ impl HandlerCredit {
     }
 }
 
-struct ReplyCredit {
+pub(crate) struct ReplyCredit {
     pending: Arc<PendingReplies>,
     id: Option<RequestId>,
+    // Exact bytes this credit charged to `PendingState::queued_bytes`.
+    bytes: usize,
 }
 
 impl Drop for ReplyCredit {
     fn drop(&mut self) {
+        let mut state = lock(&self.pending.state);
         if let Some(id) = self.id.take() {
-            lock(&self.pending.state).entries.remove(&id);
+            state.entries.remove(&id);
         }
+        state.queued_bytes = state.queued_bytes.saturating_sub(self.bytes);
     }
 }
 
@@ -490,7 +540,8 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         // Validate the actual SDK message, including protocol errors and any
         // version-specific fields, before its encoder allocates the wire frame.
-        let fits = frame_fits(&message);
+        // Measure once: the same length gates the write and charges the budget.
+        let frame = frame_len(&message);
         let release_id = match &message {
             ServerJsonRpcMessage::Response(response) => Some(response.id.clone()),
             ServerJsonRpcMessage::Error(error) => error.id.clone(),
@@ -513,14 +564,10 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
             .as_ref()
             .map(|_| self.writer.clone().try_lock_owned().ok());
         let writer = self.writer.clone();
-        let credit = release_id.map(|id| {
-            self.pending.mark_sending(&id);
-            ReplyCredit {
-                pending: Arc::clone(&self.pending),
-                id: Some(id),
-            }
-        });
-        let send = fits.then(|| self.inner.send(message));
+        // An oversized frame never queues, so it charges nothing, yet every
+        // frame that reaches the wire charges and refunds its exact bytes.
+        let credit = release_id.map(|id| self.pending.mark_sending(&id, frame.unwrap_or(0)));
+        let send = frame.map(|_| self.inner.send(message));
         async move {
             let _credit = credit;
             let Some(send) = send else {
@@ -540,27 +587,61 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
     }
 
     async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
-        if self.pending.is_overloaded() {
-            return None;
-        }
-        let message = self.inner.receive().await?;
-        match &message {
-            ClientJsonRpcMessage::Request(request) => {
-                if !self.pending.reserve(&request.id) {
-                    return None;
-                }
+        loop {
+            if self.pending.is_overloaded() {
+                return None;
             }
-            ClientJsonRpcMessage::Notification(notif) => {
-                if let rmcp::model::ClientNotification::CancelledNotification(cancelled) =
-                    &notif.notification
-                    && let Some(id) = &cancelled.params.request_id
-                {
-                    self.pending.mark_cancelled(id);
+            let message = self.inner.receive().await?;
+            match &message {
+                ClientJsonRpcMessage::Request(request) => {
+                    let writer_guard = self.writer.clone().try_lock_owned().ok();
+                    match self.pending.reserve(&request.id, writer_guard.is_none()) {
+                        ReserveOutcome::Admitted => return Some(message),
+                        ReserveOutcome::Overloaded => return None,
+                        ReserveOutcome::Busy => {
+                            let Some(_writer) = writer_guard else {
+                                self.pending.trip_overload();
+                                return None;
+                            };
+                            let busy = ServerJsonRpcMessage::error(
+                                rmcp::ErrorData::new(
+                                    rmcp::model::ErrorCode(-32000),
+                                    "Server busy: concurrent request limit reached",
+                                    None,
+                                ),
+                                Some(request.id.clone()),
+                            );
+                            if !frame_fits(&busy) {
+                                self.pending.trip_overload();
+                                return None;
+                            }
+                            // `T::send` builds a `Send + 'static` future without
+                            // awaiting, so the write completes in a spawned task
+                            // and `receive()` never awaits `FramedWrite` inside
+                            // RMCP's cancelable `select!`.
+                            let send = self.inner.send(busy);
+                            let pending = Arc::clone(&self.pending);
+                            tokio::spawn(async move {
+                                let _writer = _writer;
+                                if send.await.is_err() {
+                                    pending.trip_overload();
+                                }
+                            });
+                        }
+                    }
                 }
+                ClientJsonRpcMessage::Notification(notif) => {
+                    if let rmcp::model::ClientNotification::CancelledNotification(cancelled) =
+                        &notif.notification
+                        && let Some(id) = &cancelled.params.request_id
+                    {
+                        self.pending.mark_cancelled(id);
+                    }
+                    return Some(message);
+                }
+                _ => return Some(message),
             }
-            _ => {}
         }
-        Some(message)
     }
 
     fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
@@ -568,7 +649,9 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
         let close = self.inner.close();
         async move {
             let result = close.await;
-            lock(&pending.state).entries.clear();
+            let mut state = lock(&pending.state);
+            state.entries.clear();
+            state.queued_bytes = 0;
             result
         }
     }
@@ -906,5 +989,194 @@ mod tests {
         })
         .await
         .expect("duplicate id overload test stalled");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn healthy_consumer_burst_above_in_flight_limit_returns_busy_without_overload() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (server_in, mut client_in) = tokio::io::duplex(16384);
+            let (client_out, server_out) = tokio::io::duplex(16384);
+            let shutdown = CancellationToken::new();
+            let overload = CancellationToken::new();
+            let mut transport = BoundedTransport::with_control(
+                rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
+                    server_in, server_out,
+                ),
+                shutdown.clone(),
+                overload.clone(),
+            );
+            for id in 1..=(MAX_IN_FLIGHT + 1) {
+                let req = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#);
+                client_in.write_all(req.as_bytes()).await.unwrap();
+                client_in.write_all(b"\n").await.unwrap();
+            }
+            for _ in 0..MAX_IN_FLIGHT {
+                assert!(transport.receive().await.is_some());
+            }
+            let mut reader = tokio::io::BufReader::new(client_out);
+            let recv_task = tokio::spawn(async move { (transport.receive().await, transport) });
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let busy: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(busy["id"], (MAX_IN_FLIGHT + 1) as u64);
+            assert_eq!(busy["error"]["code"], -32000);
+            assert!(!overload.is_cancelled());
+            assert!(!shutdown.is_cancelled());
+            drop(client_in);
+            let (next, mut transport) = recv_task.await.unwrap();
+            assert!(next.is_none());
+            assert!(!overload.is_cancelled());
+            assert!(!shutdown.is_cancelled());
+            transport.close().await.unwrap();
+        })
+        .await
+        .expect("healthy burst busy-reply test stalled");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_bytes_charge_on_send_and_refund_after_the_write_completes() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        tokio::time::timeout(Duration::from_secs(3), async {
+            // One byte of capacity keeps the frame resident in the writer.
+            let (writer, reader) = tokio::io::duplex(1);
+            let mut transport =
+                BoundedTransport::new(rmcp::transport::async_rw::AsyncRwTransport::<
+                    RoleServer,
+                    _,
+                    _,
+                >::new(tokio::io::empty(), writer));
+            let reply: ServerJsonRpcMessage = serde_json::from_value(serde_json::json!({
+                "jsonrpc":"2.0", "id":41, "result":{"tools":[]}
+            }))
+            .unwrap();
+            let expected = crate::wire::frame_len(&reply).expect("frame fits");
+            assert!(expected > 0);
+            let pending = Arc::clone(&transport.pending);
+            lock(&pending.state)
+                .entries
+                .insert(RequestId::Number(41), CreditState::CompletedAwaitingRmcp);
+
+            let send = tokio::spawn(transport.send(reply));
+            let mut reader = tokio::io::BufReader::new(reader);
+            while reader.read_u8().await.unwrap() != b'{' {}
+            // The frame is mid-write: the full serialized size stays charged.
+            assert_eq!(lock(&pending.state).queued_bytes, expected);
+
+            // The leading `{` was consumed above; read the rest of the frame.
+            let mut rest = Vec::new();
+            reader.read_until(b'\n', &mut rest).await.unwrap();
+            assert!(rest.ends_with(b"\n"));
+            assert!(String::from_utf8_lossy(&rest).contains("\"id\":41"));
+            send.await.unwrap().unwrap();
+            assert_eq!(lock(&pending.state).queued_bytes, 0);
+            assert!(
+                !lock(&pending.state)
+                    .entries
+                    .contains_key(&RequestId::Number(41))
+            );
+        })
+        .await
+        .expect("queued byte accounting stalled");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_writer_above_blocked_bytes_trips_overload_below_active_limit() {
+        use tokio::io::AsyncWriteExt;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (server_in, mut client_in) = tokio::io::duplex(4096);
+            let (client_out, server_out) = tokio::io::duplex(4096);
+            let shutdown = CancellationToken::new();
+            let overload = CancellationToken::new();
+            let pending = PendingReplies::new(shutdown.clone(), overload.clone());
+            let mut transport = BoundedTransport::with_pending(
+                rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
+                    server_in, server_out,
+                ),
+                Arc::clone(&pending),
+            );
+
+            // Hold the writer so every later frame queues as `Sending`.
+            let writer_guard = transport.writer.clone().lock_owned().await;
+            let first = RequestId::Number(100);
+            assert_eq!(pending.reserve(&first, true), ReserveOutcome::Admitted);
+            let credit = pending.mark_sending(&first, MAX_BLOCKED_BYTES);
+            assert_eq!(lock(&pending.state).queued_bytes, MAX_BLOCKED_BYTES);
+            // Fewer than MAX_ACTIVE entries are queued, yet the byte bound trips.
+            assert!(lock(&pending.state).entries.len() < MAX_ACTIVE);
+            assert!(!overload.is_cancelled());
+
+            client_in
+                .write_all(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#)
+                .await
+                .unwrap();
+            client_in.write_all(b"\n").await.unwrap();
+            assert!(transport.receive().await.is_none());
+            assert!(overload.is_cancelled());
+            assert!(shutdown.is_cancelled());
+            assert!(lock(&pending.state).overloaded);
+            drop(credit);
+            drop(writer_guard);
+            transport.close().await.unwrap();
+            drop(client_out);
+            client_in.shutdown().await.unwrap();
+        })
+        .await
+        .expect("blocked-byte overload test stalled");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_completed_reply_still_charges_and_refunds_its_bytes() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (writer, reader) = tokio::io::duplex(1);
+            let mut transport =
+                BoundedTransport::new(rmcp::transport::async_rw::AsyncRwTransport::<
+                    RoleServer,
+                    _,
+                    _,
+                >::new(tokio::io::empty(), writer));
+            let reply: ServerJsonRpcMessage = serde_json::from_value(serde_json::json!({
+                "jsonrpc":"2.0", "id":42, "result":{"tools":[]}
+            }))
+            .unwrap();
+            let expected = crate::wire::frame_len(&reply).expect("frame fits");
+            let id = RequestId::Number(42);
+            let pending = Arc::clone(&transport.pending);
+            lock(&pending.state)
+                .entries
+                .insert(id.clone(), CreditState::CompletedAwaitingRmcp);
+
+            // Cancellation must not drop a reply whose response already exists.
+            pending.mark_cancelled(&id);
+            assert_eq!(
+                lock(&pending.state).entries.get(&id),
+                Some(&CreditState::CompletedAwaitingRmcp)
+            );
+
+            let send = tokio::spawn(transport.send(reply));
+            let mut reader = tokio::io::BufReader::new(reader);
+            while reader.read_u8().await.unwrap() != b'{' {}
+            assert_eq!(lock(&pending.state).queued_bytes, expected);
+            let mut rest = Vec::new();
+            reader.read_until(b'\n', &mut rest).await.unwrap();
+            assert!(String::from_utf8_lossy(&rest).contains("\"id\":42"));
+            send.await.unwrap().unwrap();
+            assert_eq!(lock(&pending.state).queued_bytes, 0);
+            assert!(!lock(&pending.state).entries.contains_key(&id));
+        })
+        .await
+        .expect("cancelled completed reply lost its byte accounting");
+    }
+
+    #[test]
+    fn untracked_frames_still_charge_and_refund_their_bytes() {
+        let pending = PendingReplies::new(CancellationToken::new(), CancellationToken::new());
+        let id = RequestId::Number(7);
+        let credit = pending.mark_sending(&id, 4096);
+        assert_eq!(lock(&pending.state).queued_bytes, 4096);
+        assert!(lock(&pending.state).entries.is_empty());
+        drop(credit);
+        assert_eq!(lock(&pending.state).queued_bytes, 0);
     }
 }

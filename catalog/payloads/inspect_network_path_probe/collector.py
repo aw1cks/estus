@@ -27,7 +27,7 @@ def main():
             proc.wait()
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
-        if value not in policy['destinations']: raise ValueError('destination outside operator policy')
+        if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):

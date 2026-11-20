@@ -33,6 +33,20 @@
     ]
   },
   "tools": {
+    "change_apt": {
+      "definition": "change_apt.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "apt"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.builtin.apt"
+      }
+    },
     "change_boot_clear_oneshot": {
       "definition": "change_boot_clear_oneshot.toml",
       "qualification": "site_policy_template",
@@ -79,6 +93,20 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/change_boot_oneshot"
+      }
+    },
+    "change_dnf": {
+      "definition": "change_dnf.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3",
+        "dnf"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.builtin.dnf"
       }
     },
     "change_host_reboot": {
@@ -353,78 +381,17 @@
         "path": "payloads/change_nic_rss"
       }
     },
-    "change_package_repository": {
-      "definition": "change_package_repository.toml",
-      "qualification": "laboratory_only",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "apt",
-        "estus_catalog_signed_local_repositories"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_package_repository"
-      }
-    },
-    "change_package_repository_refresh": {
-      "definition": "change_package_repository_refresh.toml",
+    "change_package": {
+      "definition": "change_package.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "apt"
+        "python3"
       ],
       "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_package_repository_refresh"
-      }
-    },
-    "change_packages_install": {
-      "definition": "change_packages_install.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "apt",
-        "dpkg"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_packages_install"
-      }
-    },
-    "change_packages_remove": {
-      "definition": "change_packages_remove.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "apt",
-        "dpkg"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_packages_remove"
-      }
-    },
-    "change_packages_upgrade": {
-      "definition": "change_packages_upgrade.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "apt",
-        "dpkg"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/change_packages_upgrade"
+        "kind": "ansible_module",
+        "module": "ansible.builtin.package"
       }
     },
     "change_sysctl_config": {
@@ -546,12 +513,11 @@
       "requires": [
         "linux",
         "python3",
-        "ansible",
         "systemd"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/change_systemd_restart"
+        "kind": "native_payload",
+        "path": "payloads/change_systemd_restart"
       }
     },
     "change_systemd_runtime_limits": {
@@ -589,12 +555,11 @@
       "requires": [
         "linux",
         "python3",
-        "ansible",
         "systemd"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/change_systemd_start"
+        "kind": "native_payload",
+        "path": "payloads/change_systemd_start"
       }
     },
     "change_systemd_stop": {
@@ -604,12 +569,11 @@
       "requires": [
         "linux",
         "python3",
-        "ansible",
         "systemd"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/change_systemd_stop"
+        "kind": "native_payload",
+        "path": "payloads/change_systemd_stop"
       }
     },
     "change_systemd_try_restart": {
@@ -688,12 +652,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/inspect_hardware_identifiers"
+        "kind": "native_payload",
+        "path": "payloads/inspect_hardware_identifiers"
       }
     },
     "inspect_icmp_probe": {
@@ -990,12 +953,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_hardware_system"
+        "kind": "native_payload",
+        "path": "payloads/observe_hardware_system"
       }
     },
     "observe_host_summary": {
@@ -1004,12 +966,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_host_summary"
+        "kind": "native_payload",
+        "path": "payloads/observe_host_summary"
       }
     },
     "observe_journal_boots": {
@@ -1284,11 +1245,11 @@
       "requires": [
         "linux",
         "python3",
-        "ansible"
+        "ethtool"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_nic_features"
+        "kind": "native_payload",
+        "path": "payloads/observe_nic_features"
       }
     },
     "observe_nic_fec": {
@@ -1391,46 +1352,17 @@
         "path": "payloads/observe_nic_transceiver"
       }
     },
-    "observe_package": {
-      "definition": "observe_package.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "dpkg"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_package"
-      }
-    },
     "observe_packages": {
       "definition": "observe_packages.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
-      ],
-      "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_packages"
-      }
-    },
-    "observe_packages_updates": {
-      "definition": "observe_packages_updates.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "apt"
+        "python3"
       ],
       "executor": {
         "kind": "native_payload",
-        "path": "payloads/observe_packages_updates"
+        "path": "payloads/observe_packages"
       }
     },
     "observe_pci_device": {
@@ -1517,12 +1449,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_storage_device"
+        "kind": "native_payload",
+        "path": "payloads/observe_storage_device"
       }
     },
     "observe_storage_device_health": {
@@ -1546,12 +1477,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_storage_devices"
+        "kind": "native_payload",
+        "path": "payloads/observe_storage_devices"
       }
     },
     "observe_storage_mounts": {
@@ -1560,12 +1490,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "ansible"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_storage_mounts"
+        "kind": "native_payload",
+        "path": "payloads/observe_storage_mounts"
       }
     },
     "observe_storage_raid": {
@@ -1644,11 +1573,11 @@
       "requires": [
         "linux",
         "python3",
-        "ansible"
+        "systemd"
       ],
       "executor": {
-        "kind": "ansible_role",
-        "path": "roles/observe_systemd_unit"
+        "kind": "native_payload",
+        "path": "payloads/observe_systemd_unit"
       }
     },
     "observe_systemd_unit_dependencies": {
@@ -1734,6 +1663,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/preview_kernel_module_load"
+      }
+    },
+    "preview_package": {
+      "definition": "preview_package.toml",
+      "qualification": "site_policy_template",
+      "policy_required": true,
+      "requires": [
+        "linux",
+        "python3"
+      ],
+      "executor": {
+        "kind": "ansible_module",
+        "module": "ansible.builtin.package"
       }
     },
     "preview_sysctl": {

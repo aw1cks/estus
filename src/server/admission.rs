@@ -39,8 +39,6 @@ const KNOWN_EXECUTORS: &[&str] = &[
     "native_sudo",
     "native_payload",
     "ansible_module",
-    "ansible_role",
-    "ansible_playbook",
     "unknown",
 ];
 

@@ -1,5 +1,4 @@
-# Opt-in check-mode preview for approved sysctl tuning via ansible.posix.sysctl.
-# Import offline with `estus schema import ansible.posix.sysctl` before activation.
+# Check-mode preview for sysctl changes via offline Ansible bundle.
 mode = "headless"
 capabilities = { named = true }
 enabled_tools = ["preview_sysctl"]
@@ -7,43 +6,34 @@ enabled_tools = ["preview_sysctl"]
 [targets.server]
 ssh_host = "server-ordinary"
 
-[automation]
-workspace_root = "/var/lib/estus/runner"
-max_concurrent = 2
-max_scratch_bytes = 16777216
-max_scratch_files = 512
-
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [automation.authorities.catalog]
 ssh_config_file = "/etc/estus/catalog-ssh.conf"
-
-[automation.authorities.catalog.become]
-method = "sudo"
-user = "root"
+become = { method = "sudo", user = "root" }
 
 [automation.authorities.catalog.targets.server]
 destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.preview_sysctl]
-description = "Preview approved sysctl change and optional supplied diff in check mode without mutating kernel or sysctl.d state. Skipped tasks are never treated as observations; diff is omitted unless actually supplied."
+description = "Preview sysctl parameter change and file diff in check mode without modifying runtime or persistent configuration."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read"]
-execution = { kind = "ansible_module", snapshot = "/etc/estus/preview_sysctl.schema.json", no_log = false, check_mode = true, diff = true }
-fixed_args = { "sysctl_file" = "/etc/sysctl.d/99-estus-catalog.conf", "sysctl_set" = true, "reload" = false, "state" = "present" }
-input_map = { "name" = "name", "value" = "value" }
-limits = { timeout_secs = 60 }
-input_schema = { "type" = "object", "properties" = { "name" = { "type" = "string", "enum" = ["kernel.printk_ratelimit"], "maxLength" = 64 }, "value" = { "type" = "string", "minLength" = 1, "maxLength" = 16 } }, "required" = ["name", "value"], "additionalProperties" = false }
+execution = { kind = "ansible_module", module = "ansible.posix.sysctl", no_log = false, check_mode = true, diff = true }
+fixed_args = { reload = false }
+input_map = { name = "name", value = "value", state = "state", sysctl_file = "sysctl_file", sysctl_set = "sysctl_set" }
+limits = { timeout_secs = 30 }
+input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 128 }, value = { type = "string", minLength = 1, maxLength = 256 }, state = { type = "string", enum = ["present", "absent"] }, sysctl_file = { type = "string", minLength = 1, maxLength = 256 }, sysctl_set = { type = "boolean" } }, required = ["name", "state"], additionalProperties = false }
 
 [tools.preview_sysctl.result]
 kind = "ansible_projection"
-fields = { "changed" = ["changed"], "diff" = ["diff"] }
+fields = { changed = ["changed"], diff = ["diff"] }
 max_bytes = 4096
 max_items = 64
 max_depth = 5
-schema = { "type" = "object", "properties" = { "changed" = { "type" = "boolean" }, "diff" = { "type" = "object", "properties" = { "before" = { "type" = "string", "maxLength" = 2048 }, "after" = { "type" = "string", "maxLength" = 2048 }, "before_header" = { "type" = "string", "maxLength" = 256 }, "after_header" = { "type" = "string", "maxLength" = 256 }, "prepared" = { "type" = "string", "maxLength" = 2048 } }, "additionalProperties" = false } }, "required" = ["changed"], "additionalProperties" = false }
+schema = { type = "object", properties = { changed = { type = "boolean" }, diff = { type = "object", properties = { before = { type = "string", maxLength = 2048 }, after = { type = "string", maxLength = 2048 }, before_header = { type = "string", maxLength = 256 }, after_header = { type = "string", maxLength = 256 }, prepared = { type = "string", maxLength = 2048 } }, additionalProperties = false } }, required = ["changed"], additionalProperties = false }

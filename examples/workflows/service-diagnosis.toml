@@ -8,8 +8,9 @@ authority = "automation"
 allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service"]
 #
 # estus catalog export --tool observe_systemd_unit --output diagnosis-export
-# Review roles; replace BOTH unit lists in diagnosis-export/tools.toml with the
-# allowed_units above. This recipe is intentionally not a complete site config.
+# Review diagnosis-export/payloads; replace BOTH unit lists in
+# diagnosis-export/tools.toml with the allowed_units above. This recipe is
+# intentionally not a complete site config.
 # estus catalog prepare --site provisioned-site.toml --definitions diagnosis-export/tools.toml --target plain --output diagnosis-reviewed
 # estus catalog inspect --site diagnosis-reviewed/estus.toml
 # estus --config diagnosis-reviewed/estus.toml

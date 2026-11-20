@@ -42,7 +42,6 @@ pub fn call(role: &str, function: &str, args: Value) -> Result<Value> {
     );
     let source = match executor["kind"].as_str() {
         Some("native_payload") => bundle.join("collector.py"),
-        Some("ansible_role") => bundle.join("files/collector.py"),
         _ => anyhow::bail!("executor has no standalone collector"),
     };
     let request = serde_json::to_vec(&json!({"function": function, "args": args}))?;

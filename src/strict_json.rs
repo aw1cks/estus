@@ -6,10 +6,6 @@ pub fn parse(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     serde_json::from_slice::<Unique>(bytes).map(|value| value.0)
 }
 
-pub(crate) fn value<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
-    Unique::deserialize(deserializer).map(|value| value.0)
-}
-
 // serde_json::Value normally accepts duplicate keys. Authoring inputs must not
 // acquire different meanings when read by another JSON implementation.
 struct Unique(Value);

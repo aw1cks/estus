@@ -70,9 +70,7 @@ impl CompiledBinding {
             return Err(invalid("Not a payload binding"));
         };
         let authority = AutomationAuthority::parse(&raw.authority)?;
-        let dynamic_targets = raw.targets.is_none()
-            && workstation
-            && matches!(authority, AutomationAuthority::Ordinary);
+        let dynamic_targets = raw.targets.is_none() && workstation;
         let targets = raw.targets.unwrap_or_default();
         if raw.argument_types.is_some()
             || raw.description.is_empty()

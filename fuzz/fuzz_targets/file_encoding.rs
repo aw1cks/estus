@@ -105,7 +105,7 @@ fn known(error: &ToolError) {
 // response (including newline), independently of ReplyBudget's size counter.
 fn wire_reply<T: Serialize>(budget: ReplyBudget, id: RequestId, reply: ToolReply<T>) -> Value {
     let expected = serde_json::to_value(&reply).unwrap();
-    let failed = reply.error.is_some();
+    let failed = reply.error().is_some();
     let result = budget.result(reply).unwrap();
     let actual = serde_json::to_value(&result).unwrap();
     assert_eq!(actual["structuredContent"], expected);

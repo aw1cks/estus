@@ -1,6 +1,6 @@
 mod audit;
-mod automation;
 mod bindings;
+mod bundle;
 mod capture;
 mod catalog;
 mod command;
@@ -54,12 +54,9 @@ pub mod internal {
         }
     }
 
-    pub mod automation_protocol {
-        pub use crate::automation::protocol::{
-            Completion, Evidence, ExecutionMode, Observations, reduce,
-        };
+    pub mod bundle {
+        pub use crate::bundle::BundlePack;
     }
-
     pub mod filesystem_data {
         pub use crate::filesystem::data::{
             Encoding, RawRead, ReadData, ReadRequest, ReadSpec, WriteData, WriteRequest, WriteSpec,
@@ -83,7 +80,6 @@ use std::{
 };
 
 use clap::{CommandFactory, FromArgMatches};
-use contracts::schema_import;
 use rmcp::ServiceExt;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::signal::unix::{SignalKind, signal};
@@ -91,7 +87,7 @@ use tokio_util::sync::CancellationToken;
 
 enum Diagnostic {
     Doctor(config::DoctorArgs),
-    Schema(schema_import::SchemaArgs),
+    Bundle(bundle::BundleArgs),
 }
 
 pub fn run_cli() -> ExitCode {
@@ -129,7 +125,7 @@ pub fn run_cli() -> ExitCode {
             return standalone_catalog(args, cli, explicit_config, explicit_ssh);
         }
         Some(config::CliCommand::Doctor(args)) => Some(Diagnostic::Doctor(args)),
-        Some(config::CliCommand::Schema(args)) => Some(Diagnostic::Schema(args)),
+        Some(config::CliCommand::Bundle(args)) => Some(Diagnostic::Bundle(args)),
         None => None,
     };
     let diagnostic = command.is_some();
@@ -213,11 +209,9 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
                         .publish()
                         .await
                 }
-                Diagnostic::Schema(args) => {
-                    schema_import::run(config, args, shutdown.clone())
-                        .await
-                        .publish()
-                        .await
+                Diagnostic::Bundle(args) => {
+                    let configured = config.automation_runtime().ok().flatten();
+                    bundle::run_cli(args, configured, shutdown.clone()).await
                 }
             }
         };
@@ -257,20 +251,6 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
         Err(error) => return invalid_config(&error),
     };
     if config.automation_required() && !activated {
-        let shutdown = CancellationToken::new();
-        let duration = match config.timeout(None) {
-            Ok(duration) => duration,
-            Err(error) => {
-                return fail_phase(error.code(), "runtime_verification", "limits.timeout_secs");
-            }
-        };
-        let Some(deadline) = tokio::time::Instant::now().checked_add(duration) else {
-            return fail_phase(
-                "invalid_timeout",
-                "runtime_verification",
-                "limits.timeout_secs",
-            );
-        };
         let reference = match config.automation_runtime() {
             Ok(reference) => reference,
             Err(error) => {
@@ -279,31 +259,12 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
                 );
             }
         };
-        let verification = automation::check(
-            reference,
-            automation::RuntimeContext {
-                deadline,
-                ct: &shutdown,
-                shutdown: &shutdown,
-            },
-        );
-        tokio::pin!(verification);
-        let health = tokio::select! {
-            health = &mut verification => health,
-            _ = interrupt.recv() => {
-                shutdown.cancel();
-                verification.as_mut().await
-            },
-            _ = terminate.recv() => {
-                shutdown.cancel();
-                verification.as_mut().await
-            },
-        };
+        let health = bundle::check(reference);
         if !health.is_passed() {
             return fail_phase(
-                health.error_code.unwrap_or("runtime_unavailable"),
+                health.error_code().unwrap_or("runtime_unavailable"),
                 "runtime_verification",
-                "automation.runtime",
+                "automation.bundle",
             );
         }
     }

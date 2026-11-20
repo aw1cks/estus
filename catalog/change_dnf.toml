@@ -1,0 +1,39 @@
+# RHEL/AlmaLinux/Rocky/Fedora dnf/dnf5 escape-hatch package mutation via offline Ansible bundle.
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_dnf"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+[automation.authorities.catalog]
+ssh_config_file = "/etc/estus/catalog-ssh.conf"
+become = { method = "sudo", user = "root" }
+
+[automation.authorities.catalog.targets.server]
+destination = "server-catalog"
+python = "/usr/bin/python3"
+
+[tools.change_dnf]
+description = "Apply dnf/dnf5 package transitions with dnf-specific options (enablerepo, disablerepo, allowerasing, nobest, update_cache); interrupted operations are never replayed."
+revision = "1"
+targets = ["server"]
+authority = "automation:catalog"
+effects = ["persistent_write", "read"]
+execution = { kind = "ansible_module", module = "ansible.builtin.dnf", no_log = false, check_mode = false, diff = false }
+fixed_args = {}
+input_map = { name = "name", state = "state", update_cache = "update_cache", enablerepo = "enablerepo", disablerepo = "disablerepo", allowerasing = "allowerasing", nobest = "nobest" }
+limits = { timeout_secs = 120 }
+input_schema = { type = "object", properties = { name = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, minItems = 1, maxItems = 32 }, state = { type = "string", enum = ["present", "absent", "latest"] }, update_cache = { type = "boolean" }, enablerepo = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, maxItems = 16 }, disablerepo = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, maxItems = 16 }, allowerasing = { type = "boolean" }, nobest = { type = "boolean" } }, required = ["name", "state"], additionalProperties = false }
+
+[tools.change_dnf.result]
+kind = "ansible_projection"
+fields = { changed = ["changed"] }
+max_bytes = 4096
+max_items = 64
+max_depth = 4
+schema = { type = "object", properties = { changed = { type = "boolean" } }, required = ["changed"], additionalProperties = false }

@@ -14,160 +14,23 @@ use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
 };
-use sha2::{Digest, Sha256};
+use serde_json::{Value, json};
 
 const MANIFEST_LIMIT: u64 = 256 * 1024;
 const DEFINITION_LIMIT: u64 = 256 * 1024;
-const ROLE_LIMIT: u64 = 8 * 1024 * 1024;
-const ROLE_FILES: usize = 256;
+const PAYLOAD_LIMIT: u64 = 8 * 1024 * 1024;
+const PAYLOAD_FILES: usize = 256;
 const ERROR: &str = "invalid or unavailable catalog assets";
 
-struct PinnedDynamicPayload {
-    name: &'static str,
-    toml_sha256: &'static str,
-    source_sha256: &'static str,
-    manifest_sha256: &'static str,
-    workstation_adapted: bool,
-}
-
-const PINNED_DYNAMIC_PAYLOADS: &[PinnedDynamicPayload] = &[
-    PinnedDynamicPayload {
-        name: "inspect_processes",
-        toml_sha256: "b8eb943622bb4b5727ffe005293b6f57f421c08e79b205ffd2a8f306459df4c3",
-        source_sha256: "55116ba7c26c2fae296246afcc26c7247ce6122bc0cbacb4af94d4af7cbfd5ab",
-        manifest_sha256: "6057feb1cb38b1779dab3123f415249cf566d24a1595a3973675799299e308a6",
-        workstation_adapted: false,
+pub(crate) enum WorkstationEntry {
+    Payload {
+        definition: toml::Value,
+        source: Vec<u8>,
+        manifest: Vec<u8>,
     },
-    PinnedDynamicPayload {
-        name: "inspect_sockets",
-        toml_sha256: "7935f68c69775859ea77c977bea139c7b4a19c65cb90bb74dadbd7c84e98dc70",
-        source_sha256: "8221541c2274dcdfad554037844b5cf762ebfaa9287989e4f3c073f4aabb2347",
-        manifest_sha256: "dc06e0988eaabfecbf8e4105678aa2768526822b69c9b900e21163c2ccb90697",
-        workstation_adapted: true,
+    Module {
+        definition: toml::Value,
     },
-    PinnedDynamicPayload {
-        name: "observe_cpu",
-        toml_sha256: "dfaa4def61f1f3d2ae6383eaa2f6f6f09475910a35f306ced1294f5eac117200",
-        source_sha256: "f8767fb99e075259f3b104f23e5cbff8478cf502f2c91308a9fd27b9117cef64",
-        manifest_sha256: "6035fca16346ca8913557980e4f6925ff42fb3b271fb65a84a34fa80f8a7cbce",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_filesystem_usage",
-        toml_sha256: "2ba61be0af96b8159436940d68c9759792f1c976ef4c011cdf4f212605d97001",
-        source_sha256: "7b1c7c1b72b5e6bf11f8a14cd329fad5557532854e68e09ee39473e57c3e3930",
-        manifest_sha256: "cd387051a7eb8d1a1b49919fe73bae740b5ac637a2889cf9a32f92bda6b630e3",
-        workstation_adapted: true,
-    },
-    PinnedDynamicPayload {
-        name: "observe_kernel_modules",
-        toml_sha256: "c21eb8a9a2fb06d8c7b7900cf0fc60e05b4624bc01f271d4a2d3e76a575304fb",
-        source_sha256: "6310b9d1738cb4995869d86bbd849b9a5443ef8883fabfaf48bd515520394e01",
-        manifest_sha256: "2c1795173447652afd471d32abed056b00610adb6e595e4c262b99c2ad704a34",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_kernel_state",
-        toml_sha256: "55b660094ce9cacc140f96282674546ea4272386aa677d93f6ae5bd6a95fe903",
-        source_sha256: "8ebfab3f0114bf8828bd7f8ee8e1307df218747f85b5028ceca222bdabe2beb8",
-        manifest_sha256: "0455b24d107bea1c3c322177f9a099830d7ae0395b0ad974d4c5524e7d3b22ef",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_memory",
-        toml_sha256: "75e97867765313558ad6257716c903fdb4f08944bef9557734b820b6c936ff0e",
-        source_sha256: "eae9433cc26d1bb5ae810b9b680ef35acd120da960fadb9db205087d90814b27",
-        manifest_sha256: "e88b7365b9c8afc9f8f2c4fba59b81fd4975a5e612e5291ab61623853d851811",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_network_addresses",
-        toml_sha256: "80c7df78100a443b81277d9da32839e2f7105744e5706b052b4e2441d180480d",
-        source_sha256: "ef4437b785e62981d7efdfb6aa530f31ad35bb2fcbc7d728da595c78481e0c35",
-        manifest_sha256: "3164e652cdfa1b20abefeb491a9825e3551f891ab822e84a662a995dfea7412d",
-        workstation_adapted: true,
-    },
-    PinnedDynamicPayload {
-        name: "observe_network_interface_stats",
-        toml_sha256: "03746d2ab916c211dee501fe237ee38a0ffdb34156d77c6ff45b0d81e1563b72",
-        source_sha256: "a84a9f194aace5824ffd3d9606af8acfeb3cc4104b7a379a2d93075f8ec9ecec",
-        manifest_sha256: "7eedd026b1d3a08454d7511ad5b273fcbfb44a4716f4f885f2e94a844ccd1035",
-        workstation_adapted: true,
-    },
-    PinnedDynamicPayload {
-        name: "observe_network_links",
-        toml_sha256: "6a4e473a17bdf2ccb867c11d7eb2ad02a682db4f10e121f2525349e26b42a562",
-        source_sha256: "cf1548cebfd20f9897af0b4831aab28de5ee665795760e67c013f8c5cd38d6aa",
-        manifest_sha256: "ebaf11547572f2b9b2fba68a05b3640ae7889346b5bfb9fa80a407b81de69909",
-        workstation_adapted: true,
-    },
-    PinnedDynamicPayload {
-        name: "observe_network_routes",
-        toml_sha256: "c117178c0aa42afa378933966b2a97ee1a5e47f2f05f54ba898837e60cd13f5b",
-        source_sha256: "2c53406cce4262b69e206175eb77cae07369704f386167484307cf8fef5cc75a",
-        manifest_sha256: "c5f0432482c5c6acc29fc494cffdaa74cb06c1c511597715841be602281be072",
-        workstation_adapted: true,
-    },
-    PinnedDynamicPayload {
-        name: "observe_pci_devices",
-        toml_sha256: "3153077113d09ccb47ed0560229e4bb0cdb9449041d85e2490269fd179af44d2",
-        source_sha256: "56312c1c3ec5bef4df87d1c6db9747edf3aa2adf4c5ee04ad86d95fcb825df35",
-        manifest_sha256: "6a732c412db51140782856fd8adb03486a7ebd5a095f34c279046ffa2686547a",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_pci_topology",
-        toml_sha256: "ad3d2d9b4b15f144056c0de6e77c032c97bbcc5c6d3553d1b507d2dd7910bdfc",
-        source_sha256: "11f02d36676815324a2b234beed97c16e8887ed8753b46420a5eb03fa401420b",
-        manifest_sha256: "e5e51166a3c930eae30ed4cdf662a20d157259fc61347d4aace7013e53aa5acc",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_pressure",
-        toml_sha256: "7751ea63a765e676e7cf9c250e8aeb4855773230016aa93174a40ff2aad81476",
-        source_sha256: "bf1e7663c14cd92cdaa8cc5e603007adea8c668a359ce7e22f907c83f88bdf9e",
-        manifest_sha256: "3c38e3ea311dc50792f6d10684c6b16df1d0200d28005fb202eb934b8b459868",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_systemd_jobs",
-        toml_sha256: "0793aeaa3d7c9c71c6784b65025237eb30ccc06100d7ffd4235e85ed357c8af4",
-        source_sha256: "2d88cd269a15566130a5823d1f2c9880507a7530ca4d8f4c245c0094459a8f57",
-        manifest_sha256: "c3350bf95c8626a5ab0e51bfcfed2769bc1e551766dd70a36f0d8775ebb08df3",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_systemd_sockets",
-        toml_sha256: "e188a88f6bf68886e7fef7413b9662f6d52c52339b22af7e0fa37e9e067675ad",
-        source_sha256: "9c1919e4aa7ec6933dbe9029fc6b0917c71884b6bc9d0ca4f140f87b9bbd8403",
-        manifest_sha256: "41657219ba4886ac42ddafd7f45ca76b4918f58da27a072a045b8f2fa6c08e25",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_systemd_timers",
-        toml_sha256: "5caa815b71654c03aaf7aec50572d896cfee43df62df6110efcd37a9e1bcbef1",
-        source_sha256: "51a914545bb0a5d013466993adaacad56faebdff2651f251373706a113b4118b",
-        manifest_sha256: "855f69d6a987768a039f58e4ee48ca184af002a1f46970ca939c9b05379a654f",
-        workstation_adapted: false,
-    },
-    PinnedDynamicPayload {
-        name: "observe_systemd_units",
-        toml_sha256: "260395ced357942ee029e08904574368d1b232100657b7f8c43cc262e977bb73",
-        source_sha256: "793438fbace6b73f6ab7f14a9a9c5281bf8f8baa4ac92ceee28679da7c9ca323",
-        manifest_sha256: "051cf5f8c068fc5006a0d30d8e702904d3916c33a3e9a50abbb9d436b7f3a867",
-        workstation_adapted: true,
-    },
-    PinnedDynamicPayload {
-        name: "observe_time_sync",
-        toml_sha256: "699bfba894bfaea288b6e9c0dff1ec5f7266809405bb33e7a252b01d8c791ef3",
-        source_sha256: "a99e7d8104373bd2b9a522d3f0ac6ce90168b65c742f1b78a4247389f385247d",
-        manifest_sha256: "c71f16b5f418682e1d5b7a659ac5d4c854c7312dd0e9278822b6f90edfe663ff",
-        workstation_adapted: false,
-    },
-];
-
-pub(crate) fn pinned_dynamic_payload_names() -> impl Iterator<Item = &'static str> {
-    PINNED_DYNAMIC_PAYLOADS.iter().map(|p| p.name)
 }
 
 pub(crate) fn discover_default_root() -> Option<PathBuf> {
@@ -191,103 +54,193 @@ fn adapt_workstation_definition(
     tool_def: &mut toml::Value,
 ) -> Result<(), &'static str> {
     let table = tool_def.as_table_mut().ok_or(ERROR)?;
-    match name {
-        "observe_systemd_units" => {
-            table
-                .get_mut("fixed_args")
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?
-                .insert("unit_pattern".into(), toml::Value::String("*".into()));
+    // Strip site-specific fixture constraints for workstation dynamic mode.
+    let removed_constraints = table.remove("constraints");
+    let had_allowed_units = removed_constraints
+        .as_ref()
+        .and_then(toml::Value::as_table)
+        .is_some_and(|c| c.contains_key("allowed_units"));
+    let had_allowed_keys = removed_constraints
+        .as_ref()
+        .and_then(toml::Value::as_table)
+        .is_some_and(|c| c.contains_key("allowed_keys"));
+    if had_allowed_units
+        || had_allowed_keys
+        || matches!(
+            name,
+            "change_sysctl_config"
+                | "change_sysctl_runtime"
+                | "change_boot_default"
+                | "change_boot_oneshot"
+        )
+    {
+        table
+            .entry("fixed_args")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    }
+    if let Some(fixed) = table
+        .get_mut("fixed_args")
+        .and_then(toml::Value::as_table_mut)
+    {
+        if had_allowed_units || fixed.contains_key("allowed_units") {
+            fixed.insert(
+                "allowed_units".into(),
+                toml::Value::Array(vec![toml::Value::String("*".into())]),
+            );
         }
-        "observe_filesystem_usage" => {
-            let mut paths = toml::Table::new();
-            for (id, path) in [
-                ("root", "/"),
-                ("var", "/var"),
-                ("tmp", "/tmp"),
-                ("home", "/home"),
-                ("run", "/run"),
-            ] {
-                paths.insert(id.into(), toml::Value::String(path.into()));
-            }
-            table
-                .get_mut("fixed_args")
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?
-                .insert("configured_paths".into(), toml::Value::Table(paths));
-            table
-                .get_mut("input_schema")
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|s| s.get_mut("properties"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|p| p.get_mut("path_id"))
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?
-                .insert(
-                    "enum".into(),
-                    toml::Value::Array(
-                        ["root", "var", "tmp", "home", "run"]
-                            .into_iter()
-                            .map(|s| toml::Value::String(s.into()))
-                            .collect(),
-                    ),
-                );
+        if name == "change_sysctl_config" || name == "change_sysctl_runtime" {
+            fixed.insert(
+                "approved_keys".into(),
+                toml::Value::Array(vec![toml::Value::String("*".into())]),
+            );
         }
-        "observe_network_links"
-        | "observe_network_addresses"
-        | "observe_network_interface_stats" => {
-            table
-                .get_mut("fixed_args")
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|f| f.get_mut("operator_policy"))
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?
-                .insert(
+        if name == "change_boot_default" || name == "change_boot_oneshot" {
+            fixed.insert(
+                "allowed_entries".into(),
+                toml::Value::Array(vec![toml::Value::String("*".into())]),
+            );
+        }
+        if fixed.contains_key("approved_packages") {
+            fixed.insert(
+                "approved_packages".into(),
+                toml::Value::Array(vec![toml::Value::String("*".into())]),
+            );
+        }
+        if name == "observe_systemd_units" && fixed.contains_key("unit_pattern") {
+            fixed.insert("unit_pattern".into(), toml::Value::String("*".into()));
+        }
+        if (name.starts_with("observe_cgroup_") || name == "inspect_cgroup_processes")
+            && fixed.contains_key("approved_root")
+        {
+            fixed.insert("approved_root".into(), toml::Value::String("/".into()));
+        }
+        if let Some(policy) = fixed
+            .get_mut("operator_policy")
+            .and_then(toml::Value::as_table_mut)
+        {
+            if policy.contains_key("interfaces") {
+                policy.insert(
                     "interfaces".into(),
                     toml::Value::Array(vec![toml::Value::String("*".into())]),
                 );
-            let iface = table
-                .get_mut("input_schema")
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|s| s.get_mut("properties"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|p| p.get_mut("interface"))
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?;
-            iface.remove("enum");
-            iface.insert("minLength".into(), toml::Value::Integer(1));
-            iface.insert("maxLength".into(), toml::Value::Integer(15));
+            }
+            for key in ["interface", "mac", "driver"] {
+                if policy.contains_key(key) {
+                    policy.insert(key.into(), toml::Value::String("*".into()));
+                }
+            }
         }
-        "observe_network_routes" => {
-            let dest = table
-                .get_mut("input_schema")
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|s| s.get_mut("properties"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|p| p.get_mut("destination"))
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?;
-            dest.remove("enum");
-            dest.insert("minLength".into(), toml::Value::Integer(1));
-            dest.insert("maxLength".into(), toml::Value::Integer(64));
+    }
+    if name == "observe_filesystem_usage" {
+        let mut paths = toml::Table::new();
+        for (id, path) in [
+            ("root", "/"),
+            ("var", "/var"),
+            ("tmp", "/tmp"),
+            ("home", "/home"),
+            ("run", "/run"),
+        ] {
+            paths.insert(id.into(), toml::Value::String(path.into()));
         }
-        "inspect_sockets" => {
-            let addr = table
-                .get_mut("input_schema")
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|s| s.get_mut("properties"))
-                .and_then(toml::Value::as_table_mut)
-                .and_then(|p| p.get_mut("address"))
-                .and_then(toml::Value::as_table_mut)
-                .ok_or(ERROR)?;
-            addr.remove("enum");
-            addr.insert("minLength".into(), toml::Value::Integer(1));
-            addr.insert("maxLength".into(), toml::Value::Integer(64));
+        if let Some(fixed) = table
+            .get_mut("fixed_args")
+            .and_then(toml::Value::as_table_mut)
+        {
+            fixed.insert("configured_paths".into(), toml::Value::Table(paths));
         }
-        _ => {}
+        if let Some(path_id) = table
+            .get_mut("input_schema")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|s| s.get_mut("properties"))
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|p| p.get_mut("path_id"))
+            .and_then(toml::Value::as_table_mut)
+        {
+            path_id.insert(
+                "enum".into(),
+                toml::Value::Array(
+                    ["root", "var", "tmp", "home", "run"]
+                        .into_iter()
+                        .map(|s| toml::Value::String(s.into()))
+                        .collect(),
+                ),
+            );
+        }
+    }
+    if let Some(props) = table
+        .get_mut("input_schema")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|s| s.get_mut("properties"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (prop_name, max_len) in [
+            ("unit", 128),
+            ("interface", 15),
+            ("destination", 64),
+            ("address", 64),
+            ("device", 64),
+            ("package", 128),
+            ("key", 128),
+            ("entry_id", 255),
+        ] {
+            if let Some(prop) = props.get_mut(prop_name).and_then(toml::Value::as_table_mut)
+                && prop.get("type").and_then(toml::Value::as_str) == Some("string")
+                && prop.contains_key("enum")
+            {
+                prop.remove("enum");
+                prop.entry("minLength")
+                    .or_insert_with(|| toml::Value::Integer(1));
+                prop.entry("maxLength")
+                    .or_insert_with(|| toml::Value::Integer(max_len));
+            }
+        }
+        if let Some(items) = props
+            .get_mut("name")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|n| n.get_mut("items"))
+            .and_then(toml::Value::as_table_mut)
+            && items.get("type").and_then(toml::Value::as_str) == Some("string")
+            && items.contains_key("enum")
+        {
+            items.remove("enum");
+            items
+                .entry("minLength")
+                .or_insert_with(|| toml::Value::Integer(1));
+            items
+                .entry("maxLength")
+                .or_insert_with(|| toml::Value::Integer(128));
+        }
+        if name == "observe_sysctl"
+            && let Some(keys) = props.get_mut("keys").and_then(toml::Value::as_table_mut)
+            && keys.get("type").and_then(toml::Value::as_str) == Some("array")
+        {
+            keys.insert("maxItems".into(), toml::Value::Integer(16));
+            if let Some(items) = keys.get_mut("items").and_then(toml::Value::as_table_mut)
+                && items.get("type").and_then(toml::Value::as_str) == Some("string")
+                && items.contains_key("enum")
+            {
+                items.remove("enum");
+                items
+                    .entry("minLength")
+                    .or_insert_with(|| toml::Value::Integer(1));
+                items
+                    .entry("maxLength")
+                    .or_insert_with(|| toml::Value::Integer(64));
+            }
+            if let Some(fixed) = table
+                .get_mut("fixed_args")
+                .and_then(toml::Value::as_table_mut)
+            {
+                fixed.insert(
+                    "approved_keys".into(),
+                    toml::Value::Array(vec![toml::Value::String("*".into())]),
+                );
+            }
+        }
     }
     Ok(())
 }
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -321,7 +274,6 @@ pub struct Template {
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Executor {
-    AnsibleRole { path: String },
     NativePayload { path: String },
     AnsibleModule { module: String },
 }
@@ -363,6 +315,7 @@ fn name_valid(name: &str) -> bool {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
         })
 }
+
 fn has_catalog_risk_prefix(name: &str) -> bool {
     name.starts_with("observe_")
         || name.starts_with("inspect_")
@@ -484,19 +437,9 @@ impl Catalog {
                 || !has_catalog_risk_prefix(name)
                 || template.definition != format!("{name}.toml")
                 || match &template.executor {
-                    Executor::AnsibleRole { path } => path != &format!("roles/{name}"),
                     Executor::NativePayload { path } => path != &format!("payloads/{name}"),
                     Executor::AnsibleModule { module } => {
-                        module.len() > 256
-                            || module.split('.').count() != 3
-                            || module.split('.').any(|part| {
-                                part.is_empty()
-                                    || !part.bytes().enumerate().all(|(index, byte)| {
-                                        byte.is_ascii_lowercase()
-                                            || byte == b'_'
-                                            || (index > 0 && byte.is_ascii_digit())
-                                    })
-                            })
+                        !crate::contracts::module_schema::valid_fqcn(module)
                     }
                 }
                 || template.requires.len() > 32
@@ -531,8 +474,16 @@ impl Catalog {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    pub(crate) fn workstation_tool_names(&self) -> impl Iterator<Item = &str> {
+        self.manifest.tools.iter().filter_map(|(name, template)| {
+            (!matches!(template.qualification, Qualification::LaboratoryOnly))
+                .then_some(name.as_str())
+        })
     }
 
     fn validate_definition(
@@ -582,36 +533,19 @@ impl Catalog {
         Self::validate_definition(&self.directory, name, &template.definition)
     }
 
-    pub(crate) fn load_pinned_payload(
+    pub(crate) fn load_workstation_entry(
         &self,
         name: &str,
-    ) -> Result<(toml::Value, Vec<u8>, Vec<u8>), &'static str> {
-        let pinned = PINNED_DYNAMIC_PAYLOADS
-            .iter()
-            .find(|entry| entry.name == name)
-            .ok_or("unknown pinned bundled payload")?;
+    ) -> Result<WorkstationEntry, &'static str> {
         let template = self
             .manifest
             .tools
             .get(name)
             .ok_or("unknown catalog tool")?;
-        if matches!(template.qualification, Qualification::LaboratoryOnly)
-            || (template.policy_required && !pinned.workstation_adapted)
-            || !matches!(template.executor, Executor::NativePayload { .. })
-        {
+        if matches!(template.qualification, Qualification::LaboratoryOnly) {
             return Err(ERROR);
         }
-        let toml_bytes = bounded_read(
-            open_child(&self.directory, Path::new(&template.definition), false)?,
-            DEFINITION_LIMIT,
-        )?;
-        if hex::encode(Sha256::digest(&toml_bytes)) != pinned.toml_sha256 {
-            return Err(ERROR);
-        }
-        let mut table: toml::Table = std::str::from_utf8(&toml_bytes)
-            .map_err(|_| ERROR)?
-            .parse()
-            .map_err(|_| ERROR)?;
+        let mut table = Self::validate_definition(&self.directory, name, &template.definition)?;
         let mut tools = table
             .remove("tools")
             .and_then(|v| v.try_into::<toml::Table>().ok())
@@ -620,36 +554,90 @@ impl Catalog {
         if !tools.is_empty() {
             return Err(ERROR);
         }
-        if pinned.workstation_adapted {
-            adapt_workstation_definition(name, &mut tool_def)?;
+        adapt_workstation_definition(name, &mut tool_def)?;
+        match &template.executor {
+            Executor::AnsibleModule { .. } => Ok(WorkstationEntry::Module {
+                definition: tool_def,
+            }),
+            Executor::NativePayload { .. } => {
+                let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
+                let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
+                let source_bytes = bounded_read(
+                    open_child(&tool_dir, Path::new("collector.py"), false)?,
+                    1_048_576,
+                )?;
+                let manifest_raw = bounded_read(
+                    open_child(&tool_dir, Path::new("manifest.json"), false)?,
+                    262_144,
+                )?;
+                let mut manifest_val: Value =
+                    crate::strict_json::parse(&manifest_raw).map_err(|_| ERROR)?;
+                let def_table = tool_def.as_table().ok_or(ERROR)?;
+                let adapted_overlay = json!({
+                    "input_schema": serde_json::to_value(def_table.get("input_schema").ok_or(ERROR)?).map_err(|_| ERROR)?,
+                    "fixed_args": def_table.get("fixed_args").map(serde_json::to_value).transpose().map_err(|_| ERROR)?.unwrap_or_else(|| json!({})),
+                    "input_map": def_table.get("input_map").map(serde_json::to_value).transpose().map_err(|_| ERROR)?.unwrap_or_else(|| json!({})),
+                });
+                if let Some(approval) = manifest_val
+                    .get_mut("approval")
+                    .and_then(Value::as_object_mut)
+                {
+                    approval.insert("overlay".into(), adapted_overlay);
+                }
+                // Widen contract enums removed by workstation adaptation so compile_binding accepts open inputs.
+                if let Some(contract_props) = manifest_val
+                    .get_mut("contract")
+                    .and_then(|c| c.get_mut("schema"))
+                    .and_then(|s| s.get_mut("properties"))
+                    .and_then(Value::as_object_mut)
+                {
+                    for (_, prop) in contract_props.iter_mut() {
+                        if let Some(obj) = prop.as_object_mut()
+                            && obj.get("type").and_then(Value::as_str) == Some("string")
+                            && obj.contains_key("enum")
+                        {
+                            // Keep closed operational enums (direction, scope, signal), drop fixture target enums.
+                            let is_fixture_enum = obj
+                                .get("enum")
+                                .and_then(Value::as_array)
+                                .is_some_and(|arr| {
+                                    arr.iter().any(|v| {
+                                        v.as_str().is_some_and(|s| {
+                                            s.contains("estus-fixture")
+                                                || s == "catalog0"
+                                                || s == "eth0"
+                                                || s == "vda"
+                                                || s == "queue0"
+                                                || s.starts_with("estus-")
+                                                || s.starts_with("192.0.2.")
+                                                || s.starts_with("198.51.100.")
+                                        })
+                                    })
+                                });
+                            if is_fixture_enum {
+                                obj.remove("enum");
+                            }
+                        }
+                    }
+                }
+                let manifest_bytes = serde_json::to_vec(&manifest_val).map_err(|_| ERROR)?;
+                Ok(WorkstationEntry::Payload {
+                    definition: tool_def,
+                    source: source_bytes,
+                    manifest: manifest_bytes,
+                })
+            }
         }
-        let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
-        let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
-        let source_bytes = bounded_read(
-            open_child(&tool_dir, Path::new("collector.py"), false)?,
-            1_048_576,
-        )?;
-        if hex::encode(Sha256::digest(&source_bytes)) != pinned.source_sha256 {
-            return Err(ERROR);
-        }
-        let manifest_bytes = bounded_read(
-            open_child(&tool_dir, Path::new("manifest.json"), false)?,
-            262_144,
-        )?;
-        if hex::encode(Sha256::digest(&manifest_bytes)) != pinned.manifest_sha256 {
-            return Err(ERROR);
-        }
-        Ok((tool_def, source_bytes, manifest_bytes))
     }
+
     pub fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
         let template = self
             .manifest
             .tools
             .get(name)
             .ok_or("unknown catalog tool")?;
-        let (directory_name, required) = match &template.executor {
-            Executor::AnsibleRole { .. } => ("roles", &["tasks/main.yml"][..]),
-            Executor::NativePayload { .. } => ("payloads", &["collector.py", "manifest.json"][..]),
+        let required: &[&str] = match &template.executor {
+            Executor::NativePayload { .. } => &["collector.py", "manifest.json"],
             Executor::AnsibleModule { .. } => return Err(ERROR),
         };
         if destination.components().any(|component| {
@@ -660,17 +648,16 @@ impl Catalog {
         }) {
             return Err(ERROR);
         }
-        let roles = open_child(&self.directory, Path::new(directory_name), true)?;
-        let directory = open_child(&roles, Path::new(name), true)?;
-        let mut scan = RoleScan {
-            is_role: directory_name == "roles",
+        let payloads = open_child(&self.directory, Path::new("payloads"), true)?;
+        let directory = open_child(&payloads, Path::new(name), true)?;
+        let mut scan = PayloadScan {
             files: Vec::new(),
-            remaining: ROLE_LIMIT,
+            remaining: PAYLOAD_LIMIT,
             entries: 0,
         };
-        collect_role(
+        collect_payload(
             &directory,
-            &self.root.join(directory_name).join(name),
+            &self.root.join("payloads").join(name),
             Path::new(""),
             &mut scan,
             0,
@@ -678,7 +665,7 @@ impl Catalog {
         let files = scan.files;
         if required
             .iter()
-            .any(|required| !files.iter().any(|(path, _)| path == Path::new(required)))
+            .any(|req| !files.iter().any(|(path, _)| path == Path::new(req)))
         {
             return Err(ERROR);
         }
@@ -686,8 +673,6 @@ impl Catalog {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        // The caller owns destination selection; reject symlinked ancestors before
-        // creating the private directory, and never merge into an existing tree.
         let mut ancestor = Some(parent);
         while let Some(path) = ancestor {
             if !path.as_os_str().is_empty()
@@ -731,18 +716,18 @@ impl Catalog {
         result
     }
 }
-struct RoleScan {
-    is_role: bool,
+
+struct PayloadScan {
     files: Vec<(PathBuf, Vec<u8>)>,
     remaining: u64,
     entries: usize,
 }
 
-fn collect_role(
+fn collect_payload(
     directory: &File,
     source: &Path,
     relative: &Path,
-    scan: &mut RoleScan,
+    scan: &mut PayloadScan,
     depth: usize,
 ) -> Result<(), &'static str> {
     if depth > 16 {
@@ -751,29 +736,18 @@ fn collect_role(
     for entry in fs::read_dir(source).map_err(|_| ERROR)? {
         let entry = entry.map_err(|_| ERROR)?;
         scan.entries += 1;
-        if scan.entries > ROLE_FILES {
+        if scan.entries > PAYLOAD_FILES {
             return Err(ERROR);
         }
         let name = entry.file_name();
         let kind = entry.file_type().map_err(|_| ERROR)?;
         let path = relative.join(&name);
         if kind.is_dir() {
-            // Installers may byte-compile packaged collectors. These caches are
-            // generated installation state, not reviewed role source assets.
             if name == "__pycache__" {
                 continue;
             }
-            if scan.is_role
-                && depth == 0
-                && !matches!(
-                    name.to_str(),
-                    Some("tasks" | "meta" | "files" | "defaults" | "vars" | "handlers")
-                )
-            {
-                return Err(ERROR);
-            }
             let child = open_child(directory, Path::new(&name), true)?;
-            collect_role(&child, &source.join(&name), &path, scan, depth + 1)?;
+            collect_payload(&child, &source.join(&name), &path, scan, depth + 1)?;
         } else if kind.is_file() {
             if matches!(
                 Path::new(&name)
@@ -782,9 +756,6 @@ fn collect_role(
                 Some("pyc" | "pyo")
             ) {
                 continue;
-            }
-            if scan.is_role && depth == 0 {
-                return Err(ERROR);
             }
             if !matches!(
                 Path::new(&name)
@@ -808,27 +779,46 @@ fn collect_role(
 }
 
 #[cfg(test)]
-mod pinned_tests {
+mod workstation_tests {
     use super::*;
+    use crate::bindings::Bindings;
+    use crate::config::Limits;
 
     #[test]
-    fn pinned_bundled_dynamic_payloads_match_manifest_and_hashes() {
+    fn eligible_workstation_payloads_activate() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
-        let catalog = Catalog::load(Some(&root)).unwrap();
-        let mut names: Vec<&str> = pinned_dynamic_payload_names().collect();
-        names.sort_unstable();
-        assert_eq!(names.len(), 19);
-        assert!(names.contains(&"observe_cpu"));
-        assert!(names.contains(&"observe_systemd_units"));
-        assert!(names.contains(&"observe_filesystem_usage"));
-        assert!(names.contains(&"observe_network_links"));
-        assert!(names.contains(&"inspect_processes"));
-        assert!(names.contains(&"inspect_sockets"));
-        for name in names {
-            let (tool_def, source, manifest) = catalog.load_pinned_payload(name).unwrap();
-            assert!(tool_def.is_table());
-            assert!(!source.is_empty());
-            assert!(!manifest.is_empty());
+        let catalog = Catalog::load(Some(&root)).expect("load catalog");
+        let limits = Limits::default();
+        let mut bindings = Bindings::compile_with_mode(
+            BTreeMap::new(),
+            &[],
+            &limits,
+            |_| false,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        let mut failures = Vec::new();
+        for name in catalog.workstation_tool_names() {
+            if let WorkstationEntry::Payload {
+                definition,
+                source,
+                manifest,
+            } = catalog
+                .load_workstation_entry(name)
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+                && let Err(error) = bindings.push_dynamic_payload(
+                    name.to_owned(),
+                    definition,
+                    source,
+                    &manifest,
+                    &limits,
+                )
+            {
+                failures.push(format!("{name}: {error:?}"));
+            }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

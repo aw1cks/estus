@@ -1,0 +1,259 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "81ecdfc32fe9d83439094727f736434c3f5e9edae76ac3f44297662d2877064d",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "target_python": {
+          "name": "target_python"
+        },
+        "manager_scope": {
+          "name": "manager_scope"
+        },
+        "allowed_units": {
+          "name": "allowed_units",
+          "default": null
+        },
+        "unit": {
+          "name": "unit"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json",
+      "os",
+      "re",
+      "sys"
+    ],
+    "executables": [],
+    "paths": [],
+    "executable_candidates": {
+      "systemctl": [
+        "/usr/bin/systemctl",
+        "/bin/systemctl"
+      ]
+    }
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "manager_scope": {
+          "type": "string",
+          "enum": [
+            "system",
+            "user"
+          ]
+        },
+        "allowed_units": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_python",
+        "manager_scope",
+        "unit"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "manager_scope": {
+          "aliases": {},
+          "properties": {}
+        },
+        "allowed_units": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
+        },
+        "unit": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "unit"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3",
+        "manager_scope": "system",
+        "allowed_units": [
+          "estus-fixture.service",
+          "estus-fixture-idle.service",
+          "estus-fixture-fail.service",
+          "estus-fixture.timer",
+          "estus-fixture.socket",
+          "estus-fixture-signal.service",
+          "estus-fixture-block.service",
+          "estus-fixture-manager.service",
+          "estus-fixture@.service"
+        ]
+      },
+      "input_map": {
+        "unit": "unit"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "scope": [
+          "mcp_result",
+          "scope"
+        ],
+        "properties": [
+          "mcp_result",
+          "properties"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 6,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user"
+            ],
+            "maxLength": 6
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "Id": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "LoadState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "ActiveState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "SubState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "UnitFileState": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "MainPID": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "Result": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "InvocationID": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "NRestarts": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "ActiveEnterTimestampMonotonic": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "InactiveEnterTimestampMonotonic": {
+                "type": "string",
+                "maxLength": 4096
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "Id",
+                "LoadState",
+                "ActiveState",
+                "SubState",
+                "UnitFileState",
+                "MainPID",
+                "Result",
+                "InvocationID",
+                "NRestarts",
+                "ActiveEnterTimestampMonotonic",
+                "InactiveEnterTimestampMonotonic"
+              ],
+              "maxLength": 31
+            },
+            "maxItems": 11
+          }
+        },
+        "required": [
+          "scope",
+          "properties",
+          "unavailable"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

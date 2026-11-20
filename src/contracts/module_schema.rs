@@ -114,7 +114,7 @@ pub fn bounded(value: &Value) -> bool {
     walk(value, 0, &mut 0, &mut 0)
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Aliases {
     #[serde(default)]
@@ -125,7 +125,7 @@ struct Aliases {
     items: Option<Box<Aliases>>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Contract {
     schema: Value,
@@ -790,8 +790,9 @@ pub fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
             ("exclusiveMaximum", true, false),
         ] {
             if let Some(limit) = object.get(key).and_then(Value::as_f64)
-                && ((lower && (value < limit || (exclusive && value == limit)))
-                    || (!lower && (value > limit || (exclusive && value == limit))))
+                && (lower && value < limit
+                    || exclusive && value == limit
+                    || !lower && value > limit)
             {
                 return Err(INPUT);
             }
@@ -1012,6 +1013,7 @@ pub(crate) fn validate_setup_overlay(module: &str, overlay: &Value) -> Result<()
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct CapabilityBinding {
     contract: Contract,
     input_schema: Value,

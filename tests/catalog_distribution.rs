@@ -33,14 +33,6 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
         );
         let destination = output.join(name);
         match &catalog.manifest().tools[name].executor {
-            assets::Executor::AnsibleRole { .. } => {
-                catalog.copy_assets(name, &destination).unwrap();
-                assert!(destination.join("tasks/main.yml").is_file(), "{name}");
-                assert_eq!(
-                    fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
-                    0o700
-                );
-            }
             assets::Executor::NativePayload { .. } => {
                 catalog.copy_assets(name, &destination).unwrap();
                 assert!(destination.join("collector.py").is_file(), "{name}");
@@ -65,14 +57,16 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
 }
 
 fn small_catalog(root: &Path) {
-    fs::create_dir_all(root.join("roles/observe_cpu/tasks")).unwrap();
-    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["observe_cpu"]},"tools":{"observe_cpu":{"definition":"observe_cpu.toml","executor":{"kind":"ansible_role","path":"roles/observe_cpu"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
+    let payload = root.join("payloads/observe_cpu");
+    fs::create_dir_all(&payload).unwrap();
+    fs::write(root.join("catalog.json"), r#"{"schema":3,"version":"1","presets":{"linux-health":["observe_cpu"]},"tools":{"observe_cpu":{"definition":"observe_cpu.toml","executor":{"kind":"native_payload","path":"payloads/observe_cpu"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#).unwrap();
     fs::write(
         root.join("observe_cpu.toml"),
         "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\"]\n",
     )
     .unwrap();
-    fs::write(root.join("roles/observe_cpu/tasks/main.yml"), "---\n[]\n").unwrap();
+    fs::write(payload.join("collector.py"), "raise SystemExit(0)\n").unwrap();
+    fs::write(payload.join("manifest.json"), "{}\n").unwrap();
 }
 #[test]
 fn missing_unknown_and_legacy_qualification_formats_fail_closed() {
@@ -106,12 +100,11 @@ fn missing_unknown_and_legacy_qualification_formats_fail_closed() {
 }
 
 #[test]
-fn role_export_excludes_installer_generated_python_bytecode() {
+fn payload_export_excludes_installer_generated_python_bytecode() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     small_catalog(&root);
-    let files = root.join("roles/observe_cpu/files");
-    fs::create_dir(&files).unwrap();
+    let files = root.join("payloads/observe_cpu");
     let collector = files.join("collector.py");
     fs::write(
         &collector,
@@ -143,13 +136,13 @@ fn role_export_excludes_installer_generated_python_bytecode() {
         .copy_assets("observe_cpu", &output)
         .unwrap();
     assert_eq!(
-        fs::read(output.join("files/collector.py")).unwrap(),
+        fs::read(output.join("collector.py")).unwrap(),
         fs::read(&collector).unwrap()
     );
-    assert!(!output.join("files/__pycache__").exists());
-    assert!(!output.join("files/collector.pyc").exists());
-    assert!(!output.join("files/collector.pyo").exists());
-    assert!(output.join("tasks/main.yml").is_file());
+    assert!(output.join("manifest.json").is_file());
+    assert!(!output.join("__pycache__").exists());
+    assert!(!output.join("collector.pyc").exists());
+    assert!(!output.join("collector.pyo").exists());
 }
 
 #[test]
@@ -166,7 +159,7 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
         fs::read_to_string(destination.join("sentinel")).unwrap(),
         "keep"
     );
-    let task = root.join("roles/observe_cpu/tasks/main.yml");
+    let task = root.join("payloads/observe_cpu/collector.py");
     fs::remove_file(&task).unwrap();
     symlink(root.join("observe_cpu.toml"), &task).unwrap();
     assert!(
@@ -182,7 +175,7 @@ fn catalog_rejects_symlinks_clobber_traversal_and_oversized_inputs() {
     );
     assert!(!root.join("symlink-copy").exists());
     fs::remove_file(&task).unwrap();
-    fs::write(&task, "---\n[]\n").unwrap();
+    fs::write(&task, "raise SystemExit(0)\n").unwrap();
     fs::write(root.join("observe_cpu.toml"), vec![b' '; 256 * 1024 + 1]).unwrap();
     assert!(catalog.definition("observe_cpu").is_err());
     fs::remove_file(root.join("observe_cpu.toml")).unwrap();
@@ -486,9 +479,9 @@ fn assert_selection_metadata(output: &Path, canonical: &Value, selected: &[&str]
 }
 
 #[test]
-fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail() {
+fn all_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fail() {
     let catalog = canonical_catalog();
-    assert_eq!(catalog.manifest().tools.len(), 123);
+    assert_eq!(catalog.manifest().tools.len(), 120);
     for name in catalog.manifest().tools.keys() {
         let definition = catalog.definition(name).unwrap();
         let effects = definition["tools"][name]["effects"]
@@ -542,10 +535,10 @@ fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fa
 
     let bad_prefix = tempfile::tempdir().unwrap();
     let bad_root = bad_prefix.path().canonicalize().unwrap();
-    fs::create_dir_all(bad_root.join("roles/legacy_tool/tasks")).unwrap();
+    fs::create_dir_all(bad_root.join("payloads/legacy_tool")).unwrap();
     fs::write(
         bad_root.join("catalog.json"),
-        r#"{"schema":3,"version":"1","presets":{},"tools":{"legacy_tool":{"definition":"legacy_tool.toml","executor":{"kind":"ansible_role","path":"roles/legacy_tool"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#,
+        r#"{"schema":3,"version":"1","presets":{},"tools":{"legacy_tool":{"definition":"legacy_tool.toml","executor":{"kind":"native_payload","path":"payloads/legacy_tool"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#,
     )
     .unwrap();
     fs::write(
@@ -553,11 +546,8 @@ fn all_118_catalog_tools_satisfy_risk_prefix_effects_invariant_and_mismatches_fa
         "[tools.legacy_tool]\ndescription = 'fixture'\neffects = [\"read\"]\n",
     )
     .unwrap();
-    fs::write(
-        bad_root.join("roles/legacy_tool/tasks/main.yml"),
-        "---\n[]\n",
-    )
-    .unwrap();
+    fs::write(bad_root.join("payloads/legacy_tool/collector.py"), "").unwrap();
+    fs::write(bad_root.join("payloads/legacy_tool/manifest.json"), "{}").unwrap();
     assert!(Catalog::load(Some(&bad_root)).is_err());
 }
 
@@ -571,15 +561,6 @@ fn all_payload_manifests_pin_modules_executable_candidates_and_python_min() {
         "change_nic_eee",
         "observe_nic_fec",
         "observe_nic_transceiver",
-    ];
-    let apt_tools = [
-        "change_package_repository",
-        "change_package_repository_refresh",
-        "change_packages_install",
-        "change_packages_remove",
-        "change_packages_upgrade",
-        "observe_package",
-        "observe_packages_updates",
     ];
     for (name, template) in &catalog.manifest().tools {
         let assets::Executor::NativePayload { path } = &template.executor else {
@@ -608,48 +589,35 @@ fn all_payload_manifests_pin_modules_executable_candidates_and_python_min() {
         );
         let modules = req["modules"].as_array().unwrap();
         assert!(!modules.is_empty(), "{name}: missing modules");
-        if apt_tools.contains(&name.as_str()) {
-            assert!(
-                modules.contains(&serde_json::json!("apt")),
-                "{name}: missing apt module requirement"
-            );
-        }
-        if name == "change_packages_install" {
-            let cands = req["executable_candidates"].as_object().unwrap();
-            for key in ["dpkg-query", "apt-mark", "apt-get"] {
-                assert!(cands.contains_key(key), "{name}: missing {key} candidates");
+        if let Some(cands) = req["executable_candidates"].as_object() {
+            for (key, candidates) in cands {
+                assert!(
+                    !candidates.as_array().unwrap().is_empty(),
+                    "{name}: {key} has no executable candidates"
+                );
             }
         }
     }
 }
 
 #[test]
-fn role_and_payload_export_rejects_unexpected_asset_types_and_subdirectories() {
+fn payload_export_accepts_subdirectories_and_rejects_unexpected_asset_types() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     small_catalog(&root);
-    let unexpected_dir = root.join("roles/observe_cpu/unexpected");
-    fs::create_dir(&unexpected_dir).unwrap();
-    fs::write(unexpected_dir.join("main.yml"), "---\n[]\n").unwrap();
+    let subdir = root.join("payloads/observe_cpu/support");
+    fs::create_dir(&subdir).unwrap();
+    fs::write(subdir.join("helper.py"), "VALUE = 1\n").unwrap();
     assert!(
         Catalog::load(Some(&root))
             .unwrap()
-            .copy_assets("observe_cpu", &root.join("out-dir"))
-            .is_err()
+            .copy_assets("observe_cpu", &root.join("out-sub"))
+            .is_ok()
     );
-    fs::remove_dir_all(&unexpected_dir).unwrap();
+    assert!(root.join("out-sub/support/helper.py").is_file());
+    fs::remove_dir_all(&subdir).unwrap();
 
-    let top_file = root.join("roles/observe_cpu/stray.yml");
-    fs::write(&top_file, "---\n[]\n").unwrap();
-    assert!(
-        Catalog::load(Some(&root))
-            .unwrap()
-            .copy_assets("observe_cpu", &root.join("out-top"))
-            .is_err()
-    );
-    fs::remove_file(&top_file).unwrap();
-
-    let bad_ext = root.join("roles/observe_cpu/tasks/extra.sh");
+    let bad_ext = root.join("payloads/observe_cpu/extra.sh");
     fs::write(&bad_ext, "#!/bin/sh\n").unwrap();
     assert!(
         Catalog::load(Some(&root))

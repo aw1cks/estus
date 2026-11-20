@@ -320,7 +320,7 @@ impl Estus {
         input_schema = schema_for_type::<Empty>(),
         output_schema = schema_for_type::<ToolReply<TargetDiscovery<'static>>>()
     )]
-    pub(super) fn observe_targets(
+    pub(super) async fn observe_targets(
         &self,
         Arguments(_): Arguments<Empty>,
         context: RequestContext<RoleServer>,
@@ -338,10 +338,23 @@ impl Estus {
             binding_revision: None,
             executor: None,
         };
-        let _permit = match self.state.operations.try_acquire() {
+        let deadline = match super::preparation::request_deadline(
+            started,
+            std::time::Duration::from_secs(self.state.config.limits().operation_timeout_secs),
+        ) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<TargetDiscovery<'_>>::failure(error));
+            }
+        };
+        let _permit = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
             Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::resource_limit("Tool operation limit reached", false);
+            Err(error) => {
                 metadata.reject(started, &error);
                 return budget.result(ToolReply::<TargetDiscovery<'_>>::failure(error));
             }
@@ -374,10 +387,23 @@ impl Estus {
             metadata.reject(started, &error);
             return budget.result(ToolReply::<ReadData>::failure(error));
         }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+        let deadline = match super::preparation::request_deadline(
+            started,
+            std::time::Duration::from_secs(self.state.config.limits().operation_timeout_secs),
+        ) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<ReadData>::failure(error));
+            }
+        };
+        let permit = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
             Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::resource_limit("Tool operation limit reached", false);
+            Err(error) => {
                 metadata.reject(started, &error);
                 return budget.result(ToolReply::<ReadData>::failure(error));
             }
@@ -591,7 +617,7 @@ impl Estus {
         input_schema = schema_for_type::<ClearTargetQuarantineRequest>(),
         output_schema = schema_for_type::<ToolReply<ClearTargetQuarantineData>>()
     )]
-    pub(super) fn change_target_quarantine_clear(
+    pub(super) async fn change_target_quarantine_clear(
         &self,
         Arguments(request): Arguments<ClearTargetQuarantineRequest>,
         context: RequestContext<RoleServer>,
@@ -643,11 +669,20 @@ impl Estus {
                 false,
             ));
         }
-        let Ok(_permit) = self.state.operations.try_acquire() else {
-            return reject(ToolError::resource_limit(
-                "Tool operation limit reached",
-                false,
-            ));
+        let deadline = match super::preparation::request_deadline(
+            started,
+            std::time::Duration::from_secs(self.state.config.limits().operation_timeout_secs),
+        ) {
+            Ok(deadline) => deadline,
+            Err(error) => return reject(error),
+        };
+        let _permit = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return reject(error),
         };
         let audit = Audit::start(metadata, started);
         let cleared = match self.state.admission.clear_quarantine(&request.host) {

@@ -6,7 +6,7 @@ use crate::{
     reply::ToolError,
     strict_json::parse,
 };
-pub(crate) use engine::{Engine, PayloadRun, PreviewPrestateRequest};
+pub(crate) use engine::{BundleRun, Engine, PayloadRun, PreviewPrestateRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -392,13 +392,13 @@ impl PayloadPlan {
     ) -> Result<Self, ConfigError> {
         let mut manifest: Manifest = parse(manifest_bytes)
             .and_then(serde_json::from_value)
-            .map_err(|_| invalid())?;
+            .map_err(|_| invalid().with_cause("manifest_schema", "payload_validation"))?;
         if source.is_empty() || source.len() > manifest.max_source_bytes.min(MAX_SOURCE) {
-            return Err(invalid());
+            return Err(invalid().with_cause("source_bounds", "payload_validation"));
         }
         let computed_source = digest(&source);
         if !manifest.source_sha256.is_empty() && manifest.source_sha256 != computed_source {
-            return Err(invalid());
+            return Err(invalid().with_cause("source_digest", "payload_validation"));
         }
         manifest.source_sha256 = computed_source;
         manifest.approval = Approval {
@@ -409,10 +409,11 @@ impl PayloadPlan {
             revision: approval.revision.to_owned(),
         };
         manifest.approved = true;
-        validate_manifest(&manifest)?;
+        validate_manifest(&manifest)
+            .map_err(|error| error.with_cause("manifest_constraints", "payload_validation"))?;
         manifest.manifest_sha256 = manifest_digest(&manifest)?;
         let binding = module_schema::compile_binding(&manifest.contract, approval.overlay)
-            .map_err(|_| invalid())?;
+            .map_err(|code| invalid().with_cause(code, "payload_binding"))?;
         Ok(Self {
             manifest,
             source: source.into(),

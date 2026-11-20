@@ -174,11 +174,7 @@ fn module_request_shape_is_recursive_but_bounds_remain_policy() {
 
 #[test]
 fn automation_envelopes_reject_output_retention_even_when_false() {
-    for mut raw in [
-        module_definition(),
-        role_definition(),
-        playbook_definition(),
-    ] {
+    for mut raw in [module_definition()] {
         raw["input_schema"]["properties"]["nested"]["properties"]
             .as_table_mut()
             .unwrap()
@@ -221,7 +217,7 @@ fn module_definition() -> toml::Value {
     raw["authority"] = "automation".into();
     raw["result"]["kind"] = "ansible_summary".into();
     raw["execution"] =
-        toml::from_str("kind='ansible_module'\nsnapshot='/unavailable/reviewed.json'").unwrap();
+        toml::from_str("kind='ansible_module'\nmodule='ansible.builtin.stat'").unwrap();
     raw["input_schema"] = toml::Value::try_from(json!({
         "type":"object","additionalProperties":false,"required":["nested"],
         "properties":{"nested":{"type":"object","additionalProperties":false,
@@ -235,204 +231,6 @@ fn module_definition() -> toml::Value {
     );
     raw
 }
-
-fn role_definition() -> toml::Value {
-    let mut raw = module_definition();
-    raw["execution"] = toml::from_str(
-        "kind='ansible_role'\nsnapshot='/unavailable/role.json'\nrole_path='/unavailable/role'",
-    )
-    .unwrap();
-    raw
-}
-
-fn playbook_definition() -> toml::Value {
-    let mut raw = module_definition();
-    raw["execution"] = toml::from_str(
-        "kind='ansible_playbook'\nsnapshot='/unavailable/playbook.json'\nproject_root='/unavailable/project'",
-    )
-    .unwrap();
-    raw
-}
-
-#[test]
-fn playbook_compilation_is_source_free_and_keeps_controls_private() {
-    for enabled in [Vec::new(), vec!["observe".into()]] {
-        let bindings = Bindings::compile(
-            BTreeMap::from([("observe".into(), playbook_definition())]),
-            &enabled,
-            &Limits::default(),
-            |_| true,
-            None,
-            false,
-        )
-        .unwrap();
-        let binding = bindings.get(BindingId(0)).unwrap();
-        assert_eq!(binding.executor_kind(), "ansible_playbook");
-        assert!(!binding.automation_activated());
-        let published = serde_json::to_string(&binding.input_schema).unwrap();
-        assert!(!published.contains("/unavailable"));
-        for control in [
-            "playbook",
-            "project_root",
-            "inventory",
-            "tags",
-            "extra_vars",
-        ] {
-            let mut arguments = json!({"host":"server","inputs":{"nested":{"items":[]}}});
-            arguments[control] = json!("caller");
-            assert!(
-                binding
-                    .parse_request(arguments.as_object().unwrap().clone())
-                    .is_err()
-            );
-        }
-    }
-    for control in ["role_path", "playbook", "inventory", "tags", "extra_vars"] {
-        let mut raw = playbook_definition();
-        raw["execution"]
-            .as_table_mut()
-            .unwrap()
-            .insert(control.into(), "caller".into());
-        assert!(
-            compile(raw).is_err(),
-            "accepted execution control {control}"
-        );
-    }
-    let mut raw = playbook_definition();
-    raw["execution"]["project_root"] = "relative".into();
-    assert!(compile(raw).is_err());
-}
-
-#[test]
-fn playbook_backend_controls_are_rejected_without_activation() {
-    for name in [
-        "playbook",
-        "project_root",
-        "ansible_connection",
-        "ansible_python_interpreter",
-        "inventory",
-        "tags",
-        "become",
-        "connection",
-        "interpreter",
-        "estus_arguments",
-    ] {
-        for field in ["fixed_args", "input_map"] {
-            let mut raw = playbook_definition();
-            raw.as_table_mut().unwrap().insert(
-                field.into(),
-                toml::Value::try_from(json!({name:"nested"})).unwrap(),
-            );
-            assert!(
-                compile(raw).is_err(),
-                "accepted {field} playbook control {name}"
-            );
-        }
-    }
-}
-
-#[test]
-fn playbook_projection_requires_concrete_domain_members() {
-    for path in [
-        vec!["ansible_facts", "platform"],
-        vec!["mcp_result"],
-        vec!["mcp_result", "platform"],
-    ] {
-        let mut raw = playbook_definition();
-        let mut result = projection_result();
-        result["fields"]["platform"] = toml::Value::Array(
-            path.iter()
-                .map(|part| toml::Value::String((*part).into()))
-                .collect(),
-        );
-        raw["result"] = result;
-        assert_eq!(
-            compile(raw).is_ok(),
-            path.len() == 2 && path[0] == "mcp_result"
-        );
-    }
-}
-
-#[test]
-fn role_compilation_keeps_source_private_and_caller_controls_closed() {
-    let bindings = compile(role_definition()).unwrap();
-    let binding = bindings.get(BindingId(0)).unwrap();
-    assert_eq!(binding.executor_kind(), "ansible_role");
-    assert_eq!(binding.result_kind(), "ansible_summary");
-    assert!(binding.is_automation());
-    assert!(!binding.automation_activated());
-    let published = serde_json::to_string(&binding.input_schema).unwrap();
-    assert!(!published.contains("/unavailable"));
-    for control in ["role", "entry_point", "role_path", "extra_vars"] {
-        let mut arguments = json!({"host":"server","inputs":{"nested":{"items":[]}}});
-        arguments[control] = json!("caller");
-        assert!(
-            binding
-                .parse_request(arguments.as_object().unwrap().clone())
-                .is_err()
-        );
-        let mut raw = role_definition();
-        raw["execution"]
-            .as_table_mut()
-            .unwrap()
-            .insert(control.into(), "caller".into());
-        assert!(compile(raw).is_err());
-    }
-}
-
-#[test]
-fn role_projection_requires_a_concrete_mcp_result_member() {
-    for path in [
-        vec!["ansible_facts", "platform"],
-        vec!["mcp_result"],
-        vec!["mcp_result", "platform"],
-    ] {
-        let mut raw = role_definition();
-        let mut result = projection_result();
-        result["fields"]["platform"] = toml::Value::Array(
-            path.iter()
-                .map(|part| toml::Value::String((*part).into()))
-                .collect(),
-        );
-        raw["result"] = result;
-        assert_eq!(
-            compile(raw).is_ok(),
-            path.len() == 2 && path[0] == "mcp_result"
-        );
-    }
-}
-
-#[test]
-fn role_backend_controls_are_rejected_even_without_activation() {
-    for name in [
-        "mcp_result",
-        "estus_arguments",
-        "ansible_connection",
-        "connection",
-        "become_user",
-        "hostvars",
-        "inventory_file",
-        "callback_plugins",
-        "role_path",
-        "tasks_from",
-        "tags",
-        "no_log",
-    ] {
-        let mut raw = role_definition();
-        raw.as_table_mut().unwrap().insert(
-            "fixed_args".into(),
-            toml::Value::try_from(json!({name:"value"})).unwrap(),
-        );
-        assert!(compile(raw).is_err(), "accepted fixed role control {name}");
-        let mut raw = role_definition();
-        raw["input_map"] = toml::Value::try_from(json!({name:"nested"})).unwrap();
-        assert!(compile(raw).is_err(), "accepted mapped role control {name}");
-    }
-    let mut raw = role_definition();
-    raw["execution"]["role_path"] = "relative/role".into();
-    assert!(compile(raw).is_err());
-}
-
 #[test]
 fn module_compilation_is_lazy_and_preserves_recursive_public_domain() {
     let bindings = compile(module_definition()).unwrap();
@@ -455,31 +253,7 @@ fn module_compilation_is_lazy_and_preserves_recursive_public_domain() {
         request.inputs,
         json!({"nested":{"items":["{{ literal }}"]}})
     );
-    let target = crate::config::AutomationTarget {
-        destination: "fixed".into(),
-        python: "/python".into(),
-    };
-    assert!(
-        binding
-            .prepare_automation(
-                &request,
-                &Limits::default(),
-                AutomationTransport {
-                    authority: crate::config::ResolvedAutomation {
-                        target: std::borrow::Cow::Borrowed(&target),
-                        ssh_config: None,
-                        ssh_executable: Path::new("/usr/bin/ssh"),
-                        r#become: None,
-                        agent: crate::config::AutomationAgent::Inherit,
-                        dynamic_python: false,
-                    },
-                    scratch_bytes: 1024,
-                    scratch_files: 10,
-                    started: std::time::Instant::now(),
-                }
-            )
-            .is_err()
-    );
+    assert!(!binding.automation_activated());
 }
 
 #[test]

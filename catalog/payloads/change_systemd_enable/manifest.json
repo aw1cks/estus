@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "790e9f58f2d22d0a2dfea598efe46c2ec1c932b9e56bcb7dd0526943e41906b8",
+  "source_sha256": "1c47c25eb125a3ecd4187019ab41e3be446b826f417a31e57d2df8a309017d33",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -74,7 +74,6 @@
       "required": [
         "target_python",
         "manager_scope",
-        "allowed_units",
         "unit"
       ],
       "additionalProperties": false

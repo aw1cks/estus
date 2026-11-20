@@ -4,7 +4,7 @@ def main():
     policy = json.loads(sys.argv[2])
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
-        if value not in policy['destinations']: raise ValueError('destination outside operator policy')
+        if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):
@@ -26,7 +26,7 @@ def main():
         print(raw)
 
     dest=destination()
-    if p['destination_port'] not in policy['ports']: raise ValueError('port outside operator policy')
+    if policy['ports'] and '*' not in policy['ports'] and p['destination_port'] not in policy['ports']: raise ValueError('port outside operator policy')
     start=time.monotonic()
     connected=False
     try:

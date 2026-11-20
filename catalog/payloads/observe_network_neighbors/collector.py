@@ -31,8 +31,8 @@ def main():
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
-        value=p.get('interface',policy['interface'])
-        if value not in policy['interfaces'] or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
+        value=p.get('interface',policy.get('interface'))
+        if (policy['interfaces'] and '*' not in policy['interfaces'] and (not value or value not in policy['interfaces'])) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
         return value
     def emit(value):
         if 'entries' in value:
@@ -67,7 +67,7 @@ def main():
     out=[]
     for r in ip(args):
         dev=selected if selected is not None else r['dev']
-        if dev not in policy['interfaces']: continue
+        if '*' not in policy['interfaces'] and dev not in policy['interfaces']: continue
         x={'destination':r['dst'],'interface':dev,'state':r.get('state',[])}
         if 'lladdr' in r: x['address']=r['lladdr']
         out.append(x)

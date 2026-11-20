@@ -55,7 +55,8 @@ def main():
         return result
     if 'unit' in request:
         unit = request['unit']
-        if unit not in request['allowed_units'] or not re.fullmatch(r'[A-Za-z0-9_@.:-]{1,128}', unit):
+        allowed = request.get('allowed_units')
+        if not isinstance(unit, str) or not re.fullmatch(r'[A-Za-z0-9_@.:-]{1,128}', unit) or (isinstance(allowed, list) and allowed and '*' not in allowed and unit not in allowed):
             raise ValueError('unit is outside operator allowlist')
     result = {'scope': scope}
     signal = request['signal']

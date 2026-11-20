@@ -17,20 +17,21 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_sysctl_runtime]
-description = "Set only approved integer kernel.printk_ratelimit seconds (0 disables rate limiting; 1..60 bounds interval). Runtime only, no persistence or all-settings reload. Verified readback is not CAS, rollback, or application-health assurance; interruption may leave effects."
+description = "Set one operator-approved integer sysctl key (constraints.allowed_keys, applied as approved_keys; kernel.printk_ratelimit is additionally bounded to 0..=60 seconds). Runtime only, no persistence or all-settings reload. Verified readback is not CAS, rollback, or application-health assurance; interruption may leave effects."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/change_sysctl_runtime.payload.json", source = "/etc/estus/payloads/change_sysctl_runtime/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
+constraints = { allowed_keys = ["kernel.printk_ratelimit"] }
 input_map = { "key" = "key", "value" = "value" }
 limits = { timeout_secs = 40 }
-input_schema = { "type" = "object", "properties" = { "key" = { "type" = "string", "maxLength" = 64, "enum" = ["kernel.printk_ratelimit"] }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 60 } }, "required" = ["key", "value"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "key" = { "type" = "string", "minLength" = 1, "maxLength" = 128 }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 } }, "required" = ["key", "value"], "additionalProperties" = false }
 [tools.change_sysctl_runtime.result]
 kind = "capability_projection"
 fields = { "key" = ["mcp_result", "key"], "before" = ["mcp_result", "before"], "value" = ["mcp_result", "value"], "verified" = ["mcp_result", "verified"], "persistent" = ["mcp_result", "persistent"], "application" = ["mcp_result", "application"], "config_path" = ["mcp_result", "config_path"], "atomic_compare_exchange" = ["mcp_result", "atomic_compare_exchange"], "rollback_guaranteed" = ["mcp_result", "rollback_guaranteed"] }
 max_bytes = 4096
 max_items = 256
 max_depth = 8
-schema = { "type" = "object", "properties" = { "key" = { "type" = "string", "maxLength" = 64 }, "before" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 60 }, "verified" = { "type" = "boolean", "const" = true }, "persistent" = { "type" = "boolean", "const" = false }, "application" = { "type" = "string", "maxLength" = 64 }, "config_path" = { "type" = "string", "maxLength" = 128 }, "atomic_compare_exchange" = { "type" = "boolean", "const" = false }, "rollback_guaranteed" = { "type" = "boolean", "const" = false } }, "required" = ["key", "before", "value", "verified", "persistent", "application", "config_path", "atomic_compare_exchange", "rollback_guaranteed"], "additionalProperties" = false }
+schema = { "type" = "object", "properties" = { "key" = { "type" = "string", "minLength" = 1, "maxLength" = 128 }, "before" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "value" = { "type" = "integer", "minimum" = 0, "maximum" = 9007199254740991 }, "verified" = { "type" = "boolean", "const" = true }, "persistent" = { "type" = "boolean", "const" = false }, "application" = { "type" = "string", "maxLength" = 64 }, "config_path" = { "type" = "string", "maxLength" = 128 }, "atomic_compare_exchange" = { "type" = "boolean", "const" = false }, "rollback_guaranteed" = { "type" = "boolean", "const" = false } }, "required" = ["key", "before", "value", "verified", "persistent", "application", "config_path", "atomic_compare_exchange", "rollback_guaranteed"], "additionalProperties" = false }

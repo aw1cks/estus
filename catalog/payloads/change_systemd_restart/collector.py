@@ -1,0 +1,76 @@
+import json
+import os
+import re
+import sys
+
+import estus_runtime
+
+OPERATION = 'restart'
+PROPERTIES = ['Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState', 'MainPID', 'Result']
+UNIT_PATTERN = re.compile(r'[A-Za-z0-9_@.:-]{1,128}')
+PROJECTION_BOUND = 4096
+
+
+def unit_allowed(unit, allowed):
+    if not isinstance(unit, str) or UNIT_PATTERN.fullmatch(unit) is None:
+        return False
+    if allowed is None:
+        return True
+    if not isinstance(allowed, list) or not allowed:
+        return True
+    return '*' in allowed or unit in allowed
+
+
+def systemctl(scope, args):
+    executable = os.environ.get('ESTUS_EXEC_SYSTEMCTL')
+    if not executable:
+        raise ValueError('systemctl is unavailable')
+    result = estus_runtime.run_bounded(
+        [executable, '--' + scope, '--no-pager', '--no-ask-password'] + args,
+        timeout=20,
+        max_bytes=262144,
+    )
+    if result['timed_out']:
+        raise ValueError('systemctl deadline exceeded')
+    if result['returncode'] != 0:
+        raise ValueError('systemctl failed with exit ' + str(result['returncode']))
+    return result['stdout']
+
+
+def show(scope, unit):
+    raw = systemctl(scope, ['show', '--property=' + ','.join(PROPERTIES), '--', unit])
+    properties = {}
+    for line in raw.splitlines():
+        key, separator, value = line.partition('=')
+        if not separator or key not in PROPERTIES or key in properties:
+            raise ValueError('unexpected selected property')
+        properties[key] = estus_runtime.check_text(value, maximum=4096)
+    return properties
+
+
+def main():
+    request = json.loads(sys.argv[1])
+    scope = request.get('manager_scope')
+    if scope not in ('system', 'user'):
+        raise ValueError('unsupported operator manager scope')
+    unit = request.get('unit')
+    if not unit_allowed(unit, request.get('allowed_units')):
+        raise ValueError('unit is outside operator policy')
+
+    systemctl(scope, [OPERATION, '--', unit])
+    result = {
+        'scope': scope,
+        'operation': OPERATION,
+        'operation_completed': True,
+        'health': 'not_checked',
+        'unit': unit,
+        'properties': show(scope, unit),
+    }
+    encoded = json.dumps(result, separators=(',', ':'), allow_nan=False)
+    if len(encoded.encode('utf-8')) > PROJECTION_BOUND:
+        raise ValueError('projection output bound exceeded')
+    print(encoded)
+
+
+if __name__ == '__main__':
+    main()

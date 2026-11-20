@@ -29,8 +29,8 @@ pub(crate) struct Cli {
 pub(crate) enum CliCommand {
     /// Check runtime health or configured targets without executing automation or commands.
     Doctor(DoctorArgs),
-    /// Import and verify reviewed offline Ansible module contracts; never execute them.
-    Schema(crate::contracts::schema_import::SchemaArgs),
+    /// Build or inspect offline Ansible module bundle packs.
+    Bundle(crate::bundle::BundleArgs),
     /// Discover, export and prepare bundled catalog definitions offline.
     Catalog(crate::catalog::cli::CatalogArgs),
 }
@@ -334,9 +334,8 @@ impl Config {
             let value: toml::Value =
                 toml::from_str(&text).map_err(|error| ConfigError::toml_syntax(&text, &error))?;
             validate_schema(&value)?;
-            let document = value
-                .try_into::<Document>()
-                .map_err(|_| invalid("config", "invalid configuration structure"))?;
+            let document = toml::from_str::<Document>(&text)
+                .map_err(|error| ConfigError::toml_structure(&text, &error))?;
             let base = path.parent().unwrap_or(cwd).to_path_buf();
             (document, base)
         } else {
@@ -509,22 +508,51 @@ impl Config {
             if let Some(path) = catalog_source {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
                     .map_err(|reason| invalid("catalog", reason))?;
-                for name in crate::catalog::assets::pinned_dynamic_payload_names() {
+                for name in catalog.workstation_tool_names() {
                     if document.disabled_tools.iter().any(|d| d == name)
                         || bindings.entries().any(|(_, b)| b.name == name)
                     {
                         continue;
                     }
-                    let (tool_def, source, manifest_bytes) = catalog
-                        .load_pinned_payload(name)
-                        .map_err(|reason| invalid("catalog", reason))?;
-                    bindings.push_dynamic_payload(
-                        name.to_owned(),
-                        tool_def,
-                        source,
-                        &manifest_bytes,
-                        &document.limits,
-                    )?;
+                    match catalog
+                        .load_workstation_entry(name)
+                        .map_err(|reason| invalid("catalog", reason))?
+                    {
+                        crate::catalog::assets::WorkstationEntry::Payload {
+                            definition,
+                            source,
+                            manifest,
+                        } => {
+                            let needs_sudo = definition
+                                .get("authority")
+                                .and_then(toml::Value::as_str)
+                                .is_some_and(|a| a.starts_with("automation:"));
+                            if needs_sudo && !capabilities.sudo {
+                                continue;
+                            }
+                            bindings.push_dynamic_payload(
+                                name.to_owned(),
+                                definition,
+                                source,
+                                &manifest,
+                                &document.limits,
+                            )?;
+                        }
+                        crate::catalog::assets::WorkstationEntry::Module { definition } => {
+                            let needs_sudo = definition
+                                .get("authority")
+                                .and_then(toml::Value::as_str)
+                                .is_some_and(|a| a.starts_with("automation:"));
+                            if needs_sudo && !capabilities.sudo {
+                                continue;
+                            }
+                            bindings.push_dynamic_ansible_module(
+                                name.to_owned(),
+                                definition,
+                                &document.limits,
+                            )?;
+                        }
+                    }
                 }
             }
         }
@@ -1089,28 +1117,26 @@ mod tests {
     fn automation_loading_never_reads_the_runtime_environment() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load_with(cli(), dir.path(), |key| {
-            assert_ne!(key, "ESTUS_ANSIBLE_RUNTIME");
+            assert_ne!(key, "ESTUS_ANSIBLE_BUNDLE");
             None
         })
         .unwrap();
         assert!(!config.automation_required());
-        assert_eq!(config.automation_runtime_with(|_| None).unwrap(), None);
+        assert_eq!(config.automation_bundle_with(|_| None).unwrap(), None);
 
-        // Neither required nor a configured reference inspects runtime files.
+        // Neither required nor a configured reference inspects bundle files.
         for required in [false, true] {
             let config = load_text(
-                &format!(
-                    "[automation]\nrequired={required}\nruntime='/nonexistent-private-runtime'"
-                ),
+                &format!("[automation]\nrequired={required}\nbundle='/nonexistent-private-bundle'"),
                 &[],
             )
             .unwrap();
             assert_eq!(config.automation_required(), required);
             assert_eq!(
                 config
-                    .automation_runtime_with(|_| panic!("file reference must win"))
+                    .automation_bundle_with(|_| panic!("file reference must win"))
                     .unwrap(),
-                Some(PathBuf::from("/nonexistent-private-runtime"))
+                Some(PathBuf::from("/nonexistent-private-bundle"))
             );
         }
     }

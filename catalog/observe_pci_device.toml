@@ -16,10 +16,10 @@ targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/observe_pci_device.payload.json", source = "/etc/estus/payloads/observe_pci_device/collector.py", no_log = false }
-fixed_args = { target_python = "/usr/bin/python3", address = "0000:00:00.0" }
-input_map = {}
+fixed_args = { target_python = "/usr/bin/python3" }
 limits = { timeout_secs = 30 }
-input_schema = { type = "object", properties = {}, required = [], additionalProperties = false }
+input_map = { address = "address" }
+input_schema = { type = "object", properties = { address = { type = "string", minLength = 7, maxLength = 16 } }, required = ["address"], additionalProperties = false }
 [tools.observe_pci_device.result]
 kind = "capability_projection"
 fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "device" = ["mcp_result", "device"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }

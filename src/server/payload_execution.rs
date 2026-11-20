@@ -110,17 +110,21 @@ impl Estus {
         let revision = binding.revision.clone();
         let argv = prepared.argv;
         let output_limit = prepared.output_limit;
-        let Ok(operation) = Arc::clone(&self.state.operations).try_acquire_owned() else {
-            return reject(ToolError::resource_limit(
-                "Tool operation limit reached",
-                false,
-            ));
+        let operation = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return reject(error),
         };
-        let Ok(runtime) = Arc::clone(&self.state.automation).try_acquire_owned() else {
-            return reject(ToolError::resource_limit(
-                "Automation operation limit reached",
-                false,
-            ));
+        let runtime = match self
+            .state
+            .acquire_permit(&self.state.automation, deadline, &context.ct)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return reject(error),
         };
         let state = Arc::clone(&self.state);
         let (sender, receiver) = tokio::sync::oneshot::channel();

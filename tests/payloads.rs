@@ -517,6 +517,8 @@ def audit(event, args):
     if forbidden:
         violations.append(event)
         raise PermissionError('payload import side effect')
+import types
+sys.modules['estus_runtime'] = types.ModuleType('estus_runtime')
 sys.addaudithook(audit)
 error = None
 try:
@@ -537,11 +539,7 @@ print(json.dumps({'violations': violations, 'error': error}))
             continue;
         };
         let bundle = assets.join(path);
-        let files = if executor["kind"] == "native_payload" {
-            bundle
-        } else {
-            bundle.join("files")
-        };
+        let files = bundle;
         if !files.exists() {
             continue;
         }
@@ -570,6 +568,61 @@ print(json.dumps({'violations': violations, 'error': error}))
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn collectors_have_no_hardcoded_single_location_binaries() -> Result<()> {
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+    let scan = r#"import ast, os, re, sys
+binpath = re.compile(r'^/(?:usr/)?s?bin/[^/]+$')
+errors = []
+count = 0
+for payload in sorted(os.listdir(sys.argv[1])):
+    path = os.path.join(sys.argv[1], payload, 'collector.py')
+    if not os.path.isfile(path):
+        continue
+    count += 1
+    tree = ast.parse(open(path, encoding='utf-8').read(), filename=path)
+    parent_map = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parent_map[c] = n
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if not binpath.match(node.value):
+            continue
+        parent = parent_map.get(node)
+        if isinstance(parent, (ast.Tuple, ast.List)):
+            siblings = [el.value for el in parent.elts if isinstance(el, ast.Constant) and isinstance(el.value, str)]
+            if len(siblings) >= 2 and all(binpath.match(s) for s in siblings) and len(set(siblings)) == len(siblings):
+                continue
+        errors.append(path + ':' + str(node.lineno) + ':' + node.value)
+print(str(count))
+print('\n'.join(errors))
+"#;
+    let output = std::process::Command::new(
+        std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()),
+    )
+    .args(["-I", "-B", "-c", scan])
+    .arg(assets.join("payloads"))
+    .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure!(
+        output.status.success(),
+        "binary path scan failed: {}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        stdout
+    );
+    let mut lines = stdout.lines();
+    let count: usize = lines.next().context("scan count")?.parse()?;
+    ensure!(count >= 100, "expected 100+ collectors, scanned {count}");
+    let offenders: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
+    ensure!(
+        offenders.is_empty(),
+        "hardcoded single-location binary paths (use ESTUS_EXEC_* or multi-location candidate tuples): {offenders:?}"
+    );
     Ok(())
 }
 
@@ -736,8 +789,7 @@ fn inspect_journal_filters_literally_binds_direction_and_packs_within_32768_byte
 }
 
 #[test]
-fn cgroup_collectors_check_unified_hierarchy_file_and_apt_propagates_uncertain_late_child()
--> Result<()> {
+fn cgroup_collectors_check_unified_hierarchy_file() -> Result<()> {
     let python = std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into());
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/payloads");
     for name in [
@@ -775,96 +827,5 @@ with mock.patch.object(sys, 'argv', ['cg', '"/system.slice"', '1'] if 'sample' n
             String::from_utf8_lossy(&out.stderr)
         );
     }
-
-    // Verify change_packages_install does not kill only parent on timeout/overflow and
-    // propagates changed=None + uncertain=True while bootstrap supervises the late child.
-    let tmp = tempfile::tempdir()?;
-    let child_done = tmp.path().join("late-child-done");
-    let apt_runner = format!(
-        r##"import json, os, pathlib, subprocess, sys, types
-from unittest import mock
-
-marker = {marker:?}
-fake_bin = pathlib.Path({tmp_dir:?}) / 'fake_exec.py'
-inner_child = f'import time; time.sleep(0.15); open({{marker!r}}, "w").write("done")'
-fake_bin.write_text(f"""#!{{sys.executable}}
-import subprocess, sys, time
-if '--show' in sys.argv[1:]:
-    sys.exit(0)
-if 'showhold' in sys.argv[1:]:
-    sys.exit(0)
-if '--simulate' in sys.argv[1:]:
-    sys.exit(0)
-if 'install' in sys.argv[1:]:
-    subprocess.Popen([sys.executable, '-c', {{inner_child!r}}], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    sys.stdout.write('X' * 300000)
-    sys.stdout.flush()
-    time.sleep(0.1)
-""")
-fake_bin.chmod(0o755)
-
-bootstrap_mod = sys.modules.get('bootstrap_mod')
-import importlib.util
-bspec = importlib.util.spec_from_file_location('bootstrap_mod', {bootstrap:?})
-bootstrap_mod = importlib.util.module_from_spec(bspec)
-bspec.loader.exec_module(bootstrap_mod)
-
-# Run change_packages_install inside a new session (like bootstrap.py) with mocked apt module.
-site_dir = pathlib.Path({tmp_dir:?}) / 'site'
-site_dir.mkdir(exist_ok=True)
-(site_dir / 'apt.py').write_text('''
-import types
-class FakePkg:
-    name = 'demo'
-    installed = None
-    versions = [types.SimpleNamespace(version='1.0')]
-def Cache():
-    return {{'demo': FakePkg()}}
-''')
-collector_path = {collector:?}
-env = dict(
-    os.environ,
-    PYTHONPATH=str(site_dir),
-    ESTUS_EXEC_APT_GET=str(fake_bin),
-    ESTUS_EXEC_APT_MARK=str(fake_bin),
-    ESTUS_EXEC_DPKG_QUERY=str(fake_bin),
-)
-proc = subprocess.Popen(
-    [sys.executable, collector_path, json.dumps({{"package":"demo","version":"1.0"}}), json.dumps(["demo"])],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    env=env,
-    start_new_session=True,
-)
-out, err = proc.communicate(timeout=10)
-assert proc.returncode == 1, (proc.returncode, out, err)
-ev = json.loads(out.decode('utf-8'))
-assert ev == {{"changed": None, "uncertain": True}}, ev
-# Supervise process group until late child finishes (matching bootstrap.py).
-import time
-deadline = time.monotonic() + 5
-while time.monotonic() < deadline:
-    try:
-        os.killpg(proc.pid, 0)
-        time.sleep(0.02)
-    except ProcessLookupError:
-        break
-assert pathlib.Path(marker).read_text() == 'done'
-"##,
-        bootstrap = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/native_payload/bootstrap.py"),
-        collector = assets.join("change_packages_install/collector.py"),
-        marker = child_done,
-        tmp_dir = tmp.path(),
-    );
-    let out = std::process::Command::new(&python)
-        .args(["-B", "-c", &apt_runner])
-        .output()?;
-    ensure!(
-        out.status.success(),
-        "apt late-child supervision test failed: {} {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
     Ok(())
 }

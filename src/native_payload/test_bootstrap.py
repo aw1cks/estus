@@ -295,6 +295,9 @@ class Execution(unittest.TestCase):
         self.assertEqual(res_fail.returncode, 1)
         ev_fail = json.loads(res_fail.stdout)
         self.assertEqual(ev_fail.get('error_reason'), 'dependency_unavailable')
+
+class PackagePrestate(unittest.TestCase):
+    def test_apk_database_changes_invalidate_prestate(self):
         import importlib.util
         import tempfile
         from unittest import mock
@@ -314,6 +317,14 @@ class Execution(unittest.TestCase):
             self.assertNotEqual(before['database']['sha256'], after['database']['sha256'])
 
     def test_canonical_file_rejects_symlinks_with_value_error(self):
+        import importlib.util
+        import tempfile
+        from unittest import mock
+
+        spec = importlib.util.spec_from_file_location('prestate_mod', pathlib.Path(__file__).with_name('prestate.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
             target = pathlib.Path(directory) / 'target'
             target.write_bytes(b'payload')
             link = pathlib.Path(directory) / 'link'

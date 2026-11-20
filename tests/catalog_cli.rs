@@ -14,7 +14,7 @@ fn invoke(arguments: &[&std::ffi::OsStr]) -> Result<Output> {
         .env("PATH", "")
         .env("ESTUS_CONFIG", "/missing/private-config")
         .env("ESTUS_SSH", "/missing/private-ssh")
-        .env("ESTUS_ANSIBLE_RUNTIME", "/missing/private-runtime")
+        .env("ESTUS_ANSIBLE_BUNDLE", "/missing/private-bundle")
         .output()?)
 }
 
@@ -631,10 +631,8 @@ async fn preparation_rejects_fifo_ssh_config_without_hanging_or_partial_output()
 }
 
 #[test]
-#[ignore = "requires installed ESTUS_TEST_BINARY and shipped ESTUS_TEST_ANSIBLE_RUNTIME; no SSH"]
-fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<()> {
-    let runtime = std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME")
-        .context("set ESTUS_TEST_ANSIBLE_RUNTIME to the pinned installed runtime")?;
+#[ignore = "requires installed ESTUS_TEST_BINARY; no SSH"]
+fn real_prepare_publishes_reviewed_payloads_and_rejects_missing_bundle() -> Result<()> {
     let root = tempfile::tempdir()?;
     let export = root.path().join("export");
     let output = invoke(&[
@@ -660,7 +658,7 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     std::fs::write(
         &site,
         format!(
-            "capabilities = {{ named = true }}\n[ssh]\nexecutable='missing-site-ssh'\nconfig_file='missing-site.conf'\n[targets.server]\nssh_host='private-alias'\n[automation]\nruntime={runtime:?}\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
+            "capabilities = {{ named = true }}\n[ssh]\nexecutable='missing-site-ssh'\nconfig_file='missing-site.conf'\n[targets.server]\nssh_host='private-alias'\n[controller]\nworkspace_root={workspace:?}\n[automation.targets.server]\ndestination='private-alias'\npython='/usr/bin/python3'\n"
         ),
     )?;
     let valid_site = root.path().join("valid-site.toml");
@@ -674,7 +672,7 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     std::fs::write(&valid_site, toml::to_string(&valid_document)?)?;
     let missing_site = root.path().join("DO_NOT_REFLECT-missing-runtime.toml");
     let mut missing_document = valid_document.clone();
-    missing_document["automation"]["runtime"] = "/DO_NOT_REFLECT_MISSING_RUNTIME".into();
+    missing_document["automation"]["bundle"] = "/DO_NOT_REFLECT_MISSING_RUNTIME".into();
     std::fs::write(&missing_site, toml::to_string(&missing_document)?)?;
     let failed_output = root.path().join("failed-runtime");
     let rejected = Command::new(&binary)
@@ -696,7 +694,7 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
     let diagnostic: serde_json::Value = serde_json::from_slice(&rejected.stderr)?;
     ensure!(
         diagnostic["code"] == "runtime_unavailable" && diagnostic["phase"] == "runtime_import",
-        "catalog swallowed the role authoring failure: {diagnostic}"
+        "catalog swallowed the bundle verification failure: {diagnostic}"
     );
     ensure!(!String::from_utf8_lossy(&rejected.stderr).contains("DO_NOT_REFLECT"));
     for invalid_config in [false, true] {
@@ -781,39 +779,41 @@ fn real_prepare_shares_one_reviewed_bundle_and_pins_all_role_paths() -> Result<(
         "prepared SSH selection did not survive a different launch cwd: {}",
         String::from_utf8_lossy(&inspected.stderr)
     );
-    let mut approved_root = None;
     for name in ["observe_host_summary", "observe_hardware_system"] {
         let snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(
             prepared.join(format!("snapshots/{name}.json")),
         )?)?;
-        ensure!(snapshot["schema"] == 2);
-        let bundle =
-            std::path::PathBuf::from(snapshot["bundle_root"].as_str().context("bundle root")?);
-        if let Some(root) = &approved_root {
-            ensure!(
-                root == &bundle,
-                "catalog preparation duplicated the shared role parent"
-            );
-        }
-        approved_root = Some(bundle.clone());
+        ensure!(snapshot["schema"] == 1);
+        ensure!(snapshot["approved"] == true);
         ensure!(
-            config["tools"][name]["execution"]["role_path"].as_str() == bundle.join(name).to_str()
+            snapshot["source_sha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64),
+            "{name}: snapshot lost the approved source digest"
         );
-        ensure!(bundle.join("observe_host_summary/tasks/main.yml").is_file());
+        let source = std::path::PathBuf::from(
+            config["tools"][name]["execution"]["source"]
+                .as_str()
+                .context("payload source")?,
+        );
         ensure!(
-            bundle
-                .join("observe_hardware_system/tasks/main.yml")
-                .is_file()
+            source == prepared.join("payloads").join(name).join("collector.py"),
+            "{name}: prepared source is not the private reviewed payload"
         );
+        ensure!(
+            config["tools"][name]["execution"]["snapshot"].as_str()
+                == prepared.join(format!("snapshots/{name}.json")).to_str()
+        );
+        ensure!(source.is_file());
     }
-    let bundles = std::fs::read_dir(prepared.join("snapshots"))?
+    let snapshots = std::fs::read_dir(prepared.join("snapshots"))?
         .collect::<std::io::Result<Vec<_>>>()?
         .into_iter()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "roles"))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .count();
     ensure!(
-        bundles == 1,
-        "catalog preparation copied its role parent more than once"
+        snapshots == 2,
+        "catalog preparation did not publish one snapshot per approved payload"
     );
     Ok(())
 }
@@ -851,8 +851,15 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
     );
     let mut doc_b: toml::Value =
         toml::from_str(&std::fs::read_to_string(export_b.join("tools.toml"))?)?;
-    doc_b["tools"]["observe_systemd_unit"]["constraints"]["allowed_units"] =
-        toml::Value::Array(vec!["nginx.service".into()]);
+    let mut constraints = toml::Table::new();
+    constraints.insert(
+        "allowed_units".into(),
+        toml::Value::Array(vec!["nginx.service".into()]),
+    );
+    doc_b["tools"]["observe_systemd_unit"]
+        .as_table_mut()
+        .context("observe_systemd_unit table")?
+        .insert("constraints".into(), toml::Value::Table(constraints));
     doc_b["tools"]["observe_systemd_unit"]["revision"] = "2".into();
     std::fs::write(export_b.join("tools.toml"), toml::to_string(&doc_b)?)?;
 
@@ -902,8 +909,9 @@ fn catalog_diff_and_inspect_report_changes_constraints_and_omitted_templates() -
         .as_array()
         .context("omitted_templates")?;
     ensure!(
-        omitted.iter().any(|t| t["name"] == "observe_host_summary"
-            && t["reason"] == "requires_runner_and_approval")
+        omitted
+            .iter()
+            .any(|t| t["name"] == "observe_host_summary" && t["reason"] == "site_policy_required")
     );
     ensure!(
         omitted
@@ -1025,7 +1033,7 @@ async fn journal_and_record_prepare_publish_expanded_schemas_and_reject_exhauste
         .find(|t| t["name"] == "inspect_journal")
         .context("inspect_journal")?;
     let inputs = &journal["inputSchema"]["properties"]["inputs"];
-    ensure!(inputs["properties"]["limit"]["maximum"] == 50);
+    ensure!(inputs["properties"]["limit"]["maximum"] == 500);
     ensure!(
         inputs["properties"]["direction"]["enum"] == serde_json::json!(["backward", "forward"])
     );

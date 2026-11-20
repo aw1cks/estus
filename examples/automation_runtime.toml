@@ -1,16 +1,17 @@
-# Run with the optional package, which supplies its private pinned runtime:
-#   nix run .#automation-msrv -- --config examples/automation_runtime.toml doctor --runtime ansible
-#   nix run .#automation-msrv -- --config examples/automation_runtime.toml
-# Or install a wheel with its ansible extra and use the same explicit prerequisite:
+# Explicit startup prerequisite for the offline module bundle. Build and verify the
+# bundle once, outside the server lifecycle, then require it at startup:
+#   estus bundle build --python /opt/ansible/bin/python \
+#     --collections-path /opt/collections --output /etc/estus/bundle
+#   estus bundle inspect --bundle /etc/estus/bundle
 #   estus --config examples/automation_runtime.toml doctor --runtime ansible
 #   estus --config examples/automation_runtime.toml
-# This validates dependencies only; it does not publish or execute Ansible tools.
-# The native package stays independent unless this prerequisite is explicitly required.
+# ESTUS_ANSIBLE_BUNDLE overrides the file reference; the file reference wins.
+# This validates bundle integrity only; it does not publish or execute tools.
+# The base wheel and native package stay independent unless required = true.
 mode = "headless"
 capabilities = { named = true }
 enabled_tools = []
 
 [automation]
 required = true
-# A site may instead declare an absolute runtime bundle path here. The file
-# reference wins over ESTUS_ANSIBLE_RUNTIME and the wheel's selected environment.
+bundle = "/etc/estus/bundle"

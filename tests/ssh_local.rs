@@ -838,48 +838,56 @@ async fn bounded_channels(fixture: &mut Fixture, client: &Client) -> Result<()> 
         requests.push(json!({"host":"resource","command":command,"timeout_secs":15}));
         ready.push(start);
     }
-    let forbidden = fixture.root.path().join("excess-channel-dispatched");
     let calls = futures_util::future::join_all(
         requests
             .into_iter()
             .map(|request| client.call("exec_command", request)),
     );
-    let rejection = async {
-        let outcome = async {
+    let queued = async {
+        // The release file is written unconditionally before `queued` finishes,
+        // so a failed assertion never leaves the saturated commands hanging for
+        // the 15s remote timeout.
+        let outcome: Result<()> = async {
             for path in ready {
                 Fixture::await_file(&path).await?;
             }
-            ensure!(!expired.exists(), "channels expired before rejection");
-            let reply = client
-                .call(
-                    "exec_command",
-                    json!({
-                        "host":"resource",
-                        "command":format!("printf WRONG > {}", quote(&forbidden.to_string_lossy())),
-                    }),
-                )
-                .await?;
-            failed(&reply, "resource_limit")?;
-            ensure!(reply["data"].is_null());
-            await_audit(&client.log, "finish", "resource_limit").await?;
-            ensure!(!expired.exists(), "channels expired during rejection");
-            Ok::<_, anyhow::Error>(())
+            ensure!(!expired.exists(), "channels expired before saturation");
+            // The fifth operation must wait for a channel instead of being rejected
+            // while this target's four channels are occupied.
+            let waiting = client.call(
+                "exec_command",
+                json!({
+                    "host":"resource",
+                    "command":"printf CHANNEL_EXTRA",
+                    "timeout_secs":15,
+                }),
+            );
+            tokio::pin!(waiting);
+            ensure!(
+                tokio::time::timeout(Duration::from_millis(300), &mut waiting)
+                    .await
+                    .is_err(),
+                "the fifth channel was rejected instead of waiting for capacity"
+            );
+            ensure!(!expired.exists(), "channels expired while queued");
+            fs::write(&release, b"release")?;
+            let reply = waiting.await?;
+            ensure!(
+                succeeded(&reply)?["stdout"] == "CHANNEL_EXTRA",
+                "queued channel did not run after capacity freed"
+            );
+            Ok(())
         }
         .await;
-        let released = fs::write(&release, b"release");
-        outcome?;
-        released?;
-        Ok::<_, anyhow::Error>(())
+        let _ = fs::write(&release, b"release");
+        outcome
     };
-    let (outputs, rejected) = tokio::join!(calls, rejection);
-    rejected?;
+    let (outputs, served) = tokio::join!(calls, queued);
+    let _ = fs::write(&release, b"release");
+    served?;
     for (index, output) in outputs.into_iter().enumerate() {
         ensure!(succeeded(&output?)?["stdout"] == format!("CHANNEL_{index}"));
     }
-    ensure!(
-        !forbidden.exists(),
-        "excess channel was queued or dispatched"
-    );
     ensure!(
         !expired.exists(),
         "capacity was released by deadline rather than controller"
@@ -1032,30 +1040,39 @@ async fn global_operation_limit(fixture: &mut Fixture, client: &Client) -> Resul
             .into_iter()
             .map(|request| client.call("exec_command", request)),
     );
-    let rejection = async {
-        let outcome = async {
+    let queued = async {
+        // The release file is written unconditionally before `queued` finishes,
+        // so a failed assertion never leaves the saturated operations hanging
+        // for the 15s remote timeout.
+        let outcome: Result<()> = async {
             for path in ready {
                 Fixture::await_file(&path).await?;
             }
-            ensure!(!expired.exists(), "operations expired before rejection");
-            let reply = client.call("observe_targets", json!({})).await?;
-            failed(&reply, "resource_limit")?;
+            ensure!(!expired.exists(), "operations expired before saturation");
+            let waiting = client.call("observe_targets", json!({}));
+            tokio::pin!(waiting);
             ensure!(
-                reply["data"].is_null(),
-                "the seventeenth operation was admitted"
+                tokio::time::timeout(Duration::from_millis(300), &mut waiting)
+                    .await
+                    .is_err(),
+                "the ninth operation was rejected instead of waiting for a slot"
             );
-            await_audit(&client.log, "reject", "resource_limit").await?;
-            ensure!(!expired.exists(), "operations expired during rejection");
-            Ok::<_, anyhow::Error>(())
+            ensure!(!expired.exists(), "operations expired while queued");
+            fs::write(&release, b"release")?;
+            let reply = waiting.await?;
+            ensure!(
+                succeeded(&reply)?["mode"] == "configured",
+                "queued operation did not run after a slot freed"
+            );
+            Ok(())
         }
         .await;
-        let released = fs::write(&release, b"release");
-        outcome?;
-        released?;
-        Ok::<_, anyhow::Error>(())
+        let _ = fs::write(&release, b"release");
+        outcome
     };
-    let (outputs, rejected) = tokio::join!(calls, rejection);
-    rejected?;
+    let (outputs, served) = tokio::join!(calls, queued);
+    let _ = fs::write(&release, b"release");
+    served?;
     for (index, output) in outputs.into_iter().enumerate() {
         ensure!(succeeded(&output?)?["stdout"] == format!("GLOBAL_{index}"));
     }

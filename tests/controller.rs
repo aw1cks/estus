@@ -1195,16 +1195,21 @@ async fn global_admission_is_held_by_live_controller_owners_and_recovers_after_c
         for record in &records {
             observed.extend([pid(record, "leader")?, pid(record, "worker")?]);
         }
-        server.call(100, arguments()).await?;
+        server
+            .call(
+                100,
+                json!({"label":"ordinary","count":-7,"flag":true,"timeout_secs":1}),
+            )
+            .await?;
         let rejected = server.response(100).await?;
         let result = envelope(&rejected)?;
         ensure!(
-            result["error"]["code"] == "resource_limit" && result["data"].is_null(),
-            "admission overflow: {result}"
+            result["error"]["code"] == "timeout" && result["data"].is_null(),
+            "queued call did not time out: {result}"
         );
         ensure!(
             fixture.records()?.len() == 8 && fixture.operation_directories()?.len() == 8,
-            "rejected call performed local work"
+            "timed-out queued call performed local work"
         );
         // Cancellation keeps the actual operation owner responsible for cleanup.
         for id in 10..18 {

@@ -34,7 +34,7 @@ async fn unit_state(guest: &catalog::Guest, unit: &str) -> Result<Value> {
     serde_json::from_str(&text).context("unit oracle JSON")
 }
 
-async fn owned_runner_processes(
+async fn controller_local_processes(
     workspace: &std::path::Path,
 ) -> Result<std::collections::BTreeSet<u32>> {
     let needle = workspace.to_str().context("workflow workspace UTF8")?;
@@ -58,7 +58,7 @@ async fn owned_runner_processes(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_VM, ESTUS_TEST_ANSIBLE_RUNTIME; disposable Linux EFI guest"]
+#[ignore = "requires ESTUS_TEST_CATALOG_VM, ESTUS_TEST_ANSIBLE_BUNDLE; disposable Linux EFI guest"]
 async fn reviewed_health_workflow() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
@@ -92,7 +92,7 @@ async fn reviewed_health_workflow() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_VM, ESTUS_TEST_ANSIBLE_RUNTIME; disposable Linux EFI guest"]
+#[ignore = "requires ESTUS_TEST_CATALOG_VM, ESTUS_TEST_ANSIBLE_BUNDLE; disposable Linux EFI guest"]
 async fn reviewed_service_diagnosis_workflow() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
@@ -126,7 +126,7 @@ async fn reviewed_service_diagnosis_workflow() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ESTUS_TEST_CATALOG_VM, ESTUS_TEST_ANSIBLE_RUNTIME; disposable Linux EFI guest"]
+#[ignore = "requires ESTUS_TEST_CATALOG_VM, ESTUS_TEST_ANSIBLE_BUNDLE; disposable Linux EFI guest"]
 async fn reviewed_service_restart_workflow() -> Result<()> {
     let guest = catalog::Guest::start().await?;
     let result: Result<()> = async {
@@ -213,8 +213,10 @@ systemctl daemon-reload
         }).await.context("restart never entered real manager-owned ExecStop")??;
         let pending = unit_state(guest, UNIT).await?;
         ensure!(pending["ActiveState"] == "deactivating", "fixture did not hold a real pending restart: {pending}");
-        ensure!(!owned_runner_processes(&binding.workspace).await?.is_empty(),
-            "pending restart has no independently observable owned Runner");
+        ensure!(
+            controller_local_processes(&binding.workspace).await?.is_empty(),
+            "SSH-native execution started an unexpected controller-local process"
+        );
         server.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{
             "requestId":40,"reason":"reviewed workflow cancellation during real systemd stop job"
         }})).await?;
@@ -273,7 +275,9 @@ systemctl daemon-reload
         "interrupted Runner left owned workspace"
     );
     ensure!(
-        owned_runner_processes(&binding.workspace).await?.is_empty(),
+        controller_local_processes(&binding.workspace)
+            .await?
+            .is_empty(),
         "interrupted restart retained a host process under its owned workspace"
     );
     Ok(())

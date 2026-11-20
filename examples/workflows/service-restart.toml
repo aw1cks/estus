@@ -10,8 +10,9 @@ authority = "automation:catalog"
 allowed_units = ["estus-fixture.service"]
 #
 # estus catalog export --tool change_systemd_restart --output restart-export
-# Review roles; replace constraints.allowed_units in restart-export/tools.toml with the
-# allowed_units above. Provision catalog authority separately from ordinary SSH.
+# Review restart-export/payloads; replace constraints.allowed_units in
+# restart-export/tools.toml with the allowed_units above. Provision catalog
+# authority separately from ordinary SSH.
 # estus catalog prepare --site provisioned-site.toml --definitions restart-export/tools.toml --target plain --output restart-reviewed
 # estus catalog inspect --site restart-reviewed/estus.toml
 # estus --config restart-reviewed/estus.toml

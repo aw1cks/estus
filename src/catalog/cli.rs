@@ -88,7 +88,7 @@ enum CatalogCommand {
         #[arg(long)]
         site: PathBuf,
     },
-    /// Export inert templates, role sources and exact overlays for operator review.
+    /// Export inert templates, payload sources and exact overlays for operator review.
     Export {
         #[arg(long = "tool", required_unless_present = "presets")]
         tools: Vec<String>,
@@ -98,12 +98,12 @@ enum CatalogCommand {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Import reviewed exported definitions using the site's selected runtimes.
+    /// Prepare reviewed exported definitions using the site's selected configuration.
     Prepare {
-        /// Site configuration supplying targets, identities and optional runtimes.
+        /// Site configuration supplying targets, identities and optional bundle paths.
         #[arg(long)]
         site: PathBuf,
-        /// Operator-reviewed tools.toml from export, including reviewed role paths.
+        /// Operator-reviewed tools.toml from export.
         #[arg(long)]
         definitions: PathBuf,
         /// Optional logical target allowlist applied to the prepared definitions.
@@ -112,7 +112,7 @@ enum CatalogCommand {
         /// New private directory containing estus.toml, overlays and snapshots.
         #[arg(long)]
         output: PathBuf,
-        /// Overall offline preparation deadline, including all selected imports.
+        /// Overall offline preparation deadline.
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600))]
         timeout_secs: u64,
     },
@@ -178,8 +178,6 @@ impl Drop for PrivateOutput {
         if self.keep {
             return;
         }
-        // A pathname is not ownership. Do not recursively remove a replacement
-        // directory after an ancestor rename, even in our same-UID trust model.
         let same = |left: &Metadata, right: &Metadata| {
             left.dev() == right.dev() && left.ino() == right.ino()
         };
@@ -238,6 +236,29 @@ fn trusted_output_parent(path: &Path) -> Result<File, &'static str> {
         }
     }
     Ok(directory)
+}
+
+fn read_json(path: &Path, limit: usize) -> Result<Value, &'static str> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| "catalog_definition_unavailable")?;
+    if !file
+        .metadata()
+        .map_err(|_| "catalog_definition_unavailable")?
+        .is_file()
+    {
+        return Err("catalog_definition_invalid");
+    }
+    let mut bytes = Vec::new();
+    file.take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "catalog_definition_unavailable")?;
+    if bytes.len() > limit {
+        return Err("catalog_definition_limit");
+    }
+    crate::strict_json::parse(&bytes).map_err(|_| "catalog_definition_invalid")
 }
 
 fn read_toml(path: &Path) -> Result<toml::Table, Failure> {
@@ -373,7 +394,7 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
         return Ok(bytes);
     }
     let mut text = format!(
-        "Catalog {} — bundled templates, not automatically enabled\n",
+        "Catalog {} — bundled templates, default in workstation mode\n",
         catalog.manifest().version
     );
     for (name, members) in &catalog.manifest().presets {
@@ -419,7 +440,7 @@ fn export(
 ) -> Result<Value, &'static str> {
     let names = selected(catalog, tools, presets)?;
     let output = PrivateOutput::create(path)?;
-    for directory in ["roles", "payloads", "overlays", "snapshots"] {
+    for directory in ["payloads", "overlays", "snapshots"] {
         DirBuilder::new()
             .mode(0o700)
             .create(output.path.join(directory))
@@ -445,14 +466,6 @@ fn export(
             .and_then(toml::Value::as_table_mut)
             .ok_or("catalog_definition_invalid")?;
         match &template.executor {
-            super::assets::Executor::AnsibleRole { .. } => {
-                let role = output.path.join("roles").join(name);
-                catalog.copy_assets(name, &role)?;
-                execution.insert(
-                    "role_path".into(),
-                    role.to_str().ok_or("catalog_output_unavailable")?.into(),
-                );
-            }
             super::assets::Executor::NativePayload { .. } => {
                 let bundle = output.path.join("payloads").join(name);
                 catalog.copy_assets(name, &bundle)?;
@@ -464,19 +477,19 @@ fn export(
                         .ok_or("catalog_output_unavailable")?
                         .into(),
                 );
+                execution.insert(
+                    "snapshot".into(),
+                    output
+                        .path
+                        .join("snapshots")
+                        .join(format!("{name}.json"))
+                        .to_str()
+                        .ok_or("catalog_output_unavailable")?
+                        .into(),
+                );
             }
             super::assets::Executor::AnsibleModule { .. } => {}
         }
-        execution.insert(
-            "snapshot".into(),
-            output
-                .path
-                .join("snapshots")
-                .join(format!("{name}.json"))
-                .to_str()
-                .ok_or("catalog_output_unavailable")?
-                .into(),
-        );
         write_private(
             &output.path.join("overlays").join(format!("{name}.json")),
             &serde_json::to_vec_pretty(&overlay(&definition)?)
@@ -532,7 +545,7 @@ fn preserve_site_paths(document: &mut toml::Table, base: &Path) -> Result<(), &'
         .get_mut("automation")
         .and_then(toml::Value::as_table_mut)
     {
-        if let Some(value) = automation.get_mut("runtime") {
+        if let Some(value) = automation.get_mut("bundle") {
             absolute_path(value, base)?;
         }
         if let Some(authorities) = automation
@@ -540,7 +553,7 @@ fn preserve_site_paths(document: &mut toml::Table, base: &Path) -> Result<(), &'
             .and_then(toml::Value::as_table_mut)
         {
             for (_, authority) in authorities.iter_mut() {
-                for key in ["runtime", "ssh_config_file"] {
+                for key in ["bundle", "ssh_config_file"] {
                     if let Some(value) = authority.get_mut(key) {
                         absolute_path(value, base)?;
                     }
@@ -569,7 +582,7 @@ fn prepare_payload(definition: &mut toml::Value, name: &str, output: &Path) -> R
         .ok_or("catalog_definition_invalid")?
         .join("manifest.json");
     let mut manifest: crate::native_payload::Manifest =
-        serde_json::from_value(crate::contracts::schema_import::read_json(&draft, 262_144)?)
+        serde_json::from_value(read_json(&draft, 262_144)?)
             .map_err(|_| "catalog_definition_invalid")?;
     let input = overlay(definition)?;
     manifest.approval = crate::native_payload::Approval {
@@ -699,10 +712,8 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
             .ok_or("catalog_definition_invalid")?;
-        let mut imports = Vec::with_capacity(tools.len());
+        let mut module_checks = Vec::new();
         let mut prepared_names = Vec::with_capacity(tools.len());
-        let mut reviewed_bundle: Option<PathBuf> = None;
-        let mut authoring_parent: Option<PathBuf> = None;
         for (name, mut definition) in tools {
             if !catalog.manifest().tools.contains_key(&name) || configured.contains_key(&name) {
                 return Err("catalog_tool_unknown_or_collision".into());
@@ -733,9 +744,6 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
                 else {
                     return Err("catalog_definition_invalid".into());
                 };
-                let snapshot = output.path.join("snapshots").join(format!("{name}.json"));
-                definition["execution"]["snapshot"] =
-                    snapshot.to_str().ok_or("catalog_output_invalid")?.into();
                 let input = overlay(&definition)?;
                 let authority = definition
                     .get("authority")
@@ -747,87 +755,11 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
                     &overlay_path,
                     &serde_json::to_vec(&input).map_err(|_| "catalog_output_invalid")?,
                 )?;
-                imports.push((
-                    name.clone(),
-                    None,
-                    overlay_path,
-                    snapshot,
-                    authority,
-                    Some(module.clone()),
-                ));
+                module_checks.push((authority, module.clone(), input));
                 configured.insert(name, definition);
                 continue;
             }
-            let execution = definition
-                .get_mut("execution")
-                .and_then(toml::Value::as_table_mut)
-                .ok_or("catalog_definition_invalid")?;
-            if execution.get("kind").and_then(toml::Value::as_str) != Some("ansible_role") {
-                return Err("catalog_definition_invalid".into());
-            }
-            let role_path = PathBuf::from(
-                execution
-                    .get("role_path")
-                    .and_then(toml::Value::as_str)
-                    .ok_or("catalog_definition_invalid")?,
-            );
-            if !role_path.is_absolute() {
-                return Err("catalog_definition_invalid".into());
-            }
-            let snapshot = output.path.join("snapshots").join(format!("{name}.json"));
-            let parent =
-                std::fs::canonicalize(role_path.parent().ok_or("catalog_definition_invalid")?)
-                    .map_err(|_| "catalog_definition_invalid")?;
-            if authoring_parent
-                .as_ref()
-                .is_some_and(|selected| selected != &parent)
-            {
-                return Err("catalog_role_search_root_mismatch".into());
-            }
-            let root = match &reviewed_bundle {
-                Some(root) => root,
-                None => {
-                    let root =
-                        crate::contracts::role_import::author_bundle(&name, &role_path, &snapshot)?;
-                    authoring_parent = Some(parent);
-                    reviewed_bundle.insert(root)
-                }
-            };
-            let role_path = root.join(&name);
-            execution.insert(
-                "role_path".into(),
-                role_path
-                    .to_str()
-                    .ok_or("catalog_output_unavailable")?
-                    .into(),
-            );
-            execution.insert(
-                "snapshot".into(),
-                snapshot
-                    .to_str()
-                    .ok_or("catalog_output_unavailable")?
-                    .into(),
-            );
-            let overlay_path = output.path.join("overlays").join(format!("{name}.json"));
-            write_private(
-                &overlay_path,
-                &serde_json::to_vec(&overlay(&definition)?)
-                    .map_err(|_| "catalog_output_invalid")?,
-            )?;
-            let authority = definition
-                .get("authority")
-                .and_then(toml::Value::as_str)
-                .ok_or("catalog_definition_invalid")?
-                .to_owned();
-            configured.insert(name.clone(), definition);
-            imports.push((
-                name,
-                Some(role_path),
-                overlay_path,
-                snapshot,
-                authority,
-                None,
-            ));
+            return Err("catalog_definition_invalid".into());
         }
         document.entry("mode").or_insert_with(|| "headless".into());
         document.entry("capabilities").or_insert_with(|| {
@@ -875,9 +807,30 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
                 .as_bytes(),
         )?;
         let config = Config::from_file_with_catalog_root(cli, config_path, None)?;
-        // Publish the effective absolute SSH selection, not the lower-priority
-        // site values. Keep the exclusively created file handle while updating
-        // this still-private output; failure drops the complete owned directory.
+        for (authority, module, input_overlay) in &module_checks {
+            let bundle_path = config
+                .catalog_runtime(authority)?
+                .or_else(crate::bundle::discover_default_bundle)
+                .ok_or(Failure::Code {
+                    code: "runtime_unavailable",
+                    phase: Some("runtime_import"),
+                })?;
+            let pack =
+                crate::bundle::BundlePack::load(&bundle_path).map_err(|_| Failure::Code {
+                    code: "runtime_unavailable",
+                    phase: Some("runtime_import"),
+                })?;
+            let contract = pack.contract_for(module).map_err(|code| Failure::Code {
+                code,
+                phase: Some("bundle_module"),
+            })?;
+            crate::contracts::module_schema::compile_binding(&contract, input_overlay).map_err(
+                |code| Failure::Code {
+                    code,
+                    phase: Some("binding_compilation"),
+                },
+            )?;
+        }
         let ssh = document
             .entry("ssh")
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
@@ -907,60 +860,14 @@ async fn prepare(args: PrepareArgs) -> Result<Value, Failure> {
         config_file
             .write_all(text.as_bytes())
             .map_err(|_| "catalog_output_unavailable")?;
-        Ok::<_, Failure>((output, config, imports, prepared_names.len()))
+        Ok::<_, Failure>((output, prepared_names.len()))
     })
     .await
     .map_err(|_| "catalog_output_unavailable")??;
-    let (output, config, imports, prepared_count) = work;
-    for (name, role_path, overlay, snapshot, authority, module) in &imports {
-        if shutdown.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        let reference = config.catalog_runtime(authority)?;
-        if let Some(module) = module {
-            let overlay = crate::contracts::schema_import::read_json(overlay, 65_536)?;
-            crate::contracts::schema_import::author_module(
-                reference,
-                module,
-                &overlay,
-                snapshot,
-                crate::automation::RuntimeContext {
-                    deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(60),
-                    ct: &shutdown,
-                    shutdown: &shutdown,
-                },
-            )
-            .await?;
-            continue;
-        }
-        let report = crate::contracts::role_import::perform_with_reference(
-            &config,
-            crate::contracts::role_import::Command::Import(
-                crate::contracts::role_import::ImportArgs::reviewed(
-                    name.clone(),
-                    role_path
-                        .as_ref()
-                        .ok_or("catalog_definition_invalid")?
-                        .clone(),
-                    snapshot.clone(),
-                    overlay.clone(),
-                ),
-            ),
-            None,
-            shutdown.clone(),
-            reference,
-        )
-        .await;
-        if let Some((code, phase)) = report.failure() {
-            return Err(Failure::Code {
-                code,
-                phase: Some(phase),
-            });
-        }
-    }
     if shutdown.is_cancelled() {
         return Err("cancelled".into());
     }
+    let (output, prepared_count) = work;
     let report = json!({"ok":true,"prepared":prepared_count,"activated":false});
     output.finish();
     Ok(report)
@@ -1179,11 +1086,6 @@ fn inspect(
                 super::assets::Qualification::LaboratoryOnly
             ) {
                 "laboratory_only"
-            } else if matches!(
-                template.executor,
-                super::assets::Executor::AnsibleRole { .. }
-            ) {
-                "requires_runner_and_approval"
             } else if !config.capabilities().named {
                 "disabled_by_capability"
             } else if template.policy_required {
@@ -1241,10 +1143,15 @@ fn approval_identity(tool: &toml::Value) -> Value {
         .get("execution")
         .and_then(|e| e.get("kind"))
         .and_then(toml::Value::as_str);
+    let module = tool
+        .get("execution")
+        .and_then(|e| e.get("module"))
+        .and_then(toml::Value::as_str);
     json!({
         "revision": tool.get("revision").and_then(toml::Value::as_str),
         "authority": tool.get("authority").and_then(toml::Value::as_str),
         "executor_kind": kind,
+        "module": module,
         "snapshot_sha256": snapshot_sha256,
     })
 }

@@ -1,0 +1,229 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "0c22c225269491c4df51e93d4db1bbd5864fde4a6fe48a7d1cd47f96d7f89f9b",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "object",
+      "fields": {
+        "target_python": {
+          "name": "target_python"
+        },
+        "interface": {
+          "name": "interface"
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "datetime",
+      "json",
+      "os",
+      "re",
+      "sys"
+    ],
+    "executables": [],
+    "paths": [],
+    "executable_candidates": {
+      "ethtool": [
+        "/usr/sbin/ethtool",
+        "/usr/bin/ethtool",
+        "/sbin/ethtool"
+      ]
+    }
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "interface": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_python",
+        "interface"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "interface": {
+          "aliases": {},
+          "properties": {}
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
+    ]
+  },
+  "approval": {
+    "overlay": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interface": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 15
+          }
+        },
+        "required": [
+          "interface"
+        ],
+        "additionalProperties": false
+      },
+      "fixed_args": {
+        "target_python": "/usr/bin/python3"
+      },
+      "input_map": {
+        "interface": "interface"
+      }
+    },
+    "result": {
+      "kind": "capability_projection",
+      "fields": {
+        "source": [
+          "mcp_result",
+          "source"
+        ],
+        "observed_at": [
+          "mcp_result",
+          "observed_at"
+        ],
+        "unavailable": [
+          "mcp_result",
+          "unavailable"
+        ],
+        "interface": [
+          "mcp_result",
+          "interface"
+        ],
+        "features": [
+          "mcp_result",
+          "features"
+        ],
+        "truncated": [
+          "mcp_result",
+          "truncated"
+        ],
+        "omitted_records": [
+          "mcp_result",
+          "omitted_records"
+        ]
+      },
+      "max_bytes": 4096,
+      "max_items": 256,
+      "max_depth": 8,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "truncated": {
+            "type": "boolean"
+          },
+          "omitted_records": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "observed_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "maxItems": 256
+          },
+          "interface": {
+            "type": "string",
+            "maxLength": 15
+          },
+          "features": {
+            "type": "object",
+            "properties": {
+              "rx_checksumming": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "tx_checksumming": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "scatter_gather": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "tcp_segmentation_offload": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "generic_segmentation_offload": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "generic_receive_offload": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "large_receive_offload": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "rx_vlan_offload": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "tx_vlan_offload": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "receive_hashing": {
+                "type": "string",
+                "maxLength": 4096
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "source",
+          "observed_at",
+          "unavailable",
+          "interface",
+          "features"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": "automation",
+    "revision": "1_native1",
+    "no_log": false
+  }
+}

@@ -22,11 +22,11 @@ def main():
             if proc.poll() is None: proc.kill()
             proc.wait(); proc.stdout.close(); proc.stderr.close()
     dev=p['interface']
-    if dev!=policy['interface'] or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}',dev): raise ValueError('interface outside operator policy')
+    if (policy['interface'] != '*' and dev != policy['interface']) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}', dev): raise ValueError('interface outside operator policy')
     with open('/sys/class/net/'+dev+'/address') as f: mac=f.read(64).strip()
-    if mac!=policy['mac']: raise ValueError('interface identity mismatch')
+    if policy['mac'] != '*' and mac != policy['mac']: raise ValueError('interface identity mismatch')
     identity=run(['-i',dev])
-    if not re.search(r'^driver: '+re.escape(policy['driver'])+r'$',identity,re.M): raise ValueError('driver outside reviewed policy')
+    if policy['driver'] != '*' and not re.search(r'^driver: ' + re.escape(policy['driver']) + r'$', identity, re.M): raise ValueError('driver outside reviewed policy')
     def selected(flag, labels, section=None):
         values={}; active=section is None
         for line in run([flag,dev]).splitlines():

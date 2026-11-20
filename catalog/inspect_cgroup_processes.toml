@@ -16,7 +16,7 @@ targets = ["server"]
 authority = "automation"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_cgroup_processes.payload.json", source = "/etc/estus/payloads/inspect_cgroup_processes/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice/estus-fixture.service" }
+fixed_args = { "target_python" = "/usr/bin/python3", "approved_root" = "/system.slice" }
 input_map = { "limit" = "limit" }
 limits = { timeout_secs = 40 }
 input_schema = { "type" = "object", "properties" = { "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 64 } }, "required" = ["limit"], "additionalProperties" = false }

@@ -30,8 +30,8 @@ def main():
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
-        value=p.get('interface',policy['interface'])
-        if value not in policy['interfaces'] or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
+        value=p.get('interface',policy.get('interface'))
+        if (policy['interfaces'] and '*' not in policy['interfaces'] and (not value or value not in policy['interfaces'])) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):
@@ -54,7 +54,7 @@ def main():
 
     dev=interface()
     net=str(ipaddress.ip_network(p['destination']))
-    if dev!=policy['interface'] or net not in policy['routes']: raise ValueError('route mutation outside policy')
+    if (policy['interfaces'] and '*' not in policy['interfaces'] and dev not in policy['interfaces']) or (policy['routes'] and '*' not in policy['routes'] and net not in policy['routes']): raise ValueError('route mutation outside policy')
     run([os.environ['ESTUS_EXEC_IP'],'route','del',net,'dev',dev,'table','254'])
     found=any(r.get('dst')==net and r.get('dev')==dev for r in ip(['route','show','table','254','exact',net]))
     if found!=False: raise ValueError('route readback mismatch')

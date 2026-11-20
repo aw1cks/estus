@@ -30,12 +30,12 @@ def main():
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
-        value=p.get('interface',policy['interface'])
-        if value not in policy['interfaces'] or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
+        value=p.get('interface',policy.get('interface'))
+        if (policy['interfaces'] and '*' not in policy['interfaces'] and (not value or value not in policy['interfaces'])) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
         return value
     def destination():
         value=str(ipaddress.ip_address(p['destination']))
-        if value not in policy['destinations']: raise ValueError('destination outside operator policy')
+        if policy['destinations'] and '*' not in policy['destinations'] and value not in policy['destinations']: raise ValueError('destination outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):
@@ -57,7 +57,7 @@ def main():
         print(raw)
 
     dev=interface(); dest=destination()
-    if dev!=policy['interface'] or dest not in policy['neighbors']: raise ValueError('neighbor mutation outside policy')
+    if (policy['interfaces'] and '*' not in policy['interfaces'] and dev not in policy['interfaces']) or (policy['neighbors'] and '*' not in policy['neighbors'] and dest not in policy['neighbors']): raise ValueError('neighbor mutation outside policy')
     run([os.environ['ESTUS_EXEC_IP'],'neighbor','del',dest,'dev',dev])
     if any(r.get('dst')==dest for r in ip(['neighbor','show','dev',dev])): raise ValueError('neighbor readback mismatch')
     emit({'interface':dev,'operation':'network_neighbor_remove','verified':True,'persistence':'runtime_only'})

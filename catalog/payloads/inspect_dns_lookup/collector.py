@@ -21,15 +21,17 @@ def main():
             raise ValueError('result exceeds projection budget')
         print(raw)
 
-    name=p['name']; resolver=p.get('resolver',policy['resolver'])
-    if name not in policy['dns_names'] or resolver!=policy['resolver']: raise ValueError('DNS target outside operator policy')
+    name=p['name']; resolver=p.get('resolver') or policy.get('resolver')
+    if policy.get('resolver') and resolver!=policy['resolver']: raise ValueError('DNS target outside operator policy')
+    if policy.get('dns_names') and '*' not in policy['dns_names'] and name not in policy['dns_names']: raise ValueError('DNS target outside operator policy')
+    port=policy.get('dns_port') if policy.get('dns_port') is not None else 53
     qtype={'A':1,'AAAA':28}[p['type']]
     ident=int.from_bytes(os.urandom(2),'big')
     question=b''.join(bytes([len(x)])+x.encode('ascii') for x in name.split('.'))+b'\x00'+struct.pack('!HH',qtype,1)
     query=struct.pack('!HHHHHH',ident,256,1,0,0,0)+question
     with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
         sock.settimeout(2)
-        sock.connect((resolver,policy['dns_port']))
+        sock.connect((resolver,port))
         sock.send(query)
         data=sock.recv(4097)
     if len(data)>4096 or len(data)<12: raise ValueError('DNS response size invalid')

@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "boot_selection",
-  "source_sha256": "9b3a0dd2d39412c8fd1f69bc0733bd90dd8df8e5ecf828cb8800a31b1a45f371",
+  "source_sha256": "9f435ba6fd009a0d3b5863a53eec1f1217076f88eda8a0703bfc04083f7ea488",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -11,6 +11,9 @@
       "fields": {
         "entry_id": {
           "name": "entry_id"
+        },
+        "allowed_entries": {
+          "name": "allowed_entries"
         }
       }
     }
@@ -25,6 +28,7 @@
       "json",
       "os",
       "platform",
+      "re",
       "resource",
       "signal",
       "subprocess",
@@ -50,16 +54,21 @@
           "description": "Operator-fixed absolute target Python, never caller-selected."
         },
         "entry_id": {
-          "type": "string",
-          "enum": [
-            "estus-current.conf",
-            "estus-alternate.conf"
-          ]
+          "type": "string"
+        },
+        "allowed_entries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
         }
       },
       "required": [
         "target_python",
-        "entry_id"
+        "entry_id",
+        "allowed_entries"
       ],
       "additionalProperties": false
     },
@@ -73,6 +82,14 @@
         "entry_id": {
           "aliases": {},
           "properties": {}
+        },
+        "allowed_entries": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
         }
       }
     },
@@ -88,10 +105,6 @@
         "properties": {
           "entry_id": {
             "type": "string",
-            "enum": [
-              "estus-current.conf",
-              "estus-alternate.conf"
-            ],
             "minLength": 1,
             "maxLength": 255
           }
@@ -102,7 +115,11 @@
         "additionalProperties": false
       },
       "fixed_args": {
-        "target_python": "/usr/bin/python3"
+        "target_python": "/usr/bin/python3",
+        "allowed_entries": [
+          "estus-current.conf",
+          "estus-alternate.conf"
+        ]
       },
       "input_map": {
         "entry_id": "entry_id"

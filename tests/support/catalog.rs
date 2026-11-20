@@ -270,12 +270,12 @@ impl Binding {
     pub async fn reject_workflow_runtime(&self) -> Result<()> {
         let mut site: toml::Value =
             toml::from_str(&fs::read_to_string(self.root.path().join("site.toml"))?)?;
-        site["automation"]["runtime"] = self
+        site["automation"]["bundle"] = self
             .root
             .path()
-            .join("missing-runtime")
+            .join("missing-bundle")
             .to_str()
-            .context("runtime path")?
+            .context("bundle path")?
             .into();
         let site_path = self.root.path().join("invalid-site.toml");
         fs::write(&site_path, toml::to_string(&site)?)?;
@@ -353,27 +353,34 @@ impl Binding {
         let mut site: toml::Value = toml::from_str(&fs::read_to_string(base)?)?;
         site["mode"] = "headless".into();
         site["capabilities"] = toml::Value::try_from(json!({"named":true}))?;
-        site.as_table_mut().context("site")?.insert(
+        let site_table = site.as_table_mut().context("site table")?;
+        site_table.insert(
             "enabled_tools".into(),
             toml::Value::try_from(json!([name]))?,
         );
-        site["automation"]
+        site_table
+            .entry("automation")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
             .context("automation")?
             .insert(
-                "runtime".into(),
-                std::env::var("ESTUS_TEST_ANSIBLE_RUNTIME")
-                    .context("set ESTUS_TEST_ANSIBLE_RUNTIME to pinned installed runtime")?
+                "bundle".into(),
+                std::env::var("ESTUS_TEST_ANSIBLE_BUNDLE")
+                    .context("set ESTUS_TEST_ANSIBLE_BUNDLE to pinned installed bundle")?
                     .into(),
             );
-        site["automation"]
+        site_table
+            .entry("controller")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
-            .context("automation")?
+            .context("controller")?
             .insert(
                 "workspace_root".into(),
                 workspace.to_str().context("workspace UTF8")?.into(),
             );
-        site["automation"]
+        site_table
+            .entry("automation")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
             .context("automation")?
             .insert(
@@ -424,7 +431,7 @@ impl Binding {
             prepared.join("snapshots").join(format!("{name}.json")),
         )?)?;
         ensure!(
-            snapshot["schema"] == 2,
+            snapshot["schema"] == 1 && snapshot["approved"] == true,
             "prepare omitted real reviewed approval"
         );
         Ok(Self {
@@ -527,6 +534,16 @@ impl Binding {
             "enabled_tools".into(),
             toml::Value::try_from(json!([name]))?,
         );
+        if !native {
+            site.entry("controller")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .context("controller")?
+                .insert(
+                    "workspace_root".into(),
+                    workspace.to_str().context("workspace UTF8")?.into(),
+                );
+        }
         let automation = site
             .entry("automation")
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
@@ -534,14 +551,10 @@ impl Binding {
             .context("automation base")?;
         if !native {
             automation.insert(
-                "runtime".into(),
-                std::env::var("ESTUS_TEST_ANSIBLE_RUNTIME")
-                    .context("set ESTUS_TEST_ANSIBLE_RUNTIME to pinned installed runtime")?
+                "bundle".into(),
+                std::env::var("ESTUS_TEST_ANSIBLE_BUNDLE")
+                    .context("set ESTUS_TEST_ANSIBLE_BUNDLE to pinned installed bundle")?
                     .into(),
-            );
-            automation.insert(
-                "workspace_root".into(),
-                workspace.to_str().context("workspace UTF8")?.into(),
             );
         }
         automation.insert(

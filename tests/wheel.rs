@@ -406,14 +406,12 @@ async fn installed_wheel_channels() -> Result<()> {
     );
     let stdio = executable(&input("ESTUS_TEST_STDIO_SUITE")?)?;
     let controller = executable(&input("ESTUS_TEST_CONTROLLER_SUITE")?)?;
-    let automation = executable(&input("ESTUS_TEST_AUTOMATION_SUITE")?)?;
-    let native = executable(&input("ESTUS_TEST_BINARY")?)?;
-    let runtime = PathBuf::from(
-        std::env::var_os("ESTUS_TEST_ANSIBLE_RUNTIME").context("set ESTUS_TEST_ANSIBLE_RUNTIME")?,
+    let bundle = PathBuf::from(
+        std::env::var_os("ESTUS_TEST_ANSIBLE_BUNDLE").context("set ESTUS_TEST_ANSIBLE_BUNDLE")?,
     );
     ensure!(
-        runtime.is_absolute() && runtime.join("runtime.json").is_file(),
-        "missing immutable Ansible bundle"
+        bundle.is_absolute() && bundle.join("bundle.json").is_file(),
+        "missing immutable AnsiballZ bundle"
     );
     let catalog_assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
         .map(PathBuf::from)
@@ -682,44 +680,76 @@ async fn installed_wheel_channels() -> Result<()> {
         }
         // An extra in an ephemeral uv environment must be observed through the
         // selected launcher, including uv run's actual sysconfig/overlay layout.
-        let checked = checked(launch(true).arg("--config").arg(&required_config).args([
-            "doctor",
-            "--runtime",
-            "ansible",
-        ]))
+        let doctor_out = checked(
+            launch(true)
+                .arg("--config")
+                .arg(&required_config)
+                .env("ESTUS_ANSIBLE_BUNDLE", &bundle)
+                .args(["doctor", "--runtime", "ansible"]),
+        )
         .await
-        .with_context(|| format!("{channel} extra doctor"))?;
+        .with_context(|| format!("{channel} configured bundle doctor"))?;
         ensure!(
-            checked.stdout.last() == Some(&b'\n')
-                && checked.stdout.iter().filter(|&&byte| byte == b'\n').count() == 1,
+            doctor_out.stdout.last() == Some(&b'\n')
+                && doctor_out
+                    .stdout
+                    .iter()
+                    .filter(|&&byte| byte == b'\n')
+                    .count()
+                    == 1,
             "{channel} doctor did not emit exactly one JSON report"
         );
-        let report: Value = serde_json::from_slice(&checked.stdout)?;
+        let report: Value = serde_json::from_slice(&doctor_out.stdout)?;
         ensure!(
             report["ok"] == true
                 && report["targets"] == json!([])
-                && report["runtime"]["kind"] == "ansible"
                 && report["runtime"]["status"] == "passed",
-            "{channel} extra health failed: {report}"
+            "{channel} extra bundle health failed: {report}"
         );
-        let identity = &report["runtime"]["identity"];
+        let identity = json!({
+            "ansible_core_version": report["runtime"]["ansible_core_version"],
+            "bundle_sha256": report["runtime"]["bundle_sha256"],
+        });
         ensure!(
-            identity["provenance"] == json!({"kind":"python_environment"})
-                && identity["python"]
+            identity["ansible_core_version"]
+                .as_str()
+                .is_some_and(|version| !version.is_empty())
+                && identity["bundle_sha256"]
                     .as_str()
-                    .is_some_and(|version| version.starts_with("3.14.")),
-            "{channel} did not observe the selected installed environment: {report}"
+                    .is_some_and(|digest| digest.len() == 64),
+            "{channel} did not observe the configured bundle: {report}"
         );
         if let Some(expected) = &expected_identity {
             ensure!(
-                identity == expected,
-                "{channel} extra runtime identity diverged"
+                &identity == expected,
+                "{channel} extra bundle identity diverged"
             );
         } else {
-            expected_identity = Some(identity.clone());
+            expected_identity = Some(identity);
         }
+        let inspected = checked(
+            launch(true)
+                .args(["bundle", "inspect", "--bundle"])
+                .arg(&bundle),
+        )
+        .await
+        .with_context(|| format!("{channel} bundle inspect"))?;
+        let inspection: Value = serde_json::from_slice(&inspected.stdout)?;
+        ensure!(
+            inspection["status"] == "passed"
+                && inspection["bundle_sha256"]
+                    .as_str()
+                    .is_some_and(|digest| digest.len() == 64)
+                && inspection["module_count"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0),
+            "{channel} bundle inspect failed: {inspection}"
+        );
         let mut command = launch(true);
-        command.arg("--config").arg(&required_config);
+        command
+            .arg("--config")
+            .arg(&required_config)
+            .env("ESTUS_ANSIBLE_BUNDLE", &bundle);
         let mut server = WireServer::start_command(command)?;
         let observed = catalog(&mut server)
             .await
@@ -757,35 +787,60 @@ async fn installed_wheel_channels() -> Result<()> {
         .and_then(Path::parent)
         .context("extra prefix")?
         .to_owned();
-    // Diagnostic availability only, not Runner execution or target readiness.
-    let scripts = extra_prefix.join("bin");
-    let child_path =
-        std::env::join_paths([scripts.as_path(), Path::new("/usr/bin"), Path::new("/bin")])?;
-    let diagnostic = checked(
-        installed
-            .command(&scripts.join("ansible-playbook"))
-            .arg("--version")
-            .env("PATH", child_path),
-    )
-    .await?;
-    eprintln!(
-        "selected-environment Ansible CLI:\n{}",
-        String::from_utf8_lossy(&diagnostic.stdout)
-    );
     let mutable = installed.root.path().join("mutable-extra");
     copy_environment(&extra_prefix, &mutable)?;
-    checked_suite(
+    // The selected environment can build and verify an offline AnsiballZ bundle
+    // without the shipped pack, then serve the same pack to a fresh process.
+    let built = installed.root.path().join("built-bundle");
+    let build = checked(
         installed
-            .command(&automation)
-            .args(["--ignored", "wheel::", "--nocapture", "--test-threads=1"])
-            .env("ESTUS_TEST_BINARY", &native)
-            .env("ESTUS_TEST_ANSIBLE_RUNTIME", &runtime)
-            .env("ESTUS_TEST_BASE_WHEEL_BINARY", installed.launcher(false))
-            .env("ESTUS_TEST_WHEEL_BINARY", installed.launcher(true))
-            .env("ESTUS_TEST_MUTABLE_PREFIX", &mutable)
-            .env("ESTUS_TEST_MUTABLE_PYTHON", mutable.join("bin/python")),
+            .command(&installed.launcher(true))
+            .args(["bundle", "build", "--python"])
+            .arg(mutable.join("bin/python"))
+            .args(["--output"])
+            .arg(&built)
+            .args([
+                "--module",
+                "ansible.builtin.ping",
+                "--module",
+                "ansible.builtin.command",
+            ]),
     )
-    .await?;
+    .await
+    .context("selected-environment bundle build")?;
+    let report: Value = serde_json::from_slice(&build.stdout)?;
+    ensure!(
+        report["ok"] == true
+            && report["modules"]
+                .as_array()
+                .is_some_and(|modules| modules.contains(&json!("ansible.builtin.ping"))),
+        "bundle build did not produce the requested modules: {report}"
+    );
+    let rebuilt = checked(
+        installed
+            .command(&installed.launcher(true))
+            .args(["bundle", "inspect", "--bundle"])
+            .arg(&built),
+    )
+    .await
+    .context("built bundle inspect")?;
+    let rebuilt: Value = serde_json::from_slice(&rebuilt.stdout)?;
+    ensure!(
+        rebuilt["status"] == "passed" && rebuilt["module_count"].as_u64() == Some(2),
+        "built bundle failed independent inspection: {rebuilt}"
+    );
+    let refused = installed
+        .command(&installed.launcher(true))
+        .args(["bundle", "build", "--python"])
+        .arg(mutable.join("bin/python"))
+        .args(["--output"])
+        .arg(&built)
+        .output()
+        .await?;
+    ensure!(
+        !refused.status.success(),
+        "bundle build overwrote an existing output directory"
+    );
     ordinary_ssh(&installed).await?;
     let root = installed.root.path().to_owned();
     installed.root.close()?;
@@ -974,7 +1029,7 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             "pyproject.toml",
             "setup.py",
             "src/main.rs",
-            "src/automation/python/runner.py",
+            "src/bundle/builder.py",
             "vendor/openssh-sftp-client/Cargo.toml",
             "vendor/openssh-sftp-client/src/lib.rs",
         ] {
@@ -1171,23 +1226,6 @@ async fn wheel_payload_matches_declared_baseline() -> Result<()> {
             [definition] => definition
                 .strip_suffix(".toml")
                 .is_some_and(|name| catalog.manifest().tools.contains_key(name)),
-            ["roles", name, directory, rest @ ..] => {
-                matches!(
-                    catalog
-                        .manifest()
-                        .tools
-                        .get(*name)
-                        .map(|tool| &tool.executor),
-                    Some(assets::Executor::AnsibleRole { .. })
-                ) && matches!(
-                    *directory,
-                    "tasks" | "meta" | "files" | "defaults" | "vars" | "handlers"
-                ) && !rest.is_empty()
-                    && Path::new(member)
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| matches!(ext, "yml" | "yaml" | "py" | "json" | "toml"))
-            }
             ["payloads", name, rest @ ..] => {
                 matches!(
                     catalog

@@ -19,7 +19,7 @@ execution = { kind = "native_payload", snapshot = "/etc/estus/observe_nic_link.p
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "interface" = "interface" }
 limits = { timeout_secs = 30 }
-input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "maxLength" = 15, "enum" = ["eth0", "catalog0", "lo"] } }, "required" = ["interface"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 } }, "required" = ["interface"], "additionalProperties" = false }
 [tools.observe_nic_link.result]
 kind = "capability_projection"
 fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "interface" = ["mcp_result", "interface"], "supported" = ["mcp_result", "supported"], "values" = ["mcp_result", "values"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }

@@ -17,9 +17,7 @@ use crate::{
 
 use super::raw::{RawBinding, RawExecution, RawResult, RawSchema, RawSlot, SiteConstraints};
 pub(crate) use payload::ActivatedPayload;
-pub(crate) use plans::{
-    ActivatedAutomation, AutomationTransport, ControllerPlan, PreparedController, controller_root,
-};
+pub(crate) use plans::{ActivatedAutomation, ControllerPlan, PreparedController};
 
 mod payload;
 mod plans;
@@ -472,13 +470,6 @@ enum Execution {
 }
 
 #[derive(Clone, Debug)]
-enum AnsibleSource {
-    Module,
-    Role { path: Option<PathBuf> },
-    Playbook { project_root: PathBuf },
-}
-
-#[derive(Clone, Debug)]
 pub(crate) enum AutomationAuthority {
     Ordinary,
     Named(String),
@@ -697,6 +688,35 @@ impl Bindings {
         self.entries.push(compiled);
         Ok(id)
     }
+    pub(crate) fn push_dynamic_ansible_module(
+        &mut self,
+        name: String,
+        raw_toml: toml::Value,
+        limits: &Limits,
+    ) -> Result<BindingId, ConfigError> {
+        if self.entries.len() >= MAX_BINDINGS {
+            return Err(invalid("At most 256 named tools are allowed"));
+        }
+        if !identifier(&name) || self.entries.iter().any(|b| b.name == name) {
+            return Err(invalid("Invalid or duplicate bundled tool identifier"));
+        }
+        let mut raw: RawBinding = raw_toml
+            .try_into()
+            .map_err(|_| invalid("Invalid bundled module definition"))?;
+        raw.targets = None;
+        let compiled =
+            CompiledBinding::compile_automation(name, raw, true, limits, &|_| false, true)?;
+        let id = BindingId(self.entries.len());
+        self.entries.push(compiled);
+        Ok(id)
+    }
+
+    pub(crate) fn disable(&mut self, id: BindingId) {
+        if let Some(binding) = self.entries.get_mut(id.0) {
+            binding.enabled = false;
+        }
+    }
+
     pub(crate) fn entries(&self) -> impl Iterator<Item = (BindingId, &CompiledBinding)> {
         self.entries
             .iter()
@@ -749,54 +769,27 @@ impl CompiledBinding {
         enabled: bool,
         limits: &Limits,
         target_exists: &impl Fn(&str) -> bool,
+        workstation: bool,
     ) -> Result<Self, ConfigError> {
-        let (snapshot, no_log, check_mode, diff, source) = match raw.execution {
-            RawExecution::AnsibleModule {
-                snapshot,
-                no_log,
-                check_mode,
-                diff,
-            } => (snapshot, no_log, check_mode, diff, AnsibleSource::Module),
-            RawExecution::AnsibleRole {
-                snapshot,
-                role_path,
-                no_log,
-            } => {
-                if role_path.as_deref().is_some_and(|path| !absolute(path)) {
-                    return Err(invalid("Invalid fixed role source"));
-                }
-                (
-                    snapshot,
-                    no_log,
-                    false,
-                    false,
-                    AnsibleSource::Role {
-                        path: role_path.map(PathBuf::from),
-                    },
-                )
-            }
-            RawExecution::AnsiblePlaybook {
-                snapshot,
-                project_root,
-                no_log,
-            } => {
-                if !absolute(&project_root) {
-                    return Err(invalid("Invalid fixed playbook project"));
-                }
-                (
-                    snapshot,
-                    no_log,
-                    false,
-                    false,
-                    AnsibleSource::Playbook {
-                        project_root: PathBuf::from(project_root),
-                    },
-                )
-            }
-            _ => unreachable!("automation execution selected"),
+        let RawExecution::AnsibleModule {
+            module,
+            bundle,
+            no_log,
+            check_mode,
+            diff,
+        } = raw.execution
+        else {
+            unreachable!("automation execution selected");
         };
-        if check_mode && (!matches!(source, AnsibleSource::Module) || !name.starts_with("preview_"))
+        if !crate::contracts::module_schema::valid_fqcn(&module) {
+            return Err(invalid("Invalid Ansible module FQCN"));
+        }
+        if let Some(ref b) = bundle
+            && !absolute(b)
         {
+            return Err(invalid("Invalid Ansible bundle path"));
+        }
+        if check_mode && !name.starts_with("preview_") {
             return Err(invalid(
                 "check_mode is only supported on preview_* ansible_module bindings",
             ));
@@ -804,19 +797,20 @@ impl CompiledBinding {
         if diff && (!check_mode || no_log) {
             return Err(invalid("diff requires preview check_mode without no_log"));
         }
-        let targets = raw.targets.unwrap_or_default();
         let authority = AutomationAuthority::parse(&raw.authority)?;
+        let dynamic_targets = raw.targets.is_none() && workstation;
+        let targets = raw.targets.unwrap_or_default();
         if !matches!(
             &raw.result,
             RawResult::AnsibleSummary {} | RawResult::AnsibleProjection { .. }
         ) || raw.description.is_empty()
             || raw.description.len() > 1024
             || !identifier(&raw.revision)
-            || !absolute(&snapshot)
-            || targets.is_empty()
-            || targets.len() > 32
-            || targets.iter().collect::<BTreeSet<_>>().len() != targets.len()
-            || targets.iter().any(|target| !target_exists(target))
+            || (!dynamic_targets
+                && (targets.is_empty()
+                    || targets.len() > 32
+                    || targets.iter().collect::<BTreeSet<_>>().len() != targets.len()
+                    || targets.iter().any(|target| !target_exists(target))))
             || raw.effects.is_empty()
             || raw.effects.iter().collect::<BTreeSet<_>>().len() != raw.effects.len()
         {
@@ -838,15 +832,6 @@ impl CompiledBinding {
                 max_items,
                 max_depth,
             } => {
-                if !matches!(source, AnsibleSource::Module)
-                    && fields.values().any(|path| {
-                        path.len() < 2 || path.first().map(String::as_str) != Some("mcp_result")
-                    })
-                {
-                    return Err(invalid(
-                        "Workflow projections require mcp_result member paths",
-                    ));
-                }
                 if diff
                     && !fields
                         .values()
@@ -889,24 +874,10 @@ impl CompiledBinding {
             .map_err(invalid)?;
         let mut overlay = json!({"input_schema":schema,"fixed_args":fixed,"input_map":raw.input_map.unwrap_or_default()});
         if let Some(argument_types) = raw.argument_types {
-            if !matches!(source, AnsibleSource::Module) {
-                return Err(invalid(
-                    "Opaque argument representations require a module binding",
-                ));
-            }
             overlay["argument_types"] = serde_json::to_value(argument_types)
                 .map_err(|_| invalid("Invalid opaque argument representations"))?;
         }
         crate::contracts::module_schema::validate_overlay(&overlay).map_err(invalid)?;
-        match &source {
-            AnsibleSource::Module => {}
-            AnsibleSource::Role { .. } => {
-                crate::contracts::role_import::validate_overlay(&overlay).map_err(invalid)?;
-            }
-            AnsibleSource::Playbook { .. } => {
-                crate::contracts::playbook_import::validate_overlay(&overlay).map_err(invalid)?;
-            }
-        }
         let timeout_secs = raw.limits.as_ref().and_then(|limits| limits.timeout_secs);
         if timeout_secs.is_some_and(|value| value == 0 || value > limits.max_timeout_secs)
             || raw
@@ -917,11 +888,16 @@ impl CompiledBinding {
         {
             return Err(invalid("Module limits only support a bounded timeout"));
         }
+        let host_schema = if dynamic_targets {
+            json!({"type": "string", "minLength": 1, "maxLength": 256})
+        } else {
+            json!({"type": "string", "enum": targets})
+        };
         let published = json!({
             "type":"object","additionalProperties":false,
             "required":["host","inputs"],
             "properties":{
-                "host":{"type":"string","enum":targets},
+                "host":host_schema,
                 "inputs":overlay["input_schema"],
                 "timeout_secs":{"type":"integer","minimum":1,"maximum":timeout_secs.unwrap_or(limits.max_timeout_secs)}
             }
@@ -934,15 +910,15 @@ impl CompiledBinding {
             description: raw.description,
             revision: raw.revision,
             targets,
-            dynamic_targets: false,
+            dynamic_targets,
             input_schema: Arc::new(published),
             enabled,
             effects: raw.effects,
             inputs: Vec::new(),
             execution: Execution::Ansible(AnsibleState::Unactivated(
                 plans::UnactivatedAutomation {
-                    snapshot: PathBuf::from(snapshot),
-                    source,
+                    module,
+                    bundle: bundle.map(PathBuf::from),
                     authority,
                     overlay,
                     no_log,
@@ -970,13 +946,15 @@ impl CompiledBinding {
         if matches!(&raw.execution, RawExecution::NativePayload { .. }) {
             return Self::compile_payload(name, raw, enabled, limits, target_exists, workstation);
         }
-        if matches!(
-            &raw.execution,
-            RawExecution::AnsibleModule { .. }
-                | RawExecution::AnsibleRole { .. }
-                | RawExecution::AnsiblePlaybook { .. }
-        ) {
-            return Self::compile_automation(name, raw, enabled, limits, target_exists);
+        if matches!(&raw.execution, RawExecution::AnsibleModule { .. }) {
+            return Self::compile_automation(
+                name,
+                raw,
+                enabled,
+                limits,
+                target_exists,
+                workstation,
+            );
         }
         if raw.fixed_args.is_some()
             || raw.input_map.is_some()
@@ -1095,10 +1073,7 @@ impl CompiledBinding {
                 let state = plan.map_or(ControllerState::Disabled, ControllerState::Activated);
                 (Execution::ControllerScript(state), Vec::new(), false)
             }
-            RawExecution::NativePayload { .. }
-            | RawExecution::AnsibleModule { .. }
-            | RawExecution::AnsibleRole { .. }
-            | RawExecution::AnsiblePlaybook { .. } => {
+            RawExecution::NativePayload { .. } | RawExecution::AnsibleModule { .. } => {
                 unreachable!("compiled separately")
             }
         };
@@ -1303,15 +1278,13 @@ impl CompiledBinding {
     pub(crate) fn execution_location(&self) -> &'static str {
         if self.is_controller() {
             "controller"
-        } else if self.is_automation() {
-            "controller_and_remote"
         } else {
             "remote"
         }
     }
 
     pub(crate) fn trusted_controller_code(&self) -> bool {
-        self.is_controller() || self.is_automation()
+        self.is_controller()
     }
 
     pub(crate) fn restriction_boundary(&self) -> Value {
@@ -1328,11 +1301,14 @@ impl CompiledBinding {
             Execution::NativeArgv { .. } => EXECUTOR_KIND,
             Execution::ControllerScript(_) => "controller_script",
             Execution::Payload(_) => "native_payload",
-            Execution::Ansible(state) => match state.source() {
-                AnsibleSource::Role { .. } => "ansible_role",
-                AnsibleSource::Playbook { .. } => "ansible_playbook",
-                AnsibleSource::Module => "ansible_module",
-            },
+            Execution::Ansible(_) => "ansible_module",
+        }
+    }
+
+    pub(crate) fn bundle_override(&self) -> Option<&Path> {
+        match &self.execution {
+            Execution::Ansible(state) => state.bundle_override(),
+            _ => None,
         }
     }
 

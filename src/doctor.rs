@@ -3,7 +3,7 @@
 //! without a cause keep their existing shape. Backend diagnostics remain private.
 //! Effective SSH policy inspection runs `ssh -G -- <destination>`, which can evaluate
 //! `Match exec` stanzas from the configured or user SSH config.
-use crate::automation::{self, RuntimeCheck, RuntimeContext};
+use crate::bundle::{self, BundleCheck};
 use crate::{
     config::{Config, DoctorArgs, IdentityRole},
     filesystem::operations::{self, FileContext},
@@ -88,7 +88,7 @@ struct TargetReport {
 #[derive(Serialize)]
 struct RuntimeReport {
     #[serde(flatten)]
-    check: RuntimeCheck,
+    check: BundleCheck,
     #[serde(skip_serializing_if = "Option::is_none")]
     phase: Option<&'static str>,
 }
@@ -287,21 +287,11 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
         let check = match kind {
             crate::config::RuntimeKind::Ansible => {
                 if let Some(code) = stopped(&shutdown, deadline) {
-                    RuntimeCheck::not_tested(code)
+                    BundleCheck::not_tested(code)
                 } else {
                     match config.automation_runtime() {
-                        Ok(reference) => {
-                            automation::check(
-                                reference,
-                                RuntimeContext {
-                                    deadline,
-                                    ct: &shutdown,
-                                    shutdown: &shutdown,
-                                },
-                            )
-                            .await
-                        }
-                        Err(_) => RuntimeCheck::failed("runtime_unavailable"),
+                        Ok(reference) => bundle::check(reference),
+                        Err(_) => BundleCheck::failed("runtime_unavailable"),
                     }
                 }
             }

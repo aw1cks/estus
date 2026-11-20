@@ -26,7 +26,6 @@ effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/change_systemd_reload.payload.json", source = "/etc/estus/payloads/change_systemd_reload/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
 input_map = { "unit" = "unit" }
-constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service", "estus-fixture.timer", "estus-fixture.socket", "estus-fixture-signal.service", "estus-fixture-block.service", "estus-fixture-manager.service", "estus-fixture@.service"] }
 limits = { timeout_secs = 60 }
 input_schema = { "type" = "object", "properties" = { "unit" = { "type" = "string", "maxLength" = 128 } }, "required" = ["unit"], "additionalProperties" = false }
 [tools.change_systemd_reload.result]

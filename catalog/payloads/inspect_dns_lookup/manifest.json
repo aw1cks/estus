@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "79d582b750e1774c7066660bf5bded9aa2150649767a7fa10c3f598246c0456e",
+  "source_sha256": "049614f85c0c023289278b2b47b515fd9c29ab790e57049647b2e7480784d8a0",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -116,9 +116,7 @@
             }
           },
           "required": [
-            "dns_names",
-            "resolver",
-            "dns_port"
+            "dns_names"
           ],
           "additionalProperties": false,
           "description": "Fixed reviewed destination and interface policy, never caller supplied"

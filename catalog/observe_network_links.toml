@@ -16,10 +16,10 @@ targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/observe_network_links.payload.json", source = "/etc/estus/payloads/observe_network_links/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interfaces" = [], "destinations" = [], "ports" = [], "addresses" = [], "routes" = [], "neighbors" = [], "namespaces" = [], "dns_names" = [] } }
 input_map = { "interface" = "interface", "limit" = "limit" }
 limits = { timeout_secs = 30 }
-input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "enum" = ["lo", "catalog0"], "maxLength" = 256 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = [], "additionalProperties" = false }
 [tools.observe_network_links.result]
 kind = "capability_projection"
 fields = { "entries" = ["mcp_result", "entries"], "truncated" = ["mcp_result", "truncated"], "scope" = ["mcp_result", "scope"] }

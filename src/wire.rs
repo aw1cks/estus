@@ -157,10 +157,10 @@ impl ReplyBudget {
                 "censored":false,"complete":false,"duration_ms":u64::MAX,
                 "owned_group_cleanup":"signalled_and_reaped"
             },
-            "error":{"code":"invalid_argument","message":"x".repeat(256),"remote_state_unknown":false}
+            "error":{"code":"invalid_projection","message":"x".repeat(256),"remote_state_unknown":false,"schema_path":"x".repeat(96),"constraint":"pattern_mismatch"}
         });
         let projection_bytes = if let Some(limit) = max_projection_bytes {
-            if !(64..=65536).contains(&limit) {
+            if !(64..=262_144).contains(&limit) {
                 return Err(exceeded());
             }
             reservation["data"]["projection"] =
@@ -368,10 +368,19 @@ fn prefix_len(text: &str, remaining: &mut usize) -> usize {
     end
 }
 
+/// Serialized compact frame size, or `None` when the frame exceeds the budget.
+///
+/// The SDK encoder adds exactly one newline after compact JSON, so the bound is
+/// strict and a frame that exactly fills the budget is already rejected.
+pub(crate) fn frame_len(message: &impl Serialize) -> Option<usize> {
+    serialized_size(message)
+        .ok()
+        .filter(|bytes| *bytes < MAX_RESPONSE_BYTES)
+}
+
 /// Final size guard, shared by the live transport and serialization oracles.
 pub(crate) fn frame_fits(message: &impl Serialize) -> bool {
-    // The SDK encoder adds exactly one newline after compact JSON.
-    serialized_size(message).is_ok_and(|bytes| bytes < MAX_RESPONSE_BYTES)
+    frame_len(message).is_some()
 }
 
 #[cfg(test)]
@@ -422,10 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn projection_reservation_accepts_65536_and_rejects_65537() {
+    fn projection_reservation_accepts_262144_and_rejects_262145() {
         let normal = ReplyBudget::new(&RequestId::Number(1)).unwrap();
-        assert!(normal.automation_reserve("logical", Some(65536)).is_ok());
-        assert!(normal.automation_reserve("logical", Some(65537)).is_err());
+        assert!(normal.automation_reserve("logical", Some(262_144)).is_ok());
+        assert!(normal.automation_reserve("logical", Some(262_145)).is_err());
         let tight = RequestId::String("x".repeat(MAX_RESPONSE_BYTES - 150_000).into());
         let tight_budget = ReplyBudget::new(&tight).unwrap();
         assert!(

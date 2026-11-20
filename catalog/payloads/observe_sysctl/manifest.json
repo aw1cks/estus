@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "62750cb7803887aa450037f5995aa32e158256448fd1481ae833689dfdb47deb",
+  "source_sha256": "629b99f2a6a31ab674279e07eee4c4f4d7821408cca056992d7e72f704ce298b",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -47,13 +47,17 @@
         "keys": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
           }
         },
         "approved_keys": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
           }
         }
       },
@@ -159,7 +163,7 @@
           },
           "values": {
             "type": "array",
-            "maxItems": 3,
+            "maxItems": 16,
             "items": {
               "type": "object",
               "required": [

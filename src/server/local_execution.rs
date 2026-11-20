@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rmcp::{ErrorData, RoleServer, model::CallToolResult, service::RequestContext};
 
@@ -39,10 +42,8 @@ impl Estus {
             request_id: &context.id,
             tool: self.state.binding_name(id),
             host: binding
-                .targets
-                .iter()
-                .find(|host| **host == request.host)
-                .map(String::as_str),
+                .permits_host(&request.host)
+                .then_some(request.host.as_str()),
             identity_role: authority_role,
             sudo_mode: None,
             user: None,
@@ -60,12 +61,21 @@ impl Estus {
                 false,
             ));
         }
-        let target = match self.state.config.automation_target(id, &request.host) {
+        let target_check = match self.state.config.automation_target(id, &request.host) {
             Ok(target) => target,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<AutomationData>::failure(error));
-            }
+            Err(error) => return reject(error),
+        };
+        let prepared = match binding.prepare_activated_automation(
+            &activated,
+            &request,
+            self.state.config.limits(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return reject(error),
+        };
+        let deadline = match request_deadline(started, prepared.duration) {
+            Ok(deadline) => deadline,
+            Err(error) => return reject(error),
         };
         let is_preview = activated.check_mode;
         let requires_preview = !is_preview
@@ -74,66 +84,24 @@ impl Estus {
                 crate::config::RiskTier::Change | crate::config::RiskTier::Exec
             )
             && self.state.config.requires_preview(&request.host);
-        let authority_identity = if is_preview || requires_preview {
-            let Ok(digest) = super::preview::authority_identity_digest(&authority_label, &target)
+        let preview_meta = if is_preview || requires_preview {
+            let Ok(authority_identity) =
+                super::preview::authority_identity_digest(&authority_label, &target_check)
             else {
                 return reject(ToolError::preview_required(
                     "Invalid preview authority identity",
                     false,
                 ));
             };
-            Some(digest)
-        } else {
-            None
-        };
-        let (bytes, files) = self.state.config.automation_scratch();
-        let mut prepared = match binding.prepare_activated_automation(
-            &activated,
-            &request,
-            self.state.config.limits(),
-            bindings::AutomationTransport {
-                authority: target,
-                scratch_bytes: bytes,
-                scratch_files: files,
-                started,
-            },
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<AutomationData>::failure(error));
-            }
-        };
-        if requires_preview
-            && !prepared
-                .module_name
-                .as_deref()
-                .is_some_and(super::preview::is_qualified_module)
-        {
-            return reject(ToolError::preview_required(
-                "Operation has no qualified preview path under require_preview policy",
-                false,
-            ));
-        }
-        let deadline = match request_deadline(started, prepared.controller.duration) {
-            Ok(deadline) => deadline,
-            Err(error) => {
-                metadata.reject(started, &error);
-                return budget.result(ToolReply::<AutomationData>::failure(error));
-            }
-        };
-        let preview_meta = if is_preview || requires_preview {
-            let (Some(module_name), Some(args), Some(authority_identity)) = (
-                prepared.module_name.take(),
-                prepared.arguments.take(),
-                authority_identity,
-            ) else {
+            if requires_preview && !super::preview::is_qualified_module(&activated.module) {
                 return reject(ToolError::preview_required(
                     "Operation has no qualified preview path under require_preview policy",
                     false,
                 ));
-            };
-            let Some(spec) = super::preview::PreviewSpec::for_ansible(&module_name, &args) else {
+            }
+            let Some(spec) =
+                super::preview::PreviewSpec::for_ansible(&activated.module, &prepared.arguments)
+            else {
                 return reject(ToolError::preview_required(
                     "Operation has no qualified preview path under require_preview policy",
                     false,
@@ -150,17 +118,21 @@ impl Estus {
         } else {
             super::admission::AdmissionMode::ExclusiveWrite
         };
-        let Ok(operation) = self.state.operations.clone().try_acquire_owned() else {
-            return reject(ToolError::resource_limit(
-                "Tool operation limit reached",
-                false,
-            ));
+        let operation = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return reject(error),
         };
-        let Ok(runtime) = self.state.automation.clone().try_acquire_owned() else {
-            return reject(ToolError::resource_limit(
-                "Automation operation limit reached",
-                false,
-            ));
+        let runtime = match self
+            .state
+            .acquire_permit(&self.state.automation, deadline, &context.ct)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return reject(error),
         };
         let state = self.state.clone();
         let revision = binding.revision.clone();
@@ -197,29 +169,23 @@ impl Estus {
                     return;
                 }
             };
+            let target = state
+                .config
+                .automation_target(id, &request.host)
+                .expect("automation target already authorized");
             if requires_preview {
-                let Some((spec, authority_identity)) = &preview_meta else {
-                    let error = ToolError::preview_required(
-                        "Operation has no qualified preview path under require_preview policy",
-                        false,
-                    );
-                    metadata.reject(started, &error);
-                    let _ = sender.send(ToolReply::failure(error));
-                    return;
-                };
-                let resolved = state
-                    .config
-                    .automation_target(id, &request.host)
-                    .expect("automation target already authorized");
+                let (spec, authority_identity) = preview_meta
+                    .as_ref()
+                    .expect("preview spec checked before spawn");
                 let pre_state_digest = match state
                     .payload
                     .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
                         host: &request.host,
                         authority: &authority_label,
-                        target: &resolved,
+                        target: &target,
                         module: spec.prestate_module,
                         arguments: &spec.prestate_args,
-                        connect_timeout: std::time::Duration::from_secs(
+                        connect_timeout: Duration::from_secs(
                             state.config.limits().connect_timeout_secs,
                         ),
                         deadline,
@@ -263,22 +229,31 @@ impl Estus {
             }
             let audit = Audit::start(metadata, started);
             target_lease.mark_dispatched(request.host.clone(), authority_label.clone(), executor);
-            let mut run = crate::automation::execution::run(
-                prepared,
-                crate::controller::ControllerContext {
+            let mut reply = state
+                .payload
+                .run_bundle(crate::native_payload::BundleRun {
+                    pack: &activated.pack,
+                    module: &activated.module,
+                    arguments: &prepared.arguments,
+                    no_log: activated.no_log,
+                    check_mode: activated.check_mode,
+                    diff: activated.diff,
+                    projection: activated.projection.as_deref(),
+                    host: &request.host,
+                    authority: &authority_label,
+                    target,
+                    connect_timeout: Duration::from_secs(
+                        state.config.limits().connect_timeout_secs,
+                    ),
+                    output_limit: prepared.output_limit,
                     deadline,
                     ct: &context.ct,
-                    shutdown: &state.shutdown,
                     started,
-                    capture_limit: 65_536,
-                    retention: None,
-                    progress: crate::progress::Reporter::from_context(&context),
-                },
-            )
-            .await;
+                })
+                .await;
             if is_preview {
-                let valid_observation = run.reply.error().is_none()
-                    && run.reply.data().is_some_and(|d| {
+                let valid_observation = reply.error().is_none()
+                    && reply.data().is_some_and(|d| {
                         d.complete
                             && d.status == crate::reply::AutomationStatus::Successful
                             && d.tasks.ok == 1
@@ -299,7 +274,7 @@ impl Estus {
                                     target: &resolved,
                                     module: spec.prestate_module,
                                     arguments: &spec.prestate_args,
-                                    connect_timeout: std::time::Duration::from_secs(
+                                    connect_timeout: Duration::from_secs(
                                         state.config.limits().connect_timeout_secs,
                                     ),
                                     deadline,
@@ -317,24 +292,21 @@ impl Estus {
                             });
                         }
                     }
-                } else if run.reply.error().is_none()
-                    && run.reply.data().is_some_and(|d| d.tasks.skipped > 0)
+                } else if reply.error().is_none()
+                    && reply.data().is_some_and(|d| d.tasks.skipped > 0)
                 {
-                    run.reply.set_error(ToolError::invalid_result(
+                    reply.set_error(ToolError::invalid_result(
                         "Preview was skipped; no target observation was produced",
                         false,
                     ));
                 }
             }
             target_lease.finish(
-                run.reply.error().is_some_and(|e| e.remote_state_unknown),
-                run.reply.error().map_or("unknown", ToolError::code),
+                reply.error().is_some_and(|e| e.remote_state_unknown),
+                reply.error().map_or("unknown", ToolError::code),
             );
-            audit.finish_automation(&run.reply);
-            let _ = sender.send(run.reply);
-            if let Some(pending) = run.pending {
-                pending.finish().await;
-            }
+            audit.finish_automation(&reply);
+            let _ = sender.send(reply);
         });
         let reply = receiver.await.unwrap_or_else(|_| {
             ToolReply::failure(ToolError::io_error(
@@ -405,18 +377,27 @@ impl Estus {
             metadata.reject_controller(started, &error);
             return budget.controller_result(ControllerReply::failure(error));
         };
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+        let permit = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
             Ok(permit) => permit,
-            Err(_) => {
-                let error = ControllerError::resource_limit("Tool operation limit reached");
-                metadata.reject_controller(started, &error);
-                return budget.controller_result(ControllerReply::failure(error));
+            Err(error) => {
+                let ctrl_err = if error.code() == "timeout" {
+                    ControllerError::timeout(
+                        "Controller operation deadline expired waiting for slot",
+                    )
+                } else {
+                    ControllerError::cancelled("Controller request cancelled before dispatch")
+                };
+                metadata.reject_controller(started, &ctrl_err);
+                return budget.controller_result(ControllerReply::failure(ctrl_err));
             }
         };
         let state = Arc::clone(&self.state);
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
-            // Receiver cancellation cannot drop admission, files, or child ownership.
             let _credit = crate::progress::HandlerCredit::from_context(&context);
             let permit = permit;
             let metadata = state.controller_metadata(id, &context.id);

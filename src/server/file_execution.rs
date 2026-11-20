@@ -65,10 +65,13 @@ impl Estus {
                 return budget.result(ToolReply::<T>::failure(error));
             }
         };
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+        let permit = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
             Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::resource_limit("Tool operation limit reached", false);
+            Err(error) => {
                 file_metadata(&host, tool, &self.state, &context.id).reject(started, &error);
                 return budget.result(ToolReply::<T>::failure(error));
             }

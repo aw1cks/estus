@@ -1,0 +1,42 @@
+# RHEL/AlmaLinux/Rocky/Fedora escape hatch: dnf-specific options from the bundle.
+# Use when change_package cannot express the reviewed options (enablerepo,
+# disablerepo, allowerasing, nobest, update_cache).
+#   estus bundle build --python /opt/ansible/bin/python --output /etc/estus/bundle \
+#     --module ansible.builtin.dnf --module ansible.builtin.dnf5
+# A preview_dnf authorization binds this exact module and the options supplied;
+# it never authorizes change_package or change_apt, and must match the change call.
+# Interrupted operations are never replayed.
+# MCP: change_dnf {"host":"server","inputs":{"name":["tmux"],"state":"latest","enablerepo":["epel"]}}
+mode = "headless"
+capabilities = { named = true }
+enabled_tools = ["change_dnf"]
+
+[targets.server]
+ssh_host = "server-ordinary"
+
+[automation]
+bundle = "/etc/estus/bundle"
+
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+
+[tools.change_dnf]
+description = "Apply dnf/dnf5 package transitions with dnf-specific options (enablerepo, disablerepo, allowerasing, nobest, update_cache); interrupted operations are never replayed."
+revision = "1"
+targets = ["server"]
+authority = "automation"
+effects = ["persistent_write", "read"]
+execution = { kind = "ansible_module", module = "ansible.builtin.dnf", no_log = false, check_mode = false, diff = false }
+fixed_args = {}
+input_map = { name = "name", state = "state", update_cache = "update_cache", enablerepo = "enablerepo", disablerepo = "disablerepo", allowerasing = "allowerasing", nobest = "nobest" }
+limits = { timeout_secs = 120 }
+input_schema = { type = "object", properties = { name = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, minItems = 1, maxItems = 32 }, state = { type = "string", enum = ["present", "absent", "latest"] }, update_cache = { type = "boolean" }, enablerepo = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, maxItems = 16 }, disablerepo = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, maxItems = 16 }, allowerasing = { type = "boolean" }, nobest = { type = "boolean" } }, required = ["name", "state"], additionalProperties = false }
+
+[tools.change_dnf.result]
+kind = "ansible_projection"
+fields = { changed = ["changed"] }
+max_bytes = 4096
+max_items = 64
+max_depth = 4
+schema = { type = "object", properties = { changed = { type = "boolean" } }, required = ["changed"], additionalProperties = false }

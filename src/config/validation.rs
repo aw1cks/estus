@@ -37,7 +37,7 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "automation.authorities.*",
             &[
                 "ssh_config_file",
-                "runtime",
+                "bundle",
                 "ssh_auth_sock",
                 "become",
                 "targets",
@@ -49,7 +49,7 @@ fn validate_authorities_schema(value: &toml::Value) -> Result<(), ConfigError> {
                 "automation.authorities.*.ssh_config_file",
                 true,
             ),
-            ("runtime", "automation.authorities.*.runtime", false),
+            ("bundle", "automation.authorities.*.bundle", false),
             (
                 "ssh_auth_sock",
                 "automation.authorities.*.ssh_auth_sock",
@@ -170,7 +170,7 @@ fn validate_automation_targets(
 pub(super) fn validate_runtime_path(value: &str) -> Result<(), ConfigError> {
     if !Path::new(value).is_absolute() || value.len() > 4096 || value.contains('\0') {
         return Err(invalid(
-            "automation.runtime",
+            "automation.bundle",
             "must be a bounded absolute path",
         ));
     }
@@ -553,11 +553,8 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
             "automation",
             &[
                 "required",
-                "runtime",
-                "workspace_root",
+                "bundle",
                 "max_concurrent",
-                "max_scratch_bytes",
-                "max_scratch_files",
                 "targets",
                 "authorities",
             ],
@@ -567,10 +564,10 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
         {
             return Err(invalid("automation.required", "must be a boolean"));
         }
-        if let Some(value) = automation.get("runtime") {
+        if let Some(value) = automation.get("bundle") {
             let value = value
                 .as_str()
-                .ok_or_else(|| invalid("automation.runtime", "must be a string"))?;
+                .ok_or_else(|| invalid("automation.bundle", "must be a string"))?;
             validate_runtime_path(value)?;
         }
         if let Some(value) = automation.get("authorities") {
@@ -735,18 +732,8 @@ pub(super) fn validate_automation(
             "must be a bounded absolute path",
         ));
     }
-    if !(1..=16).contains(&automation.max_concurrent)
-        || automation.max_scratch_bytes == 0
-        || automation.max_scratch_bytes > 64 * 1024 * 1024
-        || !(1..=4096).contains(&automation.max_scratch_files)
-    {
-        return Err(invalid(
-            "automation",
-            "invalid concurrency or scratch bounds",
-        ));
-    }
-    if let Some(root) = &automation.workspace_root {
-        validate_runtime_path(root)?;
+    if !(1..=16).contains(&automation.max_concurrent) {
+        return Err(invalid("automation", "invalid concurrency bounds"));
     }
     for (name, target) in &automation.targets {
         if !targets
@@ -799,6 +786,9 @@ pub(super) fn validate_bindings(
         .entries()
         .filter(|(_, binding)| binding.automation_authority().is_some())
     {
+        if binding.has_dynamic_targets() {
+            continue;
+        }
         let targets = match binding.automation_authority() {
             Some(AutomationAuthority::Ordinary) => &automation.targets,
             Some(AutomationAuthority::Named(name)) => {
@@ -910,8 +900,8 @@ mod tests {
                 "ssh_config_file='private-secret'",
             ),
             (
-                "runtime='/private-authority/runtime'",
-                "runtime=['private-secret']",
+                "bundle='/private-authority/bundle'",
+                "bundle=['private-secret']",
             ),
             (
                 "become={method='sudo',user='root'}",
@@ -968,14 +958,7 @@ mod tests {
     fn automation_defaults_and_bounds_are_explicit() {
         let config = load_text("", &[]).unwrap();
         assert_eq!(config.automation_concurrency(), 8);
-        assert_eq!(config.automation_scratch(), (16 * 1024 * 1024, 512));
-        for field in [
-            "max_concurrent=0",
-            "max_concurrent=17",
-            "max_scratch_bytes=0",
-            "max_scratch_bytes=67108865",
-            "max_scratch_files=4097",
-        ] {
+        for field in ["max_concurrent=0", "max_concurrent=17"] {
             assert!(load_text(&format!("[automation]\n{field}"), &[]).is_err());
         }
     }
@@ -1252,17 +1235,14 @@ mod tests {
                 "automation.required",
             ),
             (
-                "[automation]\nruntime=['secret_payload']",
-                "automation.runtime",
+                "[automation]\nbundle=['secret_payload']",
+                "automation.bundle",
             ),
+            ("[automation]\nbundle='secret_payload'", "automation.bundle"),
+            ("[automation]\nbundle=''", "automation.bundle"),
             (
-                "[automation]\nruntime='secret_payload'",
-                "automation.runtime",
-            ),
-            ("[automation]\nruntime=''", "automation.runtime"),
-            (
-                "[automation]\nruntime=\"/secret_payload\\u0000\"",
-                "automation.runtime",
+                "[automation]\nbundle=\"/secret_payload\\u0000\"",
+                "automation.bundle",
             ),
         ] {
             let error = load_text(text, &[]).err().unwrap();
@@ -1271,10 +1251,10 @@ mod tests {
             assert!(!format!("{error:?}").contains("secret_payload"));
             assert!(std::error::Error::source(&error).is_none());
         }
-        let oversized = format!("[automation]\nruntime='/{}'", "x".repeat(4096));
+        let oversized = format!("[automation]\nbundle='/{}'", "x".repeat(4096));
         assert_eq!(
             load_text(&oversized, &[]).err().unwrap().field,
-            "automation.runtime"
+            "automation.bundle"
         );
     }
 

@@ -29,7 +29,7 @@ async fn sysctl_config_set_real_guest_acceptance() -> Result<()> {
         ensure!(lines.next().context("sysctl value")?.parse::<u64>()? == desired, "actual runtime setting unchanged");
         ensure!(lines.next() == Some("17"), "unrelated config was reloaded");
 
-        let file = guest.shell("cat /etc/sysctl.d/90-estus-catalog-printk-ratelimit.conf; stat -c '%u:%a' /etc/sysctl.d/90-estus-catalog-printk-ratelimit.conf").await?;
+        let file = guest.shell("cat /etc/sysctl.d/90-estus-catalog-kernel_printk__ratelimit.conf; stat -c '%u:%a' /etc/sysctl.d/90-estus-catalog-kernel_printk__ratelimit.conf").await?;
         ensure!(file.status.success(), "persistent file absent");
         ensure!(String::from_utf8(file.stdout)? == format!("kernel.printk_ratelimit = {desired}\n0:644\n"), "persistent exact config or ownership incorrect");
         ensure!(value["persistent"] == true && value["application"] == "exact_config_file_sysctl_load", "application effect hidden");

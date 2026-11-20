@@ -255,6 +255,44 @@ pub(super) fn request_deadline(
 }
 
 impl State {
+    pub(super) async fn acquire_permit(
+        &self,
+        semaphore: &std::sync::Arc<tokio::sync::Semaphore>,
+        deadline: tokio::time::Instant,
+        ct: &tokio_util::sync::CancellationToken,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ToolError> {
+        if ct.is_cancelled() || self.shutdown.is_cancelled() {
+            return Err(ToolError::cancelled(
+                "Request cancelled before dispatch",
+                false,
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ToolError::timeout(
+                "Operation deadline expired waiting for execution slot",
+                false,
+            ));
+        }
+        tokio::select! {
+            biased;
+            () = ct.cancelled() => Err(ToolError::cancelled(
+                "Request cancelled before dispatch",
+                false,
+            )),
+            () = self.shutdown.cancelled() => Err(ToolError::cancelled(
+                "Server shutting down before dispatch",
+                false,
+            )),
+            () = tokio::time::sleep_until(deadline) => Err(ToolError::timeout(
+                "Operation deadline expired waiting for execution slot",
+                false,
+            )),
+            permit = std::sync::Arc::clone(semaphore).acquire_owned() => permit.map_err(|_| {
+                ToolError::cancelled("Server shutting down before dispatch", false)
+            }),
+        }
+    }
+
     pub(super) fn output_metadata<'a>(&'a self, request_id: &'a RequestId) -> Metadata<'a> {
         Metadata {
             request_id,

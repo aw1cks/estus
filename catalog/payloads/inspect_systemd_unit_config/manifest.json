@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "4700974285ae75dbdecb0cedd5028b0a950a5052f5404a0e46b371e4a4b10d92",
+  "source_sha256": "fb7dcc4e3a98e343e3d56bd956cdfefffe367619aa961369db7fb6647db2266c",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -16,7 +16,8 @@
           "name": "manager_scope"
         },
         "allowed_units": {
-          "name": "allowed_units"
+          "name": "allowed_units",
+          "default": null
         },
         "unit": {
           "name": "unit"
@@ -76,7 +77,6 @@
       "required": [
         "target_python",
         "manager_scope",
-        "allowed_units",
         "unit"
       ],
       "additionalProperties": false

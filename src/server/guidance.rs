@@ -14,7 +14,7 @@ pub(super) const INSTRUCTIONS: &str = "\
 Estus exposes structured SSH operations organized by risk tier:
 - observe_*: read-only system telemetry; safe starting tier.
 - inspect_*: sensitive reads (logs, processes, files, sockets) or active probes.
-- preview_*: read-only pre-change dependency/plan checks; review before applying changes.
+- preview_*: read-only pre-change dependency/plan checks; review before applying changes. A preview authorizes one exact intent, so pass the same arguments the change will use.
 - change_*: structured single-purpose mutations and quarantine reset; never automatically replayed.
 - exec_*: generic remote command/argv/sudo execution; escalate only when structured tools cannot express the task.
 
@@ -50,6 +50,15 @@ const GUIDE_NETWORKING: &str = "\
 2. Escalate to active probes or socket tables deliberately: `inspect_sockets`, `inspect_dns_lookup`, `inspect_icmp_probe`, `inspect_tcp_connect_probe`, `inspect_network_path_probe`.
 3. NIC/link/route mutations (`change_network_*`, `change_nic_*`) can disrupt connectivity and trigger target write quarantine if interrupted.";
 
+const GUIDE_PREVIEW: &str = "\
+# Estus Runbook: Preview Before Change
+
+1. Run the matching `preview_*` tool first whenever the target policy sets `require_preview`; an unauthorized change returns `preview_required`.
+2. A preview binds one exact intent digest (target, authority, domain, arguments, and observed pre-state). It is consumed once and expires after five minutes; re-preview after any intervening change.
+3. sysctl: `preview_sysctl(name, value, state)`. Omitting `sysctl_file` authorizes `change_sysctl_*` for the catalog file: the preview maps to `/etc/sysctl.d/90-estus-catalog-<key>.conf` and matches `change_sysctl_config`. Pass `sysctl_set=true` to bind `/etc/sysctl.conf` and match `change_sysctl_runtime`. An explicit `sysctl_file` binds that exact path, which no catalog payload rewrites, so it authorizes only a matching explicit-file change.
+4. Packages: `preview_package`/`preview_apt`/`preview_dnf` share the `estus.packages` domain and preview the requested names and canonical state. Pass the same `name` list and `state` (`present`, `absent`, `latest`) as the change; any extra module option changes the digest and invalidates the preview.
+5. Reusing a preview for a different host, authority, value, or path fails with `preview_required`; never assume a preview from another target carries over.";
+
 const GUIDE_UNCERTAINTY: &str = "\
 # Estus Runbook: Uncertainty & Quarantine Reconciliation
 
@@ -80,6 +89,13 @@ const STATIC_GUIDES: &[StaticGuide] = &[
         title: "Linux CPU, Memory & Pressure Triage",
         description: "Telemetry-first workflow for CPU, memory, PSI pressure, cgroups, and processes.",
         body: GUIDE_LINUX_MEMORY,
+    },
+    StaticGuide {
+        uri: "estus://guides/preview",
+        name: "preview-guide",
+        title: "Preview Before Change",
+        description: "Binding semantics of preview_* intents for sysctl, packages, and services.",
+        body: GUIDE_PREVIEW,
     },
     StaticGuide {
         uri: "estus://guides/networking",
@@ -360,7 +376,10 @@ pub(super) fn get_prompt(
             let preview_step = if previews.is_empty() {
                 "2. No `preview_*` tool is registered for this host; verify target paths/units carefully before mutating.".to_owned()
             } else {
-                format!("2. Run matching preview first ({}).", previews.join(", "))
+                format!(
+                    "2. Run matching preview first ({}), passing the same arguments the change will use; a preview binds one exact intent and is consumed once (`estus://guides/preview`).",
+                    previews.join(", ")
+                )
             };
             let clear_note = if permitted.contains("change_target_quarantine_clear") {
                 "clear quarantine explicitly via `change_target_quarantine_clear` only after reconciliation"

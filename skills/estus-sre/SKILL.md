@@ -8,7 +8,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 ## 1. Risk Tiers & Escalation
 - **`observe_*`** (auto-allow eligible): read-only system telemetry. Always start here (`observe_targets`, `observe_host_summary`, `observe_cpu`, `observe_memory`, `observe_pressure`, `observe_systemd_units`, `observe_network_links`).
 - **`inspect_*`** (ask): sensitive reads (files, directories, processes, sockets, journal logs) or active network probes. Narrow scope before calling.
-- **`preview_*`** (ask): pre-change dependency and plan checks (`preview_kernel_module_load`). Run before corresponding mutations.
+- **`preview_*`** (ask): pre-change dependency and plan checks (`preview_kernel_module_load`, `preview_systemd_service`, `preview_sysctl`, `preview_package`, `preview_apt`, `preview_dnf`). Run before the matching mutation.
 - **`change_*`** (ask): structured single-purpose mutations and `change_target_quarantine_clear`. Never automatically replayed.
 - **`exec_*`** (ask): generic command/argv/sudo execution (`exec_command`, `exec_argv`, `exec_sudo`). Escalate only when structured tools cannot express the operation.
 
@@ -20,18 +20,30 @@ description: Safe observation-first Linux triage, journal inspection, and change
 ## 3. Continuation & Output Handles
 - Paginated inspection tools use explicit single-use tokens or byte offsets:
   - `inspect_directory`: pass returned cursor on identical `host`/`path`.
-  - `inspect_journal`: optional `unit`, literal `contains`, `limit` 1–50, `direction` (`backward` default or `forward`), direction-bound `continuation_cursor` packed within 32768 bytes.
+  - `inspect_journal`: optional `unit`, literal `contains`, `limit` 1–500, `direction` (`backward` default or `forward`), direction-bound `continuation_cursor` packed within 131072 bytes.
   - `inspect_journal_record`: reconstruct long/truncated messages by `boot_id`, `cursor`, `offset`, and `max_bytes` (1–4096 base64 UTF-8 slices) until `eof=true`.
-- Command/controller tools support `retain_output=true`, returning session-scoped handles readable via `inspect_output`.
+- Command and local-execution tools support `retain_output=true`, returning session-scoped handles readable via `inspect_output`.
 
-## 4. MCP Guidance Surfaces
+## 4. Package Changes Across Distributions
+- `change_package` is the cross-distro transition: the reviewed bundle routes it to the target-detected manager (apt, dnf/dnf5, apk, zypper) and it accepts `name`, `state`, optional `version` and `update_cache`. A version pin requires `state="present"` and exactly one package name; it is rewritten as `name=version` on apt and `name-version` on dnf/dnf5/zypper.
+- `change_apt` and `change_dnf` are explicit escape hatches for manager-specific options (purge, allow_downgrade, enablerepo, disablerepo, allowerasing, nobest). Use them only when the generic tool cannot express the change.
+- `preview_package`, `preview_apt` and `preview_dnf` are the qualified check-mode previews. A preview authorizes only the requested module and the reviewed options it was given: a `preview_package` run never authorizes `change_apt` or `change_dnf`, and neither does the reverse. Preview and change must select the same module with matching inputs/options; the package database detected at pre-state time is recorded independently, so a changed target manager invalidates reuse.
+- Package prerequisites and repositories are preprovisioned by the operator. Estus installs no dependencies and performs no repository refresh unless that reviewed option is approved.
+- Target-host Python bindings are prerequisites for the package tools: `preview_package`, `change_package`, `preview_apt` and `change_apt` need `python3-apt` (Debian/Ubuntu); `preview_dnf` and `change_dnf` need `python3-dnf` or `python3-libdnf5` (RHEL/Fedora). Estus never installs these (`auto_install_module_deps = false`): a missing binding fails closed with `dependency_unavailable` in check mode, and no check-mode run mutates the target. `observe_packages` is pure stdlib plus the shipped runtime helper and needs none of these bindings.
+
+## 5. Preview Pairing Under `require_preview = true`
+- `preview_sysctl` with `{name, value, state: "present"}` is the qualified preview for `change_sysctl_config` (persistent dedicated sysctl.d file + exact-file apply, then readback).
+- `preview_sysctl` with `{name, value, state: "present", sysctl_set: true}` is the qualified preview for `change_sysctl_runtime` (single-key runtime write, no persistence).
+- A preview authorizes only the change tool it was paired with and the exact inputs it was given; a sysctl preview never authorizes systemd, package, or any other mutation, and preview and change must agree on key, value, and persistence semantics.
+
+## 6. MCP Guidance Surfaces
 - **Prompts**: `triage_host`, `diagnose_service`, `safe_change`, `network_triage`.
-- **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
+- **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/preview`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
 
-## 5. Exact-Name Client Approval Policy (138 Published Tools)
-Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies):
+## 7. Exact-Name Client Approval Policy (135 Published Tools)
+Published tools are the 15 builtin names plus the 120 bundled catalog tools. Which catalog tools exist depends on the selected configuration and, in zero-config workstation mode, on the installed catalog and bundle. Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies).
 
-### Allow (`observe_*` — 63 tools)
+### Allow (`observe_*` — 61 tools)
 ```json
 [
   "observe_boot_entries",
@@ -73,9 +85,7 @@ Configure exact tool names according to your MCP client's permission rules (pref
   "observe_nic_rss",
   "observe_nic_stats",
   "observe_nic_transceiver",
-  "observe_package",
   "observe_packages",
-  "observe_packages_updates",
   "observe_pci_device",
   "observe_pci_devices",
   "observe_pci_driver_binding",
@@ -100,13 +110,15 @@ Configure exact tool names according to your MCP client's permission rules (pref
 ]
 ```
 
-### Ask (`inspect_*`, `preview_*`, `change_*`, `exec_*` — 75 tools)
+### Ask (`inspect_*`, `preview_*`, `change_*`, `exec_*` — 74 tools)
 ```json
 [
+  "change_apt",
   "change_boot_clear_oneshot",
   "change_boot_default",
   "change_boot_oneshot",
   "change_directory_remove",
+  "change_dnf",
   "change_file_remove",
   "change_file_replace",
   "change_file_write",
@@ -130,11 +142,7 @@ Configure exact tool names according to your MCP client's permission rules (pref
   "change_nic_pause",
   "change_nic_rings",
   "change_nic_rss",
-  "change_package_repository",
-  "change_package_repository_refresh",
-  "change_packages_install",
-  "change_packages_remove",
-  "change_packages_upgrade",
+  "change_package",
   "change_rename",
   "change_sysctl_config",
   "change_sysctl_runtime",
@@ -176,6 +184,7 @@ Configure exact tool names according to your MCP client's permission rules (pref
   "preview_apt",
   "preview_dnf",
   "preview_kernel_module_load",
+  "preview_package",
   "preview_sysctl",
   "preview_systemd_service"
 ]

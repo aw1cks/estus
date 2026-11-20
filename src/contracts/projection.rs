@@ -7,6 +7,83 @@ use serde_json::Value;
 const INVALID: &str = "invalid_projection";
 const MAX_PLAN_BYTES: usize = 16 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectionViolation {
+    pub schema_path: String,
+    pub constraint: &'static str,
+}
+
+fn classify_jsonschema_error(error: &jsonschema::ValidationError<'_>) -> &'static str {
+    use jsonschema::error::ValidationErrorKind as K;
+    let schema_path = error.schema_path().as_str();
+    match error.kind() {
+        K::AdditionalProperties { .. } | K::UnevaluatedProperties { .. } => "unknown_field",
+        K::FalseSchema
+            if schema_path.ends_with("/additionalProperties")
+                || schema_path.ends_with("/unevaluatedProperties") =>
+        {
+            "unknown_field"
+        }
+        K::Required { .. } => "missing_field",
+        K::Type { .. } => "invalid_type",
+        K::Enum { .. } => "invalid_enum",
+        K::Minimum { .. } | K::ExclusiveMinimum { .. } => "below_minimum",
+        K::Maximum { .. } | K::ExclusiveMaximum { .. } => "above_maximum",
+        K::MinLength { .. } | K::MinItems { .. } | K::MinProperties { .. } => "too_short",
+        K::MaxLength { .. } | K::MaxItems { .. } | K::MaxProperties { .. } => "too_long",
+        K::Pattern { .. } | K::BacktrackLimitExceeded { .. } | K::Format { .. } => {
+            "pattern_mismatch"
+        }
+        K::Constant { .. } => "const_mismatch",
+        _ => "schema_violation",
+    }
+}
+
+fn safe_projection_path(root: &Value, error: &jsonschema::ValidationError<'_>) -> String {
+    use jsonschema::error::ValidationErrorKind as K;
+    use jsonschema::paths::LocationSegment;
+    let mut path = String::from("result");
+    let mut cursor = root;
+    for segment in error.instance_path().iter() {
+        match segment {
+            LocationSegment::Property(prop) => {
+                if let Some(next) = cursor
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|props| props.get(prop.as_ref()))
+                {
+                    path.push('.');
+                    path.push_str(prop.as_ref());
+                    cursor = next;
+                } else {
+                    return path;
+                }
+            }
+            LocationSegment::Index(idx) => {
+                if let Some(next) = cursor.get("items") {
+                    path.push('.');
+                    path.push_str(&idx.to_string());
+                    cursor = next;
+                } else {
+                    return path;
+                }
+            }
+        }
+    }
+    if let K::Required {
+        property: Value::String(prop),
+    } = error.kind()
+        && cursor
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|props| props.contains_key(prop))
+    {
+        path.push('.');
+        path.push_str(prop);
+    }
+    path
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
@@ -49,8 +126,8 @@ pub fn compile(config: Value) -> Result<Plan, &'static str> {
 
 pub(crate) fn compile_with_diff(config: Value, allow_diff: bool) -> Result<Plan, &'static str> {
     let plan: Plan = serde_json::from_value(config).map_err(|_| INVALID)?;
-    if !(64..=65536).contains(&plan.max_bytes)
-        || !(1..=1024).contains(&plan.max_items)
+    if !(64..=262_144).contains(&plan.max_bytes)
+        || !(1..=4096).contains(&plan.max_items)
         || !(1..=8).contains(&plan.max_depth)
         || plan.fields.is_empty()
         || plan.fields.len() > 16
@@ -111,7 +188,7 @@ fn check_node(
         && schema
             .get("maxItems")
             .and_then(Value::as_u64)
-            .is_none_or(|n| n > 256)
+            .is_none_or(|n| n > 1024)
     {
         return Err(INVALID);
     }
@@ -158,47 +235,92 @@ impl io::Write for ByteLimit {
 }
 
 impl Plan {
+    #[cfg(test)]
     pub(crate) fn validate_value(&self, value: &Value) -> Result<(), &'static str> {
+        self.validate_value_detailed(value).map_err(|_| INVALID)
+    }
+
+    pub(crate) fn validate_value_detailed(&self, value: &Value) -> Result<(), ProjectionViolation> {
         fn walk(
             value: &Value,
             depth: usize,
             nodes: &mut usize,
+            path: &str,
             plan: &Plan,
-        ) -> Result<(), &'static str> {
+        ) -> Result<(), ProjectionViolation> {
             *nodes += 1;
-            if depth > plan.max_depth || *nodes > plan.max_items {
-                return Err(INVALID);
+            if depth > plan.max_depth {
+                return Err(ProjectionViolation {
+                    schema_path: path.to_owned(),
+                    constraint: "max_depth",
+                });
+            }
+            if *nodes > plan.max_items {
+                return Err(ProjectionViolation {
+                    schema_path: path.to_owned(),
+                    constraint: "max_items",
+                });
             }
             match value {
                 Value::Object(values) => {
-                    for value in values.values() {
-                        walk(value, depth + 1, nodes, plan)?;
+                    for (key, child) in values {
+                        let child_path = format!("{path}.{key}");
+                        walk(child, depth + 1, nodes, &child_path, plan)?;
                     }
                 }
                 Value::Array(values) => {
-                    for value in values {
-                        walk(value, depth + 1, nodes, plan)?;
+                    for (idx, child) in values.iter().enumerate() {
+                        let child_path = format!("{path}.{idx}");
+                        walk(child, depth + 1, nodes, &child_path, plan)?;
                     }
                 }
                 Value::Number(n)
                     if n.as_f64()
                         .is_none_or(|n| !n.is_finite() || n.abs() > 9_007_199_254_740_991.0) =>
                 {
-                    return Err(INVALID);
+                    return Err(ProjectionViolation {
+                        schema_path: path.to_owned(),
+                        constraint: "integer_range",
+                    });
                 }
                 _ => (),
             }
             Ok(())
         }
-        walk(value, 0, &mut 0, self)?;
+        walk(value, 0, &mut 0, "result", self)?;
         serde_json::to_writer(
             ByteLimit {
                 remaining: self.max_bytes,
             },
             value,
         )
-        .map_err(|_| INVALID)?;
-        crate::contracts::module_schema::validate(&self.schema, value).map_err(|_| INVALID)
+        .map_err(|_| ProjectionViolation {
+            schema_path: "result".to_owned(),
+            constraint: "max_bytes",
+        })?;
+        if crate::contracts::module_schema::validate(&self.schema, value).is_err() {
+            if let Ok(validator) = jsonschema::validator_for(&self.schema)
+                && let Some((schema_path, constraint)) = validator
+                    .iter_errors(value)
+                    .map(|err| {
+                        (
+                            safe_projection_path(&self.schema, &err),
+                            classify_jsonschema_error(&err),
+                        )
+                    })
+                    .min()
+            {
+                return Err(ProjectionViolation {
+                    schema_path,
+                    constraint,
+                });
+            }
+            return Err(ProjectionViolation {
+                schema_path: "result".to_owned(),
+                constraint: "schema_violation",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -343,5 +465,22 @@ mod tests {
         value["schema"]["description"] = json!("x".repeat(MAX_PLAN_BYTES - base_bytes));
         assert!(serde_json::to_vec(&value["schema"]).unwrap().len() < MAX_PLAN_BYTES);
         assert!(compile(value).is_err());
+    }
+
+    #[test]
+    fn detailed_validation_reports_exact_field_path_and_constraint() {
+        let mut value = config();
+        value["schema"]["required"] = json!(["platform"]);
+        value["schema"]["properties"]["platform"]["enum"] = json!(["Linux"]);
+        let plan = compile(value).unwrap();
+        let err = plan.validate_value_detailed(&json!({})).unwrap_err();
+        assert_eq!(err.schema_path, "result.platform");
+        assert_eq!(err.constraint, "missing_field");
+
+        let err = plan
+            .validate_value_detailed(&json!({"platform": "Darwin"}))
+            .unwrap_err();
+        assert_eq!(err.schema_path, "result.platform");
+        assert_eq!(err.constraint, "invalid_enum");
     }
 }

@@ -56,25 +56,15 @@ pub(super) enum RawExecution {
         no_log: bool,
     },
     AnsibleModule {
-        snapshot: String,
+        module: String,
+        #[serde(default)]
+        bundle: Option<String>,
         #[serde(default)]
         no_log: bool,
         #[serde(default)]
         check_mode: bool,
         #[serde(default)]
         diff: bool,
-    },
-    AnsibleRole {
-        snapshot: String,
-        role_path: Option<String>,
-        #[serde(default)]
-        no_log: bool,
-    },
-    AnsiblePlaybook {
-        snapshot: String,
-        project_root: String,
-        #[serde(default)]
-        no_log: bool,
     },
 }
 #[derive(Deserialize)]

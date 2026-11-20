@@ -19,6 +19,8 @@ const QUALIFIED_MODULES: &[&str] = &[
     "ansible.posix.sysctl",
     "ansible.builtin.apt",
     "ansible.builtin.dnf",
+    "ansible.builtin.dnf5",
+    "ansible.builtin.package",
 ];
 
 pub(crate) fn is_qualified_module(module: &str) -> bool {
@@ -152,23 +154,11 @@ fn scalar_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn sysctl_slug(key: &str) -> String {
-    let mut out = String::with_capacity(key.len());
-    let mut prev_underscore = false;
-    for byte in key.bytes() {
-        let lower = byte.to_ascii_lowercase();
-        if lower.is_ascii_alphanumeric() {
-            out.push(char::from(lower));
-            prev_underscore = false;
-        } else if !prev_underscore && !out.is_empty() {
-            out.push('_');
-            prev_underscore = true;
-        }
-    }
-    while out.ends_with('_') {
-        out.pop();
-    }
-    out
+/// Injective catalog file slug for a sysctl key matching `[a-z0-9_.-]+`:
+/// `_` doubles and `.` becomes `_`, so distinct keys can never share a file
+/// (`br_0` -> `br__0`, `br-0` -> `br-0`).
+fn sysctl_config_slug(key: &str) -> String {
+    key.replace('_', "__").replace('.', "_")
 }
 
 fn sorted_names(raw: Option<&Value>) -> Option<Vec<String>> {
@@ -210,19 +200,29 @@ impl PreviewSpec {
                     .and_then(Value::as_str)
                     .unwrap_or("present");
                 let value = scalar_string(args.get("value"));
-                let sysctl_file = args
-                    .get("sysctl_file")
-                    .and_then(Value::as_str)
-                    .unwrap_or("/etc/sysctl.conf");
                 let sysctl_set = args
                     .get("sysctl_set")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let reload = args.get("reload").and_then(Value::as_bool).unwrap_or(true);
+                // Bind the same file the native executors pin, so one preview
+                // authorizes the config and runtime payloads alike.
+                let sysctl_file = match args.get("sysctl_file").and_then(Value::as_str) {
+                    Some(explicit) => Value::String(explicit.to_owned()),
+                    // `change_sysctl_runtime` never reads or writes
+                    // `/etc/sysctl.conf`, so a runtime preview binds a null file.
+                    None if sysctl_set => Value::Null,
+                    None => Value::String(format!(
+                        "/etc/sysctl.d/90-estus-catalog-{}.conf",
+                        sysctl_config_slug(key)
+                    )),
+                };
+                // The catalog fixes reload=false for preview; defaulting to true
+                // would make a bare preview digest unmatchable.
+                let reload = args.get("reload").and_then(Value::as_bool).unwrap_or(false);
                 let intent = json!({
                     "key": key,
                     "value": value,
-                    "sysctl_file": sysctl_file,
+                    "sysctl_file": sysctl_file.clone(),
                     "sysctl_set": sysctl_set,
                     "reload": reload,
                     "state": state,
@@ -255,18 +255,42 @@ impl PreviewSpec {
                     intent_digest: canonical_json_sha256(&intent).ok()?,
                 })
             }
-            "ansible.builtin.apt" | "ansible.builtin.dnf" => {
+            "ansible.builtin.package"
+            | "ansible.builtin.apt"
+            | "ansible.builtin.dnf"
+            | "ansible.builtin.dnf5" => {
                 let names = sorted_names(args.get("name"))?;
                 let state = canonical_package_state(args.get("state").and_then(Value::as_str))?;
-                let prestate_module = if module == "ansible.builtin.apt" {
-                    "ansible.builtin.apt"
-                } else {
-                    "ansible.builtin.dnf"
-                };
+                let version = args
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty());
+                let mut options = args.as_object()?.clone();
+                options.remove("name");
+                options.remove("state");
+                options.remove("version");
+                // Internal safety flags are not caller intent and would make an
+                // otherwise identical preview and change digest disagree.
+                options.remove("auto_install_module_deps");
+                // Normalize the cache toggle so omitted and `false` agree while
+                // `true` still changes the digest.
+                let update_cache = options
+                    .remove("update_cache")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                options.insert("update_cache".into(), Value::Bool(update_cache));
                 let intent = json!({
+                    "module": module,
                     "names": names,
                     "state": state,
+                    "version": version,
+                    "options": options,
                 });
+                let prestate_module = match module {
+                    "ansible.builtin.apt" => "ansible.builtin.apt",
+                    "ansible.builtin.dnf" | "ansible.builtin.dnf5" => "ansible.builtin.dnf",
+                    _ => "estus.packages",
+                };
                 Some(Self {
                     domain: "estus.packages",
                     prestate_module,
@@ -324,16 +348,21 @@ impl PreviewSpec {
                 let value = scalar_string(args.get("value"))?;
                 let (sysctl_file, sysctl_set) = if binding_name == "change_sysctl_config" {
                     (
-                        format!("/etc/sysctl.d/90-estus-catalog-{}.conf", sysctl_slug(key)),
+                        Value::String(format!(
+                            "/etc/sysctl.d/90-estus-catalog-{}.conf",
+                            sysctl_config_slug(key)
+                        )),
                         false,
                     )
                 } else {
-                    ("/etc/sysctl.conf".to_owned(), true)
+                    // The runtime payload rewrites the live kernel value and never
+                    // touches `/etc/sysctl.conf`; a null file keeps both sides equal.
+                    (Value::Null, true)
                 };
                 let intent = json!({
                     "key": key,
                     "value": value,
-                    "sysctl_file": sysctl_file,
+                    "sysctl_file": sysctl_file.clone(),
                     "sysctl_set": sysctl_set,
                     "reload": false,
                     "state": "present",
@@ -387,28 +416,6 @@ impl PreviewSpec {
                     domain: "ansible.builtin.systemd_service",
                     prestate_module: "ansible.builtin.systemd_service",
                     prestate_args: json!({"name": unit, "scope": scope}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                })
-            }
-            "change_packages_install" | "change_packages_remove" | "change_packages_upgrade" => {
-                if args.get("version").is_some_and(|v| !v.is_null()) {
-                    return None;
-                }
-                let pkg = args.get("package").and_then(Value::as_str)?;
-                let state = match binding_name {
-                    "change_packages_install" => "present",
-                    "change_packages_remove" => "absent",
-                    "change_packages_upgrade" => "latest",
-                    _ => unreachable!(),
-                };
-                let intent = json!({
-                    "names": [pkg],
-                    "state": state,
-                });
-                Some(Self {
-                    domain: "estus.packages",
-                    prestate_module: "estus.packages",
-                    prestate_args: json!({"name": [pkg]}),
                     intent_digest: canonical_json_sha256(&intent).ok()?,
                 })
             }
@@ -508,20 +515,24 @@ mod tests {
         assert_eq!(ansible_systemd.domain, native_systemd.domain);
         assert_eq!(ansible_systemd.intent_digest, native_systemd.intent_digest);
 
-        let ansible_apt = PreviewSpec::for_ansible(
-            "ansible.builtin.apt",
+        let preview_pkg = PreviewSpec::for_ansible(
+            "ansible.builtin.package",
             &json!({"name": ["htop"], "state": "present"}),
         )
         .unwrap();
-        let native_pkg = PreviewSpec::for_payload(
-            "change_packages_install",
-            false,
-            &json!({"package": "htop"}),
+        let ansible_dnf = PreviewSpec::for_ansible(
+            "ansible.builtin.dnf",
+            &json!({"name": ["htop"], "state": "present"}),
         )
         .unwrap();
-        assert_eq!(ansible_apt.domain, native_pkg.domain);
-        assert_eq!(ansible_apt.intent_digest, native_pkg.intent_digest);
-
+        assert_eq!(preview_pkg.domain, ansible_dnf.domain);
+        assert_ne!(preview_pkg.intent_digest, ansible_dnf.intent_digest);
+        let different_options = PreviewSpec::for_ansible(
+            "ansible.builtin.package",
+            &json!({"name": ["htop"], "state": "present", "update_cache": true}),
+        )
+        .unwrap();
+        assert_ne!(preview_pkg.intent_digest, different_options.intent_digest);
         let preview_kmod = PreviewSpec::for_payload(
             "preview_kernel_module_load",
             true,
@@ -536,5 +547,209 @@ mod tests {
         .unwrap();
         assert_eq!(preview_kmod.domain, apply_kmod.domain);
         assert_eq!(preview_kmod.intent_digest, apply_kmod.intent_digest);
+    }
+
+    #[test]
+    fn preview_sysctl_default_file_authorizes_change_sysctl_config() {
+        let key = "kernel.printk_ratelimit";
+        let preview = PreviewSpec::for_ansible(
+            "ansible.posix.sysctl",
+            &json!({"name": key, "value": "10", "state": "present"}),
+        )
+        .unwrap();
+        let change = PreviewSpec::for_payload(
+            "change_sysctl_config",
+            false,
+            &json!({"key": key, "value": 10}),
+        )
+        .unwrap();
+
+        assert_eq!(preview.domain, "ansible.posix.sysctl");
+        assert_eq!(preview.domain, change.domain);
+        assert_eq!(preview.prestate_module, change.prestate_module);
+        assert_eq!(
+            preview.prestate_args,
+            json!({
+                "name": key,
+                "sysctl_file": "/etc/sysctl.d/90-estus-catalog-kernel_printk__ratelimit.conf",
+            })
+        );
+        assert_eq!(preview.prestate_args, change.prestate_args);
+        assert_eq!(preview.intent_digest, change.intent_digest);
+    }
+
+    #[test]
+    fn preview_sysctl_runtime_flag_authorizes_change_sysctl_runtime() {
+        let key = "kernel.printk_ratelimit";
+        let preview = PreviewSpec::for_ansible(
+            "ansible.posix.sysctl",
+            &json!({
+                "name": key,
+                "value": "10",
+                "state": "present",
+                "sysctl_set": true,
+            }),
+        )
+        .unwrap();
+        let runtime = PreviewSpec::for_payload(
+            "change_sysctl_runtime",
+            false,
+            &json!({"key": key, "value": 10}),
+        )
+        .unwrap();
+        let config = PreviewSpec::for_payload(
+            "change_sysctl_config",
+            false,
+            &json!({"key": key, "value": 10}),
+        )
+        .unwrap();
+
+        assert_eq!(preview.domain, "ansible.posix.sysctl");
+        assert_eq!(preview.domain, runtime.domain);
+        assert_eq!(
+            preview.prestate_args,
+            json!({"name": key, "sysctl_file": null})
+        );
+        assert_eq!(preview.prestate_args, runtime.prestate_args);
+        assert_eq!(preview.intent_digest, runtime.intent_digest);
+        // One preview must not authorize both the runtime and persistent payloads.
+        assert_ne!(preview.intent_digest, config.intent_digest);
+    }
+
+    #[test]
+    fn explicit_sysctl_file_still_binds_that_exact_path() {
+        let explicit = PreviewSpec::for_ansible(
+            "ansible.posix.sysctl",
+            &json!({
+                "name": "kernel.printk_ratelimit",
+                "value": "10",
+                "state": "present",
+                "sysctl_file": "/etc/sysctl.d/99-site.conf",
+                "reload": true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.prestate_args,
+            json!({"name": "kernel.printk_ratelimit", "sysctl_file": "/etc/sysctl.d/99-site.conf"})
+        );
+        let config = PreviewSpec::for_payload(
+            "change_sysctl_config",
+            false,
+            &json!({"key": "kernel.printk_ratelimit", "value": 10}),
+        )
+        .unwrap();
+        assert_ne!(explicit.intent_digest, config.intent_digest);
+        assert_eq!(
+            sysctl_config_slug("kernel.printk_ratelimit"),
+            "kernel_printk__ratelimit"
+        );
+        assert_eq!(sysctl_config_slug("vm.swappiness"), "vm_swappiness");
+        // The encoding must never collapse distinct keys onto one file.
+        assert_ne!(
+            sysctl_config_slug("net.ipv4.conf.br_0.forwarding"),
+            sysctl_config_slug("net.ipv4.conf.br-0.forwarding")
+        );
+        assert_eq!(
+            sysctl_config_slug("net.ipv4.conf.br_0.forwarding"),
+            "net_ipv4_conf_br__0_forwarding"
+        );
+        assert_eq!(
+            sysctl_config_slug("net.ipv4.conf.br-0.forwarding"),
+            "net_ipv4_conf_br-0_forwarding"
+        );
+    }
+
+    #[test]
+    fn preview_apt_matches_change_apt_after_option_normalization() {
+        let preview = PreviewSpec::for_ansible(
+            "ansible.builtin.apt",
+            &json!({
+                "name": ["htop"],
+                "state": "present",
+                "update_cache": false,
+                "auto_install_module_deps": false,
+            }),
+        )
+        .unwrap();
+        let change = PreviewSpec::for_ansible(
+            "ansible.builtin.apt",
+            &json!({"name": ["htop"], "state": "present", "auto_install_module_deps": false}),
+        )
+        .unwrap();
+        assert_eq!(preview.intent_digest, change.intent_digest);
+
+        let cached = PreviewSpec::for_ansible(
+            "ansible.builtin.apt",
+            &json!({"name": ["htop"], "state": "present", "update_cache": true}),
+        )
+        .unwrap();
+        assert_ne!(preview.intent_digest, cached.intent_digest);
+    }
+
+    #[test]
+    fn preview_dnf_normalizes_update_cache_and_keeps_distinct_options() {
+        let bare = PreviewSpec::for_ansible(
+            "ansible.builtin.dnf",
+            &json!({"name": ["htop"], "state": "present", "update_cache": false}),
+        )
+        .unwrap();
+        let change = PreviewSpec::for_ansible(
+            "ansible.builtin.dnf",
+            &json!({"name": ["htop"], "state": "present"}),
+        )
+        .unwrap();
+        assert_eq!(bare.intent_digest, change.intent_digest);
+
+        let cached = PreviewSpec::for_ansible(
+            "ansible.builtin.dnf",
+            &json!({"name": ["htop"], "state": "present", "update_cache": true}),
+        )
+        .unwrap();
+        assert_ne!(bare.intent_digest, cached.intent_digest);
+
+        let repo = PreviewSpec::for_ansible(
+            "ansible.builtin.dnf",
+            &json!({"name": ["htop"], "state": "present", "enablerepo": ["epel"]}),
+        )
+        .unwrap();
+        assert_ne!(bare.intent_digest, repo.intent_digest);
+    }
+
+    #[test]
+    fn preview_sysctl_authorizes_both_native_executors_without_a_runtime_file() {
+        let key = "net.ipv4.conf.br_0.forwarding";
+        let preview = PreviewSpec::for_ansible(
+            "ansible.posix.sysctl",
+            &json!({"name": key, "value": "1", "state": "present"}),
+        )
+        .unwrap();
+        let config = PreviewSpec::for_payload(
+            "change_sysctl_config",
+            false,
+            &json!({"key": key, "value": 1}),
+        )
+        .unwrap();
+        assert_eq!(preview.intent_digest, config.intent_digest);
+        assert_eq!(preview.prestate_args, config.prestate_args);
+
+        let runtime_preview = PreviewSpec::for_ansible(
+            "ansible.posix.sysctl",
+            &json!({"name": key, "value": "1", "state": "present", "sysctl_set": true}),
+        )
+        .unwrap();
+        let runtime = PreviewSpec::for_payload(
+            "change_sysctl_runtime",
+            false,
+            &json!({"key": key, "value": 1}),
+        )
+        .unwrap();
+        assert_eq!(runtime_preview.intent_digest, runtime.intent_digest);
+        assert_eq!(runtime_preview.prestate_args, runtime.prestate_args);
+        assert_eq!(
+            runtime.prestate_args,
+            json!({"name": key, "sysctl_file": null})
+        );
+        assert_ne!(runtime_preview.intent_digest, config.intent_digest);
     }
 }

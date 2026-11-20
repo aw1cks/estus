@@ -35,10 +35,31 @@ const MAX_SOCKET_BYTES: usize = 100;
 const SOCKET_ENTRY_RESERVE_BYTES: usize = 12;
 
 type Key = (String, String, IdentityRole);
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Policy {
+    /// Operator/user OpenSSH configuration applies exactly as written.
     Native,
+    /// Headless service: pins trust updates and agent loading off.
+    Headless,
     Diagnostic,
+}
+
+impl Policy {
+    /// Hardening options that must not be relaxed by a host stanza.
+    ///
+    /// Command-line `-o` values precede config parsing, so a `Host *` block can
+    /// never grant trust updates or agent loading in a managed deployment.
+    fn hardening(self) -> &'static [&'static str] {
+        match self {
+            // Workstation mode honors the operator's OpenSSH configuration.
+            Self::Native => &[],
+            Self::Headless | Self::Diagnostic => &[
+                "StrictHostKeyChecking=yes",
+                "UpdateHostKeys=no",
+                "AddKeysToAgent=no",
+            ],
+        }
+    }
 }
 
 pub(crate) struct Pool {
@@ -164,19 +185,28 @@ impl Lease {
 }
 
 impl Pool {
+    /// Automation pool in the mode-appropriate policy.
+    ///
+    /// Headless deployments pin trust; workstation deployments leave the
+    /// operator's trust and agent configuration untouched.
     pub(crate) fn automation(
         executable: PathBuf,
         ssh_config: Option<PathBuf>,
         connect_timeout: Duration,
         shutdown: CancellationToken,
         agent: Option<std::ffi::OsString>,
+        headless: bool,
     ) -> Arc<Self> {
         let mut pool = Self::with_policy(
             executable,
             ssh_config,
             connect_timeout,
             shutdown,
-            Policy::Diagnostic,
+            if headless {
+                Policy::Headless
+            } else {
+                Policy::Native
+            },
         );
         Arc::get_mut(&mut pool)
             .expect("new pool is uniquely owned")
@@ -196,6 +226,22 @@ impl Pool {
             connect_timeout,
             shutdown,
             Policy::Native,
+        )
+    }
+
+    /// Headless service pool: pinned trust, no host-key updates, no agent loading.
+    pub(crate) fn headless(
+        executable: PathBuf,
+        ssh_config: Option<PathBuf>,
+        connect_timeout: Duration,
+        shutdown: CancellationToken,
+    ) -> Arc<Self> {
+        Self::with_policy(
+            executable,
+            ssh_config,
+            connect_timeout,
+            shutdown,
+            Policy::Headless,
         )
     }
 
@@ -220,7 +266,9 @@ impl Pool {
         executable: &Path,
         ssh_config: Option<&Path>,
     ) -> bool {
-        matches!(self.policy, Policy::Native)
+        // Both workstation and headless pools carry the operator's trust
+        // configuration; reuse keeps one warm master per authority identity.
+        matches!(self.policy, Policy::Native | Policy::Headless)
             && self.agent.is_none()
             && self.executable == executable
             && self.ssh_config.as_deref() == ssh_config
@@ -265,9 +313,9 @@ impl Pool {
         check_control()?;
         let key = (target.to_owned(), destination.to_owned(), role);
         enum AcquireStep {
-            Ready {
+            Existing(Arc<Entry>),
+            Launch {
                 entry: Arc<Entry>,
-                launch: bool,
                 permit: OwnedSemaphorePermit,
             },
             Wait(CancellationToken),
@@ -285,21 +333,8 @@ impl Pool {
                         if entry.stop.is_cancelled() {
                             AcquireStep::Wait(entry.done.clone())
                         } else {
-                            let permit =
-                                Arc::clone(&entry.channels)
-                                    .try_acquire_owned()
-                                    .map_err(|_| {
-                                        ToolError::resource_limit(
-                                            "SSH channel limit reached",
-                                            false,
-                                        )
-                                    })?;
                             state.interests += 1;
-                            AcquireStep::Ready {
-                                entry: Arc::clone(entry),
-                                launch: false,
-                                permit,
-                            }
+                            AcquireStep::Existing(Arc::clone(entry))
                         }
                     }
                 } else if entries.len() >= MAX_MASTERS {
@@ -358,14 +393,10 @@ impl Pool {
                             ToolError::resource_limit("SSH channel limit reached", false)
                         })?;
                     entries.insert(key.clone(), Arc::clone(&entry));
-                    AcquireStep::Ready {
-                        entry,
-                        launch: true,
-                        permit,
-                    }
+                    AcquireStep::Launch { entry, permit }
                 }
             };
-            let (entry, launch, permit) = match step {
+            let (entry, launch, interest, permit) = match step {
                 AcquireStep::Wait(done) => {
                     tokio::select! {
                         biased;
@@ -377,13 +408,39 @@ impl Pool {
                     }
                     continue;
                 }
-                AcquireStep::Ready {
-                    entry,
-                    launch,
-                    permit,
-                } => (entry, launch, permit),
+                AcquireStep::Launch { entry, permit } => {
+                    let interest = Interest(Arc::clone(&entry));
+                    (entry, true, interest, permit)
+                }
+                AcquireStep::Existing(entry) => {
+                    let interest = Interest(Arc::clone(&entry));
+                    let channels = Arc::clone(&entry.channels);
+                    let acquired = tokio::select! {
+                        biased;
+                        _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                        _ = entry.stop.cancelled() => None,
+                        res = channels.acquire_owned() => res.ok(),
+                    };
+                    let Some(permit) = acquired else {
+                        let done = entry.done.clone();
+                        drop(interest);
+                        drop(entry);
+                        tokio::select! {
+                            biased;
+                            _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                            _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                            _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                            _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                            _ = done.cancelled() => {}
+                        }
+                        continue;
+                    };
+                    (entry, false, interest, permit)
+                }
             };
-            let interest = Interest(Arc::clone(&entry));
             if launch {
                 let owner = Arc::downgrade(self);
                 let executable = self.executable.clone();
@@ -614,16 +671,10 @@ impl Master {
         ] {
             command.arg("-o").arg(option);
         }
-        if matches!(policy, Policy::Diagnostic) {
-            // Command-line values precede config parsing and cannot be relaxed
-            // by a host stanza. Keep configured known-host paths and proxies.
-            for option in [
-                "StrictHostKeyChecking=yes",
-                "UpdateHostKeys=no",
-                "AddKeysToAgent=no",
-            ] {
-                command.arg("-o").arg(option);
-            }
+        // Command-line values precede config parsing and cannot be relaxed by a
+        // host stanza. Keep configured known-host paths and proxies.
+        for option in policy.hardening() {
+            command.arg("-o").arg(option);
         }
         if let Some(config) = config {
             command.arg("-F").arg(config);
@@ -745,18 +796,35 @@ impl Drop for Master {
         }
         // On an unexpected unwind, keep finalization with the owned reaper:
         // shutdown must not observe done before process/socket cleanup.
-        tokio::spawn(async move {
-            if let Some(mut child) = child {
-                if child.start_kill().is_err() {
-                    diagnostic("master_kill_failed");
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Some(mut child) = child {
+                    if child.start_kill().is_err() {
+                        diagnostic("master_kill_failed");
+                    }
+                    if child.wait().await.is_err() {
+                        diagnostic("master_reap_failed");
+                    }
                 }
-                if child.wait().await.is_err() {
-                    diagnostic("master_reap_failed");
+                if let Some(drain) = drain {
+                    drain.abort();
+                    let _ = drain.await;
                 }
+                if let Some(directory) = directory
+                    && directory.close().is_err()
+                {
+                    diagnostic("master_socket_cleanup_failed");
+                }
+                drop(finalizer);
+            });
+        } else {
+            if let Some(mut child) = child
+                && child.start_kill().is_err()
+            {
+                diagnostic("master_kill_failed");
             }
             if let Some(drain) = drain {
                 drain.abort();
-                let _ = drain.await;
             }
             if let Some(directory) = directory
                 && directory.close().is_err()
@@ -764,7 +832,7 @@ impl Drop for Master {
                 diagnostic("master_socket_cleanup_failed");
             }
             drop(finalizer);
-        });
+        }
     }
 }
 
@@ -1028,6 +1096,92 @@ fn diagnostic(code: &'static str) {
 mod tests {
     use super::*;
     use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+
+    #[test]
+    fn headless_policy_pins_trust_and_agent_options() {
+        assert_eq!(
+            Policy::Headless.hardening(),
+            &[
+                "StrictHostKeyChecking=yes",
+                "UpdateHostKeys=no",
+                "AddKeysToAgent=no",
+            ]
+        );
+        // Workstation mode must not override the operator's OpenSSH config.
+        assert!(Policy::Native.hardening().is_empty());
+        assert_eq!(Policy::Diagnostic.hardening(), Policy::Headless.hardening());
+    }
+
+    #[test]
+    fn matches_native_transport_accepts_native_and_headless_for_shared_reuse() {
+        let executable = PathBuf::from("/usr/bin/ssh");
+        let config = PathBuf::from("/etc/estus/ssh.conf");
+        let shutdown = || CancellationToken::new();
+        let (exe, cfg) = (executable.as_path(), Some(config.as_path()));
+
+        let native = Pool::new(
+            executable.clone(),
+            Some(config.clone()),
+            Duration::from_secs(1),
+            shutdown(),
+        );
+        assert!(native.matches_native_transport(exe, cfg));
+
+        let headless = Pool::headless(
+            executable.clone(),
+            Some(config.clone()),
+            Duration::from_secs(1),
+            shutdown(),
+        );
+        assert!(
+            headless.matches_native_transport(exe, cfg),
+            "headless pool must share the warm master with native transport"
+        );
+
+        // A diagnostic pool intentionally negotiates a distinct trust state.
+        let diagnostic = Pool::diagnostic(
+            executable.clone(),
+            Some(config.clone()),
+            Duration::from_secs(1),
+            shutdown(),
+        );
+        assert!(!diagnostic.matches_native_transport(exe, cfg));
+
+        // Identity differences never share a master.
+        assert!(!headless.matches_native_transport(Path::new("/usr/bin/other"), cfg));
+        assert!(!headless.matches_native_transport(exe, None));
+
+        let automated = Pool::automation(
+            executable.clone(),
+            Some(config.clone()),
+            Duration::from_secs(1),
+            shutdown(),
+            None,
+            true,
+        );
+        assert_eq!(
+            automated.policy,
+            Policy::Headless,
+            "headless automation must pin trust"
+        );
+        assert!(!automated.matches_native_transport(exe, cfg));
+
+        // Workstation automation must honor the operator's OpenSSH config.
+        let workstation = Pool::automation(
+            executable.clone(),
+            Some(config.clone()),
+            Duration::from_secs(1),
+            shutdown(),
+            None,
+            false,
+        );
+        assert_eq!(
+            workstation.policy,
+            Policy::Native,
+            "workstation automation must not pin trust options"
+        );
+        assert!(workstation.policy.hardening().is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unwound_master_reaps_before_pool_completion() {

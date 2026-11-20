@@ -281,58 +281,58 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             ensure!(names.contains(&expected_builtin), "missing workstation builtin {expected_builtin}: {names:?}");
         }
         ensure!(!names.contains(&"exec_sudo"), "no-config workstation exposed ssh_sudo");
-        for extra in &names {
-            let is_builtin = matches!(
-                *extra,
-                "change_target_quarantine_clear"
-                    | "exec_command"
-                    | "inspect_directory"
-                    | "change_mkdir"
-                    | "inspect_file"
-                    | "inspect_output"
-                    | "change_directory_remove"
-                    | "change_file_remove"
-                    | "change_rename"
-                    | "change_file_replace"
-                    | "exec_argv"
-                    | "observe_stat"
-                    | "observe_targets"
-                    | "change_file_write"
+        let is_builtin = |name: &&str| matches!(
+            *name,
+            "change_target_quarantine_clear"
+                | "exec_command"
+                | "inspect_directory"
+                | "change_mkdir"
+                | "inspect_file"
+                | "inspect_output"
+                | "change_directory_remove"
+                | "change_file_remove"
+                | "change_rename"
+                | "change_file_replace"
+                | "exec_argv"
+                | "observe_stat"
+                | "observe_targets"
+                | "change_file_write"
+        );
+        // No ESTUS_ANSIBLE_BUNDLE is set, so exactly the non-laboratory_only
+        // native_payload catalog tools may be published.
+        let catalog_text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/catalog.json"),
+        )
+        .context("read bundled catalog.json")?;
+        let catalog: Value = serde_json::from_str(&catalog_text).context("parse catalog.json")?;
+        let catalog_tools = catalog["tools"]
+            .as_object()
+            .context("catalog.json tools object")?;
+        let expected: std::collections::BTreeSet<String> = catalog_tools
+            .iter()
+            .filter(|(_, template)| {
+                template["qualification"] != "laboratory_only"
+                    && template["executor"]["kind"] == "native_payload"
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let published: std::collections::BTreeSet<String> = names
+            .iter()
+            .filter(|name| !is_builtin(name))
+            .map(|name| (*name).to_string())
+            .collect();
+        ensure!(
+            published == expected,
+            "no-config workstation published {published:?}, expected {expected:?}"
+        );
+        for extra in &published {
+            let tool = tools.iter().find(|t| t["name"] == *extra).unwrap();
+            ensure!(
+                tool["inputSchema"]["properties"]["host"]
+                    == json!({"type": "string", "minLength": 1, "maxLength": 256}),
+                "workstation dynamic tool {extra} had unexpected host schema: {}",
+                tool["inputSchema"]["properties"]["host"]
             );
-            if !is_builtin {
-                ensure!(
-                    matches!(
-                        *extra,
-                        "inspect_processes"
-                            | "inspect_sockets"
-                            | "observe_cpu"
-                            | "observe_filesystem_usage"
-                            | "observe_kernel_modules"
-                            | "observe_kernel_state"
-                            | "observe_memory"
-                            | "observe_network_addresses"
-                            | "observe_network_interface_stats"
-                            | "observe_network_links"
-                            | "observe_network_routes"
-                            | "observe_pci_devices"
-                            | "observe_pci_topology"
-                            | "observe_pressure"
-                            | "observe_systemd_jobs"
-                            | "observe_systemd_sockets"
-                            | "observe_systemd_timers"
-                            | "observe_systemd_units"
-                            | "observe_time_sync"
-                    ),
-                    "unexpected extra tool in no-config workstation: {extra}"
-                );
-                let tool = tools.iter().find(|t| t["name"] == *extra).unwrap();
-                ensure!(
-                    tool["inputSchema"]["properties"]["host"]
-                        == json!({"type": "string", "minLength": 1, "maxLength": 256}),
-                    "workstation dynamic tool {extra} had unexpected host schema: {}",
-                    tool["inputSchema"]["properties"]["host"]
-                );
-            }
         }
         let dynamic_count = names
             .iter()
@@ -6632,7 +6632,8 @@ done
             ))
             .await?;
         profile_policy_denied(&server.response(102).await?)?;
-        // Authorized call must hit resource_limit while saturated.
+        // An authorized call queues for a slot until its deadline instead of
+        // being rejected at admission while all eight operation slots are busy.
         server
             .send(modern_request(
                 json!(103),
@@ -6644,22 +6645,28 @@ done
                 MODERN_VERSION,
             ))
             .await?;
-        let sat = server.response(103).await?;
-        ensure!(
-            sat["result"]["structuredContent"]["error"]["code"] == "resource_limit",
-            "expected resource_limit under saturation: {sat}"
-        );
+        // Slots free only after the fixture observes this release, so an admitted
+        // request must still be queued here; a rejection would have already
+        // returned resource_limit instead of running to completion below.
         std::fs::write(&release, b"done")?;
         let mut seen = std::collections::BTreeSet::new();
-        for _ in 1..=8 {
+        for _ in 1..=9 {
             let (frame, _) = server
                 .frame()
                 .await?
                 .context("server closed stdout before saturated calls finished")?;
             let id = frame["id"].as_u64().context("saturated response id")?;
+            if id == 103 {
+                ensure!(
+                    frame["result"]["structuredContent"]["error"].is_null(),
+                    "queued operation failed after a slot freed: {frame}"
+                );
+            }
             ensure!(seen.insert(id), "duplicate saturated response id {id}");
         }
-        ensure!(seen == (1..=8).collect(), "unexpected saturated response ids: {seen:?}");
+        let mut expected: std::collections::BTreeSet<u64> = (1..=8).collect();
+        expected.insert(103);
+        ensure!(seen == expected, "unexpected saturated response ids: {seen:?}");
         Ok::<_, anyhow::Error>(())
     }
     .await;

@@ -40,17 +40,23 @@ impl Estus {
             metadata.reject(started, &error);
             return budget.result(ToolReply::<CommandData>::failure(error));
         }
-        if let Err(error) = request
+        let deadline = match request
             .prepare(&self.state.config)
-            .and_then(|prepared| request_deadline(started, prepared.duration).map(|_| ()))
+            .and_then(|prepared| request_deadline(started, prepared.duration))
         {
-            metadata.reject(started, &error);
-            return budget.result(ToolReply::<CommandData>::failure(error));
-        }
-        let permit = match Arc::clone(&self.state.operations).try_acquire_owned() {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                metadata.reject(started, &error);
+                return budget.result(ToolReply::<CommandData>::failure(error));
+            }
+        };
+        let permit = match self
+            .state
+            .acquire_permit(&self.state.operations, deadline, &context.ct)
+            .await
+        {
             Ok(permit) => permit,
-            Err(_) => {
-                let error = ToolError::resource_limit("Tool operation limit reached", false);
+            Err(error) => {
                 metadata.reject(started, &error);
                 return budget.result(ToolReply::<CommandData>::failure(error));
             }

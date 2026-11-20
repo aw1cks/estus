@@ -61,12 +61,23 @@ impl Estus {
         let shutdown = CancellationToken::new();
         let pending_replies =
             crate::progress::PendingReplies::new(shutdown.clone(), CancellationToken::new());
-        let pool = Pool::new(
-            config.ssh_executable().to_path_buf(),
-            config.ssh_config().map(std::path::Path::to_path_buf),
-            Duration::from_secs(config.limits().connect_timeout_secs),
-            shutdown.clone(),
-        );
+        // Headless deployments pin trust and suppress host-key/agent mutation;
+        // workstation deployments honor the operator's OpenSSH configuration.
+        let pool = if config.mode() == crate::config::Mode::Headless {
+            Pool::headless(
+                config.ssh_executable().to_path_buf(),
+                config.ssh_config().map(std::path::Path::to_path_buf),
+                Duration::from_secs(config.limits().connect_timeout_secs),
+                shutdown.clone(),
+            )
+        } else {
+            Pool::new(
+                config.ssh_executable().to_path_buf(),
+                config.ssh_config().map(std::path::Path::to_path_buf),
+                Duration::from_secs(config.limits().connect_timeout_secs),
+                shutdown.clone(),
+            )
+        };
         let outputs = OutputStore::new(config.output_limits(), shutdown.clone());
         let directories = tools
             .contains(ToolKey::Builtin(ToolId::ListDirectory))
@@ -83,6 +94,7 @@ impl Estus {
                 payload: crate::native_payload::Engine::new_with_shared_pool(
                     shutdown.clone(),
                     Some(Arc::clone(&pool)),
+                    config.mode() == crate::config::Mode::Headless,
                 ),
                 config,
                 tools,

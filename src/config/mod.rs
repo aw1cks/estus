@@ -285,6 +285,23 @@ impl ConfigError {
         }
     }
 
+    pub(crate) fn toml_structure(text: &str, error: &toml::de::Error) -> Self {
+        let location = error
+            .span()
+            .and_then(|span| text.get(..span.start))
+            .map(|prefix| SourceLocation {
+                line: prefix.bytes().filter(|byte| *byte == b'\n').count() + 1,
+                column: prefix
+                    .rsplit('\n')
+                    .next()
+                    .map_or(1, |line| line.chars().count() + 1),
+            });
+        Self {
+            location,
+            ..Self::new("config", "invalid configuration structure")
+        }
+    }
+
     pub(crate) fn record(&self) -> impl serde::Serialize + '_ {
         #[derive(serde::Serialize)]
         struct Record<'a> {
@@ -323,11 +340,8 @@ pub(crate) struct Config {
 #[serde(default, deny_unknown_fields)]
 struct Automation {
     required: bool,
-    runtime: Option<PathBuf>,
-    workspace_root: Option<String>,
+    bundle: Option<PathBuf>,
     max_concurrent: usize,
-    max_scratch_bytes: u64,
-    max_scratch_files: usize,
     targets: BTreeMap<String, AutomationTarget>,
     authorities: BTreeMap<String, NamedAutomationAuthority>,
 }
@@ -336,11 +350,8 @@ impl Default for Automation {
     fn default() -> Self {
         Self {
             required: false,
-            runtime: None,
-            workspace_root: None,
+            bundle: None,
             max_concurrent: 8,
-            max_scratch_bytes: 16 * 1024 * 1024,
-            max_scratch_files: 512,
             targets: BTreeMap::new(),
             authorities: BTreeMap::new(),
         }
@@ -359,7 +370,7 @@ pub(crate) struct AutomationTarget {
 #[serde(deny_unknown_fields)]
 struct NamedAutomationAuthority {
     ssh_config_file: PathBuf,
-    runtime: Option<PathBuf>,
+    bundle: Option<PathBuf>,
     ssh_auth_sock: Option<PathBuf>,
     r#become: AutomationBecome,
     targets: BTreeMap<String, AutomationTarget>,

@@ -31,9 +31,10 @@ def main():
         print(encoded)
 
     key,value=args[0],args[1]
-    approved_keys=args[2] if len(args)>=3 else ['kernel.printk_ratelimit']
-    if (not isinstance(approved_keys,list) or not isinstance(key,str) or key not in approved_keys
-            or '..' in key or '/' in key or not re.fullmatch(r'[a-z0-9_]+(?:\.[a-z0-9_-]+)+',key)
+    if not isinstance(key,str): raise ValueError('unapproved typed sysctl')
+    approved_keys=args[2] if len(args)>=3 else None
+    if not isinstance(approved_keys,list) or not approved_keys or ('*' not in approved_keys and key not in approved_keys): raise ValueError('unapproved typed sysctl')
+    if ('..' in key or '/' in key or not re.fullmatch(r'[a-z0-9_]+(?:\.[a-z0-9_-]+)+',key)
             or type(value) is not int or not 0<=value<=MAX):
         raise ValueError('unapproved typed sysctl')
     if key=='kernel.printk_ratelimit' and not 0<=value<=60:
@@ -46,8 +47,8 @@ def main():
     before=current()
 
     import tempfile
-    slug=key[7:] if key.startswith('kernel.') else key
-    path='/etc/sysctl.d/90-estus-catalog-'+slug.replace('.','-').replace('_','-')+'.conf'
+    slug=key.replace('_','__').replace('.','_')
+    path='/etc/sysctl.d/90-estus-catalog-'+slug+'.conf'
     content=key+' = '+str(value)+'\n'
     directory=os.path.dirname(path)
     if os.path.realpath(directory)!=directory: raise ValueError('aliased config directory')

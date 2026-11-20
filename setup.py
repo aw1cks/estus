@@ -6,58 +6,49 @@ import shutil
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
-try:
-    from setuptools.command.bdist_wheel import bdist_wheel
-except ImportError:
-    from wheel.bdist_wheel import bdist_wheel  # type: ignore[no-redef]
+from setuptools.command.bdist_wheel import bdist_wheel
+
 
 def catalog_sources():
     root = Path(__file__).resolve().parent / "catalog"
     manifest = root / "catalog.json"
     data = json.loads(manifest.read_text(encoding="utf-8"))
-    declared_roles = set()
     declared_payloads = set()
     declared_definitions = set()
     yield manifest, Path("catalog.json")
     for name, tool in data["tools"].items():
         executor = tool["executor"]
         kind = executor["kind"]
-        group = {"ansible_role": "roles", "native_payload": "payloads"}.get(kind)
-        if tool["definition"] != name + ".toml" or (group and executor["path"] != group + "/" + name):
+        if tool["definition"] != name + ".toml":
             raise ValueError("invalid catalog source path")
         declared_definitions.add(tool["definition"])
         yield root / tool["definition"], Path(tool["definition"])
         if kind == "ansible_module":
             continue
-        if group is None:
+        if kind != "native_payload" or executor.get("path") != "payloads/" + name:
             raise ValueError("unsupported catalog executor")
-        if kind == "ansible_role":
-            declared_roles.add(name)
-        else:
-            declared_payloads.add(name)
-        role = root / executor["path"]
-        for source in sorted(role.rglob("*")):
+        declared_payloads.add(name)
+        payload_dir = root / executor["path"]
+        for source in sorted(payload_dir.rglob("*")):
             if source.is_symlink():
                 raise ValueError("symlink in catalog source")
             if source.is_file():
-                relative = source.relative_to(role)
+                relative = source.relative_to(payload_dir)
                 if "__pycache__" in relative.parts or source.suffix in {".pyc", ".pyo"}:
                     continue
-                if (kind == "ansible_role" and relative.parts[0] not in {"tasks", "meta", "files", "defaults", "vars", "handlers"}) or source.suffix not in {".yml", ".yaml", ".py", ".json", ".toml"}:
+                if source.suffix not in {".yml", ".yaml", ".py", ".json", ".toml"}:
                     raise ValueError("unexpected catalog source asset")
                 yield source, source.relative_to(root)
-    for group_name, declared in (("roles", declared_roles), ("payloads", declared_payloads)):
-        group_dir = root / group_name
-        if group_dir.exists():
-            for child in sorted(group_dir.iterdir()):
-                if child.name == "__pycache__":
-                    continue
-                if not child.is_dir() or child.is_symlink() or child.name not in declared:
-                    raise ValueError(f"unexpected catalog directory entry: {child.relative_to(root)}")
+    payloads_dir = root / "payloads"
+    if payloads_dir.exists():
+        for child in sorted(payloads_dir.iterdir()):
+            if child.name == "__pycache__":
+                continue
+            if not child.is_dir() or child.is_symlink() or child.name not in declared_payloads:
+                raise ValueError(f"unexpected catalog directory entry: {child.relative_to(root)}")
     for entry in sorted(root.iterdir()):
         if entry.suffix == ".toml" and entry.name not in declared_definitions:
             raise ValueError(f"unexpected catalog definition: {entry.name}")
-
 
 class BuildPy(build_py):
     def run(self):

@@ -22,8 +22,8 @@ def build_journal_item(r, boot, max_int=9007199254740991):
         'boot_id': r['_BOOT_ID'],
         'realtime_usec': integer('__REALTIME_TIMESTAMP'),
         'monotonic_usec': integer('__MONOTONIC_TIMESTAMP'),
-        'message': msg[:256],
-        'message_truncated': len(msg) > 256,
+        'message': msg[:512],
+        'message_truncated': len(msg) > 512,
     }
     if len(item['cursor']) > 256 or item['boot_id'] != boot:
         raise ValueError('unexpected journal identity')
@@ -52,7 +52,7 @@ def select_journal_records(
     direction='backward',
     cursor_arg='',
     skip_cursor='',
-    max_bytes=32768,
+    max_bytes=131072,
 ):
     import json
     if direction not in ('backward', 'forward'):
@@ -186,7 +186,7 @@ def main():
 
     def publish(value):
         encoded = json.dumps(value, separators=(',', ':'), allow_nan=False)
-        if len(encoded.encode()) > 32768:
+        if len(encoded.encode()) > 131072:
             raise ValueError('result bound')
         print(encoded)
 
@@ -199,7 +199,7 @@ def main():
 
     if p['since'] > p['until']:
         raise ValueError('inverted time interval')
-    if not (1 <= p['limit'] <= 50):
+    if not (1 <= p['limit'] <= 500):
         raise ValueError('limit out of bounds')
     direction = p['direction'] or 'backward'
     contains = p['contains'] or ''
@@ -227,28 +227,8 @@ def main():
 
     status = 'available'
     raw_records = []
-    probe_usec = None
-    if raw_cursor:
-        try:
-            probe = fetch_records(base + ['--cursor=' + raw_cursor, '--lines=+1'], 1)
-            if not probe or probe[0].get('__CURSOR') != raw_cursor:
-                status = 'cursor_unavailable'
-            else:
-                probe_usec = int(probe[0]['__REALTIME_TIMESTAMP'])
-                if probe[0].get('_BOOT_ID') != boot or not (p['since'] * 1000000 <= probe_usec <= p['until'] * 1000000):
-                    raise ValueError('cursor outside requested boot/time scope')
-        except UtilityError as error:
-            if 'Failed to seek to cursor' not in str(error):
-                raise
-            status = 'cursor_unavailable'
-
     if status == 'available':
-        if contains:
-            fetch_limit = 2000
-        elif direction == 'backward' and raw_cursor:
-            fetch_limit = max(p['limit'] + 64, 512)
-        else:
-            fetch_limit = p['limit'] + 1
+        fetch_limit = 2000 if contains else p['limit'] + 1
 
         query = base + ['--boot=' + boot, '--priority=0..' + str(p['priority'])]
         if direction == 'forward':
@@ -258,19 +238,29 @@ def main():
             else:
                 query += ['--since=@' + str(p['since'])]
         else:
-            upper_sec = p['until']
-            if probe_usec is not None:
-                upper_sec = min(upper_sec, probe_usec // 1000000 + 1)
             query += [
                 '--since=@' + str(p['since']),
-                '--until=@' + str(upper_sec),
+                '--until=@' + str(p['until']),
                 '--reverse',
                 '--lines=' + str(fetch_limit),
             ]
+            # Journald pages backwards directly from the retained cursor: one fixed
+            # utility invocation, no separate seek probe.
+            if raw_cursor:
+                query += ['--after-cursor=' + raw_cursor]
         if unit:
             query += ['_SYSTEMD_UNIT=' + unit]
-        raw_records = fetch_records(query, fetch_limit + 1)
+        try:
+            raw_records = fetch_records(query, fetch_limit + 1)
+        except UtilityError as error:
+            if raw_cursor and 'Failed to seek to cursor' in str(error):
+                status = 'cursor_unavailable'
+            else:
+                raise
 
+    # A backward page is fetched with --after-cursor, which already excludes the
+    # anchor record; only forward paging can still echo it in the window.
+    skip_cursor = raw_cursor if direction == 'forward' else ''
     payload = select_journal_records(
         raw_records,
         boot=boot,
@@ -283,8 +273,8 @@ def main():
         contains=contains,
         direction=direction,
         cursor_arg=p['cursor'] or '',
-        skip_cursor=raw_cursor,
-        max_bytes=32768,
+        skip_cursor=skip_cursor,
+        max_bytes=131072,
     )
     publish(payload)
 

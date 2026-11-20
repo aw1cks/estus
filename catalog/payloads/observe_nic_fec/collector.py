@@ -94,7 +94,12 @@ def main():
         address = stream.read(65)
     if len(address) > 64 or address.strip() != policy['mac']:
         raise ValueError('interface identity mismatch')
-    driver = os.path.basename(os.path.realpath(base + '/device/driver', strict=True))
+    link = base + '/device/driver'
+    try:
+        os.stat(link)
+    except OSError:
+        raise ValueError('driver link absent')
+    driver = os.path.basename(os.path.realpath(link))
     if driver != policy['driver']:
         raise ValueError('driver outside reviewed policy')
     state = parse_fec(run(['--show-fec', dev]))

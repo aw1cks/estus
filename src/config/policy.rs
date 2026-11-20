@@ -75,6 +75,10 @@ impl Target {
                 .as_ref()
                 .is_none_or(|names| names.contains(name))
     }
+
+    pub(super) fn permits_workstation_sudo(&self) -> bool {
+        Capabilities::from(self.capabilities).sudo && self.sudo.workstation_route().is_some()
+    }
 }
 
 impl Sudo {
@@ -136,6 +140,28 @@ impl Sudo {
             }
         }
     }
+
+    /// Elevation route a dynamic workstation binding may use. Dynamic Python and
+    /// Ansible payloads never pin the native program a sudo policy allowlists, so
+    /// only an unrestricted root policy is equivalent to workstation sudo.
+    /// `Some(None)` is same-account root; `Some(Some(host))` is separate identity.
+    pub(super) fn workstation_route(&self) -> Option<Option<&str>> {
+        match self {
+            Self::Disabled => None,
+            Self::SameAccount { users, programs } => {
+                unrestricted_root(users, programs).then_some(None)
+            }
+            Self::SeparateIdentity {
+                ssh_host,
+                users,
+                programs,
+            } => unrestricted_root(users, programs).then_some(Some(ssh_host.as_str())),
+        }
+    }
+}
+
+fn unrestricted_root(users: &[String], programs: &Option<Vec<String>>) -> bool {
+    users.iter().any(|user| user == "root") && programs.is_none()
 }
 
 impl Config {
@@ -152,23 +178,22 @@ impl Config {
         self.automation.required
     }
 
-    /// Resolve the optional reference only when runtime health is requested.
-    /// This validates its shape without inspecting any runtime files.
+    /// Resolve the optional bundle reference when runtime health or activation is requested.
     pub(crate) fn automation_runtime(&self) -> Result<Option<PathBuf>, ConfigError> {
-        self.automation_runtime_with(|key| std::env::var_os(key))
+        self.automation_bundle_with(|key| std::env::var_os(key))
     }
 
-    pub(super) fn automation_runtime_with(
+    pub(super) fn automation_bundle_with(
         &self,
         env: impl FnOnce(&str) -> Option<OsString>,
     ) -> Result<Option<PathBuf>, ConfigError> {
-        if let Some(path) = &self.automation.runtime {
+        if let Some(path) = &self.automation.bundle {
             return Ok(Some(path.clone()));
         }
-        env("ESTUS_ANSIBLE_RUNTIME")
+        env("ESTUS_ANSIBLE_BUNDLE")
             .map(|value| {
                 let value = value.to_str().ok_or_else(|| {
-                    invalid("automation.runtime", "must be a bounded absolute path")
+                    invalid("automation.bundle", "must be a bounded absolute path")
                 })?;
                 validate_runtime_path(value)?;
                 Ok(PathBuf::from(value))
@@ -195,24 +220,23 @@ impl Config {
                 .get(id)
                 .and_then(|binding| binding.automation_authority())
             {
-                let (name, authority) = self
-                    .automation
-                    .authorities
-                    .get_key_value(name)
-                    .ok_or_else(|| invalid("tools", "automation authority is not configured"))?;
-                if inspected_payload_authorities.insert(name.as_str()) {
-                    let config = authority.ssh_config_file.clone();
-                    let socket = authority.ssh_auth_sock.clone();
-                    tokio::task::spawn_blocking(move || {
-                        inspect_automation_authority(&config, socket.as_deref())
-                    })
-                    .await
-                    .map_err(|_| {
-                        invalid(
-                            "automation.authorities.*",
-                            "cannot inspect selected authority",
-                        )
-                    })??;
+                if let Some((name, authority)) = self.automation.authorities.get_key_value(name) {
+                    if inspected_payload_authorities.insert(name.as_str()) {
+                        let config = authority.ssh_config_file.clone();
+                        let socket = authority.ssh_auth_sock.clone();
+                        tokio::task::spawn_blocking(move || {
+                            inspect_automation_authority(&config, socket.as_deref())
+                        })
+                        .await
+                        .map_err(|_| {
+                            invalid(
+                                "automation.authorities.*",
+                                "cannot inspect selected authority",
+                            )
+                        })??;
+                    }
+                } else if self.mode != Mode::Workstation || !self.capabilities.sudo {
+                    return Err(invalid("tools", "automation authority is not configured"));
                 }
             }
             self.bindings.activate_payload(id, ct).await?;
@@ -230,89 +254,97 @@ impl Config {
         if active.is_empty() {
             return Ok(false);
         }
-        let needs_inherited_runtime = active.iter().any(|id| {
-            match self
-                .bindings
-                .get(*id)
-                .and_then(|binding| binding.automation_authority())
-            {
-                Some(AutomationAuthority::Ordinary) => true,
-                Some(AutomationAuthority::Named(name)) => self
-                    .automation
-                    .authorities
-                    .get(name)
-                    .is_some_and(|authority| authority.runtime.is_none()),
-                None => false,
-            }
-        });
-        let inherited_runtime = if needs_inherited_runtime {
-            self.automation_runtime()?
-        } else {
-            None
-        };
-        let root = crate::bindings::controller_root(self.automation.workspace_root.as_deref())?;
+        let inherited_bundle = self.automation_runtime()?;
         let mut inspected = inspected_payload_authorities;
+        let mut loaded_packs: BTreeMap<PathBuf, std::sync::Arc<crate::bundle::BundlePack>> =
+            BTreeMap::new();
         for id in active {
-            let (runtime, agent_socket) = match self
+            if ct.is_cancelled() {
+                return Err(
+                    invalid("automation", "cancelled").with_cause("cancelled", "activation")
+                );
+            }
+            let (authority_bundle, per_binding_bundle) = {
+                let binding = self
+                    .bindings
+                    .get(id)
+                    .ok_or_else(|| invalid("tools", "unknown automation binding"))?;
+                let override_path = binding.bundle_override().map(Path::to_path_buf);
+                let auth_bundle = match binding.automation_authority() {
+                    Some(AutomationAuthority::Named(name)) => {
+                        if let Some((name, authority)) =
+                            self.automation.authorities.get_key_value(name)
+                        {
+                            if inspected.insert(name.as_str()) {
+                                let config = authority.ssh_config_file.clone();
+                                let socket = authority.ssh_auth_sock.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    inspect_automation_authority(&config, socket.as_deref())
+                                })
+                                .await
+                                .map_err(|_| {
+                                    invalid(
+                                        "automation.authorities.*",
+                                        "cannot inspect selected authority",
+                                    )
+                                })??;
+                            }
+                            authority.bundle.clone()
+                        } else if self.mode == Mode::Workstation && self.capabilities.sudo {
+                            None
+                        } else {
+                            return Err(invalid("tools", "automation authority is not configured"));
+                        }
+                    }
+                    Some(AutomationAuthority::Ordinary) => None,
+                    None => return Err(invalid("tools", "automation authority is not configured")),
+                };
+                (auth_bundle, override_path)
+            };
+            let dynamic_optional = self
                 .bindings
                 .get(id)
-                .and_then(|binding| binding.automation_authority())
-            {
-                Some(AutomationAuthority::Named(name)) => {
-                    let (name, authority) = self
-                        .automation
-                        .authorities
-                        .get_key_value(name)
-                        .ok_or_else(|| {
-                            invalid("tools", "automation authority is not configured")
-                        })?;
-                    if inspected.insert(name.as_str()) {
-                        let config = authority.ssh_config_file.clone();
-                        let socket = authority.ssh_auth_sock.clone();
-                        tokio::task::spawn_blocking(move || {
-                            inspect_automation_authority(&config, socket.as_deref())
-                        })
-                        .await
-                        .map_err(|_| {
-                            invalid(
-                                "automation.authorities.*",
-                                "cannot inspect selected authority",
-                            )
-                        })??;
-                    }
-                    (
-                        authority
-                            .runtime
-                            .as_ref()
-                            .or(inherited_runtime.as_ref())
-                            .cloned(),
-                        authority
-                            .ssh_auth_sock
-                            .as_ref()
-                            .map(|path| path.as_os_str().to_owned()),
-                    )
+                .is_some_and(|b| b.has_dynamic_targets())
+                && !self.automation.required;
+            let Some(bundle_path) = per_binding_bundle
+                .or(authority_bundle)
+                .or_else(|| inherited_bundle.clone())
+                .or_else(crate::bundle::discover_default_bundle)
+            else {
+                if dynamic_optional {
+                    self.bindings.disable(id);
+                    continue;
                 }
-                Some(AutomationAuthority::Ordinary) => {
-                    (inherited_runtime.clone(), std::env::var_os("SSH_AUTH_SOCK"))
-                }
-                None => return Err(invalid("tools", "automation authority is not configured")),
+                return Err(
+                    invalid("automation.bundle", "Ansible bundle pack is unavailable")
+                        .with_cause("runtime_unavailable", "runtime_selection"),
+                );
             };
-            self.bindings
-                .activate_automation(id, runtime, root.clone(), agent_socket, ct)
-                .await?;
+            let pack = if let Some(existing) = loaded_packs.get(&bundle_path) {
+                std::sync::Arc::clone(existing)
+            } else {
+                let load_path = bundle_path.clone();
+                let loaded = tokio::task::spawn_blocking(move || {
+                    crate::bundle::BundlePack::load(&load_path)
+                })
+                .await
+                .map_err(|_| {
+                    invalid("automation.bundle", "bundle verification failed")
+                        .with_cause("runtime_unavailable", "runtime_selection")
+                })?
+                .map_err(|code| {
+                    invalid("automation.bundle", code).with_cause(code, "bundle_load")
+                })?;
+                loaded_packs.insert(bundle_path, std::sync::Arc::clone(&loaded));
+                loaded
+            };
+            self.bindings.activate_automation(id, pack)?;
         }
         Ok(true)
     }
 
     pub(crate) fn automation_concurrency(&self) -> usize {
         self.automation.max_concurrent
-    }
-
-    pub(crate) fn automation_scratch(&self) -> (u64, usize) {
-        (
-            self.automation.max_scratch_bytes,
-            self.automation.max_scratch_files,
-        )
     }
 
     pub(crate) fn mode(&self) -> Mode {
@@ -376,18 +408,19 @@ impl Config {
         }
         let ssh_executable = self.ssh_executable();
         if binding.has_dynamic_targets() {
-            if self.mode != Mode::Workstation
-                || !matches!(
-                    binding.automation_authority(),
-                    Some(AutomationAuthority::Ordinary)
-                )
-            {
+            if self.mode != Mode::Workstation {
                 return Err(denied());
             }
             destination(host, "host").map_err(|_| {
                 ToolError::invalid_argument("Host must be a safe nonempty SSH destination", false)
             })?;
-            if let Some(target) = self.targets.as_ref().and_then(|targets| targets.get(host))
+            // A configured destination policy is an allowlist, not a default:
+            // an unlisted host is denied rather than used as a raw destination.
+            let target = match &self.targets {
+                Some(targets) => Some(targets.get(host).ok_or_else(denied)?),
+                None => None,
+            };
+            if let Some(target) = target
                 && !target.permits_binding(&binding.name)
             {
                 return Err(denied());
@@ -398,29 +431,76 @@ impl Config {
                 &binding.name,
                 risk_tier_for_binding(binding),
             )?;
+            static WORKSTATION_SUDO: std::sync::LazyLock<AutomationBecome> =
+                std::sync::LazyLock::new(|| AutomationBecome::Sudo {
+                    user: "root".to_owned(),
+                    executable: "/usr/bin/sudo".to_owned(),
+                });
+            let workstation_become = match binding.automation_authority() {
+                Some(AutomationAuthority::Ordinary) => None,
+                Some(AutomationAuthority::Named(name)) => {
+                    if !self.capabilities.sudo {
+                        return Err(denied());
+                    }
+                    if let Some(authority) = self.automation.authorities.get(name) {
+                        let mapped = authority.targets.get(host).ok_or_else(denied)?;
+                        return Ok(ResolvedAutomation {
+                            target: Cow::Borrowed(mapped),
+                            ssh_config: Some(&authority.ssh_config_file),
+                            ssh_executable,
+                            r#become: Some(&authority.r#become),
+                            agent: authority
+                                .ssh_auth_sock
+                                .as_deref()
+                                .map_or(AutomationAgent::Disabled, AutomationAgent::Fixed),
+                            dynamic_python: mapped.python.is_empty(),
+                        });
+                    }
+                    // Workstation sudo fallback: the per-target policy must grant
+                    // unrestricted root elevation. Dynamic payloads run Python
+                    // scripts, not an allowlisted native program, so a pinned
+                    // program list would otherwise be silently bypassed.
+                    if let Some(target) = target
+                        && !target.permits_workstation_sudo()
+                    {
+                        return Err(denied());
+                    }
+                    Some(&*WORKSTATION_SUDO)
+                }
+                None => return Err(denied()),
+            };
+            // Separate-identity elevation must connect to its own SSH host, and
+            // only when this binding actually elevates.
+            let elevated_destination = workstation_become
+                .as_ref()
+                .and_then(|_| target.and_then(|target| target.sudo.workstation_route().flatten()));
             if let Some(mapped) = self.automation.targets.get(host) {
+                let destination =
+                    elevated_destination.map_or_else(|| mapped.destination.clone(), str::to_owned);
                 return Ok(ResolvedAutomation {
-                    target: Cow::Borrowed(mapped),
+                    target: Cow::Owned(AutomationTarget {
+                        destination,
+                        python: mapped.python.clone(),
+                    }),
                     ssh_config: self.ssh_config.as_deref(),
                     ssh_executable,
-                    r#become: None,
+                    r#become: workstation_become,
                     agent: AutomationAgent::Inherit,
                     dynamic_python: mapped.python.is_empty(),
                 });
             }
-            let resolved_destination = self
-                .targets
-                .as_ref()
-                .and_then(|targets| targets.get(host))
-                .map_or(host, |target| target.ssh_host.as_str());
+            let resolved_destination = elevated_destination.map_or_else(
+                || target.map_or(host.to_owned(), |target| target.ssh_host.clone()),
+                str::to_owned,
+            );
             return Ok(ResolvedAutomation {
                 target: Cow::Owned(AutomationTarget {
-                    destination: resolved_destination.to_owned(),
+                    destination: resolved_destination,
                     python: String::new(),
                 }),
                 ssh_config: self.ssh_config.as_deref(),
                 ssh_executable,
-                r#become: None,
+                r#become: workstation_become,
                 agent: AutomationAgent::Inherit,
                 dynamic_python: true,
             });
@@ -508,7 +588,7 @@ impl Config {
             .authorities
             .get(name)
             .ok_or_else(|| invalid("tools", "automation authority is not configured"))?;
-        match &selected.runtime {
+        match &selected.bundle {
             Some(path) => Ok(Some(path.clone())),
             None => self.automation_runtime(),
         }
@@ -519,7 +599,9 @@ impl Config {
             && self.bindings.get(id).is_some_and(|binding| {
                 binding.enabled()
                     && (binding.automation_authority().is_none()
-                        || (binding.has_dynamic_targets() && self.mode == Mode::Workstation)
+                        || (binding.has_dynamic_targets()
+                            && self.mode == Mode::Workstation
+                            && self.dynamic_workstation_enabled(binding))
                         || binding.targets.iter().any(|name| {
                             self.targets
                                 .as_ref()
@@ -527,6 +609,29 @@ impl Config {
                                 .is_some_and(|target| target.permits_binding(&binding.name))
                         }))
             })
+    }
+
+    /// A dynamic workstation binding is exposed only when a configured target
+    /// would actually authorize it; an empty `[targets]` table exposes none.
+    fn dynamic_workstation_enabled(&self, binding: &crate::bindings::CompiledBinding) -> bool {
+        let Some(targets) = &self.targets else {
+            return true;
+        };
+        let authority = binding.automation_authority();
+        targets.iter().any(|(host_name, target)| {
+            target.permits_binding(&binding.name)
+                && match authority {
+                    Some(AutomationAuthority::Ordinary) => true,
+                    Some(AutomationAuthority::Named(name)) => {
+                        self.automation
+                            .authorities
+                            .get(name)
+                            .is_some_and(|authority| authority.targets.contains_key(host_name))
+                            || (self.capabilities.sudo && target.permits_workstation_sudo())
+                    }
+                    None => false,
+                }
+        })
     }
 
     pub(crate) fn controller_enabled(&self, id: BindingId) -> bool {
@@ -912,15 +1017,15 @@ mod tests {
             ("files-only", "baseline", true),
             ("baseline", "files-only", true),
         ] {
-            for kind in ["ansible_module", "ansible_role"] {
-                let text = automation_text(global, target, enabled).replace("ansible_module", kind);
-                let mut config = load_text(&text, &[]).unwrap();
-                config
+            let text = automation_text(global, target, enabled);
+            let mut config = load_text(&text, &[]).unwrap();
+            assert!(
+                !config
                     .activate_automation(&tokio_util::sync::CancellationToken::new())
                     .await
-                    .unwrap();
-                assert!(!config.binding_enabled(BindingId(0)));
-            }
+                    .unwrap()
+            );
+            assert!(!config.binding_enabled(BindingId(0)));
         }
     }
 
@@ -931,7 +1036,7 @@ mod tests {
             .activate_automation(&tokio_util::sync::CancellationToken::new())
             .await
             .unwrap_err();
-        assert_eq!(error.field, "tools");
+        assert_eq!(error.field, "automation.bundle");
         let target = config.automation_target(BindingId(0), "server").unwrap();
         assert_eq!(target.target.destination, "automation-alias");
         assert!(
@@ -1734,31 +1839,31 @@ result={{kind="controller_command"}}
         let config = load_text("", &[]).unwrap();
         assert_eq!(
             config
-                .automation_runtime_with(|key| {
-                    assert_eq!(key, "ESTUS_ANSIBLE_RUNTIME");
-                    Some("/nonexistent-private-runtime".into())
+                .automation_bundle_with(|key| {
+                    assert_eq!(key, "ESTUS_ANSIBLE_BUNDLE");
+                    Some("/nonexistent-private-bundle".into())
                 })
                 .unwrap(),
-            Some(PathBuf::from("/nonexistent-private-runtime"))
+            Some(PathBuf::from("/nonexistent-private-bundle"))
         );
         for value in [
             String::new(),
-            "private-relative-runtime".to_owned(),
-            "/private\0runtime".to_owned(),
+            "private-relative-bundle".to_owned(),
+            "/private\0bundle".to_owned(),
             format!("/{}", "x".repeat(4096)),
         ] {
             let error = config
-                .automation_runtime_with(|_| Some(value.into()))
+                .automation_bundle_with(|_| Some(value.into()))
                 .unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "automation.runtime: must be a bounded absolute path"
+                "automation.bundle: must be a bounded absolute path"
             );
         }
         let boundary = format!("/{}", "x".repeat(4095));
         assert_eq!(
             config
-                .automation_runtime_with(|_| Some(boundary.clone().into()))
+                .automation_bundle_with(|_| Some(boundary.clone().into()))
                 .unwrap(),
             Some(PathBuf::from(boundary))
         );
@@ -1770,11 +1875,11 @@ result={{kind="controller_command"}}
         use std::os::unix::ffi::OsStringExt;
         let config = load_text("", &[]).unwrap();
         let error = config
-            .automation_runtime_with(|_| Some(OsString::from_vec(vec![b'/', 0xff])))
+            .automation_bundle_with(|_| Some(OsString::from_vec(vec![b'/', 0xff])))
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "automation.runtime: must be a bounded absolute path"
+            "automation.bundle: must be a bounded absolute path"
         );
     }
 
@@ -1994,5 +2099,161 @@ enum = ["/etc/passwd"]
             &[],
         );
         assert_eq!(conflict.err().unwrap().field, "rules");
+    }
+
+    /// Dynamic workstation tool with an ordinary and a named authority route.
+    /// `authority` is either empty or a complete `[automation.authorities.*]`.
+    fn dynamic_workstation_text(targets: &str, authority: &str) -> String {
+        format!(
+            r#"
+mode = "workstation"
+capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
+destination_policy = "configured"
+enabled_tools = ["automation", "catalog"]
+{targets}
+{authority}
+[tools.automation]
+description = "Dynamic ordinary automation"
+revision = "1"
+authority = "automation"
+effects = ["read"]
+execution = {{ kind = "ansible_module", module = "ansible.builtin.stat" }}
+result = {{ kind = "ansible_summary" }}
+input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
+
+[tools.catalog]
+description = "Dynamic named automation"
+revision = "1"
+authority = "automation:catalog"
+effects = ["read"]
+execution = {{ kind = "ansible_module", module = "ansible.builtin.stat" }}
+result = {{ kind = "ansible_summary" }}
+input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
+"#
+        )
+    }
+
+    fn dynamic_ids(config: &Config) -> (BindingId, BindingId) {
+        let mut ordinary = None;
+        let mut named = None;
+        for (id, binding) in config.bindings.entries() {
+            match binding.name.as_str() {
+                "automation" => ordinary = Some(id),
+                "catalog" => named = Some(id),
+                _ => {}
+            }
+        }
+        (
+            ordinary.expect("ordinary dynamic binding missing"),
+            named.expect("named dynamic binding missing"),
+        )
+    }
+
+    #[test]
+    fn empty_targets_table_disables_and_denies_every_dynamic_binding() {
+        let config = load_text(&dynamic_workstation_text("[targets]", ""), &[]).unwrap();
+        assert!(config.targets.as_ref().is_some_and(BTreeMap::is_empty));
+        let (ordinary, named) = dynamic_ids(&config);
+        assert!(!config.binding_enabled(ordinary));
+        assert!(!config.binding_enabled(named));
+        for id in [ordinary, named] {
+            for host in ["db", "unlisted", "server"] {
+                assert_eq!(
+                    config.automation_target(id, host).err().unwrap().code(),
+                    "policy_denied",
+                    "{id:?} {host}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn configured_targets_deny_unlisted_dynamic_hosts() {
+        let config = load_text(
+            &dynamic_workstation_text("[targets.db]\nssh_host = \"db-ordinary\"", ""),
+            &[],
+        )
+        .unwrap();
+        let (ordinary, _) = dynamic_ids(&config);
+        assert!(config.binding_enabled(ordinary));
+        assert!(config.automation_target(ordinary, "db").is_ok());
+        assert_eq!(
+            config
+                .automation_target(ordinary, "unlisted")
+                .err()
+                .unwrap()
+                .code(),
+            "policy_denied"
+        );
+    }
+
+    #[test]
+    fn default_disabled_sudo_allows_ordinary_but_denies_named_dynamic_elevation() {
+        let config = load_text(
+            &dynamic_workstation_text("[targets.db]\nssh_host = \"db-ordinary\"", ""),
+            &[],
+        )
+        .unwrap();
+        let (ordinary, named) = dynamic_ids(&config);
+        let resolved = config.automation_target(ordinary, "db").unwrap();
+        assert_eq!(resolved.target.destination, "db-ordinary");
+        assert!(resolved.r#become.is_none());
+        assert!(!config.binding_enabled(named));
+        assert_eq!(
+            config.automation_target(named, "db").err().unwrap().code(),
+            "policy_denied"
+        );
+    }
+
+    #[test]
+    fn unrestricted_root_sudo_permits_named_dynamic_elevation_only() {
+        let unrestricted = load_text(
+            &dynamic_workstation_text(
+                "[targets.db]\nssh_host = \"db-ordinary\"\n[targets.db.sudo]\nmode = \"same-account\"",
+                "",
+            ),
+            &[],
+        )
+        .unwrap();
+        let (_, named) = dynamic_ids(&unrestricted);
+        assert!(unrestricted.binding_enabled(named));
+        let resolved = unrestricted.automation_target(named, "db").unwrap();
+        // Same-account elevation stays on the ordinary SSH destination.
+        assert_eq!(resolved.target.destination, "db-ordinary");
+        assert!(resolved.r#become.is_some());
+
+        for restricted in [
+            "[targets.db]\nssh_host = \"db-ordinary\"\n[targets.db.sudo]\nmode = \"same-account\"\nprograms = [\"/usr/bin/id\"]",
+            "[targets.db]\nssh_host = \"db-ordinary\"\n[targets.db.sudo]\nmode = \"same-account\"\nusers = [\"app\"]",
+        ] {
+            let config = load_text(&dynamic_workstation_text(restricted, ""), &[]).unwrap();
+            let (_, named) = dynamic_ids(&config);
+            assert!(!config.binding_enabled(named), "{restricted}");
+            assert_eq!(
+                config.automation_target(named, "db").err().unwrap().code(),
+                "policy_denied"
+            );
+        }
+    }
+
+    #[test]
+    fn separate_identity_sudo_routes_dynamic_elevation_to_the_elevated_host() {
+        let config = load_text(
+            &dynamic_workstation_text(
+                "[targets.db]\nssh_host = \"db-ordinary\"\n\
+                 [targets.db.sudo]\nmode = \"separate-identity\"\nssh_host = \"db-admin\"",
+                "",
+            ),
+            &[],
+        )
+        .unwrap();
+        let (ordinary, named) = dynamic_ids(&config);
+        let elevated = config.automation_target(named, "db").unwrap();
+        assert_eq!(elevated.target.destination, "db-admin");
+        assert!(elevated.r#become.is_some());
+        // Ordinary dynamic bindings never elevate, so they stay on the ordinary host.
+        let plain = config.automation_target(ordinary, "db").unwrap();
+        assert_eq!(plain.target.destination, "db-ordinary");
+        assert!(plain.r#become.is_none());
     }
 }

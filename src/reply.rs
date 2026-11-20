@@ -36,7 +36,6 @@ enum ErrorCode {
     TargetQuarantined,
     Timeout,
     Unsupported,
-    UnsupportedWorkspaceEntry,
 }
 
 impl ErrorCode {
@@ -73,7 +72,6 @@ impl ErrorCode {
             Self::TargetQuarantined => "target_quarantined",
             Self::Timeout => "timeout",
             Self::Unsupported => "unsupported",
-            Self::UnsupportedWorkspaceEntry => "unsupported_workspace_entry",
         }
     }
 }
@@ -83,6 +81,41 @@ impl Serialize for ErrorCode {
         serializer.serialize_str(self.as_str())
     }
 }
+
+/// Every production error code, ordered by its snake_case wire string.
+///
+/// Test-only codes such as `ControllerTimeout` stay out of the public schema.
+const ALL_PUBLIC: &[ErrorCode] = &[
+    ErrorCode::AlreadyExists,
+    ErrorCode::AutomationFailed,
+    ErrorCode::Cancelled,
+    ErrorCode::ChecksumMismatch,
+    ErrorCode::CleanupIncomplete,
+    ErrorCode::CommandFailed,
+    ErrorCode::ConnectionLost,
+    ErrorCode::ControllerResourceLimit,
+    ErrorCode::DiscoveryFailed,
+    ErrorCode::InvalidArgument,
+    ErrorCode::InvalidEncoding,
+    ErrorCode::InvalidProjection,
+    ErrorCode::InvalidResult,
+    ErrorCode::IoError,
+    ErrorCode::NotFound,
+    ErrorCode::PayloadFailed,
+    ErrorCode::PayloadRejected,
+    ErrorCode::PermissionDenied,
+    ErrorCode::PolicyDenied,
+    ErrorCode::PreviewRequired,
+    ErrorCode::ResourceLimit,
+    ErrorCode::ResourceUnavailable,
+    ErrorCode::Shutdown,
+    ErrorCode::SpawnFailed,
+    ErrorCode::SshConnectFailed,
+    ErrorCode::SshSpawnFailed,
+    ErrorCode::TargetQuarantined,
+    ErrorCode::Timeout,
+    ErrorCode::Unsupported,
+];
 
 impl JsonSchema for ErrorCode {
     fn inline_schema() -> bool {
@@ -98,7 +131,16 @@ impl JsonSchema for ErrorCode {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <&str>::json_schema(generator)
+        // A closed set: callers can branch on the exact wire strings.
+        let mut schema = <&str>::json_schema(generator);
+        let values = ALL_PUBLIC
+            .iter()
+            .map(|code| serde_json::Value::String(code.as_str().to_owned()))
+            .collect();
+        schema
+            .ensure_object()
+            .insert("enum".to_owned(), serde_json::Value::Array(values));
+        schema
     }
 }
 
@@ -309,6 +351,10 @@ pub struct ToolError {
     pub remote_state_unknown: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<PayloadFailureReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<&'static str>,
 }
 
 impl ToolError {
@@ -324,6 +370,8 @@ impl ToolError {
             message: Cow::Borrowed(message),
             remote_state_unknown,
             reason: None,
+            schema_path: None,
+            constraint: None,
         }
     }
 
@@ -351,13 +399,6 @@ impl ToolError {
         remote_state_unknown: bool,
     ) -> Self {
         Self::new(ErrorCode::ChecksumMismatch, message, remote_state_unknown)
-    }
-
-    pub(crate) const fn cleanup_incomplete(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::CleanupIncomplete, message, remote_state_unknown)
     }
 
     pub(crate) const fn command_failed(message: &'static str, remote_state_unknown: bool) -> Self {
@@ -388,6 +429,8 @@ impl ToolError {
             message: Cow::Owned(message),
             remote_state_unknown: false,
             reason: None,
+            schema_path: None,
+            constraint: None,
         }
     }
 
@@ -403,6 +446,23 @@ impl ToolError {
         remote_state_unknown: bool,
     ) -> Self {
         Self::new(ErrorCode::InvalidProjection, message, remote_state_unknown)
+    }
+
+    pub(crate) fn invalid_projection_at(schema_path: String, constraint: &'static str) -> Self {
+        let mut trimmed = schema_path;
+        if trimmed.len() > 96 {
+            trimmed.truncate(96);
+        }
+        let message =
+            format!("Payload output violates approved projection at {trimmed} ({constraint})");
+        Self {
+            code: ErrorCode::InvalidProjection,
+            message: Cow::Owned(message),
+            remote_state_unknown: false,
+            reason: None,
+            schema_path: Some(trimmed),
+            constraint: Some(constraint),
+        }
     }
 
     pub(crate) const fn invalid_result(message: &'static str, remote_state_unknown: bool) -> Self {
@@ -430,6 +490,8 @@ impl ToolError {
             message: Cow::Borrowed(reason.message()),
             remote_state_unknown,
             reason: Some(reason),
+            schema_path: None,
+            constraint: None,
         }
     }
 
@@ -576,10 +638,6 @@ impl ControllerError {
         Self::new(ErrorCode::InvalidArgument, message)
     }
 
-    pub(crate) const fn invalid_result(message: &'static str) -> Self {
-        Self::new(ErrorCode::InvalidResult, message)
-    }
-
     pub(crate) const fn io_error(message: &'static str) -> Self {
         Self::new(ErrorCode::IoError, message)
     }
@@ -602,10 +660,6 @@ impl ControllerError {
 
     pub(crate) const fn timeout(message: &'static str) -> Self {
         Self::new(ErrorCode::Timeout, message)
-    }
-
-    pub(crate) const fn unsupported_workspace_entry(message: &'static str) -> Self {
-        Self::new(ErrorCode::UnsupportedWorkspaceEntry, message)
     }
 }
 
@@ -671,14 +725,6 @@ impl ControllerReply {
 
     pub(crate) fn data(&self) -> Option<&ControllerData> {
         self.outcome.data()
-    }
-
-    pub(crate) fn into_parts(self) -> (Option<ControllerData>, Option<ControllerError>) {
-        match self.outcome {
-            ReplyOutcome::Success(data) => (Some(data), None),
-            ReplyOutcome::Failure(error) => (None, Some(error)),
-            ReplyOutcome::Partial { data, error } => (Some(data), Some(error)),
-        }
     }
 
     pub(crate) fn data_mut(&mut self) -> Option<&mut ControllerData> {
@@ -902,6 +948,92 @@ mod tests {
     }
 
     #[test]
+    fn public_error_code_schema_is_the_exact_sorted_closed_enum() {
+        let mut names: Vec<&str> = ALL_PUBLIC.iter().map(|code| code.as_str()).collect();
+        let sorted = {
+            let mut copy = names.clone();
+            copy.sort_unstable();
+            copy
+        };
+        assert_eq!(names, sorted, "ALL_PUBLIC must stay sorted by wire string");
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            ALL_PUBLIC.len(),
+            "ALL_PUBLIC must not repeat a code"
+        );
+
+        // Every non-test variant must be published exactly once.
+        let production = [
+            ErrorCode::AlreadyExists,
+            ErrorCode::AutomationFailed,
+            ErrorCode::Cancelled,
+            ErrorCode::ChecksumMismatch,
+            ErrorCode::CleanupIncomplete,
+            ErrorCode::CommandFailed,
+            ErrorCode::ConnectionLost,
+            ErrorCode::ControllerResourceLimit,
+            ErrorCode::DiscoveryFailed,
+            ErrorCode::InvalidArgument,
+            ErrorCode::InvalidEncoding,
+            ErrorCode::InvalidProjection,
+            ErrorCode::InvalidResult,
+            ErrorCode::IoError,
+            ErrorCode::NotFound,
+            ErrorCode::PayloadFailed,
+            ErrorCode::PayloadRejected,
+            ErrorCode::PermissionDenied,
+            ErrorCode::PolicyDenied,
+            ErrorCode::PreviewRequired,
+            ErrorCode::ResourceLimit,
+            ErrorCode::ResourceUnavailable,
+            ErrorCode::Shutdown,
+            ErrorCode::SpawnFailed,
+            ErrorCode::SshConnectFailed,
+            ErrorCode::SshSpawnFailed,
+            ErrorCode::TargetQuarantined,
+            ErrorCode::Timeout,
+            ErrorCode::Unsupported,
+        ];
+        assert_eq!(production.len(), ALL_PUBLIC.len());
+        for code in production {
+            assert!(
+                ALL_PUBLIC.contains(&code),
+                "{} is missing from ALL_PUBLIC",
+                code.as_str()
+            );
+        }
+        assert!(!ALL_PUBLIC.contains(&ErrorCode::ControllerTimeout));
+
+        // The published outputSchema enum is exactly the wire strings.
+        let schema: Value = serde_json::to_value(
+            schemars::generate::SchemaSettings::draft2020_12()
+                .for_serialize()
+                .with(|s| s.inline_subschemas = true)
+                .into_generator()
+                .into_root_schema_for::<ToolError>(),
+        )
+        .unwrap();
+        let published: Vec<String> = schema["properties"]["code"]["enum"]
+            .as_array()
+            .expect("ToolError.code must publish an enum")
+            .iter()
+            .map(|value| value.as_str().expect("enum entries are strings").to_owned())
+            .collect();
+        assert_eq!(
+            published,
+            ALL_PUBLIC
+                .iter()
+                .map(|code| code.as_str().to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !published.iter().any(|code| code == "controller_timeout"),
+            "test-only code leaked into the public schema"
+        );
+    }
+
+    #[test]
     fn every_error_code_serializes_with_exact_snake_case_name() {
         let tool_cases = [
             ("already_exists", ToolError::already_exists("m", false)),
@@ -913,10 +1045,6 @@ mod tests {
             (
                 "checksum_mismatch",
                 ToolError::checksum_mismatch("m", false),
-            ),
-            (
-                "cleanup_incomplete",
-                ToolError::cleanup_incomplete("m", false),
             ),
             ("command_failed", ToolError::command_failed("m", false)),
             ("connection_lost", ToolError::connection_lost("m", true)),
@@ -977,7 +1105,6 @@ mod tests {
                 ControllerError::controller_timeout("m"),
             ),
             ("invalid_argument", ControllerError::invalid_argument("m")),
-            ("invalid_result", ControllerError::invalid_result("m")),
             ("io_error", ControllerError::io_error("m")),
             ("policy_denied", ControllerError::policy_denied("m")),
             ("resource_limit", ControllerError::resource_limit("m")),
@@ -987,10 +1114,6 @@ mod tests {
             ),
             ("spawn_failed", ControllerError::spawn_failed("m")),
             ("timeout", ControllerError::timeout("m")),
-            (
-                "unsupported_workspace_entry",
-                ControllerError::unsupported_workspace_entry("m"),
-            ),
         ];
         for (expected, err) in &controller_cases {
             assert_eq!(err.code(), *expected);

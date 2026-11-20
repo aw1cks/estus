@@ -22,10 +22,10 @@ targets = ["server"]
 authority = "automation:catalog"
 effects = ["runtime_write", "availability", "read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/change_network_route_remove.payload.json", source = "/etc/estus/payloads/change_network_route_remove/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interface" = "catalog0", "interfaces" = ["lo", "catalog0"], "destinations" = ["127.0.0.1", "192.0.2.2"], "ports" = [18080], "addresses" = ["192.0.2.9/24"], "routes" = ["198.51.100.0/24"], "neighbors" = ["192.0.2.2"], "namespaces" = ["catalogns"], "dns_names" = ["catalog.test"], "resolver" = "127.0.0.1", "dns_port" = 15353 } }
+fixed_args = { "target_python" = "/usr/bin/python3", "operator_policy" = { "interfaces" = [], "destinations" = [], "ports" = [], "addresses" = [], "routes" = [], "neighbors" = [], "namespaces" = [], "dns_names" = [] } }
 input_map = { "interface" = "interface", "destination" = "destination" }
 limits = { timeout_secs = 30 }
-input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "enum" = ["catalog0"], "maxLength" = 256 }, "destination" = { "type" = "string", "enum" = ["198.51.100.0/24"], "maxLength" = 256 } }, "required" = ["interface", "destination"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "destination" = { "type" = "string", "minLength" = 1, "maxLength" = 64 } }, "required" = ["interface", "destination"], "additionalProperties" = false }
 [tools.change_network_route_remove.result]
 kind = "capability_projection"
 fields = { "interface" = ["mcp_result", "interface"], "operation" = ["mcp_result", "operation"], "verified" = ["mcp_result", "verified"], "persistence" = ["mcp_result", "persistence"] }

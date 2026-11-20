@@ -29,7 +29,7 @@ async fn sysctl_set_runtime_real_guest_acceptance() -> Result<()> {
         ensure!(lines.next().context("sysctl value")?.parse::<u64>()? == desired, "actual runtime setting unchanged");
         ensure!(lines.next() == Some("17"), "unrelated config was reloaded");
 
-        let absent = guest.shell("test ! -e /etc/sysctl.d/90-estus-catalog-printk-ratelimit.conf").await?;
+        let absent = guest.shell("test ! -e /etc/sysctl.d/90-estus-catalog-kernel_printk__ratelimit.conf").await?;
         ensure!(absent.status.success() && value["persistent"] == false, "runtime setting persisted unexpectedly");
         Ok(())
     }.await;

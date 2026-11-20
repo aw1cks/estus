@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "bfc1cd185d4fb3d3b0ca06df09cc169ed67cf451cc312deb430b401c8069faf5",
+  "source_sha256": "be4e5b5a0fcf3bb88e89c901a144696ce799602c13737e82b3a1562e83d85ea9",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -22,9 +22,6 @@
       "kind": "argument",
       "name": "approved_keys",
       "format": "json",
-      "default": [
-        "kernel.printk_ratelimit"
-      ],
       "omit_if_absent": false
     }
   ],
@@ -81,7 +78,8 @@
       "required": [
         "target_python",
         "key",
-        "value"
+        "value",
+        "approved_keys"
       ],
       "additionalProperties": false
     },
@@ -102,7 +100,11 @@
         },
         "approved_keys": {
           "aliases": {},
-          "properties": {}
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
         }
       }
     },
@@ -118,7 +120,8 @@
         "properties": {
           "key": {
             "type": "string",
-            "maxLength": 64,
+            "maxLength": 128,
+            "minLength": 1,
             "enum": [
               "kernel.printk_ratelimit"
             ]
@@ -126,7 +129,7 @@
           "value": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 60
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -136,7 +139,10 @@
         "additionalProperties": false
       },
       "fixed_args": {
-        "target_python": "/usr/bin/python3"
+        "target_python": "/usr/bin/python3",
+        "approved_keys": [
+          "kernel.printk_ratelimit"
+        ]
       },
       "input_map": {
         "key": "key",
@@ -191,7 +197,8 @@
         "properties": {
           "key": {
             "type": "string",
-            "maxLength": 64
+            "maxLength": 128,
+            "minLength": 1
           },
           "before": {
             "type": "integer",
@@ -201,7 +208,7 @@
           "value": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 60
+            "maximum": 9007199254740991
           },
           "verified": {
             "type": "boolean",

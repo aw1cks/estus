@@ -1,5 +1,5 @@
 def main():
-    import datetime, json, os, platform, resource, signal, subprocess, sys, tempfile, uuid
+    import datetime, json, os, re, platform, resource, signal, subprocess, sys, tempfile, uuid
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     a = json.loads(sys.argv[1])
@@ -105,7 +105,10 @@ def main():
 
     def selected_entry():
         ident = a['entry_id']
-        if ident not in ('estus-current.conf', 'estus-alternate.conf'):
+        if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_@.+:-]{0,254}', ident) or '..' in ident:
+            raise ValueError('entry ID invalid')
+        allowed = a.get('allowed_entries')
+        if not isinstance(allowed, list) or not allowed or ('*' not in allowed and ident not in allowed):
             raise ValueError('entry ID not approved')
         matches = [(v,e) for v,e in entries() if v['entry_id'] == ident]
         if len(matches) != 1:
@@ -115,9 +118,9 @@ def main():
     v,e = selected_entry()
     ident = v['entry_id']
     before = efi('LoaderEntryDefault')
-    mutation = run([os.environ['ESTUS_EXEC_BOOTCTL'],'set-default',ident])
+    mutation = run([os.environ['ESTUS_EXEC_BOOTCTL'],'set-default','--',ident])
     after = efi('LoaderEntryDefault')
-    verified = after is None if ident == '' else after == ident
+    verified = after == ident
     result.update({'entry_id':ident, 'selection_variable':'LoaderEntryDefault', 'previous_selection':before if before is not None else 'unset',
         'observed_selection':after if after is not None else 'unset', 'reboot_requested':False,
         'outcome':'uncertain' if mutation['timed_out'] else ('verified' if verified and mutation['returncode'] == 0 else 'failed'),

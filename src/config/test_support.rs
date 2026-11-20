@@ -8,7 +8,7 @@ pub(super) fn named_authority_text(global: &str, target: &str, enabled: bool) ->
         + r#"
 [automation.authorities.ops]
 ssh_config_file='/private-authority/config'
-runtime='/private-authority/runtime'
+bundle='/private-authority/bundle'
 become={method='sudo',user='root'}
 [automation.authorities.ops.targets.server]
 destination='private-authority-alias'
@@ -37,8 +37,7 @@ enabled_tools={enabled}
 ssh_host='native-alias'
 {target_caps}
 [automation]
-runtime='/unavailable/runtime.json'
-workspace_root='/unavailable/workspace'
+bundle='/unavailable/bundle'
 [automation.targets.server]
 destination='automation-alias'
 python='/unavailable/python'
@@ -48,7 +47,7 @@ revision='review-1'
 targets=['server']
 authority='automation'
 effects=['probe']
-execution={{kind='ansible_module',snapshot='/unavailable/snapshot.json'}}
+execution={{kind='ansible_module',module='ansible.builtin.stat'}}
 result={{kind='ansible_summary'}}
 input_schema={{type='object',additionalProperties=false,required=[],properties={{}}}}
 "#,

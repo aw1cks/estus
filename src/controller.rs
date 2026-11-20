@@ -5,13 +5,13 @@
 //! not descendant disappearance, rollback, or bounded shutdown on a broken OS.
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions, Permissions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use crate::bindings::{ControllerPlan, PreparedController};
 use crate::capture::{Capture, drain};
 use crate::config::CleanupDiagnostics;
 use crate::process::Children;
-use crate::progress::{Reporter, Stage};
+use crate::progress::Reporter;
 use crate::reply::{
     ControllerData, ControllerError, ControllerReply, ControllerTermination, GroupCleanup,
 };
@@ -166,17 +166,6 @@ impl Drop for CleanupReservation {
         }
     }
 }
-/// Concrete child protocols; native controller scripts retain their existing mode.
-#[derive(Debug)]
-pub(crate) enum ControllerSupervision {
-    Script,
-    Automation {
-        invocation_id: String,
-        mode: crate::automation::protocol::ExecutionMode,
-        scratch_bytes: u64,
-        scratch_files: usize,
-    },
-}
 
 pub(crate) struct ControllerContext<'a> {
     pub deadline: tokio::time::Instant,
@@ -191,108 +180,12 @@ pub(crate) struct ControllerContext<'a> {
 pub(crate) struct ControllerRun {
     pub reply: ControllerReply,
     pub pending: Option<PendingCleanup>,
-    pub automation: Option<crate::automation::protocol::Evidence>,
 }
 
 struct Setup {
     workspace: Option<PathBuf>,
     root_identity: Option<(nix::libc::dev_t, nix::libc::ino_t)>,
     ready: bool,
-}
-
-enum LeaseStage {
-    Waiting,
-    Running,
-    Finished { clean: bool },
-    Closed { clean: bool },
-}
-
-/// The CLI wrapper alone holds the writer until process exit. Its own child
-/// never inherits it, so EOF cannot precede wrapper exit and child reaping.
-struct CliLease {
-    reader: fs::File,
-    startup_writer: Option<fs::File>,
-    stage: LeaseStage,
-    invalid: bool,
-}
-
-impl CliLease {
-    fn open(path: &Path) -> io::Result<Self> {
-        let flags = nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
-        let reader = OpenOptions::new()
-            .read(true)
-            .custom_flags(flags)
-            .open(path)?;
-        if !reader.metadata()?.file_type().is_fifo() {
-            return Err(io::Error::other("invalid CLI lifetime pipe"));
-        }
-        let writer = OpenOptions::new()
-            .write(true)
-            .custom_flags(flags)
-            .open(path)?;
-        Ok(Self {
-            reader,
-            startup_writer: Some(writer),
-            stage: LeaseStage::Waiting,
-            invalid: false,
-        })
-    }
-
-    fn poll(&mut self) -> io::Result<()> {
-        if matches!(self.stage, LeaseStage::Closed { .. }) {
-            return Ok(());
-        }
-        let mut bytes = [0; 8];
-        loop {
-            let count = match self.reader.read(&mut bytes) {
-                Ok(count) => count,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
-            if count == 0 {
-                let clean =
-                    matches!(self.stage, LeaseStage::Finished { clean: true }) && !self.invalid;
-                self.stage = LeaseStage::Closed { clean };
-                return Ok(());
-            }
-            for &byte in &bytes[..count] {
-                match (&self.stage, byte) {
-                    (LeaseStage::Waiting, b'R') => {
-                        self.startup_writer.take();
-                        self.stage = LeaseStage::Running;
-                    }
-                    (LeaseStage::Running, b'C' | b'F') => {
-                        self.stage = LeaseStage::Finished {
-                            clean: byte == b'C',
-                        };
-                    }
-                    _ => {
-                        self.invalid = true;
-                        self.startup_writer.take();
-                        if matches!(self.stage, LeaseStage::Waiting) {
-                            self.stage = LeaseStage::Running;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn active(&self) -> bool {
-        matches!(
-            self.stage,
-            LeaseStage::Running | LeaseStage::Finished { .. }
-        )
-    }
-
-    fn clean(&self) -> bool {
-        !self.invalid
-            && matches!(
-                self.stage,
-                LeaseStage::Waiting | LeaseStage::Closed { clean: true }
-            )
-    }
 }
 
 /// Owned by the server's tracked local task, including after its receiver drops.
@@ -303,9 +196,6 @@ pub(crate) struct PendingCleanup {
     root_identity: Option<(nix::libc::dev_t, nix::libc::ino_t)>,
     cleanup: Option<JoinHandle<io::Result<()>>>,
     children: Children,
-    control: Option<ChildStdin>,
-    scratch: Option<JoinHandle<io::Result<ScratchStatus>>>,
-    lease: Option<CliLease>,
 }
 
 impl PendingCleanup {
@@ -316,9 +206,6 @@ impl PendingCleanup {
             root_identity: None,
             cleanup: None,
             children: Children::default(),
-            control: None,
-            scratch: None,
-            lease: None,
         }
     }
 
@@ -334,12 +221,6 @@ impl PendingCleanup {
         }
     }
 
-    /// An unkillable direct child or persistently failing filesystem can keep
-    /// this owner alive indefinitely. No numeric process-group polling occurs.
-    pub(crate) async fn finish(self) {
-        self.finish_with(None, None).await;
-    }
-
     pub(crate) async fn finish_with(
         mut self,
         mut permit: Option<OwnedSemaphorePermit>,
@@ -351,31 +232,14 @@ impl PendingCleanup {
             self.workspace = setup.workspace;
             self.root_identity = setup.root_identity;
         }
-        self.control.take();
         self.children.signal_final();
-        if let Some(scratch) = self.scratch.take() {
-            let _ = scratch.await;
-        }
         let mut reaped = self.children.reap();
-        let mut lease_active = self.lease.as_mut().is_some_and(|lease| {
-            let _ = lease.poll();
-            lease.active()
-        });
-        if (!reaped || lease_active)
-            && let Some(reservation) = slot.as_mut()
-        {
+        if !reaped && let Some(reservation) = slot.as_mut() {
             reservation.enter_child_reap();
         }
         while !reaped {
             tokio::time::sleep(POLL).await;
             reaped = self.children.reap();
-        }
-        while lease_active {
-            tokio::time::sleep(POLL).await;
-            lease_active = self.lease.as_mut().is_some_and(|lease| {
-                let _ = lease.poll();
-                lease.active()
-            });
         }
         while self.workspace.is_some() {
             self.start_workspace_cleanup();
@@ -387,8 +251,6 @@ impl PendingCleanup {
                 if let Some(reservation) = slot.as_mut() {
                     reservation.enter_workspace_remove();
                 }
-                // Release the normal operation permit only after reaping and
-                // only once the separate quarantine slot owns the workspace.
                 if slot.is_some() {
                     permit.take();
                 }
@@ -549,11 +411,9 @@ fn remove_workspace(
     }
 }
 
-fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>, automation: bool) -> Setup {
+fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>) -> Setup {
     let mut workspace = None;
     let mut root_identity = None;
-    // The path owner is outside the unwind boundary so partial private files
-    // survive a setup panic as an explicitly owned cleanup obligation.
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
         let directory = tempfile::Builder::new()
             .prefix("controller-")
@@ -580,12 +440,6 @@ fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>, automation: bool
             file.write_all(bytes)?;
             file.flush()?;
         }
-        if automation {
-            nix::unistd::mkfifo(
-                &path.join("runner.lease"),
-                nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-            )?;
-        }
         Ok(())
     }));
     Setup {
@@ -597,10 +451,8 @@ fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>, automation: bool
 
 fn spawn_script(
     owner: &mut Children,
-    control: &mut Option<ChildStdin>,
     plan: &ControllerPlan,
     workspace: &Path,
-    automation: bool,
 ) -> io::Result<(ChildStdout, ChildStderr)> {
     let group = owner.start_anchor()?;
     let group = i32::try_from(group).map_err(|_| io::Error::other("controller spawn failed"))?;
@@ -616,11 +468,7 @@ fn spawn_script(
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
         .envs(&plan.environment)
-        .stdin(if automation {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(group);
@@ -641,7 +489,6 @@ fn spawn_script(
         .script
         .as_mut()
         .ok_or_else(|| io::Error::other("controller spawn failed"))?;
-    // Both std Child handles are owned before either fallible Tokio conversion.
     let stdout = child
         .stdout
         .take()
@@ -650,7 +497,6 @@ fn spawn_script(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("controller pipe failed"))?;
-    *control = child.stdin.take();
     Ok((
         ChildStdout::from_std(stdout)?,
         ChildStderr::from_std(stderr)?,
@@ -664,9 +510,6 @@ enum Outcome {
     Io,
     Spawn,
     Setup,
-    Protocol,
-    Resource,
-    UnsupportedWorkspaceEntry,
 }
 
 async fn read_pipe<R: AsyncRead + Unpin>(
@@ -679,76 +522,6 @@ async fn read_pipe<R: AsyncRead + Unpin>(
     }
 }
 
-struct Monitoring {
-    automation: Option<crate::automation::protocol::Evidence>,
-    scratch: Option<(u64, usize)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScratchStatus {
-    Ok,
-    LimitExceeded,
-    UnsupportedEntry,
-}
-
-fn scratch_within_limit(
-    root: &Path,
-    mut bytes: u64,
-    mut files: usize,
-) -> io::Result<ScratchStatus> {
-    fn visit(
-        path: &Path,
-        depth: usize,
-        temporary: bool,
-        bytes: &mut u64,
-        files: &mut usize,
-    ) -> io::Result<ScratchStatus> {
-        if depth > 16 {
-            return Ok(ScratchStatus::LimitExceeded);
-        }
-        let entries = match fs::read_dir(path) {
-            Err(error) if depth > 0 && error.kind() == io::ErrorKind::NotFound => {
-                return Ok(ScratchStatus::Ok);
-            }
-            result => result?,
-        };
-        for entry in entries {
-            let entry = entry?;
-            if *files == 0 {
-                return Ok(ScratchStatus::LimitExceeded);
-            }
-            *files -= 1;
-            let metadata = match entry.path().symlink_metadata() {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                result => result?,
-            };
-            if metadata.is_dir() {
-                let temporary = temporary || (depth == 0 && entry.file_name() == "tmp");
-                match visit(&entry.path(), depth + 1, temporary, bytes, files)? {
-                    ScratchStatus::Ok => {}
-                    status => return Ok(status),
-                }
-            } else if metadata.is_file() {
-                if metadata.len() > *bytes {
-                    return Ok(ScratchStatus::LimitExceeded);
-                }
-                *bytes -= metadata.len();
-            } else if !((depth == 0
-                && entry.file_name() == "runner.lease"
-                && metadata.file_type().is_fifo())
-                // Python multiprocessing uses Unix sockets under private TMPDIR.
-                || (temporary
-                    && metadata.file_type().is_socket()
-                    && metadata.uid() == nix::unistd::getuid().as_raw()))
-            {
-                return Ok(ScratchStatus::UnsupportedEntry);
-            }
-        }
-        Ok(ScratchStatus::Ok)
-    }
-    visit(root, 0, false, &mut bytes, &mut files)
-}
-
 async fn monitor(
     owner: &mut PendingCleanup,
     stdout: &mut Option<ChildStdout>,
@@ -756,50 +529,14 @@ async fn monitor(
     output: &mut Capture,
     errors: &mut Capture,
     context: &ControllerContext<'_>,
-    monitoring: &mut Monitoring,
 ) -> Outcome {
     let mut out_buffer = [0; 8192];
     let mut err_buffer = [0; 8192];
-    let mut next_scratch = tokio::time::Instant::now();
     loop {
-        // Status wins over a late cancellation, including when no pipes remain.
         match owner.children.script_status() {
             Ok(Some(status)) => return Outcome::Completed(status),
             Err(_) => return Outcome::Io,
             Ok(None) => {}
-        }
-        if let Some(lease) = owner.lease.as_mut() {
-            if lease.poll().is_err() {
-                return Outcome::Io;
-            }
-            if lease.invalid {
-                return Outcome::Protocol;
-            }
-        }
-        if let Some((bytes, files)) = monitoring.scratch {
-            if owner.scratch.as_ref().is_some_and(JoinHandle::is_finished) {
-                let Some(scan) = owner.scratch.take() else {
-                    return Outcome::Io;
-                };
-                match scan.await {
-                    Ok(Ok(ScratchStatus::Ok)) => {}
-                    Ok(Ok(ScratchStatus::LimitExceeded)) => return Outcome::Resource,
-                    Ok(Ok(ScratchStatus::UnsupportedEntry)) => {
-                        return Outcome::UnsupportedWorkspaceEntry;
-                    }
-                    _ => return Outcome::Io,
-                }
-            }
-            if owner.scratch.is_none() && tokio::time::Instant::now() >= next_scratch {
-                let Some(path) = owner.workspace.as_ref() else {
-                    return Outcome::Io;
-                };
-                let path = path.clone();
-                owner.scratch = Some(tokio::task::spawn_blocking(move || {
-                    scratch_within_limit(&path, bytes, files)
-                }));
-                next_scratch = tokio::time::Instant::now() + Duration::from_millis(100);
-            }
         }
         tokio::select! {
             () = context.ct.cancelled() => return Outcome::Cancelled,
@@ -808,21 +545,7 @@ async fn monitor(
             () = tokio::time::sleep(POLL) => {},
             result = read_pipe(stdout, &mut out_buffer) => match result {
                 Ok(0) => { stdout.take(); },
-                Ok(count) => if let Some(evidence) = monitoring.automation.as_mut() {
-                    let observations = evidence.feed(&out_buffer[..count]);
-                    if observations.ready {
-                        context.progress.stage(crate::progress::Stage::RunnerReady);
-                    }
-                    for _ in 0..observations.tasks {
-                        context.progress.stage(crate::progress::Stage::RunnerTask);
-                    }
-                    if observations.terminal {
-                        context.progress.stop();
-                    }
-                    if evidence.failed() {
-                        return if evidence.resource_limited() { Outcome::Resource } else { Outcome::Protocol };
-                    }
-                } else { output.retain(&out_buffer[..count]); },
+                Ok(count) => output.retain(&out_buffer[..count]),
                 Err(_) => { output.incomplete(); stdout.take(); return Outcome::Io; },
             },
             result = read_pipe(stderr, &mut err_buffer) => match result {
@@ -847,68 +570,6 @@ async fn finish_drain<R: AsyncRead + Unpin>(pipe: Option<R>, capture: &mut Captu
     }
 }
 
-async fn finish_protocol(
-    mut pipe: Option<ChildStdout>,
-    capture: &mut Capture,
-    evidence: &mut Option<crate::automation::protocol::Evidence>,
-) -> bool {
-    if evidence.is_none() {
-        return finish_drain(pipe, capture).await;
-    }
-    let result = tokio::time::timeout(GRACE, async {
-        let mut buffer = [0; 8192];
-        while let Some(stream) = pipe.as_mut() {
-            let count = stream.read(&mut buffer).await?;
-            if count == 0 {
-                break;
-            }
-            if let Some(evidence) = evidence.as_mut() {
-                evidence.feed(&buffer[..count]);
-            }
-        }
-        Ok::<_, io::Error>(())
-    })
-    .await;
-    if let Some(evidence) = evidence.as_mut() {
-        evidence.finish();
-    }
-    matches!(result, Ok(Ok(())))
-}
-
-async fn cooperative_finish(
-    owner: &mut PendingCleanup,
-    stdout: &mut Option<ChildStdout>,
-    stderr: &mut Option<ChildStderr>,
-    evidence: &mut crate::automation::protocol::Evidence,
-) {
-    owner.control.take();
-    if owner.children.script.is_none() {
-        return;
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let mut output = [0; 8192];
-    let mut errors = [0; 8192];
-    while tokio::time::Instant::now() < deadline {
-        let cli_done = owner.lease.as_mut().is_none_or(|lease| {
-            let _ = lease.poll();
-            !lease.active()
-        });
-        if !matches!(owner.children.script_status(), Ok(None)) && cli_done {
-            break;
-        }
-        tokio::select! {
-            () = tokio::time::sleep(POLL) => {},
-            result = read_pipe(stdout, &mut output) => match result {
-                Ok(0) | Err(_) => { stdout.take(); },
-                Ok(count) => { evidence.feed(&output[..count]); },
-            },
-            result = read_pipe(stderr, &mut errors) => {
-                if !matches!(result, Ok(1..)) { stderr.take(); }
-            },
-        }
-    }
-}
-
 pub(crate) async fn run(
     prepared: PreparedController,
     mut context: ControllerContext<'_>,
@@ -916,55 +577,24 @@ pub(crate) async fn run(
     context.deadline = context
         .deadline
         .min(tokio::time::Instant::now() + prepared.duration);
-    let mut monitoring = match prepared.supervision {
-        ControllerSupervision::Script => Monitoring {
-            automation: None,
-            scratch: None,
-        },
-        ControllerSupervision::Automation {
-            invocation_id,
-            mode,
-            scratch_bytes,
-            scratch_files,
-        } => Monitoring {
-            automation: Some(crate::automation::protocol::Evidence::new(
-                invocation_id,
-                mode,
-            )),
-            scratch: Some((scratch_bytes, scratch_files)),
-        },
-    };
     let mut owner = PendingCleanup::new();
     let plan = prepared.plan;
     let setup_plan = Arc::clone(&plan);
-    let automation = monitoring.automation.is_some();
-    // Automation stdout is a private protocol, not caller-owned command output.
-    // Discard even an accidentally supplied reservation before capturing anything.
-    if automation {
-        context.retention.take();
-    }
     owner.setup = Some(tokio::task::spawn_blocking(move || {
-        prepare_workspace(setup_plan, prepared.input_json, automation)
+        prepare_workspace(setup_plan, prepared.input_json)
     }));
-    let limit = if monitoring.automation.is_some() {
-        0
-    } else {
-        context.capture_limit.min(prepared.max_output_bytes)
-    };
+    let limit = context.capture_limit.min(prepared.max_output_bytes);
     let capture = || match context.retention.as_ref() {
         Some(retention) => Capture::with_retention(limit, retention.capture_limit()),
         None => Capture::new(limit),
     };
     let mut output = capture();
     let mut errors = capture();
-    if !automation {
-        output.report_to(context.progress.clone());
-        errors.report_to(context.progress.clone());
-    }
+    output.report_to(context.progress.clone());
+    errors.report_to(context.progress.clone());
     let mut stdout = None;
     let mut stderr = None;
 
-    // All direct-child/workspace/capture ownership lives outside catch_unwind.
     let operation = AssertUnwindSafe(async {
         let setup = match owner.setup.as_mut() {
             Some(setup) => tokio::select! {
@@ -986,7 +616,6 @@ pub(crate) async fn run(
         if !setup.ready {
             return Outcome::Setup;
         }
-        // Cancellation after blocking setup cannot dispatch a new child.
         if context.ct.is_cancelled() || context.shutdown.is_cancelled() {
             return Outcome::Cancelled;
         }
@@ -996,27 +625,11 @@ pub(crate) async fn run(
         let Some(workspace) = owner.workspace.as_ref() else {
             return Outcome::Setup;
         };
-        if monitoring.automation.is_some() {
-            owner.lease = match CliLease::open(&workspace.join("runner.lease")) {
-                Ok(lease) => Some(lease),
-                Err(_) => return Outcome::Setup,
-            };
-        }
-        match spawn_script(
-            &mut owner.children,
-            &mut owner.control,
-            &plan,
-            workspace,
-            monitoring.automation.is_some(),
-        ) {
+        match spawn_script(&mut owner.children, &plan, workspace) {
             Ok((out, err)) => {
                 stdout = Some(out);
                 stderr = Some(err);
-                if automation {
-                    context.progress.stage(Stage::RunnerStarted);
-                } else {
-                    context.progress.output_started();
-                }
+                context.progress.output_started();
             }
             Err(_) if owner.children.script.is_some() => return Outcome::Io,
             Err(_) => return Outcome::Spawn,
@@ -1028,24 +641,18 @@ pub(crate) async fn run(
             &mut output,
             &mut errors,
             &context,
-            &mut monitoring,
         )
         .await
     })
     .catch_unwind()
     .await;
-    // The observed outcome ends reporting before any owned cleanup or pipe tails.
     context.progress.stop();
-    let mut outcome = operation.unwrap_or(Outcome::Io);
+    let outcome = operation.unwrap_or(Outcome::Io);
     let started = owner.children.started();
-    if let Some(evidence) = monitoring.automation.as_mut() {
-        evidence.stop();
-        cooperative_finish(&mut owner, &mut stdout, &mut stderr, evidence).await;
-    }
     owner.children.signal_final();
     let cleanup_deadline = tokio::time::Instant::now() + GRACE;
     let (out_complete, err_complete) = tokio::join!(
-        finish_protocol(stdout.take(), &mut output, &mut monitoring.automation),
+        finish_drain(stdout.take(), &mut output),
         finish_drain(stderr.take(), &mut errors),
     );
     let mut reaped = owner.children.reap();
@@ -1054,34 +661,7 @@ pub(crate) async fn run(
         reaped = owner.children.reap();
     }
     let mut cleanup_ok = true;
-    if let Some(scan) = owner.scratch.as_mut() {
-        match tokio::time::timeout_at(cleanup_deadline, scan).await {
-            Ok(Ok(Ok(ScratchStatus::Ok))) => {
-                owner.scratch.take();
-            }
-            Ok(Ok(Ok(ScratchStatus::LimitExceeded))) => {
-                owner.scratch.take();
-                outcome = Outcome::Resource;
-            }
-            Ok(Ok(Ok(ScratchStatus::UnsupportedEntry))) => {
-                owner.scratch.take();
-                outcome = Outcome::UnsupportedWorkspaceEntry;
-            }
-            Ok(_) => {
-                owner.scratch.take();
-                outcome = Outcome::Io;
-            }
-            Err(_) => cleanup_ok = false,
-        }
-    }
-    let lease_done = owner.lease.as_mut().is_none_or(|lease| {
-        if lease.poll().is_err() {
-            return false;
-        }
-        !lease.active()
-    });
-    cleanup_ok &= owner.lease.as_ref().is_none_or(CliLease::clean);
-    if reaped && owner.setup.is_none() && owner.scratch.is_none() && lease_done {
+    if reaped && owner.setup.is_none() {
         owner.start_workspace_cleanup();
         if let Some(cleanup) = owner.cleanup.as_mut() {
             match tokio::time::timeout_at(cleanup_deadline, cleanup).await {
@@ -1135,30 +715,6 @@ pub(crate) async fn run(
             None,
             ControllerTermination::Cancelled,
             Some(ControllerError::cancelled("Controller command cancelled")),
-        ),
-        Outcome::Protocol => (
-            None,
-            None,
-            ControllerTermination::IoError,
-            Some(ControllerError::invalid_result(
-                "Controller protocol was invalid",
-            )),
-        ),
-        Outcome::Resource => (
-            None,
-            None,
-            ControllerTermination::IoError,
-            Some(ControllerError::resource_limit(
-                "Controller workspace or protocol limit exceeded",
-            )),
-        ),
-        Outcome::UnsupportedWorkspaceEntry => (
-            None,
-            None,
-            ControllerTermination::IoError,
-            Some(ControllerError::unsupported_workspace_entry(
-                "Controller workspace contained a prohibited symlink or special file",
-            )),
         ),
         Outcome::Io => (
             None,
@@ -1224,56 +780,22 @@ pub(crate) async fn run(
         owned_group_cleanup: group_cleanup,
         output,
     };
-    let pending = if owner.setup.is_some()
-        || !reaped
-        || owner.workspace.is_some()
-        || owner.cleanup.is_some()
-        || owner.scratch.is_some()
-        || owner.lease.as_ref().is_some_and(CliLease::active)
-    {
-        Some(owner)
-    } else {
-        None
-    };
+    let pending =
+        if owner.setup.is_some() || !reaped || owner.workspace.is_some() || owner.cleanup.is_some()
+        {
+            Some(owner)
+        } else {
+            None
+        };
     ControllerRun {
         reply: ControllerReply::with_optional_error(data, failure),
         pending,
-        automation: monitoring.automation,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn automation_scratch_counts_private_temporary_sockets_without_allowing_other_special_entries()
-    {
-        let root = tempfile::tempdir().unwrap();
-        let temporary = root.path().join("tmp").join("worker");
-        fs::create_dir_all(&temporary).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(temporary.join("ipc")).unwrap();
-        assert_eq!(
-            scratch_within_limit(root.path(), 1024, 3).unwrap(),
-            ScratchStatus::Ok
-        );
-        assert_eq!(
-            scratch_within_limit(root.path(), 1024, 2).unwrap(),
-            ScratchStatus::LimitExceeded
-        );
-        let outside = root.path().join("outside");
-        let _outside = std::os::unix::net::UnixListener::bind(&outside).unwrap();
-        assert_eq!(
-            scratch_within_limit(root.path(), 1024, 4).unwrap(),
-            ScratchStatus::UnsupportedEntry
-        );
-        fs::remove_file(outside).unwrap();
-        std::os::unix::fs::symlink(&temporary, root.path().join("link")).unwrap();
-        assert_eq!(
-            scratch_within_limit(root.path(), 1024, 4).unwrap(),
-            ScratchStatus::UnsupportedEntry
-        );
-    }
 
     #[test]
     fn repair_removes_private_0555_workspace_without_following_symlinks() {
@@ -1323,127 +845,5 @@ mod tests {
         assert_eq!(snap.workspace_remove, 2);
         slots.pop();
         assert!(quarantine.try_reserve().is_some());
-    }
-
-    #[tokio::test]
-    async fn automation_prohibited_symlink_returns_unsupported_workspace_entry() {
-        let root = tempfile::tempdir().unwrap();
-        fs::set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
-        let find = |name: &str, fallback: &str| {
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .map(|dir| dir.join(name))
-                .find(|candidate| candidate.is_file())
-                .unwrap_or_else(|| PathBuf::from(fallback))
-        };
-        let sh_path = find("sh", "/bin/sh");
-        let ln_path = find("ln", "/bin/ln");
-        let sleep_path = find("sleep", "/bin/sleep");
-        let source = format!(
-            "{} -s /tmp escape-link\n{} 0.2\n",
-            ln_path.display(),
-            sleep_path.display()
-        );
-        let prepared = PreparedController {
-            plan: Arc::new(ControllerPlan {
-                source: std::borrow::Cow::Owned(source),
-                interpreter: sh_path.to_string_lossy().into_owned(),
-                interpreter_argv: Vec::new(),
-                cwd: None,
-                environment: std::collections::BTreeMap::new(),
-                workspace_root: Arc::from(root.path()),
-            }),
-            input_json: b"{}".to_vec(),
-            duration: Duration::from_secs(5),
-            max_output_bytes: 4096,
-            supervision: ControllerSupervision::Automation {
-                invocation_id: "test-inv".into(),
-                mode: crate::automation::protocol::ExecutionMode::Module,
-                scratch_bytes: 65536,
-                scratch_files: 64,
-            },
-        };
-        let ct = CancellationToken::new();
-        let shutdown = CancellationToken::new();
-        let run = run(
-            prepared,
-            ControllerContext {
-                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
-                ct: &ct,
-                shutdown: &shutdown,
-                started: Instant::now(),
-                capture_limit: 4096,
-                retention: None,
-                progress: Reporter::default(),
-            },
-        )
-        .await;
-        assert_eq!(
-            run.reply.error().map(ControllerError::code),
-            Some("unsupported_workspace_entry")
-        );
-        if let Some(pending) = run.pending {
-            pending.finish().await;
-        }
-    }
-
-    #[test]
-    fn cli_completion_does_not_release_ownership_before_writer_exit() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("runner.lease");
-        nix::unistd::mkfifo(
-            &path,
-            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-        )
-        .unwrap();
-        let mut lease = CliLease::open(&path).unwrap();
-        let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
-        writer.write_all(b"RC").unwrap();
-        lease.poll().unwrap();
-        assert!(
-            lease.active(),
-            "a completion byte is not process-exit evidence"
-        );
-        drop(writer);
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while lease.active() && Instant::now() < deadline {
-            lease.poll().unwrap();
-            if lease.active() {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }
-        assert!(!lease.active());
-        assert!(lease.clean());
-        lease.poll().unwrap();
-        assert!(
-            lease.clean(),
-            "later polls must retain accepted exit evidence"
-        );
-    }
-
-    #[test]
-    fn forced_or_missing_cli_cleanup_acknowledgment_is_not_clean() {
-        for bytes in [b"RF".as_slice(), b"R", b"RX"] {
-            let root = tempfile::tempdir().unwrap();
-            let path = root.path().join("runner.lease");
-            nix::unistd::mkfifo(
-                &path,
-                nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-            )
-            .unwrap();
-            let mut lease = CliLease::open(&path).unwrap();
-            let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
-            writer.write_all(bytes).unwrap();
-            drop(writer);
-            let deadline = Instant::now() + Duration::from_millis(500);
-            loop {
-                lease.poll().unwrap();
-                if !lease.active() || Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            assert!(!lease.active());
-            assert!(!lease.clean());
-        }
     }
 }

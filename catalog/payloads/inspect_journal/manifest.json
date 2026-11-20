@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "e3a528aa29d7698dcfe4ac5d781a43734a5dd01b14372fde103c0339f93d4020",
+  "source_sha256": "acec094b4666d897b6b102943af212f1d6202581ba3c26dfebc2fbb9a5840583",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -51,7 +51,7 @@
     {
       "kind": "argument",
       "name": "limit",
-      "default": 50,
+      "default": 100,
       "format": "json",
       "omit_if_absent": false
     },
@@ -184,7 +184,7 @@
       "since": 0,
       "journal_until": 4102444800,
       "priority": 7,
-      "limit": 50
+      "limit": 100
     },
     "review_required": [
       "Explicit typed capability contract migrated from the reviewed role argument specification. Collector source and fixed policy remain authoritative; optional arguments are supplied only by declared adapters."
@@ -197,10 +197,8 @@
         "properties": {
           "unit": {
             "type": "string",
-            "maxLength": 128,
-            "enum": [
-              "estus-fixture.service"
-            ]
+            "minLength": 1,
+            "maxLength": 128
           },
           "boot_id": {
             "type": "string",
@@ -228,7 +226,7 @@
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 50
+            "maximum": 500
           },
           "contains": {
             "type": "string",
@@ -309,8 +307,8 @@
           "priority_max"
         ]
       },
-      "max_bytes": 32768,
-      "max_items": 1024,
+      "max_bytes": 131072,
+      "max_items": 4096,
       "max_depth": 8,
       "schema": {
         "type": "object",
@@ -356,7 +354,7 @@
                 },
                 "message": {
                   "type": "string",
-                  "maxLength": 256
+                  "maxLength": 1024
                 },
                 "message_truncated": {
                   "type": "boolean"
@@ -385,7 +383,7 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 50
+            "maxItems": 500
           },
           "continuation_cursor": {
             "type": "string",

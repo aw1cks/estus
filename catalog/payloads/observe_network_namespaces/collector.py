@@ -59,7 +59,7 @@ def main():
 
     out=[]
     for r in ip(['netns','list']):
-        if r['name'] not in policy['namespaces']: continue
+        if policy['namespaces'] and '*' not in policy['namespaces'] and r['name'] not in policy['namespaces']: continue
         x={'name':r['name']}
         if 'id' in r and r['id']>=0: x['id']=r['id']
         out.append(x)

@@ -30,8 +30,8 @@ def main():
         if not isinstance(rows,list) or len(rows)>512: raise ValueError('network inventory entry bound exceeded')
         return rows
     def interface():
-        value=p.get('interface',policy['interface'])
-        if value not in policy['interfaces'] or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
+        value=p.get('interface',policy.get('interface'))
+        if (policy['interfaces'] and '*' not in policy['interfaces'] and (not value or value not in policy['interfaces'])) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value or ''): raise ValueError('interface outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):
@@ -54,7 +54,7 @@ def main():
 
     dev=interface()
     address=str(ipaddress.ip_interface(p['address']))
-    if dev!=policy['interface'] or address not in policy['addresses']: raise ValueError('address mutation outside policy')
+    if (policy['interfaces'] and '*' not in policy['interfaces'] and dev not in policy['interfaces']) or (policy['addresses'] and '*' not in policy['addresses'] and address not in policy['addresses']): raise ValueError('address mutation outside policy')
     run([os.environ['ESTUS_EXEC_IP'],'address','del',address,'dev',dev])
     a=ipaddress.ip_interface(address)
     found=any(x.get('local')==str(a.ip) and x.get('prefixlen')==a.network.prefixlen for r in ip(['address','show','dev',dev]) for x in r.get('addr_info',[]))

@@ -371,7 +371,7 @@ impl<'a> Metadata<'a> {
             } else {
                 remote_state_unknown
             },
-            owned_group_cleanup: if controller || self.executor == Some("ansible_module") {
+            owned_group_cleanup: if controller {
                 owned_group_cleanup
             } else {
                 None

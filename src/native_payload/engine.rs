@@ -28,8 +28,15 @@ use crate::{
 
 const BOOTSTRAP: &str = include_str!("bootstrap.py");
 const PRESTATE: &str = include_str!("prestate.py");
+const STAGE0_LOADER: &str = "import struct,sys;b=sys.stdin.buffer;h=b.read(4);n,=struct.unpack('!I',h);s=b.read(n);assert len(s)==n;exec(compile(s,'<estus>','exec'),{'__name__':'__main__'})";
 const PROBE_LIMIT: usize = 65_536;
+const MAX_BUNDLE_FRAME: usize = 4 * 1024 * 1024;
 
+pub(crate) fn invocation_id() -> String {
+    let mut bytes = [0u8; 16];
+    let _ = getrandom::fill(&mut bytes);
+    hex::encode(bytes)
+}
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -100,23 +107,27 @@ pub(crate) struct Engine {
     pools: Mutex<HashMap<String, Arc<Pool>>>,
     probes: Mutex<HashMap<String, Arc<Probe>>>,
     shutdown: CancellationToken,
+    // Headless deployments pin SSH trust; workstation mode leaves it to the operator.
+    headless: bool,
 }
 
 impl Engine {
     #[cfg(test)]
     pub(crate) fn new(shutdown: CancellationToken) -> Arc<Self> {
-        Self::new_with_shared_pool(shutdown, None)
+        Self::new_with_shared_pool(shutdown, None, false)
     }
 
     pub(crate) fn new_with_shared_pool(
         shutdown: CancellationToken,
         shared_pool: Option<Arc<Pool>>,
+        headless: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             shared_pool,
             pools: Mutex::new(HashMap::new()),
             probes: Mutex::new(HashMap::new()),
             shutdown,
+            headless,
         })
     }
     pub(crate) async fn shutdown(&self) {
@@ -178,6 +189,7 @@ impl Engine {
             connect_timeout,
             self.shutdown.clone(),
             agent,
+            self.headless,
         );
         pools.insert(key.clone(), Arc::clone(&pool));
         Ok((key, pool))
@@ -247,7 +259,7 @@ impl Engine {
             tokio::spawn(async move {
                 let _completion = ProbeCompletion(Arc::clone(&worker));
                 let lease = lease;
-                let id = crate::automation::execution::invocation_id();
+                let id = invocation_id();
                 let spec = json!({
                     "schema": 1, "operation": "discover", "id": id,
                     "requirements": requirements,
@@ -309,7 +321,12 @@ impl Engine {
         } = request;
         let operation = async {
             let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
-            let candidates = interpreters(plan, &target.target.python, target.dynamic_python)?;
+            let candidates = interpreters(
+                plan,
+                &target.target.python,
+                target.dynamic_python,
+                target.r#become.is_some(),
+            )?;
             let r#become = target.r#become;
             let role = if r#become.is_some() {
                 crate::config::IdentityRole::Automation
@@ -318,93 +335,99 @@ impl Engine {
             };
             let requirements = serde_json::to_value(&plan.manifest.requirements)
                 .map_err(|_| ToolError::invalid_argument("Invalid requirements", false))?;
-            let mut discovered = None;
-            for python in candidates {
-                let probe_lease = pool
+            let mut retried_drift = false;
+            loop {
+                let mut discovered = None;
+                for python in &candidates {
+                    let probe_lease = pool
+                        .acquire(host, &target.target.destination, role, deadline, ct)
+                        .await?;
+                    match self
+                        .discover(DiscoverRequest {
+                            key: key.clone(),
+                            lease: probe_lease,
+                            python: (*python).to_owned(),
+                            r#become,
+                            requirements: requirements.clone(),
+                            deadline,
+                            ct,
+                        })
+                        .await
+                    {
+                        Ok((identity, cache_key, discovery_generation)) => {
+                            discovered = Some((*python, identity, cache_key, discovery_generation));
+                            break;
+                        }
+                        Err(error)
+                            if matches!(
+                                error.code(),
+                                "discovery_failed" | "io_error" | "connection_lost"
+                            ) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                let (python, identity, cache_key, discovery_generation) =
+                    discovered.ok_or_else(|| {
+                        ToolError::discovery_failed(
+                            "Approved target interpreters or requirements are unavailable",
+                            false,
+                        )
+                    })?;
+                let lease = pool
                     .acquire(host, &target.target.destination, role, deadline, ct)
                     .await?;
-                match self
-                    .discover(DiscoverRequest {
-                        key: key.clone(),
-                        lease: probe_lease,
-                        python: python.to_owned(),
-                        r#become,
-                        requirements: requirements.clone(),
-                        deadline,
-                        ct,
-                    })
-                    .await
+                if lease.generation() != discovery_generation {
+                    return Err(ToolError::discovery_failed(
+                        "SSH generation changed before dispatch",
+                        false,
+                    ));
+                }
+                let id = invocation_id();
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs_f64();
+                if remaining <= 0.0 {
+                    return Err(ToolError::timeout(
+                        "Payload deadline expired before dispatch",
+                        false,
+                    ));
+                }
+                let spec = json!({
+                    "schema": 1, "operation": "execute", "id": id,
+                    "requirements": requirements, "identity": identity,
+                    "sha256": plan.manifest.source_sha256, "argv": argv,
+                    "timeout": remaining.min(600.0), "output_limit": output_limit,
+                });
+                let input = frame(&spec, &plan.source).map_err(Failure::tool)?;
+                let out = channel(ChannelRequest {
+                    session: lease.session(),
+                    python,
+                    r#become,
+                    input: &input,
+                    limit: output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
+                    deadline,
+                    ct,
+                    shutdown: &self.shutdown,
+                })
+                .await
+                .map_err(Failure::tool)?;
+                let decoded = terminal(out, &id);
+                if decoded
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.code() == "payload_rejected")
                 {
-                    Ok((identity, cache_key, discovery_generation)) => {
-                        discovered = Some((python, identity, cache_key, discovery_generation));
-                        break;
-                    }
-                    Err(error)
-                        if matches!(
-                            error.code(),
-                            "discovery_failed" | "io_error" | "connection_lost"
-                        ) =>
-                    {
+                    lock(&self.probes).remove(&cache_key);
+                    if !retried_drift {
+                        retried_drift = true;
                         continue;
                     }
-                    Err(error) => return Err(error),
                 }
+                break decoded;
             }
-            let (python, identity, cache_key, discovery_generation) =
-                discovered.ok_or_else(|| {
-                    ToolError::discovery_failed(
-                        "Approved target interpreters or requirements are unavailable",
-                        false,
-                    )
-                })?;
-            let lease = pool
-                .acquire(host, &target.target.destination, role, deadline, ct)
-                .await?;
-            if lease.generation() != discovery_generation {
-                return Err(ToolError::discovery_failed(
-                    "SSH generation changed before dispatch",
-                    false,
-                ));
-            }
-            let id = crate::automation::execution::invocation_id();
-            let remaining = deadline
-                .saturating_duration_since(Instant::now())
-                .as_secs_f64();
-            if remaining <= 0.0 {
-                return Err(ToolError::timeout(
-                    "Payload deadline expired before dispatch",
-                    false,
-                ));
-            }
-            let spec = json!({
-                "schema": 1, "operation": "execute", "id": id,
-                "requirements": requirements, "identity": identity,
-                "sha256": plan.manifest.source_sha256, "argv": argv,
-                "timeout": remaining.min(600.0), "output_limit": output_limit,
-            });
-            let input = frame(&spec, &plan.source).map_err(Failure::tool)?;
-            let out = channel(ChannelRequest {
-                session: lease.session(),
-                python,
-                r#become,
-                input: &input,
-                limit: output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
-                deadline,
-                ct,
-                shutdown: &self.shutdown,
-            })
-            .await
-            .map_err(Failure::tool)?;
-            let decoded = terminal(out, &id);
-            if decoded
-                .as_ref()
-                .err()
-                .is_some_and(|error| error.code() == "payload_rejected")
-            {
-                // A requirements lookup can fail before identity comparison is possible.
-                lock(&self.probes).remove(&cache_key);
-            }
-            decoded
         }
         .await;
 
@@ -444,6 +467,212 @@ impl Engine {
         }
     }
 
+    pub(crate) async fn run_bundle(&self, request: BundleRun<'_>) -> ToolReply<AutomationData> {
+        let BundleRun {
+            pack,
+            module,
+            arguments,
+            no_log,
+            check_mode,
+            diff,
+            projection,
+            host,
+            authority,
+            target,
+            connect_timeout,
+            output_limit,
+            deadline,
+            ct,
+            started,
+        } = request;
+        let operation = async {
+            let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
+            let candidates = bundle_interpreters(
+                &target.target.python,
+                target.dynamic_python,
+                target.r#become.is_some(),
+            )?;
+            let r#become = target.r#become;
+            let role = if r#become.is_some() {
+                crate::config::IdentityRole::Automation
+            } else {
+                crate::config::IdentityRole::Ordinary
+            };
+            let requirements = json!({
+                "python_min": pack.target_python_floor,
+                "modules": [],
+                "executables": [],
+                "paths": [],
+            });
+            let mut retried_drift = false;
+            loop {
+                let mut discovered = None;
+                for python in &candidates {
+                    let probe_lease = pool
+                        .acquire(host, &target.target.destination, role, deadline, ct)
+                        .await?;
+                    match self
+                        .discover(DiscoverRequest {
+                            key: key.clone(),
+                            lease: probe_lease,
+                            python: (*python).to_owned(),
+                            r#become,
+                            requirements: requirements.clone(),
+                            deadline,
+                            ct,
+                        })
+                        .await
+                    {
+                        Ok((identity, cache_key, discovery_generation)) => {
+                            discovered = Some((*python, identity, cache_key, discovery_generation));
+                            break;
+                        }
+                        Err(error)
+                            if matches!(
+                                error.code(),
+                                "discovery_failed" | "io_error" | "connection_lost"
+                            ) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                let (python, identity, cache_key, discovery_generation) =
+                    discovered.ok_or_else(|| {
+                        ToolError::discovery_failed(
+                            "Approved target interpreters or requirements are unavailable",
+                            false,
+                        )
+                    })?;
+                let pkg_mgr = identity
+                    .get("pkg_mgr")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let (bundled, dispatched_args) =
+                    pack.resolve_dispatch(module, pkg_mgr, arguments)?;
+                let lease = pool
+                    .acquire(host, &target.target.destination, role, deadline, ct)
+                    .await?;
+                if lease.generation() != discovery_generation {
+                    return Err(ToolError::discovery_failed(
+                        "SSH generation changed before dispatch",
+                        false,
+                    ));
+                }
+                let id = invocation_id();
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs_f64();
+                if remaining <= 0.0 {
+                    return Err(ToolError::timeout(
+                        "Bundle deadline expired before dispatch",
+                        false,
+                    ));
+                }
+                let mut module_args = dispatched_args.as_object().cloned().unwrap_or_default();
+                module_args.insert("_ansible_check_mode".into(), Value::Bool(check_mode));
+                module_args.insert("_ansible_diff".into(), Value::Bool(diff));
+                module_args.insert("_ansible_no_log".into(), Value::Bool(no_log));
+                module_args.insert("_ansible_verbosity".into(), json!(0));
+                module_args.insert(
+                    "_ansible_version".into(),
+                    Value::String(pack.ansible_core_version.clone()),
+                );
+                module_args.insert(
+                    "_ansible_module_name".into(),
+                    Value::String(bundled.fqcn.clone()),
+                );
+                module_args.insert("_ansible_syslog_facility".into(), json!("LOG_USER"));
+                module_args.insert(
+                    "_ansible_selinux_special_fs".into(),
+                    json!(["fuse", "nfs", "vboxsf", "ramfs", "9p", "vfat"]),
+                );
+                module_args.insert("_ansible_string_conversion_action".into(), json!("warn"));
+                module_args.insert("_ansible_socket".into(), Value::Null);
+                module_args.insert("_ansible_keep_remote_files".into(), Value::Bool(false));
+                module_args.insert("_ansible_remote_tmp".into(), json!("/tmp"));
+                let mut combined =
+                    Vec::with_capacity(pack.wrapper_bytes.len() + bundled.zip_bytes.len());
+                combined.extend_from_slice(&pack.wrapper_bytes);
+                combined.extend_from_slice(&bundled.zip_bytes);
+                let spec = json!({
+                    "schema": 1,
+                    "operation": "ansiballz",
+                    "id": id,
+                    "requirements": requirements,
+                    "identity": identity,
+                    "wrapper_len": pack.wrapper_bytes.len(),
+                    "wrapper_sha256": pack.wrapper_sha256,
+                    "zip_sha256": bundled.zip_sha256,
+                    "ansible_module": bundled.ansible_module,
+                    "module_fqn": bundled.module_fqn,
+                    "serialization_profile": bundled.serialization_profile,
+                    "params": { "ANSIBLE_MODULE_ARGS": module_args },
+                    "timeout": remaining.min(600.0),
+                    "output_limit": output_limit,
+                });
+                let input =
+                    frame_bounded(&spec, &combined, MAX_BUNDLE_FRAME).map_err(Failure::tool)?;
+                let out = channel(ChannelRequest {
+                    session: lease.session(),
+                    python,
+                    r#become,
+                    input: &input,
+                    limit: output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
+                    deadline,
+                    ct,
+                    shutdown: &self.shutdown,
+                })
+                .await
+                .map_err(Failure::tool)?;
+                let decoded = terminal(out, &id);
+                if decoded
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.code() == "payload_rejected")
+                {
+                    lock(&self.probes).remove(&cache_key);
+                    if !retried_drift {
+                        retried_drift = true;
+                        continue;
+                    }
+                }
+                break decoded;
+            }
+        }
+        .await;
+        match operation {
+            Err(error) => {
+                let status = match error.code() {
+                    "cancelled" => AutomationStatus::Cancelled,
+                    "timeout" => AutomationStatus::Timeout,
+                    "invalid_result" => AutomationStatus::InvalidResult,
+                    _ if error.remote_state_unknown => AutomationStatus::WorkerLost,
+                    _ => AutomationStatus::NotStarted,
+                };
+                ToolReply::partial(
+                    AutomationData {
+                        host: host.to_owned(),
+                        status,
+                        runner_rc: None,
+                        changed: None,
+                        tasks: AutomationTasks::default(),
+                        censored: no_log,
+                        complete: false,
+                        duration_ms: elapsed(started),
+                        owned_group_cleanup: GroupCleanup::NotApplicable,
+                        projection: None,
+                    },
+                    error,
+                )
+            }
+            Ok((rc, value, output_status)) => {
+                complete_bundle_reply(host, no_log, projection, rc, &value, output_status, started)
+            }
+        }
+    }
+
     pub(crate) async fn observe_preview_prestate(
         &self,
         request: PreviewPrestateRequest<'_>,
@@ -467,10 +696,20 @@ impl Engine {
         let lease = pool
             .acquire(host, &target.target.destination, role, deadline, ct)
             .await?;
-        let python = if !target.target.python.is_empty() {
-            target.target.python.as_str()
+        // Under sudo a bare name would be resolved through root's PATH, so an
+        // elevated probe must use an absolute interpreter only.
+        let candidates: Vec<&str> = if !target.target.python.is_empty() {
+            vec![target.target.python.as_str()]
         } else if target.dynamic_python {
-            "python3"
+            if target.r#become.is_some() {
+                vec![
+                    "/usr/bin/python3",
+                    "/usr/local/bin/python3",
+                    "/run/current-system/sw/bin/python3",
+                ]
+            } else {
+                vec!["python3"]
+            }
         } else {
             return Err(ToolError::preview_required(
                 "Independent pre-state probe interpreter is unavailable",
@@ -485,58 +724,64 @@ impl Engine {
         let r#become = target.r#become;
         let shutdown = &self.shutdown;
         let operation = async {
-            let mut command = if let Some(AutomationBecome::Sudo { user, executable }) = r#become {
-                let mut command = lease.session().command(executable);
-                command.args(["-H", "-n", "-k", "-u", user, "--", python]);
-                command
-            } else {
-                lease.session().command(python)
-            };
-            command
-                .args(["-I", "-c", PRESTATE])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            let mut child = command.spawn().await.map_err(|_| {
-                ToolError::preview_required("Independent pre-state probe could not spawn", false)
-            })?;
-            let mut stdin = child.stdin().take().ok_or_else(|| {
-                ToolError::preview_required("Independent pre-state probe pipe unavailable", false)
-            })?;
-            let stdout = child.stdout().take().ok_or_else(|| {
-                ToolError::preview_required("Independent pre-state probe output unavailable", false)
-            })?;
-            let stderr = child.stderr().take().ok_or_else(|| {
+            let unavailable = || {
                 ToolError::preview_required(
-                    "Independent pre-state probe error pipe unavailable",
-                    false,
-                )
-            })?;
-            let (out, err, write) = tokio::join!(
-                bounded(stdout, PROBE_LIMIT),
-                bounded(stderr, 0),
-                async move {
-                    stdin.write_all(&payload).await?;
-                    stdin.shutdown().await
-                }
-            );
-            let (stdout, overflow) = out.map_err(|_| {
-                ToolError::preview_required("Independent pre-state probe read failed", false)
-            })?;
-            let _ = err;
-            write.map_err(|_| {
-                ToolError::preview_required("Independent pre-state probe input failed", false)
-            })?;
-            let status = child.wait().await.map_err(|_| {
-                ToolError::preview_required("Independent pre-state probe exit failed", false)
-            })?;
-            if !status.success() || overflow || parse(&stdout).is_err() {
-                return Err(ToolError::preview_required(
                     "Independent pre-state digest could not be obtained",
                     false,
-                ));
+                )
+            };
+            // Each absolute candidate is tried in order; a spawn failure moves to
+            // the next one, exactly as bundle dispatch does.
+            for python in candidates {
+                let mut command =
+                    if let Some(AutomationBecome::Sudo { user, executable }) = r#become {
+                        let mut command = lease.session().command(executable);
+                        command.args(["-H", "-n", "-k", "-u", user, "--", python]);
+                        command
+                    } else {
+                        lease.session().command(python)
+                    };
+                command
+                    .args(["-I", "-c", STAGE0_LOADER])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let Ok(mut child) = command.spawn().await else {
+                    continue;
+                };
+                let Some(mut stdin) = child.stdin().take() else {
+                    continue;
+                };
+                let Some(stdout) = child.stdout().take() else {
+                    continue;
+                };
+                let Some(stderr) = child.stderr().take() else {
+                    continue;
+                };
+                let probe = payload.clone();
+                let (out, err, write) = tokio::join!(
+                    bounded(stdout, PROBE_LIMIT),
+                    bounded(stderr, 0),
+                    async move {
+                        let script = PRESTATE.as_bytes();
+                        stdin
+                            .write_all(&(script.len() as u32).to_be_bytes())
+                            .await?;
+                        stdin.write_all(script).await?;
+                        stdin.write_all(&probe).await?;
+                        stdin.shutdown().await
+                    }
+                );
+                let (stdout, overflow) = out.map_err(|_| unavailable())?;
+                let _ = err;
+                write.map_err(|_| unavailable())?;
+                let status = child.wait().await.map_err(|_| unavailable())?;
+                if !status.success() || overflow || parse(&stdout).is_err() {
+                    continue;
+                }
+                return Ok(<sha2::Sha256 as sha2::Digest>::digest(&stdout).into());
             }
-            Ok(<sha2::Sha256 as sha2::Digest>::digest(&stdout).into())
+            Err(unavailable())
         };
         tokio::select! {
             biased;
@@ -552,6 +797,7 @@ fn interpreters<'a>(
     plan: &'a PayloadPlan,
     configured: &'a str,
     dynamic_python: bool,
+    elevated: bool,
 ) -> Result<Vec<&'a str>, ToolError> {
     if !configured.is_empty() {
         if !configured.starts_with('/') || configured.contains('\0') {
@@ -577,6 +823,10 @@ fn interpreters<'a>(
     }
     if dynamic_python || fixed.is_none() {
         for interpreter in &plan.manifest.requirements.interpreters {
+            // A relative name resolves through sudo's PATH, not the caller's.
+            if elevated && !interpreter.starts_with('/') {
+                continue;
+            }
             if !candidates.contains(&interpreter.as_str()) {
                 candidates.push(interpreter.as_str());
             }
@@ -587,18 +837,22 @@ fn interpreters<'a>(
             "/usr/bin/python3",
             "/usr/local/bin/python3",
             "/run/current-system/sw/bin/python3",
-            "python3",
         ] {
             if !candidates.contains(&fallback) {
                 candidates.push(fallback);
             }
+        }
+        // Under sudo a bare name would be resolved by root's PATH, so only an
+        // absolute interpreter is ever spawned there.
+        if !elevated && !candidates.contains(&"python3") {
+            candidates.push("python3");
         }
     }
     if candidates.is_empty()
         || candidates.iter().any(|path| {
             path.is_empty()
                 || path.contains('\0')
-                || (!path.starts_with('/') && !(dynamic_python && *path == "python3"))
+                || !(path.starts_with('/') || !elevated && dynamic_python && *path == "python3")
         })
     {
         return Err(ToolError::discovery_failed(
@@ -727,15 +981,23 @@ fn complete_reply(
                 if rc != 0 {
                     return ModuleProjection::Unavailable;
                 }
-                match domain
-                    .as_ref()
-                    .and_then(|result| project(projection, result))
-                {
-                    Some(value) => ModuleProjection::Complete { value },
+                match domain {
+                    Some(ref result) => match project(projection, result) {
+                        Ok(value) => ModuleProjection::Complete { value },
+                        Err(violation) => {
+                            if error.is_none() {
+                                error = Some(crate::reply::ToolError::invalid_projection_at(
+                                    violation.schema_path,
+                                    violation.constraint,
+                                ));
+                            }
+                            ModuleProjection::Invalid
+                        }
+                    },
                     None => {
                         if error.is_none() {
                             error = Some(crate::reply::ToolError::invalid_projection(
-                                "Payload output violates approved projection",
+                                "Payload output is not valid strict JSON",
                                 false,
                             ));
                         }
@@ -760,6 +1022,179 @@ fn complete_reply(
             ..Default::default()
         },
         censored: no_log,
+        complete: true,
+        duration_ms: elapsed(started),
+        owned_group_cleanup: GroupCleanup::NotApplicable,
+        projection,
+    };
+    ToolReply::with_optional_error(data, error)
+}
+
+fn bundle_interpreters(
+    configured: &str,
+    dynamic_python: bool,
+    elevated: bool,
+) -> Result<Vec<&str>, ToolError> {
+    if !configured.is_empty() {
+        if !configured.starts_with('/') || configured.contains('\0') {
+            return Err(ToolError::discovery_failed(
+                "An approved absolute target interpreter is required",
+                false,
+            ));
+        }
+        return Ok(vec![configured]);
+    }
+    if dynamic_python {
+        let mut candidates = vec![
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/run/current-system/sw/bin/python3",
+        ];
+        // Under sudo a bare name would be resolved by root's PATH.
+        if !elevated {
+            candidates.push("python3");
+        }
+        Ok(candidates)
+    } else {
+        Ok(vec!["/usr/bin/python3"])
+    }
+}
+
+fn complete_bundle_reply(
+    host: &str,
+    no_log: bool,
+    projection_plan: Option<&crate::contracts::projection::Plan>,
+    rc: i32,
+    value: &Value,
+    output_status: OutputStatus,
+    started: std::time::Instant,
+) -> ToolReply<AutomationData> {
+    let parsed = if output_status == OutputStatus::Complete {
+        value
+            .get("stdout")
+            .and_then(Value::as_str)
+            .and_then(|stdout| parse(stdout.as_bytes()).ok())
+    } else {
+        None
+    };
+    let module_censored = parsed.as_ref().is_some_and(|doc| {
+        doc.get("_ansible_no_log") == Some(&Value::Bool(true)) || doc.get("censored").is_some()
+    });
+    let censored = no_log || module_censored;
+    let skipped = parsed
+        .as_ref()
+        .and_then(|doc| doc.get("skipped"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let module_failed = parsed
+        .as_ref()
+        .and_then(|doc| doc.get("failed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let failed = rc != 0 || module_failed;
+
+    let failure_reason = if !censored && failed {
+        value
+            .get("error_reason")
+            .and_then(Value::as_str)
+            .and_then(crate::reply::PayloadFailureReason::from_code)
+    } else {
+        None
+    };
+    let mut error = failed.then(|| match failure_reason {
+        Some(reason) => ToolError::payload_failed_with_reason(reason, false),
+        None => ToolError::automation_failed("Ansible module execution failed", false),
+    });
+    if !censored && error.is_none() {
+        match output_status {
+            OutputStatus::Overflow => {
+                error = Some(ToolError::resource_limit(
+                    "Module output exceeded retention limit",
+                    false,
+                ));
+            }
+            OutputStatus::InvalidUtf8 => {
+                error = Some(ToolError::invalid_projection(
+                    "Module output was not valid UTF-8",
+                    false,
+                ));
+            }
+            OutputStatus::Complete if parsed.is_none() => {
+                error = Some(ToolError::invalid_result(
+                    "Module output was not valid JSON",
+                    false,
+                ));
+            }
+            OutputStatus::Complete => {}
+        }
+    }
+    let changed = if censored {
+        None
+    } else if failed {
+        parsed
+            .as_ref()
+            .and_then(|doc| doc.get("changed"))
+            .and_then(Value::as_bool)
+            .filter(|&c| c)
+    } else if skipped {
+        Some(false)
+    } else {
+        parsed
+            .as_ref()
+            .and_then(|doc| doc.get("changed"))
+            .and_then(Value::as_bool)
+            .or(Some(false))
+    };
+    let projection = projection_plan.map(|plan| {
+        if censored {
+            return ModuleProjection::Censored;
+        }
+        match output_status {
+            OutputStatus::Overflow => ModuleProjection::Unavailable,
+            OutputStatus::InvalidUtf8 => ModuleProjection::Invalid,
+            OutputStatus::Complete => {
+                if failed || skipped {
+                    return ModuleProjection::Unavailable;
+                }
+                match parsed.as_ref() {
+                    Some(doc) => match project(plan, doc) {
+                        Ok(val) => ModuleProjection::Complete { value: val },
+                        Err(violation) => {
+                            if error.is_none() {
+                                error = Some(ToolError::invalid_projection_at(
+                                    violation.schema_path,
+                                    violation.constraint,
+                                ));
+                            }
+                            ModuleProjection::Invalid
+                        }
+                    },
+                    None => ModuleProjection::Invalid,
+                }
+            }
+        }
+    });
+    let tasks = AutomationTasks {
+        ok: u32::from(!failed && !skipped),
+        failed: u32::from(failed),
+        skipped: u32::from(!failed && skipped),
+        ..Default::default()
+    };
+    let data = AutomationData {
+        host: host.to_owned(),
+        status: if failed {
+            AutomationStatus::Failed
+        } else {
+            AutomationStatus::Successful
+        },
+        runner_rc: Some(if failed {
+            if rc == 0 { 1 } else { rc }
+        } else {
+            0
+        }),
+        changed,
+        tasks,
+        censored,
         complete: true,
         duration_ms: elapsed(started),
         owned_group_cleanup: GroupCleanup::NotApplicable,
@@ -832,7 +1267,10 @@ fn elapsed(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn project(plan: &crate::contracts::projection::Plan, result: &Value) -> Option<Value> {
+fn project(
+    plan: &crate::contracts::projection::Plan,
+    result: &Value,
+) -> Result<Value, crate::contracts::projection::ProjectionViolation> {
     let mut selected = serde_json::Map::new();
     for (name, path) in &plan.fields {
         // Existing catalog contracts use the role's virtual mcp_result envelope.
@@ -851,8 +1289,8 @@ fn project(plan: &crate::contracts::projection::Plan, result: &Value) -> Option<
         }
     }
     let value = Value::Object(selected);
-    plan.validate_value(&value).ok()?;
-    Some(value)
+    plan.validate_value_detailed(&value)?;
+    Ok(value)
 }
 
 struct Frame<'a> {
@@ -861,9 +1299,17 @@ struct Frame<'a> {
 }
 
 fn frame<'a>(spec: &Value, source: &'a [u8]) -> Result<Frame<'a>, Failure> {
+    frame_bounded(spec, source, super::MAX_SOURCE)
+}
+
+fn frame_bounded<'a>(
+    spec: &Value,
+    source: &'a [u8],
+    max_source: usize,
+) -> Result<Frame<'a>, Failure> {
     let data = serde_json::to_vec(spec)
         .map_err(|_| failed(ToolError::invalid_argument, "Invalid payload frame", false))?;
-    if data.len() > MAX_INPUT || source.len() > super::MAX_SOURCE {
+    if data.len() > MAX_INPUT || source.len() > max_source {
         return Err(failed(
             ToolError::resource_limit,
             "Payload frame exceeds bounds",
@@ -909,6 +1355,23 @@ pub(crate) struct PayloadRun<'a> {
     pub(crate) authority: &'a str,
     pub(crate) target: ResolvedAutomation<'a>,
     pub(crate) argv: Vec<String>,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) output_limit: usize,
+    pub(crate) deadline: Instant,
+    pub(crate) ct: &'a CancellationToken,
+    pub(crate) started: std::time::Instant,
+}
+pub(crate) struct BundleRun<'a> {
+    pub(crate) pack: &'a crate::bundle::BundlePack,
+    pub(crate) module: &'a str,
+    pub(crate) arguments: &'a Value,
+    pub(crate) no_log: bool,
+    pub(crate) check_mode: bool,
+    pub(crate) diff: bool,
+    pub(crate) projection: Option<&'a crate::contracts::projection::Plan>,
+    pub(crate) host: &'a str,
+    pub(crate) authority: &'a str,
+    pub(crate) target: ResolvedAutomation<'a>,
     pub(crate) connect_timeout: Duration,
     pub(crate) output_limit: usize,
     pub(crate) deadline: Instant,
@@ -968,7 +1431,7 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             session.command(python)
         };
         command
-            .args(["-I", "-c", BOOTSTRAP])
+            .args(["-I", "-c", STAGE0_LOADER])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -993,6 +1456,11 @@ async fn channel(request: ChannelRequest<'_>) -> Result<Output, Failure> {
             .ok_or_else(|| failed(ToolError::io_error, "Missing payload error pipe", true))?;
         let (out, err, write) =
             tokio::join!(bounded(stdout, limit), bounded(stderr, 0), async move {
+                let script = BOOTSTRAP.as_bytes();
+                stdin
+                    .write_all(&(script.len() as u32).to_be_bytes())
+                    .await?;
+                stdin.write_all(script).await?;
                 stdin.write_all(&input.header).await?;
                 stdin.write_all(input.source).await?;
                 stdin.shutdown().await
@@ -1183,16 +1651,18 @@ mod tests {
         };
         assert_eq!(
             project(&plan, &json!({"present":true})),
-            Some(json!({"required":true}))
+            Ok(json!({"required":true}))
         );
-        assert!(project(&plan, &json!({})).is_none());
+        let missing = project(&plan, &json!({})).unwrap_err();
+        assert_eq!(missing.schema_path, "result.required");
+        assert_eq!(missing.constraint, "missing_field");
         plan.fields
             .get_mut("required")
             .unwrap()
             .insert(0, "mcp_result".into());
         assert_eq!(
             project(&plan, &json!({"present":true})),
-            Some(json!({"required":true}))
+            Ok(json!({"required":true}))
         );
     }
 
@@ -1410,17 +1880,38 @@ mod tests {
             projection: None,
         };
         assert_eq!(
-            interpreters(&plan, "/opt/site/bin/python3", false).unwrap(),
+            interpreters(&plan, "/opt/site/bin/python3", false, false).unwrap(),
             vec!["/opt/site/bin/python3"]
         );
         assert_eq!(
-            interpreters(&plan, "", false).unwrap(),
+            interpreters(&plan, "", false, false).unwrap(),
             vec!["/usr/bin/python3"]
         );
-        let dynamic = interpreters(&plan, "", true).unwrap();
+        let dynamic = interpreters(&plan, "", true, false).unwrap();
         assert_eq!(dynamic[0], "/usr/bin/python3");
         assert!(dynamic.contains(&"/usr/local/bin/python3"));
         assert!(dynamic.contains(&"python3"));
+
+        // Elevation must never resolve a bare name through root's PATH.
+        let elevated = interpreters(&plan, "", true, true).unwrap();
+        assert!(!elevated.contains(&"python3"));
+        assert!(elevated.iter().all(|path| path.starts_with('/')));
+        assert_eq!(
+            bundle_interpreters("", true, false).unwrap(),
+            vec![
+                "/usr/bin/python3",
+                "/usr/local/bin/python3",
+                "/run/current-system/sw/bin/python3",
+                "python3",
+            ]
+        );
+        let bundle_elevated = bundle_interpreters("", true, true).unwrap();
+        assert!(!bundle_elevated.contains(&"python3"));
+        assert!(bundle_elevated.iter().all(|path| path.starts_with('/')));
+        assert_eq!(
+            bundle_interpreters("/opt/site/bin/python3", true, true).unwrap(),
+            vec!["/opt/site/bin/python3"]
+        );
     }
 
     #[test]

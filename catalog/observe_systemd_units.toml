@@ -16,10 +16,10 @@ targets = ["server"]
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", snapshot = "/etc/estus/observe_systemd_units.payload.json", source = "/etc/estus/payloads/observe_systemd_units/collector.py", no_log = false }
-fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system", "unit_pattern" = "estus-fixture*" }
-input_map = { "view" = "view", "unit_type" = "unit_type", "state" = "state" }
+fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
+input_map = { "view" = "view", "unit_type" = "unit_type", "state" = "state", "unit_pattern" = "unit_pattern" }
 limits = { timeout_secs = 60 }
-input_schema = { "type" = "object", "properties" = { "view" = { "type" = "string", "enum" = ["loaded", "installed"] }, "unit_type" = { "type" = "string", "enum" = ["service", "socket", "timer", "target", "mount", "path", "slice"] }, "state" = { "type" = "string", "enum" = ["all", "active", "inactive", "failed"] } }, "required" = ["view", "unit_type", "state"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "view" = { "type" = "string", "enum" = ["loaded", "installed"] }, "unit_type" = { "type" = "string", "enum" = ["service", "socket", "timer", "target", "mount", "path", "slice"] }, "state" = { "type" = "string", "enum" = ["all", "active", "inactive", "failed"] }, "unit_pattern" = { "type" = "string", "minLength" = 1, "maxLength" = 128 } }, "required" = ["view", "unit_type", "state", "unit_pattern"], "additionalProperties" = false }
 [tools.observe_systemd_units.result]
 kind = "capability_projection"
 fields = { "scope" = ["mcp_result", "scope"], "view" = ["mcp_result", "view"], "unit_type" = ["mcp_result", "unit_type"], "state" = ["mcp_result", "state"], "units" = ["mcp_result", "units"], "truncated" = ["mcp_result", "truncated"], "source_count" = ["mcp_result", "source_count"], "unit_pattern" = ["mcp_result", "unit_pattern"] }

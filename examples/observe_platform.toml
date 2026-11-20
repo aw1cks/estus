@@ -1,6 +1,10 @@
-# Import ansible.builtin.setup from the selected runtime before enabling:
-#   estus schema import ansible.builtin.setup --output /etc/estus/setup.schema.json
-# Provision the workspace mode 0700, owned by the MCP account.
+# Offline bundle module: read selected platform facts from ansible.builtin.setup.
+# Build the bundle with the setup module, inspect it, then enable:
+#   estus bundle build --python /opt/ansible/bin/python --output /etc/estus/bundle \
+#     --module ansible.builtin.setup
+#   estus bundle inspect --bundle /etc/estus/bundle
+# A setup binding is rejected unless reviewed gather_subset and gather_timeout are
+# fixed here; defaults are never inferred from upstream documentation.
 # MCP input: {"host":"server","inputs":{}}
 mode = "headless"
 capabilities = { named = true }
@@ -10,7 +14,7 @@ enabled_tools = ["observe_platform"]
 ssh_host = "server-ordinary"
 
 [automation]
-workspace_root = "/var/lib/estus/runner"
+bundle = "/etc/estus/bundle"
 
 [automation.targets.server]
 destination = "server-ordinary"
@@ -18,11 +22,11 @@ python = "/usr/bin/python3"
 
 [tools.observe_platform]
 description = "Read selected platform and Python facts on an approved ordinary target. No raw environment, arguments or event history is returned. Interrupted work is not replayed."
-revision = "1"
+revision = "2"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "ansible_module", snapshot = "/etc/estus/setup.schema.json", no_log = false }
+execution = { kind = "ansible_module", module = "ansible.builtin.setup", no_log = false }
 input_schema = { type = "object", properties = {}, required = [], additionalProperties = false }
 fixed_args = { gather_subset = ["!all", "!min", "platform", "python_version"], filter = ["ansible_system", "ansible_python_version"], gather_timeout = 5 }
 input_map = {}

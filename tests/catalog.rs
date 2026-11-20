@@ -71,11 +71,6 @@ mod tools {
     mod change_nic_pause;
     mod change_nic_rings;
     mod change_nic_rss;
-    mod change_package_repository;
-    mod change_package_repository_refresh;
-    mod change_packages_install;
-    mod change_packages_remove;
-    mod change_packages_upgrade;
     mod change_sysctl_config;
     mod change_sysctl_runtime;
     mod change_systemd_disable;
@@ -142,9 +137,7 @@ mod tools {
     mod observe_nic_rss;
     mod observe_nic_stats;
     mod observe_nic_transceiver;
-    mod observe_package;
     mod observe_packages;
-    mod observe_packages_updates;
     mod observe_pci_device;
     mod observe_pci_devices;
     mod observe_pci_driver_binding;
