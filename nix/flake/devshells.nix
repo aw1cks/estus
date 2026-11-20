@@ -5,9 +5,11 @@
       inherit (estusBuild) craneLib fuzzLib package directModuleBundle;
       devMcp = pkgs.writeShellScriptBin "estus-dev-mcp" ''
         unset ESTUS_CONFIG ESTUS_SSH_CONFIG ESTUS_SSH ESTUS_CATALOG_ROOT \
-          ESTUS_ANSIBLE_BUNDLE ESTUS_PYTHON_RUNTIME
+          ESTUS_ANSIBLE_BUNDLE ESTUS_PYTHON_RUNTIME ESTUS_WORKSTATION
         export ESTUS_ANSIBLE_BUNDLE=${directModuleBundle}
-        exec ${package}/bin/estus "$@"
+        # Workstation mode is an explicit opt-in; the developer client relies on
+        # open destinations, so it must pass the flag itself.
+        exec ${package}/bin/estus --workstation "$@"
       '';
     in
     {

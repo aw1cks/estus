@@ -21,6 +21,11 @@ pub(crate) struct Cli {
     /// Local OpenSSH executable; defaults to ssh resolved from PATH.
     #[arg(long, global = true, env = "ESTUS_SSH", hide_env_values = true)]
     pub(super) ssh: Option<PathBuf>,
+    /// Opt in to workstation mode: open destinations and caller-chosen hosts.
+    /// Without a configuration file this is required to expose anything beyond
+    /// the read-only inspection builtins.
+    #[arg(long, global = true, env = "ESTUS_WORKSTATION")]
+    pub(super) workstation: bool,
     #[command(subcommand)]
     pub(crate) command: Option<CliCommand>,
 }
@@ -314,6 +319,7 @@ impl Config {
         let config_path = cli
             .config
             .or_else(|| env("ESTUS_CONFIG").map(PathBuf::from));
+        let workstation_opt_in = cli.workstation;
         let (mut document, base) = if let Some(path) = config_path {
             let path = resolve_path(path, cwd, "config")?;
             let mut file = std::fs::OpenOptions::new()
@@ -336,15 +342,30 @@ impl Config {
             validate_schema(&value)?;
             let document = toml::from_str::<Document>(&text)
                 .map_err(|error| ConfigError::toml_structure(&text, &error))?;
+            // The flag never escalates a configuration file: it may only restate
+            // the mode the operator already declared there.
+            if workstation_opt_in && document.mode != Mode::Workstation {
+                return Err(invalid(
+                    "mode",
+                    "workstation opt-in conflicts with the selected configuration",
+                ));
+            }
             let base = path.parent().unwrap_or(cwd).to_path_buf();
             (document, base)
-        } else {
+        } else if workstation_opt_in {
+            // Workstation mode is an explicit opt-in, never a silent default:
+            // no configuration file has to state that it trusts the caller.
             let document = Document {
                 mode: Mode::Workstation,
                 destination_policy: Some(TargetMode::Open),
                 ..Default::default()
             };
             (document, cwd.to_path_buf())
+        } else {
+            // Restrictive default: configured destinations (none), action-only
+            // capabilities. A client that omits --workstation gets no exec,
+            // sudo, file-write or catalog exposure.
+            (Document::default(), cwd.to_path_buf())
         };
 
         let capabilities = match (document.mode, document.capabilities.take()) {
@@ -995,6 +1016,7 @@ mod tests {
                 ssh_config: Some("cli-ssh".into()),
                 ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
+                workstation: false,
             },
             cwd,
             |key| match key {
@@ -1017,6 +1039,7 @@ mod tests {
                     ssh_config: None,
                     ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
+                    workstation: false,
                 },
                 dir.path(),
                 |_| None
@@ -1030,6 +1053,7 @@ mod tests {
                     ssh_config: Some("missing".into()),
                     ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
+                    workstation: false,
                 },
                 dir.path(),
                 |_| None
@@ -1043,6 +1067,7 @@ mod tests {
                     ssh_config: Some(dir.path().into()),
                     ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
+                    workstation: false,
                 },
                 dir.path(),
                 |_| None
@@ -1150,18 +1175,76 @@ mod tests {
         )
         .unwrap();
         let config = Config::load_with(cli(), dir.path(), |_| None).unwrap();
+        assert_eq!(config.mode, Mode::Headless);
+        assert_eq!(config.capabilities, Capabilities::actions_only());
+        assert!(
+            config
+                .targets
+                .as_ref()
+                .is_some_and(|targets| targets.is_empty())
+        );
+        for tool in [
+            ToolId::Exec,
+            ToolId::Run,
+            ToolId::Sudo,
+            ToolId::WriteFile,
+            ToolId::ReadFile,
+            ToolId::Stat,
+            ToolId::ListDirectory,
+        ] {
+            assert!(!config.tool_enabled(tool), "{tool:?} must stay unpublished");
+        }
+        assert!(config.tool_enabled(ToolId::Targets));
+    }
+
+    #[test]
+    fn workstation_opt_in_is_required_and_never_escalates_a_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let workstation = Cli {
+            workstation: true,
+            ..cli()
+        };
+        let config = Config::load_with(workstation, dir.path(), |_| None).unwrap();
         assert_eq!(config.mode, Mode::Workstation);
         assert_eq!(config.capabilities, Capabilities::all());
         assert!(config.targets.is_none());
+
+        // No flag: restrictive headless default.
+        let config = Config::load_with(cli(), dir.path(), |_| None).unwrap();
+        assert_eq!(config.mode, Mode::Headless);
+
+        // The explicit opt-in must never turn a headless file into workstation mode.
+        let path = dir.path().join("operator.toml");
+        std::fs::write(&path, "[targets.one]\nssh_host='host-alias'\n").unwrap();
+        let error = Config::load_with(
+            Cli {
+                config: Some(path.clone()),
+                workstation: true,
+                ..cli()
+            },
+            dir.path(),
+            |_| None,
+        )
+        .err()
+        .expect("opt-in must not escalate a configuration file");
+        assert_eq!(
+            error.to_string(),
+            "mode: workstation opt-in conflicts with the selected configuration"
+        );
     }
 
     #[tokio::test]
     async fn workstation_loads_pinned_bundled_dynamic_payloads() {
         let dir = tempfile::tempdir().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
-        let mut config = Config::load_with(cli(), dir.path(), |key| {
-            (key == "ESTUS_CATALOG_ROOT").then(|| root.as_os_str().to_owned())
-        })
+        let mut config = Config::load_with(
+            Cli {
+                workstation: true,
+                ..cli()
+            },
+            dir.path(),
+            |key| (key == "ESTUS_CATALOG_ROOT").then(|| root.as_os_str().to_owned()),
+        )
         .unwrap();
         assert_eq!(config.mode, Mode::Workstation);
         config
@@ -1225,6 +1308,7 @@ result = {{ kind = "command" }}
                 ssh_config: None,
                 ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
+                workstation: false,
             },
             directory.path(),
             |_| None,

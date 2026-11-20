@@ -63,6 +63,7 @@ pub(super) fn cli() -> Cli {
         ssh_config: None,
         ssh: Some(std::env::current_exe().unwrap()),
         command: None,
+        workstation: false,
     }
 }
 
@@ -120,6 +121,7 @@ pub(super) fn load_text(text: &str, vars: &[(&str, &str)]) -> Result<Config, Con
             ssh_config: None,
             ssh: Some(std::env::current_exe().unwrap()),
             command: None,
+            workstation: false,
         },
         dir.path(),
         |key| {
