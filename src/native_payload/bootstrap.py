@@ -223,37 +223,7 @@ def exact(n):
         raise ValueError('truncated frame')
     return data
 
-def file_identity(path):
-    st = os.stat(path)
-    return [os.path.realpath(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
-
 ALLOWED_EXEC_DIRS = ('/usr/sbin', '/usr/bin', '/sbin', '/bin', '/usr/lib/systemd')
-def detect_pkg_mgr():
-    if os.path.exists('/run/ostree-booted'):
-        return 'atomic_container'
-    os_rel = ''
-    try:
-        with open('/etc/os-release', 'r', encoding='utf-8', errors='replace') as stream:
-            os_rel = stream.read(8192).lower()
-    except OSError:
-        pass
-    if ('id=debian' in os_rel or 'id=ubuntu' in os_rel or 'debian' in os_rel) and os.path.exists('/usr/bin/apt-get'):
-        return 'apt'
-    for candidate in ('/usr/bin/dnf', '/usr/bin/microdnf'):
-        if os.path.exists(candidate):
-            return 'dnf5' if os.path.realpath(candidate).endswith('/dnf5') else 'dnf'
-    for path, mgr in (
-        ('/usr/bin/apt-get', 'apt'),
-        ('/usr/bin/yum', 'dnf'),
-        ('/usr/bin/zypper', 'zypper'),
-        ('/sbin/apk', 'apk'),
-        ('/usr/bin/apk', 'apk'),
-        ('/usr/bin/pacman', 'pacman'),
-    ):
-        if os.path.exists(path):
-            return mgr
-    return 'unknown'
-
 
 def normalize_exec_name(name):
     if not isinstance(name, str) or not name or len(name) > 64:
@@ -263,60 +233,53 @@ def normalize_exec_name(name):
             raise ValueError('invalid executable name')
     return name.upper().replace('-', '_')
 
-def resolve_identity(requirements):
+class Prerequisite(Exception):
+    """A declared target prerequisite is absent; the collector must not run."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+def check_requirements(requirements):
+    """Verify declared prerequisites immediately before dispatch.
+
+    Nothing is cached: the collector source is re-shipped on every call, so the
+    only useful question is whether this interpreter can run it right now.
+    Returns the selected executable paths collectors consume via ESTUS_EXEC_*.
+    """
     if list(sys.version_info[:2]) < requirements['python_min']:
-        raise ValueError('unsupported interpreter')
-    with open('/proc/sys/kernel/random/boot_id', encoding='ascii') as stream:
-        boot = stream.read(128).strip()
-    result = {'uid': os.geteuid(), 'gid': os.getegid(), 'boot': boot,
-              'python': file_identity(sys.executable), 'version': list(sys.version_info[:3]),
-              'pkg_mgr': detect_pkg_mgr(),
-              'modules': {}, 'executables': {}, 'paths': {}}
+        raise Prerequisite('unsupported_platform')
     for module in requirements['modules']:
         if module == 'estus_runtime':
-            result['modules'][module] = '<synthetic>'
             continue
-        spec = importlib.util.find_spec(module)
-        if spec is None:
-            raise ValueError('missing module')
-        result['modules'][module] = file_identity(spec.origin) if spec.origin and os.path.isfile(spec.origin) else spec.origin
+        if importlib.util.find_spec(module) is None:
+            raise Prerequisite('dependency_unavailable')
     for program in requirements['executables']:
-        path = shutil.which(program)
-        if not path:
-            raise ValueError('missing executable')
-        result['executables'][program] = file_identity(path)
+        if not shutil.which(program):
+            raise Prerequisite('dependency_unavailable')
     candidates_map = requirements.get('executable_candidates') or {}
     if not isinstance(candidates_map, dict) or len(candidates_map) > 64:
         raise ValueError('invalid executable_candidates')
     selected_execs = {}
-    if candidates_map:
-        result['executable_candidates'] = {}
-        seen_norm = set()
-        for name, candidates in candidates_map.items():
-            norm = normalize_exec_name(name)
-            if norm in seen_norm:
-                raise ValueError('executable candidate normalization collision')
-            seen_norm.add(norm)
-            if not isinstance(candidates, list) or not (1 <= len(candidates) <= 8):
-                raise ValueError('invalid executable candidates list')
-            selected = None
-            for path in candidates:
-                if (not isinstance(path, str) or not path or len(path) > 4096 or '\0' in path
-                        or not path.startswith('/') or '..' in path.split('/')
-                        or os.path.dirname(path) not in ALLOWED_EXEC_DIRS):
-                    raise ValueError('invalid executable candidate path')
-                if selected is None and os.path.isfile(path) and os.access(path, os.X_OK):
-                    selected = path
-            if selected is None:
-                raise ValueError('missing executable candidate')
-            result['executable_candidates'][name] = file_identity(selected)
-            selected_execs[norm] = selected
-    for path in requirements['paths']:
-        result['paths'][path] = file_identity(path)
-    return result, selected_execs
-
-def identity(requirements):
-    return resolve_identity(requirements)[0]
+    seen_norm = set()
+    for name, candidates in candidates_map.items():
+        norm = normalize_exec_name(name)
+        if norm in seen_norm:
+            raise ValueError('executable candidate normalization collision')
+        seen_norm.add(norm)
+        if not isinstance(candidates, list) or not (1 <= len(candidates) <= 8):
+            raise ValueError('invalid executable candidates list')
+        selected = None
+        for path in candidates:
+            if (not isinstance(path, str) or not path or len(path) > 4096 or '\0' in path
+                    or not path.startswith('/') or '..' in path.split('/')
+                    or os.path.dirname(path) not in ALLOWED_EXEC_DIRS):
+                raise ValueError('invalid executable candidate path')
+            if selected is None and os.path.isfile(path) and os.access(path, os.X_OK):
+                selected = path
+        if selected is None:
+            raise Prerequisite('dependency_unavailable')
+        selected_execs[norm] = selected
+    return selected_execs
 
 class Interrupted(Exception):
     pass
@@ -395,20 +358,17 @@ def run():
     source = exact(size)
     if sys.stdin.buffer.read(1):
         raise ValueError('trailing frame')
-    if spec['schema'] != 1 or spec['operation'] not in ('discover', 'execute', 'ansiballz'):
+    if spec['schema'] != 1 or spec['operation'] not in ('execute', 'ansiballz'):
         raise ValueError('protocol')
     response = {'schema': 1, 'id': spec['id'], 'phase': 'rejected'}
     try:
-        observed, selected_execs = resolve_identity(spec['requirements'])
-        response['identity'] = observed
-        if spec['operation'] == 'discover':
-            if source:
-                raise ValueError('discovery source')
-            response['phase'] = 'discovered'
-            return response, 0
-        if observed != spec['identity']:
-            response['identity_mismatch'] = True
-            raise ValueError('identity drift')
+        try:
+            selected_execs = check_requirements(spec['requirements'])
+        except Prerequisite as missing:
+            # A declared prerequisite is absent, so no collector ran and no
+            # mutation can have happened. Report the closed reason, not a traceback.
+            response['error_reason'] = missing.reason
+            return response, 70
         timeout = spec['timeout']
         limit = spec['output_limit']
         if not 0 < timeout <= 600 or not 0 < limit <= 16777216:

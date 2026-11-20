@@ -236,7 +236,7 @@ test ! -e /usr/bin/ethtool
         let calls: Result<()> = async {
             let missing = set(&client, true, 237).await?;
             ensure!(
-                missing["error"]["code"] == "discovery_failed"
+                missing["error"]["code"] == "resource_unavailable"
                     && missing["error"]["remote_state_unknown"] == false
                     && missing["data"]["status"] == "not_started"
                     && missing["data"]["complete"] == false,

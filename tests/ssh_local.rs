@@ -7891,8 +7891,8 @@ result = {{ kind = "capability_projection", fields = {{ ok = ["mcp_result", "ok"
             for (id, tool) in [(2, "observe_missing_exec"), (3, "observe_high_py")] {
                 let reply = script_wire_call(&mut server, id, tool, json!({"host": "plain", "inputs": {}})).await?;
                 ensure!(
-                    reply["error"]["code"] == "discovery_failed",
-                    "{tool} did not fail with discovery_failed: {reply}"
+                    reply["error"]["code"] == "resource_unavailable",
+                    "{tool} did not fail with resource_unavailable: {reply}"
                 );
                 ensure!(
                     reply["data"]["status"] == "not_started",

@@ -28,7 +28,7 @@ class Framing(unittest.TestCase):
         duplicate = b'{"schema":1,"schema":1}'
         cases = [b'', b'ESTUSNP1' + struct.pack('!II', 262145, 0),
                  b'ESTUSNP1' + struct.pack('!II', len(duplicate), 0) + duplicate,
-                 frame({'schema': 1, 'operation': 'discover', 'id': 'x', 'requirements': REQ}) + b'x']
+                 frame({'schema': 1, 'operation': 'nonsense', 'id': 'x', 'requirements': REQ}) + b'x']
         for raw in cases:
             with self.subTest(raw=raw[:24]):
                 result = invoke(raw)
@@ -37,14 +37,9 @@ class Framing(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux boot identity required')
 class Execution(unittest.TestCase):
-    def setUp(self):
-        result = invoke(frame({'schema': 1, 'operation': 'discover', 'id': 'probe', 'requirements': REQ}))
-        self.assertEqual(result.returncode, 0)
-        self.identity = json.loads(result.stdout)['identity']
-
     def execute(self, source, **overrides):
         spec = {'schema': 1, 'operation': 'execute', 'id': 'owned-call', 'requirements': REQ,
-                'identity': self.identity, 'sha256': hashlib.sha256(source).hexdigest(),
+                'sha256': hashlib.sha256(source).hexdigest(),
                 'request': ['{{ literal }}; \n☃'], 'timeout': 2, 'output_limit': 4096}
         spec.update(overrides)
         result = invoke(frame(spec, source))
@@ -136,12 +131,12 @@ class Execution(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, 'malformed collector frame executed')
                 self.assertEqual(result.stdout, b'')
 
-    def test_digest_and_identity_drift_reject_before_source(self):
+    def test_source_digest_drift_rejects_before_execution(self):
         source = b'raise Exception("must not execute")'
-        for override in ({'sha256': '0' * 64}, {'identity': dict(self.identity, boot='stale-boot')}):
-            exit_code, evidence = self.execute(source, **override)
-            self.assertEqual(exit_code, 70)
-            self.assertEqual(evidence['phase'], 'rejected')
+        exit_code, evidence = self.execute(source, sha256='0' * 64)
+        self.assertEqual(exit_code, 70)
+        self.assertEqual(evidence['phase'], 'rejected')
+        self.assertNotIn('error_reason', evidence)
 
     def test_both_streams_are_drained_and_overflow_marked(self):
         source = b'import os; os.write(1,b"x"*100000); os.write(2,b"y"*100000)'
@@ -196,21 +191,14 @@ class Execution(unittest.TestCase):
             'paths': [],
             'executable_candidates': {'test-sh': ['/usr/sbin/nonexistent-estus-bin'] + sh_candidates},
         }
-        disc = invoke(frame({'schema': 1, 'operation': 'discover', 'id': 'cand', 'requirements': req}))
-        self.assertEqual(disc.returncode, 0)
-        disc_json = json.loads(disc.stdout)
-        self.assertEqual(disc_json['phase'], 'discovered')
-        ident = disc_json['identity']
-        self.assertEqual(ident['executable_candidates']['test-sh'][0], os.path.realpath(existing))
-
-        # Execute with poisoned ESTUS_EXEC_* in parent env: child must see only selected path.
+        # Execute with poisoned ESTUS_EXEC_* in parent env: child must see only the
+        # selected path, and the candidate is re-resolved on this very call.
         source = b'import json,os; print(json.dumps({k:v for k,v in os.environ.items() if k.startswith("ESTUS_EXEC_")}))'
         spec = {
             'schema': 1,
             'operation': 'execute',
             'id': 'cand-exec',
             'requirements': req,
-            'identity': ident,
             'sha256': hashlib.sha256(source).hexdigest(),
             'request': [],
             'timeout': 5,
@@ -224,17 +212,47 @@ class Execution(unittest.TestCase):
         self.assertEqual(ev['phase'], 'complete')
         self.assertEqual(json.loads(ev['stdout']), {'ESTUS_EXEC_TEST_SH': existing})
 
-        # Missing candidate fails discovery before dispatch.
+        # Missing candidate refuses the call before the collector runs.
         bad_req = dict(req, executable_candidates={'missing-tool': ['/usr/sbin/definitely-missing-estus']})
-        miss = invoke(frame({'schema': 1, 'operation': 'discover', 'id': 'miss', 'requirements': bad_req}))
+        miss = invoke(frame(dict(spec, requirements=bad_req), b'raise SystemExit("must not run")'))
         self.assertEqual(miss.returncode, 70)
-        self.assertEqual(json.loads(miss.stdout)['phase'], 'rejected')
+        miss_json = json.loads(miss.stdout)
+        self.assertEqual(miss_json['phase'], 'rejected')
+        self.assertEqual(miss_json['error_reason'], 'dependency_unavailable')
 
-        # Disallowed candidate directory fails discovery before dispatch.
+        # Disallowed candidate directory is a policy violation, not a prerequisite.
         evil_req = dict(req, executable_candidates={'evil-tool': ['/tmp/evil']})
-        evil = invoke(frame({'schema': 1, 'operation': 'discover', 'id': 'evil', 'requirements': evil_req}))
+        evil = invoke(frame(dict(spec, requirements=evil_req), b'raise SystemExit("must not run")'))
         self.assertEqual(evil.returncode, 70)
-        self.assertEqual(json.loads(evil.stdout)['phase'], 'rejected')
+        evil_json = json.loads(evil.stdout)
+        self.assertEqual(evil_json['phase'], 'rejected')
+        self.assertNotIn('error_reason', evil_json)
+
+    def test_missing_module_or_executable_refuses_before_dispatch(self):
+        spec = {
+            'schema': 1,
+            'operation': 'execute',
+            'id': 'dep',
+            'requirements': dict(REQ, modules=['estus_definitely_absent_module']),
+            'sha256': hashlib.sha256(b'raise SystemExit("must not run")').hexdigest(),
+            'request': [],
+            'timeout': 5,
+            'output_limit': 4096,
+        }
+        missing_module = invoke(frame(spec, b'raise SystemExit("must not run")'))
+        self.assertEqual(missing_module.returncode, 70)
+        self.assertEqual(json.loads(missing_module.stdout)['phase'], 'rejected')
+        self.assertEqual(
+            json.loads(missing_module.stdout)['error_reason'], 'dependency_unavailable'
+        )
+
+        spec = dict(spec, requirements=dict(REQ, executables=['definitely-missing-estus-util']))
+        missing_exec = invoke(frame(spec, b'raise SystemExit("must not run")'))
+        self.assertEqual(missing_exec.returncode, 70)
+        self.assertEqual(json.loads(missing_exec.stdout)['phase'], 'rejected')
+        self.assertEqual(
+            json.loads(missing_exec.stdout)['error_reason'], 'dependency_unavailable'
+        )
 
     def test_python_min_rejects_lower_version_before_dispatch(self):
         import importlib.util
@@ -244,11 +262,11 @@ class Execution(unittest.TestCase):
         spec.loader.exec_module(mod)
         req_310 = {'python_min': [3, 10], 'modules': [], 'executables': [], 'paths': []}
         with mock.patch.object(mod.sys, 'version_info', (3, 9, 18, 'final', 0)):
-            with self.assertRaisesRegex(ValueError, 'unsupported interpreter'):
-                mod.identity(req_310)
+            with self.assertRaises(mod.Prerequisite) as raised:
+                mod.check_requirements(req_310)
+            self.assertEqual(raised.exception.reason, 'unsupported_platform')
         with mock.patch.object(mod.sys, 'version_info', (3, 10, 0, 'final', 0)):
-            ident = mod.identity(req_310)
-            self.assertEqual(ident['version'], [3, 10, 0])
+            self.assertEqual(mod.check_requirements(req_310), {})
 
     def test_late_exiting_grandchild_is_supervised_then_killed_at_deadline(self):
         import os, tempfile, time
@@ -445,7 +463,6 @@ class Execution(unittest.TestCase):
 
     def test_ansiballz_execution_cleans_tmpdir_and_classifies_missing_deps(self):
         import glob, os, tempfile
-        self.assertIn('pkg_mgr', self.identity)
         wrapper = (
             b"import json, os, sys\n"
             b"def _ansiballz_main(zip_data, ansible_module, module_fqn, params, profile, date_time, extensions, rlimit_nofile):\n"
@@ -464,7 +481,6 @@ class Execution(unittest.TestCase):
             'operation': 'ansiballz',
             'id': 'abz-1',
             'requirements': REQ,
-            'identity': self.identity,
             'wrapper_len': len(wrapper),
             'wrapper_sha256': hashlib.sha256(wrapper).hexdigest(),
             'zip_sha256': hashlib.sha256(zip_bytes).hexdigest(),

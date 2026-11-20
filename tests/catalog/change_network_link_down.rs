@@ -107,7 +107,7 @@ test ! -e /usr/bin/ip
         let client = Client::start(&binding.config).await?;
         let calls: Result<()> = async {
             let missing = down(&client).await?;
-            ensure!(missing["error"]["code"] == "discovery_failed"
+            ensure!(missing["error"]["code"] == "resource_unavailable"
                 && missing["error"]["remote_state_unknown"] == false
                 && missing["data"]["status"] == "not_started"
                 && missing["data"]["complete"] == false,
@@ -121,33 +121,25 @@ test ! -e /usr/bin/ip
             let first = down(&client).await?;
             ensure!(catalog::projection(&first)?["verified"] == true
                 && !observed_up(&guest).await?,
-                "a negative discovery result prevented a new explicit request");
-
-            let changed = guest.shell(r#"set -eu
-"$(cat /run/estus-native-ip/real)" link set catalog0 up
-cp /run/estus-native-ip/replacement /run/estus-native-ip/replacement-next
-mv /run/estus-native-ip/replacement-next /run/estus-native-ip/replacement
-rm /run/estus-native-ip/calls
-"#).await?;
-            ensure!(changed.status.success(), "positive-cache invalidation fixture failed");
-            let stale = down(&client).await?;
-            ensure!(stale["error"]["code"] == "payload_rejected"
-                && stale["error"]["remote_state_unknown"] == false
-                && stale["data"]["status"] == "not_started",
-                "changed executable silently refreshed approval: {stale}");
-            ensure!(observed_up(&guest).await?, "stale discovery reached mutation");
-            ensure!(guest.shell("test ! -e /run/estus-native-ip/calls").await?.status.success(),
-                "stale request invoked a utility or replayed itself");
-
-            let explicit = down(&client).await?;
-            ensure!(catalog::projection(&explicit)?["verified"] == true
-                && !observed_up(&guest).await?,
-                "a later explicit request could not rediscover");
+                "a restored prerequisite prevented a new explicit request");
             let invoked = guest.shell("cat /run/estus-native-ip/calls").await?;
             ensure!(invoked.status.success());
             ensure!(String::from_utf8(invoked.stdout)?.lines()
                 .eq(["link set dev catalog0 down", "-j link show dev catalog0"]),
                 "mutation/readback ran more than once");
+            // Prerequisites are re-resolved on every call, so swapping the utility
+            // between requests is observed by the next one with no cache to stale.
+            let swapped = guest.shell(r#"set -eu
+"$(cat /run/estus-native-ip/real)" link set catalog0 up
+cp /run/estus-native-ip/replacement /run/estus-native-ip/replacement-next
+mv /run/estus-native-ip/replacement-next /run/estus-native-ip/replacement
+rm /run/estus-native-ip/calls
+"#).await?;
+            ensure!(swapped.status.success(), "executable swap fixture failed");
+            let again = down(&client).await?;
+            ensure!(catalog::projection(&again)?["verified"] == true
+                && !observed_up(&guest).await?,
+                "a replaced utility was not re-resolved on the next call");
             Ok(())
         }.await;
         let stopped = client.stop().await;

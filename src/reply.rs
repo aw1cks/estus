@@ -16,7 +16,6 @@ pub enum ErrorCode {
     ControllerResourceLimit,
     #[cfg(test)]
     ControllerTimeout,
-    DiscoveryFailed,
     InvalidArgument,
     InvalidEncoding,
     InvalidProjection,
@@ -52,7 +51,6 @@ impl ErrorCode {
             Self::ControllerResourceLimit => "controller_resource_limit",
             #[cfg(test)]
             Self::ControllerTimeout => "controller_timeout",
-            Self::DiscoveryFailed => "discovery_failed",
             Self::InvalidArgument => "invalid_argument",
             Self::InvalidEncoding => "invalid_encoding",
             Self::InvalidProjection => "invalid_projection",
@@ -89,7 +87,6 @@ const ALL_PUBLIC: &[ErrorCode] = &[
     ErrorCode::CommandFailed,
     ErrorCode::ConnectionLost,
     ErrorCode::ControllerResourceLimit,
-    ErrorCode::DiscoveryFailed,
     ErrorCode::InvalidArgument,
     ErrorCode::InvalidEncoding,
     ErrorCode::InvalidProjection,
@@ -404,11 +401,10 @@ impl ToolError {
         Self::new(ErrorCode::ConnectionLost, message, remote_state_unknown)
     }
 
-    pub(crate) const fn discovery_failed(
-        message: &'static str,
-        remote_state_unknown: bool,
-    ) -> Self {
-        Self::new(ErrorCode::DiscoveryFailed, message, remote_state_unknown)
+    /// A declared target prerequisite (interpreter version, module or
+    /// executable) is absent. The collector never ran, so remote state is known.
+    pub(crate) const fn resource_unavailable(message: &'static str) -> Self {
+        Self::new(ErrorCode::ResourceUnavailable, message, false)
     }
 
     pub(crate) const fn invalid_argument(
@@ -968,7 +964,6 @@ mod tests {
             ErrorCode::CommandFailed,
             ErrorCode::ConnectionLost,
             ErrorCode::ControllerResourceLimit,
-            ErrorCode::DiscoveryFailed,
             ErrorCode::InvalidArgument,
             ErrorCode::InvalidEncoding,
             ErrorCode::InvalidProjection,
@@ -1043,7 +1038,6 @@ mod tests {
             ),
             ("command_failed", ToolError::command_failed("m", false)),
             ("connection_lost", ToolError::connection_lost("m", true)),
-            ("discovery_failed", ToolError::discovery_failed("m", false)),
             ("invalid_argument", ToolError::invalid_argument("m", false)),
             (
                 "invalid_argument",

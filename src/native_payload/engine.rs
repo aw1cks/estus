@@ -1,9 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{
-        Arc, Mutex, MutexGuard,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -15,21 +12,44 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{MAX_INPUT, PayloadPlan, digest};
+use super::{MAX_INPUT, PayloadPlan};
 use crate::{
     config::{AutomationAgent, AutomationBecome, ResolvedAutomation},
     reply::{
         AutomationData, AutomationStatus, AutomationTasks, ErrorCode, GroupCleanup,
         ModuleProjection, ToolError, ToolReply,
     },
-    ssh::{Lease, Pool},
+    ssh::Pool,
     strict_json::parse,
 };
 
 const BOOTSTRAP: &str = include_str!("bootstrap.py");
 const PRESTATE: &str = include_str!("prestate.py");
 const STAGE0_LOADER: &str = "import struct,sys;b=sys.stdin.buffer;h=b.read(4);n,=struct.unpack('!I',h);s=b.read(n);assert len(s)==n;exec(compile(s,'<estus>','exec'),{'__name__':'__main__'})";
-const PROBE_LIMIT: usize = 65_536;
+const OUTPUT_HEADROOM: usize = 65_536;
+/// Prints only the package manager family a bundle router needs. Self-contained so
+/// it needs no frame, no request values and no imports from the payload protocol.
+const PKG_MGR: &str = r#"import os,sys
+p='unknown'
+if os.path.exists('/run/ostree-booted'):
+    p='atomic_container'
+else:
+    r=''
+    try:
+        r=open('/etc/os-release',encoding='utf-8',errors='replace').read(8192).lower()
+    except OSError:
+        pass
+    if ('id=debian' in r or 'id=ubuntu' in r) and os.path.exists('/usr/bin/apt-get'):
+        p='apt'
+    elif os.path.exists('/usr/bin/dnf') or os.path.exists('/usr/bin/microdnf'):
+        p='dnf5' if os.path.realpath('/usr/bin/dnf').endswith('/dnf5') else 'dnf'
+    else:
+        for path,mgr in (('/usr/bin/apt-get','apt'),('/usr/bin/yum','dnf'),('/usr/bin/zypper','zypper'),('/sbin/apk','apk'),('/usr/bin/apk','apk'),('/usr/bin/pacman','pacman')):
+            if os.path.exists(path):
+                p=mgr
+                break
+sys.stdout.write(p)
+"#;
 const MAX_BUNDLE_FRAME: usize = 4 * 1024 * 1024;
 
 pub(crate) fn invocation_id() -> String {
@@ -54,6 +74,10 @@ impl Failure {
     fn tool(self) -> ToolError {
         (self.make)(self.message, self.unknown)
     }
+
+    fn code(self) -> ErrorCode {
+        self.tool().code()
+    }
 }
 
 fn failed(
@@ -68,44 +92,10 @@ fn failed(
     }
 }
 
-struct Probe {
-    result: Mutex<Option<Result<Value, Failure>>>,
-    ready: CancellationToken,
-    stop: CancellationToken,
-    owners: AtomicUsize,
-}
-
-struct Interest(Arc<Probe>);
-
-impl Drop for Interest {
-    fn drop(&mut self) {
-        if self.0.owners.fetch_sub(1, Ordering::AcqRel) == 1 && !self.0.ready.is_cancelled() {
-            self.0.stop.cancel();
-        }
-    }
-}
-
-struct ProbeCompletion(Arc<Probe>);
-
-impl Drop for ProbeCompletion {
-    fn drop(&mut self) {
-        let mut result = lock(&self.0.result);
-        if result.is_none() {
-            *result = Some(Err(failed(
-                ToolError::discovery_failed,
-                "Discovery owner was lost",
-                false,
-            )));
-        }
-        self.0.ready.cancel();
-    }
-}
-
 /// One engine belongs to one activated config generation, never a process-global pool.
 pub(crate) struct Engine {
     shared_pool: Option<Arc<Pool>>,
     pools: Mutex<HashMap<String, Arc<Pool>>>,
-    probes: Mutex<HashMap<String, Arc<Probe>>>,
     shutdown: CancellationToken,
     // Headless deployments pin SSH trust; workstation mode leaves it to the operator.
     headless: bool,
@@ -125,20 +115,12 @@ impl Engine {
         Arc::new(Self {
             shared_pool,
             pools: Mutex::new(HashMap::new()),
-            probes: Mutex::new(HashMap::new()),
             shutdown,
             headless,
         })
     }
     pub(crate) async fn shutdown(&self) {
         let pools: Vec<_> = lock(&self.pools).values().cloned().collect();
-        let probes: Vec<_> = lock(&self.probes).values().cloned().collect();
-        for probe in &probes {
-            probe.stop.cancel();
-        }
-        for probe in probes {
-            probe.ready.cancelled().await;
-        }
         for pool in pools {
             pool.shutdown().await;
         }
@@ -150,7 +132,7 @@ impl Engine {
         authority: &str,
         target: &ResolvedAutomation<'_>,
         connect_timeout: Duration,
-    ) -> Result<(String, Arc<Pool>), ToolError> {
+    ) -> Result<Arc<Pool>, ToolError> {
         let agent = match target.agent {
             AutomationAgent::Inherit => std::env::var_os("SSH_AUTH_SOCK"),
             AutomationAgent::Disabled => None,
@@ -171,11 +153,11 @@ impl Engine {
             && let Some(shared) = &self.shared_pool
             && shared.matches_native_transport(target.ssh_executable, target.ssh_config)
         {
-            return Ok((key, Arc::clone(shared)));
+            return Ok(Arc::clone(shared));
         }
         let mut pools = lock(&self.pools);
         if let Some(pool) = pools.get(&key) {
-            return Ok((key, Arc::clone(pool)));
+            return Ok(Arc::clone(pool));
         }
         if pools.len() >= 16 {
             return Err(ToolError::resource_limit(
@@ -191,118 +173,87 @@ impl Engine {
             agent,
             self.headless,
         );
-        pools.insert(key.clone(), Arc::clone(&pool));
-        Ok((key, pool))
+        pools.insert(key, Arc::clone(&pool));
+        Ok(pool)
     }
 
-    fn probe_cell(&self, key: &str) -> Result<(Arc<Probe>, bool), ToolError> {
-        let mut probes = lock(&self.probes);
-        let expired = probes.get(key).is_some_and(|probe| {
-            probe.stop.is_cancelled() || lock(&probe.result).as_ref().is_some_and(Result::is_err)
-        });
-        if expired {
-            probes.remove(key);
-        }
-        if let Some(probe) = probes.get(key) {
-            probe.owners.fetch_add(1, Ordering::AcqRel);
-            return Ok((Arc::clone(probe), false));
-        }
-        if probes.len() >= 128 {
-            probes.retain(|_, probe| probe.owners.load(Ordering::Acquire) > 0);
-        }
-        if probes.len() >= 128 {
-            return Err(ToolError::resource_limit(
-                "Native discovery cache limit reached",
-                false,
-            ));
-        }
-        let probe = Arc::new(Probe {
-            result: Mutex::new(None),
-            ready: CancellationToken::new(),
-            stop: CancellationToken::new(),
-            owners: AtomicUsize::new(1),
-        });
-        probes.insert(key.to_owned(), Arc::clone(&probe));
-        Ok((probe, true))
-    }
-
-    async fn discover(
+    /// Resolve the target package manager for a router module.
+    ///
+    /// This is deliberately uncached: it runs immediately before dispatch and
+    /// nothing about the answer survives the call, so a rebuilt target image is
+    /// observed by the very next request.
+    #[allow(clippy::too_many_arguments)]
+    async fn package_manager(
         &self,
-        request: DiscoverRequest<'_>,
-    ) -> Result<(Value, String, u64), ToolError> {
-        let DiscoverRequest {
-            key,
-            lease,
-            python,
-            r#become,
-            requirements,
-            deadline,
-            ct,
-        } = request;
-        let generation = lease.generation();
-        let requirement_bytes = serde_json::to_vec(&requirements)
-            .map_err(|_| ToolError::invalid_argument("Invalid requirements", false))?;
-        let key = format!(
-            "{}:{}:{}:{}",
-            key,
-            generation,
-            python,
-            digest(&requirement_bytes)
-        );
-        let (probe, launch) = self.probe_cell(&key)?;
-        let _interest = Interest(Arc::clone(&probe));
-        if launch {
-            let worker = Arc::clone(&probe);
-            let shutdown = self.shutdown.clone();
-            let r#become = r#become.cloned();
-            // A cancelled waiter cannot drop another waiter's owned probe/channel.
-            tokio::spawn(async move {
-                let _completion = ProbeCompletion(Arc::clone(&worker));
-                let lease = lease;
-                let id = invocation_id();
-                let spec = json!({
-                    "schema": 1, "operation": "discover", "id": id,
-                    "requirements": requirements,
-                });
-                let result = match frame(&spec, &[]) {
-                    Ok(frame) => channel(ChannelRequest {
-                        session: lease.session(),
-                        python: &python,
-                        r#become: r#become.as_ref(),
-                        input: &frame,
-                        limit: PROBE_LIMIT,
-                        deadline: Instant::now() + Duration::from_secs(30),
-                        ct: &worker.stop,
-                        shutdown: &shutdown,
-                    })
+        pool: &Arc<Pool>,
+        host: &str,
+        destination: &str,
+        role: crate::config::IdentityRole,
+        candidates: &[&str],
+        r#become: Option<&AutomationBecome>,
+        deadline: Instant,
+        ct: &CancellationToken,
+    ) -> Result<String, ToolError> {
+        let lease = pool.acquire(host, destination, role, deadline, ct).await?;
+        let operation = async {
+            let mut last = None;
+            for python in candidates {
+                let mut command =
+                    if let Some(AutomationBecome::Sudo { user, executable }) = r#become {
+                        let mut command = lease.session().command(executable);
+                        command.args(["-H", "-n", "-k", "-u", user, "--", python]);
+                        command
+                    } else {
+                        lease.session().command(*python)
+                    };
+                command
+                    .args(["-I", "-c", PKG_MGR])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let Ok(mut child) = command.spawn().await else {
+                    continue;
+                };
+                let Some(stdout) = child.stdout().take() else {
+                    continue;
+                };
+                let Some(stderr) = child.stderr().take() else {
+                    continue;
+                };
+                let (out, err) = tokio::join!(bounded(stdout, 64), bounded(stderr, 0));
+                let (stdout, overflow) = out
+                    .map_err(|_| ToolError::resource_unavailable("Package manager probe failed"))?;
+                let _ = err;
+                let status = child
+                    .wait()
                     .await
-                    .and_then(|out| discovery_identity(out, &id)),
-                    Err(error) => Err(error),
+                    .map_err(|_| ToolError::resource_unavailable("Package manager probe failed"))?;
+                if !status.success() || overflow {
+                    last = Some(ToolError::resource_unavailable(
+                        "Target package manager is unavailable",
+                    ));
+                    continue;
                 }
-                .map_err(|mut error| {
-                    // Discovery carries no payload source and cannot dispatch a mutation.
-                    error.unknown = false;
-                    error
-                });
-                drop(lease);
-                *lock(&worker.result) = Some(result);
-                worker.ready.cancel();
-            });
-        } else {
-            drop(lease);
-        }
+                let name = String::from_utf8_lossy(&stdout);
+                let name = name.trim();
+                if name.is_empty() || name.len() > 32 {
+                    last = Some(ToolError::resource_unavailable(
+                        "Target package manager is unavailable",
+                    ));
+                    continue;
+                }
+                return Ok(name.to_owned());
+            }
+            Err(last.unwrap_or_else(|| {
+                ToolError::resource_unavailable("Target package manager is unavailable")
+            }))
+        };
         tokio::select! {
             biased;
-            _ = ct.cancelled() => Err(ToolError::cancelled("Request cancelled before payload dispatch", false)),
+            _ = ct.cancelled() => Err(ToolError::cancelled("Request cancelled before package manager probe", false)),
             _ = self.shutdown.cancelled() => Err(ToolError::cancelled("Server shutting down", false)),
-            _ = sleep_until(deadline) => Err(ToolError::timeout("Payload request deadline expired before dispatch", false)),
-            _ = probe.ready.cancelled() => {
-                match lock(&probe.result).as_ref() {
-                    Some(Ok(value)) => Ok((value.clone(), key, generation)),
-                    Some(Err(error)) => Err(error.tool()),
-                    None => Err(ToolError::discovery_failed("Discovery evidence unavailable", false)),
-                }
-            }
+            _ = sleep_until(deadline) => Err(ToolError::timeout("Request deadline exceeded during package manager probe", false)),
+            result = operation => result,
         }
     }
 
@@ -320,7 +271,7 @@ impl Engine {
             started,
         } = request;
         let operation = async {
-            let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
+            let pool = self.pool(host, authority, &target, connect_timeout)?;
             let candidates = interpreters(
                 plan,
                 &target.target.python,
@@ -335,58 +286,11 @@ impl Engine {
             };
             let requirements = serde_json::to_value(&plan.manifest.requirements)
                 .map_err(|_| ToolError::invalid_argument("Invalid requirements", false))?;
-            let mut retried_drift = false;
-            loop {
-                let mut discovered = None;
-                for python in &candidates {
-                    let probe_lease = pool
-                        .acquire(host, &target.target.destination, role, deadline, ct)
-                        .await?;
-                    match self
-                        .discover(DiscoverRequest {
-                            key: key.clone(),
-                            lease: probe_lease,
-                            python: (*python).to_owned(),
-                            r#become,
-                            requirements: requirements.clone(),
-                            deadline,
-                            ct,
-                        })
-                        .await
-                    {
-                        Ok((identity, cache_key, discovery_generation)) => {
-                            discovered = Some((*python, identity, cache_key, discovery_generation));
-                            break;
-                        }
-                        Err(error)
-                            if matches!(
-                                error.code(),
-                                ErrorCode::DiscoveryFailed
-                                    | ErrorCode::IoError
-                                    | ErrorCode::ConnectionLost
-                            ) =>
-                        {
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                let (python, identity, cache_key, discovery_generation) =
-                    discovered.ok_or_else(|| {
-                        ToolError::discovery_failed(
-                            "Approved target interpreters or requirements are unavailable",
-                            false,
-                        )
-                    })?;
+            let mut last = None;
+            for python in &candidates {
                 let lease = pool
                     .acquire(host, &target.target.destination, role, deadline, ct)
                     .await?;
-                if lease.generation() != discovery_generation {
-                    return Err(ToolError::discovery_failed(
-                        "SSH generation changed before dispatch",
-                        false,
-                    ));
-                }
                 let id = invocation_id();
                 let remaining = deadline
                     .saturating_duration_since(Instant::now())
@@ -397,39 +301,48 @@ impl Engine {
                         false,
                     ));
                 }
+                // The target re-checks interpreter, modules and executables in the
+                // same round trip that runs the collector; source is re-shipped.
                 let spec = json!({
                     "schema": 1, "operation": "execute", "id": id,
-                    "requirements": requirements, "identity": identity,
+                    "requirements": requirements,
                     "sha256": plan.manifest.source_sha256, "request": request,
                     "timeout": remaining.min(600.0), "output_limit": output_limit,
                 });
                 let input = frame(&spec, &plan.source).map_err(Failure::tool)?;
-                let out = channel(ChannelRequest {
+                let out = match channel(ChannelRequest {
                     session: lease.session(),
                     python,
                     r#become,
                     input: &input,
-                    limit: output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
+                    limit: output_limit
+                        .saturating_mul(6)
+                        .saturating_add(OUTPUT_HEADROOM),
                     deadline,
                     ct,
                     shutdown: &self.shutdown,
                 })
                 .await
-                .map_err(Failure::tool)?;
-                let decoded = terminal(out, &id);
-                if decoded
-                    .as_ref()
-                    .err()
-                    .is_some_and(|error| error.code() == ErrorCode::PayloadRejected)
                 {
-                    lock(&self.probes).remove(&cache_key);
-                    if !retried_drift {
-                        retried_drift = true;
+                    Ok(out) => out,
+                    // Only a spawn/transport failure moves to the next approved
+                    // interpreter; a collector outcome is final for this call.
+                    Err(error)
+                        if matches!(
+                            error.code(),
+                            ErrorCode::IoError | ErrorCode::ConnectionLost | ErrorCode::SpawnFailed
+                        ) =>
+                    {
+                        last = Some(error.tool());
                         continue;
                     }
-                }
-                break decoded;
+                    Err(error) => return Err(error.tool()),
+                };
+                return terminal(out, &id);
             }
+            Err(last.unwrap_or_else(|| {
+                ToolError::resource_unavailable("No approved target interpreter could be started")
+            }))
         }
         .await;
 
@@ -488,7 +401,7 @@ impl Engine {
             started,
         } = request;
         let operation = async {
-            let (key, pool) = self.pool(host, authority, &target, connect_timeout)?;
+            let pool = self.pool(host, authority, &target, connect_timeout)?;
             let candidates = bundle_interpreters(
                 &target.target.python,
                 target.dynamic_python,
@@ -506,64 +419,30 @@ impl Engine {
                 "executables": [],
                 "paths": [],
             });
-            let mut retried_drift = false;
-            loop {
-                let mut discovered = None;
-                for python in &candidates {
-                    let probe_lease = pool
-                        .acquire(host, &target.target.destination, role, deadline, ct)
-                        .await?;
-                    match self
-                        .discover(DiscoverRequest {
-                            key: key.clone(),
-                            lease: probe_lease,
-                            python: (*python).to_owned(),
-                            r#become,
-                            requirements: requirements.clone(),
-                            deadline,
-                            ct,
-                        })
-                        .await
-                    {
-                        Ok((identity, cache_key, discovery_generation)) => {
-                            discovered = Some((*python, identity, cache_key, discovery_generation));
-                            break;
-                        }
-                        Err(error)
-                            if matches!(
-                                error.code(),
-                                ErrorCode::DiscoveryFailed
-                                    | ErrorCode::IoError
-                                    | ErrorCode::ConnectionLost
-                            ) =>
-                        {
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                let (python, identity, cache_key, discovery_generation) =
-                    discovered.ok_or_else(|| {
-                        ToolError::discovery_failed(
-                            "Approved target interpreters or requirements are unavailable",
-                            false,
-                        )
-                    })?;
-                let pkg_mgr = identity
-                    .get("pkg_mgr")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                let (bundled, dispatched_args) =
-                    pack.resolve_dispatch(module, pkg_mgr, arguments)?;
+            // Router modules need the target's package manager to pick the bundled
+            // implementation. This is one minimal, uncached round trip: nothing
+            // about it is remembered across calls.
+            let pkg_mgr = if pack.routers.contains_key(module) {
+                self.package_manager(
+                    &pool,
+                    host,
+                    &target.target.destination,
+                    role,
+                    &candidates,
+                    r#become,
+                    deadline,
+                    ct,
+                )
+                .await?
+            } else {
+                "unknown".to_owned()
+            };
+            let (bundled, dispatched_args) = pack.resolve_dispatch(module, &pkg_mgr, arguments)?;
+            let mut last = None;
+            for python in &candidates {
                 let lease = pool
                     .acquire(host, &target.target.destination, role, deadline, ct)
                     .await?;
-                if lease.generation() != discovery_generation {
-                    return Err(ToolError::discovery_failed(
-                        "SSH generation changed before dispatch",
-                        false,
-                    ));
-                }
                 let id = invocation_id();
                 let remaining = deadline
                     .saturating_duration_since(Instant::now())
@@ -605,7 +484,6 @@ impl Engine {
                     "operation": "ansiballz",
                     "id": id,
                     "requirements": requirements,
-                    "identity": identity,
                     "wrapper_len": pack.wrapper_bytes.len(),
                     "wrapper_sha256": pack.wrapper_sha256,
                     "zip_sha256": bundled.zip_sha256,
@@ -618,32 +496,37 @@ impl Engine {
                 });
                 let input =
                     frame_bounded(&spec, &combined, MAX_BUNDLE_FRAME).map_err(Failure::tool)?;
-                let out = channel(ChannelRequest {
+                let out = match channel(ChannelRequest {
                     session: lease.session(),
                     python,
                     r#become,
                     input: &input,
-                    limit: output_limit.saturating_mul(6).saturating_add(PROBE_LIMIT),
+                    limit: output_limit
+                        .saturating_mul(6)
+                        .saturating_add(OUTPUT_HEADROOM),
                     deadline,
                     ct,
                     shutdown: &self.shutdown,
                 })
                 .await
-                .map_err(Failure::tool)?;
-                let decoded = terminal(out, &id);
-                if decoded
-                    .as_ref()
-                    .err()
-                    .is_some_and(|error| error.code() == ErrorCode::PayloadRejected)
                 {
-                    lock(&self.probes).remove(&cache_key);
-                    if !retried_drift {
-                        retried_drift = true;
+                    Ok(out) => out,
+                    Err(error)
+                        if matches!(
+                            error.code(),
+                            ErrorCode::IoError | ErrorCode::ConnectionLost | ErrorCode::SpawnFailed
+                        ) =>
+                    {
+                        last = Some(error.tool());
                         continue;
                     }
-                }
-                break decoded;
+                    Err(error) => return Err(error.tool()),
+                };
+                return terminal(out, &id);
             }
+            Err(last.unwrap_or_else(|| {
+                ToolError::resource_unavailable("No approved target interpreter could be started")
+            }))
         }
         .await;
         match operation {
@@ -691,7 +574,7 @@ impl Engine {
             deadline,
             ct,
         } = request;
-        let (_, pool) = self.pool(host, authority, target, connect_timeout)?;
+        let pool = self.pool(host, authority, target, connect_timeout)?;
         let role = if target.r#become.is_some() {
             crate::config::IdentityRole::Automation
         } else {
@@ -764,7 +647,7 @@ impl Engine {
                 };
                 let probe = payload.clone();
                 let (out, err, write) = tokio::join!(
-                    bounded(stdout, PROBE_LIMIT),
+                    bounded(stdout, OUTPUT_HEADROOM),
                     bounded(stderr, 0),
                     async move {
                         let script = PRESTATE.as_bytes();
@@ -805,9 +688,8 @@ fn interpreters<'a>(
 ) -> Result<Vec<&'a str>, ToolError> {
     if !configured.is_empty() {
         if !configured.starts_with('/') || configured.contains('\0') {
-            return Err(ToolError::discovery_failed(
+            return Err(ToolError::resource_unavailable(
                 "An approved absolute target interpreter is required",
-                false,
             ));
         }
         return Ok(vec![configured]);
@@ -821,7 +703,7 @@ fn interpreters<'a>(
     let mut candidates: Vec<&str> = Vec::new();
     if let Some(fixed) = fixed {
         let fixed = fixed.as_str().ok_or_else(|| {
-            ToolError::discovery_failed("Invalid approved collector interpreter", false)
+            ToolError::resource_unavailable("Invalid approved collector interpreter")
         })?;
         candidates.push(fixed);
     }
@@ -859,50 +741,11 @@ fn interpreters<'a>(
                 || !(path.starts_with('/') || !elevated && dynamic_python && *path == "python3")
         })
     {
-        return Err(ToolError::discovery_failed(
+        return Err(ToolError::resource_unavailable(
             "An approved absolute target interpreter is required",
-            false,
         ));
     }
     Ok(candidates)
-}
-
-fn discovery_identity(out: Output, id: &str) -> Result<Value, Failure> {
-    if out.rc != 0 || out.overflow {
-        return Err(failed(
-            ToolError::discovery_failed,
-            "Target requirements are unavailable",
-            false,
-        ));
-    }
-    let value = parse(&out.stdout).map_err(|_| {
-        failed(
-            ToolError::discovery_failed,
-            "Invalid discovery evidence",
-            false,
-        )
-    })?;
-    if value.get("schema").and_then(Value::as_u64) != Some(1)
-        || value.get("id").and_then(Value::as_str) != Some(id)
-        || value.get("phase").and_then(Value::as_str) != Some("discovered")
-    {
-        return Err(failed(
-            ToolError::discovery_failed,
-            "Invalid discovery evidence",
-            false,
-        ));
-    }
-    value
-        .get("identity")
-        .filter(|value| value.is_object())
-        .cloned()
-        .ok_or_else(|| {
-            failed(
-                ToolError::discovery_failed,
-                "Missing discovery identity",
-                false,
-            )
-        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1041,9 +884,8 @@ fn bundle_interpreters(
 ) -> Result<Vec<&str>, ToolError> {
     if !configured.is_empty() {
         if !configured.starts_with('/') || configured.contains('\0') {
-            return Err(ToolError::discovery_failed(
+            return Err(ToolError::resource_unavailable(
                 "An approved absolute target interpreter is required",
-                false,
             ));
         }
         return Ok(vec![configured]);
@@ -1224,10 +1066,20 @@ fn terminal(out: Output, id: &str) -> Result<(i32, Value, OutputStatus), ToolErr
     }
     match (value.get("phase").and_then(Value::as_str), out.rc) {
         (Some("rejected"), 70) => {
-            return Err(ToolError::payload_rejected(
-                "Payload rejected before execution; identity or requirements changed",
-                false,
-            ));
+            // A declared prerequisite failed, so the collector never ran and no
+            // mutation is possible. Distinguish that from a frame/protocol rejection.
+            return Err(match value.get("error_reason").and_then(Value::as_str) {
+                Some("unsupported_platform") => ToolError::resource_unavailable(
+                    "Target interpreter does not meet the approved minimum version",
+                ),
+                Some("dependency_unavailable") => ToolError::resource_unavailable(
+                    "A declared target module or executable is unavailable",
+                ),
+                _ => ToolError::payload_rejected(
+                    "Payload rejected before execution; frame or source drift",
+                    false,
+                ),
+            });
         }
         (Some("timeout"), 124) => {
             return Err(ToolError::timeout(
@@ -1394,16 +1246,6 @@ pub(crate) struct PreviewPrestateRequest<'a> {
     pub(crate) ct: &'a CancellationToken,
 }
 
-struct DiscoverRequest<'a> {
-    key: String,
-    lease: Lease,
-    python: String,
-    r#become: Option<&'a AutomationBecome>,
-    requirements: Value,
-    deadline: Instant,
-    ct: &'a CancellationToken,
-}
-
 struct ChannelRequest<'a> {
     session: &'a Session,
     python: &'a str,
@@ -1534,22 +1376,6 @@ mod tests {
         assert!(super::frame(&json!({}), &vec![0; super::super::MAX_SOURCE + 1]).is_err());
     }
 
-    #[test]
-    fn last_waiter_owns_probe_cancellation() {
-        let probe = Arc::new(Probe {
-            result: Mutex::new(None),
-            ready: CancellationToken::new(),
-            stop: CancellationToken::new(),
-            owners: AtomicUsize::new(2),
-        });
-        let first = Interest(probe.clone());
-        let second = Interest(probe.clone());
-        drop(first);
-        assert!(!probe.stop.is_cancelled());
-        drop(second);
-        assert!(probe.stop.is_cancelled());
-    }
-
     #[tokio::test]
     async fn overflow_drains_without_accepting_prefix() {
         let (out, overflow) = bounded(b"{\"ok\":true}trailing".as_slice(), 11)
@@ -1557,48 +1383,6 @@ mod tests {
             .unwrap();
         assert!(overflow);
         assert_eq!(out, b"{\"ok\":true}");
-    }
-
-    #[test]
-    fn shared_probe_positive_only_and_generation_separation() {
-        let engine = Engine::new(CancellationToken::new());
-        let (first, launch) = engine
-            .probe_cell("host:authority:generation1:python:requirements")
-            .unwrap();
-        assert!(launch);
-        let (second, launch) = engine
-            .probe_cell("host:authority:generation1:python:requirements")
-            .unwrap();
-        assert!(!launch);
-        assert!(Arc::ptr_eq(&first, &second));
-        *lock(&first.result) = Some(Ok(json!({"uid":0})));
-        first.ready.cancel();
-        drop(Interest(first.clone()));
-        drop(Interest(second));
-        let (cached, launch) = engine
-            .probe_cell("host:authority:generation1:python:requirements")
-            .unwrap();
-        assert!(!launch);
-        assert!(Arc::ptr_eq(&first, &cached));
-        let (different, launch) = engine
-            .probe_cell("host:authority:generation2:python:requirements")
-            .unwrap();
-        assert!(launch);
-        assert!(!Arc::ptr_eq(&first, &different));
-        *lock(&different.result) = Some(Err(failed(
-            ToolError::discovery_failed,
-            "Unavailable",
-            false,
-        )));
-        different.ready.cancel();
-        drop(Interest(different.clone()));
-        let (retry, launch) = engine
-            .probe_cell("host:authority:generation2:python:requirements")
-            .unwrap();
-        assert!(launch);
-        assert!(!Arc::ptr_eq(&different, &retry));
-        drop(Interest(cached));
-        drop(Interest(retry));
     }
 
     #[test]
@@ -1616,13 +1400,13 @@ mod tests {
             agent: crate::config::AutomationAgent::Disabled,
             dynamic_python: false,
         };
-        let (_, first) = engine
+        let first = engine
             .pool("logical-a", "automation", &resolved, Duration::from_secs(1))
             .unwrap();
-        let (_, same) = engine
+        let same = engine
             .pool("logical-a", "automation", &resolved, Duration::from_secs(1))
             .unwrap();
-        let (_, other) = engine
+        let other = engine
             .pool(
                 "logical-a",
                 "automation:catalog",
@@ -1630,7 +1414,7 @@ mod tests {
                 Duration::from_secs(1),
             )
             .unwrap();
-        let (_, host) = engine
+        let host = engine
             .pool("logical-b", "automation", &resolved, Duration::from_secs(1))
             .unwrap();
         assert!(Arc::ptr_eq(&first, &same));

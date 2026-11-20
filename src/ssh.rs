@@ -74,6 +74,9 @@ pub(crate) struct Pool {
 }
 
 struct Entry {
+    // Labels one owned master generation. Production no longer compares
+    // generations; the pool teardown tests use it to prove a fresh master.
+    #[cfg_attr(not(test), allow(dead_code))]
     generation: u64,
     state: Mutex<State>,
     channels: Arc<Semaphore>,
@@ -155,11 +158,6 @@ pub(crate) struct Lease {
 }
 
 impl Lease {
-    /// Process-local identity of the exact owned master generation.
-    pub(crate) fn generation(&self) -> u64 {
-        self.interest.0.generation
-    }
-
     pub(crate) fn session(&self) -> &Session {
         &self.session
     }

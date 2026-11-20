@@ -57,7 +57,7 @@ test ! -e /usr/bin/nvme
         let client = crate::support::Client::start(&binding.config).await?;
         let observations: Result<()> = async {
         let missing = health(&client).await?;
-        ensure!(missing["error"]["code"] == "discovery_failed"
+        ensure!(missing["error"]["code"] == "resource_unavailable"
             && missing["error"]["remote_state_unknown"] == false
             && missing["data"]["status"] == "not_started"
             && missing["data"]["complete"] == false,
