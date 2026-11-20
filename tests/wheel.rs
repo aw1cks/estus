@@ -404,7 +404,22 @@ async fn installed_wheel_channels() -> Result<()> {
             .is_some_and(|extension| extension == "whl"),
         "expected an actual wheel file"
     );
-    let stdio = executable(&input("ESTUS_TEST_STDIO_SUITE")?)?;
+    let stdio_suites = [
+        "protocol",
+        "catalog",
+        "files",
+        "output",
+        "exec",
+        "policy",
+        "tools",
+        "controller",
+    ]
+    .iter()
+    .map(|suffix| {
+        let var = format!("ESTUS_TEST_STDIO_{}", suffix.to_ascii_uppercase());
+        executable(&input(&var)?).with_context(|| format!("failed to resolve {var}"))
+    })
+    .collect::<std::result::Result<Vec<_>, _>>()?;
     let controller = executable(&input("ESTUS_TEST_CONTROLLER_SUITE")?)?;
     let bundle = PathBuf::from(
         std::env::var_os("ESTUS_TEST_ANSIBLE_BUNDLE").context("set ESTUS_TEST_ANSIBLE_BUNDLE")?,
@@ -762,13 +777,15 @@ async fn installed_wheel_channels() -> Result<()> {
             "{channel} extra registered tools"
         );
     }
-    checked_suite(
-        installed
-            .command(&stdio)
-            .args(["--nocapture", "--test-threads=1"])
-            .env("ESTUS_TEST_BINARY", installed.launcher(false)),
-    )
-    .await?;
+    for suite in stdio_suites {
+        checked_suite(
+            installed
+                .command(&suite)
+                .args(["--nocapture", "--test-threads=1"])
+                .env("ESTUS_TEST_BINARY", installed.launcher(false)),
+        )
+        .await?;
+    }
     for case in [
         "real_stream_capture_nonzero_and_signal_are_distinct",
         "normal_exit_timeout_cancel_eof_and_sigterm_clean_actual_group_children",

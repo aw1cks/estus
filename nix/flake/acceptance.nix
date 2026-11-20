@@ -33,7 +33,14 @@
         mkdir -p "$out/bin"
         makeWrapper ${wheelRunner} "$out/bin/wheel-acceptance" \
           --set ESTUS_TEST_WHEEL ${wheel}/${wheel.wheelName} \
-          --set ESTUS_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
+          --set ESTUS_TEST_STDIO_PROTOCOL ${msrvBuild.acceptance}/libexec/stdio_protocol \
+          --set ESTUS_TEST_STDIO_CATALOG ${msrvBuild.acceptance}/libexec/stdio_catalog \
+          --set ESTUS_TEST_STDIO_FILES ${msrvBuild.acceptance}/libexec/stdio_files \
+          --set ESTUS_TEST_STDIO_OUTPUT ${msrvBuild.acceptance}/libexec/stdio_output \
+          --set ESTUS_TEST_STDIO_EXEC ${msrvBuild.acceptance}/libexec/stdio_exec \
+          --set ESTUS_TEST_STDIO_POLICY ${msrvBuild.acceptance}/libexec/stdio_policy \
+          --set ESTUS_TEST_STDIO_TOOLS ${msrvBuild.acceptance}/libexec/stdio_tools \
+          --set ESTUS_TEST_STDIO_CONTROLLER ${msrvBuild.acceptance}/libexec/stdio_controller \
           --set ESTUS_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
           --set ESTUS_TEST_BINARY ${msrvBuild.package}/bin/estus \
           --set ESTUS_TEST_ANSIBLE_BUNDLE ${directModuleBundle} \
@@ -70,7 +77,14 @@
           --set ESTUS_TEST_BUILD_PYTHON ${wheel.buildPython}/bin/python \
           --set ESTUS_TEST_NATIVE_CATALOG ${msrvBuild.package}/share/estus/catalog \
           --set ESTUS_TEST_WHEEL ${wheel}/${wheel.wheelName} \
-          --set ESTUS_TEST_STDIO_SUITE ${msrvBuild.acceptance}/libexec/stdio \
+          --set ESTUS_TEST_STDIO_PROTOCOL ${msrvBuild.acceptance}/libexec/stdio_protocol \
+          --set ESTUS_TEST_STDIO_CATALOG ${msrvBuild.acceptance}/libexec/stdio_catalog \
+          --set ESTUS_TEST_STDIO_FILES ${msrvBuild.acceptance}/libexec/stdio_files \
+          --set ESTUS_TEST_STDIO_OUTPUT ${msrvBuild.acceptance}/libexec/stdio_output \
+          --set ESTUS_TEST_STDIO_EXEC ${msrvBuild.acceptance}/libexec/stdio_exec \
+          --set ESTUS_TEST_STDIO_POLICY ${msrvBuild.acceptance}/libexec/stdio_policy \
+          --set ESTUS_TEST_STDIO_TOOLS ${msrvBuild.acceptance}/libexec/stdio_tools \
+          --set ESTUS_TEST_STDIO_CONTROLLER ${msrvBuild.acceptance}/libexec/stdio_controller \
           --set ESTUS_TEST_CONTROLLER_SUITE ${msrvBuild.acceptance}/libexec/controller \
           --set ESTUS_TEST_BINARY ${msrvBuild.package}/bin/estus \
           --set ESTUS_TEST_ANSIBLE_BUNDLE ${directModuleBundle} \

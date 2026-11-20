@@ -19,7 +19,8 @@ Toolchain without Nix:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib
-cargo test --test stdio
+cargo test --test stdio_protocol --test stdio_catalog --test stdio_files --test stdio_output \
+  --test stdio_exec --test stdio_policy --test stdio_tools --test stdio_controller
 cargo test --test catalog_distribution
 cargo test --test wheel
 ```
@@ -79,7 +80,14 @@ Unit and protocol tests are network-free and run in the sandbox:
 
 ```sh
 cargo test --lib
-cargo test --test stdio           # MCP framing, tool inventory, stdio purity
+cargo test --test stdio_protocol  # MCP framing, lifecycle, malformed input
+cargo test --test stdio_catalog   # discovery, schemas, configuration, resources
+cargo test --test stdio_files     # file tool validation and policy
+cargo test --test stdio_output    # output read contracts and retained handles
+cargo test --test stdio_exec      # command execution inputs and budgets
+cargo test --test stdio_policy    # targets, profiles, tier and preview policy
+cargo test --test stdio_tools     # named tools, fixed sudo, remote scripts
+cargo test --test stdio_controller # hostless controller contract
 cargo test --test catalog         # catalog manifest, definitions, payload manifests
 cargo test --test catalog_cli
 cargo test --test catalog_distribution
@@ -90,7 +98,7 @@ cargo test --test progress
 cargo test --test doctor
 ```
 
-`tests/ssh_local.rs`, `tests/ssh_e2e.rs`, `tests/sftp_protocol.rs` and
+`tests/ssh_local_*.rs`, `tests/ssh_e2e.rs`, `tests/sftp_protocol.rs` and
 `tests/deployment_boundary.rs` cover real SSH/SFTP behaviour; they need a private
 runtime directory under the runner's home and a non-root user.
 
