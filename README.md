@@ -401,8 +401,8 @@ accept an optional envelope control `retain_output=true`:
 
 Execution remains synchronous, with its original remote deadline. By default no
 raw output, artifact directories or handles are retained, and the result's
-`output` field is omitted. Automation module/role/playbook requests reject this
-control: private Runner/control output is never exposed.
+`output` field is omitted. Automation module and payload requests reject this
+control: private worker output is never exposed.
 
 A requested result includes `output.status`: `ready` supplies an opaque `handle`,
 expiry and separate stdout/stderr `bytes_retained`, `total_bytes` observed, and
@@ -463,8 +463,8 @@ across active requests. Requests without a token produce no progress.
 
 Native/controller command progress counts actual stdout+stderr bytes drained,
 including bytes discarded beyond capture limits. SFTP reports observed channel,
-handshake and acknowledgement milestones. Runner reports only validated
-started/ready/task observations, never private frame bytes, names or results.
+handshake and acknowledgement milestones. Module execution reports only
+validated started/ready/task observations, never private frame bytes, names or results.
 Values increase; fixed messages identify the units. Unknown totals are omitted.
 Fast operations may complete without an update.
 
@@ -481,21 +481,20 @@ cannot retract bytes already sent. A blocked consumer can delay protocol output,
 not stream draining, execution deadlines, reaping or owned cleanup. Progress is
 not output retrieval, proof of completion, replay, or a background-task API.
 
-At most 16 requests may hold outstanding reply credits (including cancelled
-requests whose handlers may still be finishing, as well as initialization,
-discovery, and errors); a 17th request or duplicate live request ID terminates
-the overloaded session with `mcp_session_overloaded`, and clients must
-reconnect.
+Up to 64 requests may execute concurrently when the client reads `stdout`
+normally; requests above 64 receive an individual JSON-RPC `-32000` busy error
+without dropping the session. If `stdout` is blocked with more than 16 unread
+replies (or a duplicate live request ID arrives), the overloaded session
+terminates with `mcp_session_overloaded`, and clients must reconnect.
 
-`nix run .#progress-acceptance-msrv` exercises real native/controller/SFTP progress.
-`nix run .#runner-progress-acceptance-msrv` separately exercises the selected real
-Runner environment; it is not a prerequisite for native progress.
+`nix run .#progress-acceptance-msrv` exercises real native, controller, and SFTP
+progress.
 
 ## Best-effort audit delivery
 
 JSON diagnostics on stderr use a dedicated writer, independent of request and
-cleanup owners. Producers never wait for stderr or queue capacity. At most64
-records of4096 bytes each (256KiB total, including serialization and the in-flight
+cleanup owners. Producers never wait for stderr or queue capacity. At most 64
+records of 4096 bytes each (256 KiB total, including serialization and the in-flight
 record) are retained. Oversized/unserializable records and overflow are dropped
 whole; accepted records preserve enqueue order. When delivery resumes,
 `{"event":"diagnostic_loss","dropped_records":N}` reports accumulated loss.
@@ -520,224 +519,177 @@ policy, admission and pre-dispatch cancellation failures. Accepted native sudo
 operations retain validated user/program identifiers in start/finish records;
 ordinary command payloads and arguments are not logged.
 
-## Optional Ansible environment
+## Optional Ansible build environment
 
-Instead of the base installation, install the wheel's `ansible` extra. Set `wheel`
-to the artifact built for your platform; for the currently exercised macOS build:
+The server never needs an Ansible runtime at startup or during a request. An
+operator needs one once, offline, to build the bundle pack. Either use the wheel's
+`ansible` extra in a throwaway environment or any existing ansible-core install:
 
 ```sh
 wheel=./dist/estus-0.1.0-cp314-cp314-macosx_11_0_arm64.whl
 uv tool install --python 3.14 "${wheel}[ansible]"
-estus doctor --runtime ansible
+estus bundle build --python "$(uv tool dir)/estus/bin/python" \
+  --collections-path /opt/collections --output /etc/estus/bundle
+estus bundle inspect --bundle /etc/estus/bundle
 ```
 
-The extra pins Ansible 14.4.0, Core 2.21.5 and Runner 2.4.3. The Ansible distribution
-supplies the baseline collections; Core and Runner alone are insufficient.
-pip/uv resolves their transitive dependencies at installation time. This is not a
-fully locked or immutable environment, and no installer runs during MCP requests.
-The Nix runtime explicitly exposes `ansible.posix`, `community.general` and its
-declared `community.library_inventory_filtering_v1` dependency. Runtime checks
-verify declared collection presence and hash Core, Runner and selected modules or
-collections, including action plugins and module utilities. This is drift detection,
-not attestation of every possible third-party Python import or target dependency.
-The launcher supplies its own interpreter, installed package and script locations
-to Rust without requiring virtualenv activation or searching PATH for Python.
-Explicit roots also support uv-run overlays without importing arbitrary ambient
-Python paths. Explicit `[automation].runtime` configuration wins over
-`ESTUS_ANSIBLE_RUNTIME`; either wins over the launcher's environment.
-A broken explicit selection fails without falling back elsewhere.
-Without enabled Ansible bindings, an explicit health request or
-`[automation] required = true`, Rust does not consult the optional runtime.
-Installing the extra never enables tools.
+The extra pins Ansible 14.4.0 and Core 2.21.5 and supplies the baseline
+collections; Core alone is insufficient for collection modules such as
+`community.general.apk`. The builder needs only ansible-core plus those
+collections: ansible-runner is no longer a declared dependency and is not
+required to build or inspect a pack. pip/uv resolves transitive dependencies at
+installation time, so the build environment is not itself locked or immutable —
+only the produced pack is digest-verified. Nothing is installed during MCP
+requests, and installing a build environment never enables a tool.
 
-`doctor --runtime ansible` and required startup check actual public imports,
-versions and baseline collection manifests. Installer-managed identity reports
-`provenance.kind = "python_environment"`, not an immutable runtime ID. Nix bundle
-identity instead reports `provenance.kind = "nix_bundle"` with its pinned runtime ID.
-Neither check executes a workload or establishes target/module compatibility.
+Explicit `[automation].bundle` configuration wins over `ESTUS_ANSIBLE_BUNDLE`;
+either wins over executable-relative discovery. A broken explicit selection fails
+without falling back elsewhere. Without enabled bundle bindings, an explicit
+health request or `[automation] required = true`, Rust does not load a pack.
 
-The selected Python environment and its normal console-bootstrap hooks are trusted.
-Rust runs the fixed health helper in an isolated, bounded subprocess with private
-configuration/temp paths and no ambient Ansible configuration or Python search path.
-Process ownership and isolation are not a security sandbox.
+`doctor --runtime ansible` and required startup verify the same pack that
+`bundle inspect` checks: manifest schema, canonical bundle digest, wrapper digest,
+per-module archive digests, sizes, FQCN shapes and router targets. It executes no
+workload and establishes no target/module compatibility. A pack built from a
+mutable Python environment retains that environment's unverified third-party
+imports; digests cover the pack, not the interpreter that produced it.
 
-## Offline module contracts
+The build interpreter and its normal console-bootstrap hooks are trusted. Rust
+runs the fixed builder in an isolated, bounded subprocess with private
+configuration/temp paths and no ambient Ansible configuration or Python search
+path. Process ownership and isolation are not a security sandbox.
 
-Import metadata from the explicitly selected, already-provisioned environment:
+## Offline module bundles
+
+Ansible module execution uses a prebuilt bundle pack: an ordinary directory
+containing `bundle.json`, `wrapper.py` and one `modules/<fqcn>.zip` per included
+module. Building and inspecting happen outside the MCP server lifecycle, so no
+local Python or Ansible runtime is consulted at startup or during a request.
 
 ```sh
-nix run .#automation-msrv -- schema import ansible.builtin.stat \
-  --output ./stat.schema.json --overlay ./stat.binding.json
-nix run .#automation-msrv -- schema verify ./stat.schema.json \
-  --input ./stat.request.json
+estus bundle build --python /opt/ansible/bin/python \
+  --collections-path /opt/collections --output /etc/estus/bundle
+estus bundle inspect --bundle /etc/estus/bundle
 ```
 
-The same `schema` commands work through the wheel's public `estus` launcher.
-No target connection, module execution, dependency installation, online catalog or
-tool registration occurs. `--output` must be new: imports never overwrite a reviewed
-snapshot. `--timeout-secs` bounds the selected worker's lifetime.
+`--python` must be an absolute interpreter path that already has ansible-core
+(and any selected collections) installed; the builder runs it in isolated mode
+with a fixed locale and never installs anything. `--collections-path` is
+repeatable. `--module` is repeatable and defaults to the builder's stock SRE set
+(`ansible.builtin.systemd_service`, `ansible.posix.sysctl`, `ansible.builtin.apt`,
+`ansible.builtin.dnf`, `ansible.builtin.dnf5`, `ansible.builtin.package_facts`,
+`ansible.builtin.stat`, `ansible.builtin.service_facts`). `--output` must be new:
+the builder refuses to replace an existing directory and removes its partial
+output on failure. `--timeout-secs` bounds the whole build (1–600, default 120).
 
-For example, `stat.binding.json` fixes the backend path and exposes only a boolean:
+`bundle inspect` verifies the pack without Python, Ansible or SSH and prints one
+JSON line: `status` (`passed`/`failed`), `error_code`, `ansible_core_version`,
+`bundle_sha256` and `module_count`; failure exits non-zero. Loading enforces the
+manifest schema, the canonical-JSON bundle digest, the wrapper digest and every
+module archive digest, sizes, FQCN shapes and router targets. A tampered or
+partially written pack fails closed instead of degrading to another runtime.
 
-```json
-{
-  "input_schema": {
-    "type": "object",
-    "properties": {"follow": {"type": "boolean"}},
-    "required": ["follow"],
-    "additionalProperties": false
-  },
-  "fixed_args": {"path": "/srv/frontend/config"},
-  "input_map": {"follow": "follow"}
-}
+Select the pack with `[automation].bundle` (which wins), then
+`ESTUS_ANSIBLE_BUNDLE`, otherwise executable-relative discovery
+(`../share/estus/bundle`, `../../_bundle`, `../_bundle`). `[automation].required =
+true` makes a missing or broken pack a startup failure; installing a pack never
+enables a tool. The manifest records the ansible-core version that produced it and
+the target Python floor implied by that version; the target still needs an
+interpreter at the configured absolute path.
+
+Module bindings name the module and never carry a snapshot path:
+
+```toml
+[tools.automation_probe]
+revision = "2"
+targets = ["server"]
+authority = "automation"
+effects = ["probe"]
+execution = { kind = "ansible_module", module = "ansible.builtin.ping", no_log = false }
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+fixed_args = { data = "pong" }
+input_map = {}
+result = { kind = "ansible_summary" }
+limits = { timeout_secs = 10 }
 ```
 
-`stat.request.json` can contain `{"follow": false}`. Verification validates the
-fully assembled backend argument object without printing its values or executing
-it. A request cannot supply `path` or an undeclared argument. An optional
-`schema verify --overlay FILE` checks an alternate reviewed overlay without
-changing the snapshot.
+A binding may pin its own `bundle` path; otherwise the configured pack applies.
+Reviewed `input_schema`, `fixed_args` and `input_map` are the same closed contract
+used elsewhere: the module's documented argument object is imported from the pack
+at binding-compile time, the caller supplies only declared inputs, and fixed
+values never come from upstream documentation defaults. `check_mode`/`diff` are
+rejected unless the pack advertises support and the reviewed result fields approve
+disclosure. Module results are summary-only (`ansible_summary`) or select declared
+members (`ansible_projection`); raw events, arguments, environment and private
+paths are never returned, and `no_log` stays censored.
 
-Snapshots record runtime provenance, imported recursive structure/aliases and
-reviewed schema/content digests. Verification reimports installed metadata and
-rejects drift; it never silently refreshes approval. Documentation defaults remain
-metadata, not supplied arguments. Mapping-shaped documented choices preserve their
-typed keys and descriptive metadata. Documented `raw` options remain unbindable
-unless the reviewed overlay and tool configuration provide matching
-`argument_types`, for example `{"mode":{"type":"string","enum":["0600","0644"]}}`.
-Fixed values need the same bounded representation; omitted raw options stay omitted.
-Other unsupported types/constraints fail explicitly. This is not complete Ansible
-argument-spec emulation; effects, authority and policy are not inferred from docs.
+## Cross-distro package changes
 
-Backend argument names belong to the module's closed argument object, not the
-transport envelope. Documented `argv`/`stdin` are data; public `host`, timeout and
-execution controls remain reserved. The documented `free_form` pseudo-option is
-not a named argument: imports mark it unbindable and retain a review note. Use
-typed named parameters such as `argv`; unspecified types elsewhere still fail.
+`ansible.builtin.package` is a router. The bundle maps it to the manager detected
+on the target: apt, dnf/dnf5, apk, zypper or pacman (`yum`, `yum4` and `dnf4`
+normalize to `dnf`). An undetected or unsupported manager fails closed with an
+`unsupported` tool error; it never falls back to a shell command or a different
+backend. The generic contract accepts a non-empty `name` string or list, `state`
+(`present`/`absent`/`latest`) and `update_cache`. An exact `version` is allowed
+only with `state = "present"` and a single package name, and is rewritten as
+`name=version` for apt and `name-version` for dnf/dnf5/zypper.
 
-Integer-declared backend arguments are normalized recursively: decoded integral
-numbers such as `2.0` become integer `2`, including nested objects/arrays and
-aliases. Fractional values are rejected, never truncated; strings and booleans
-are not coerced. Existing schema limits and the exact-integer magnitude ceiling
-of ±9,007,199,254,740,991 still apply. Number-declared arguments retain their type.
-Normalization preserves the decoded JSON value, not every original decimal
-spelling; ordinary correctly rounded JSON decoding can round precise fractions
-before validation. Exact-decimal transport semantics are not claimed.
-
-Content digests detect changes to the selected Ansible/module collection source
-trees; they are not a sandbox, an immutable-environment attestation, or protection
-against a same-user attacker replacing trusted files. Mutable content can still
-change after verification. Enabled module execution checks selected source content
-again before dispatch; this is drift detection, not immutable attestation.
-
-## Reviewed module and preview bindings
-
-All Ansible module execution uses individually registered, reviewed `ansible_module`
-bindings enabled explicitly via `enabled_tools` (and host/target policy). Unreviewed
-generic module dispatch is not exposed; discovery uses `tools/list` and execution uses
-ordinary Runner/audit receipts.
-
-An `ansible.builtin.setup` binding is rejected unless reviewed fixed `gather_subset`
-and `gather_timeout` are present in `fixed_args` (never inferred from upstream docs).
-
-Named `preview_*` `ansible_module` bindings may enable `check_mode = true` (and optional
-`diff = true` when `!no_log` and `diff` is explicitly approved in `result.fields`) only
-for the C19-qualified operations (`ansible.builtin.systemd_service`,
-`ansible.posix.sysctl`, `ansible.builtin.apt`, `ansible.builtin.dnf`). A skipped task
-result is never treated as an observation, and `diff` remains unavailable unless supplied
-and disclosure-approved.
-
-When a matching `[rules."<pattern>"]` sets `require_preview = true`, mutating operations
-fail closed with `preview_required` unless a qualified preview ran within 300s (bounded
-to 256 entries) matching target, resolved authority identity, catalog and binding
-revisions, canonical arguments, and an independently observed target pre-state digest.
-The entry is consumed on dispatch; this proves ordering only, not human approval or
-absence of concurrent drift.
-## Offline role contracts
-
-Role authoring uses the same selected runtime and closed binding validator:
+`change_package` wraps that router; `change_apt` and `change_dnf` are explicit
+escape hatches for manager-specific options (`purge`, `allow_downgrade`; or
+`enablerepo`, `disablerepo`, `allowerasing`, `nobest`). Build the pack with the
+backends your fleet needs and inspect it before enabling:
 
 ```sh
-estus schema import-role site.operations.observe --entry-point main \
-  --output observe.role.json --overlay observe.binding.json
-estus schema verify-role observe.role.json --input observe.request.json
+estus bundle build --python /opt/ansible/bin/python \
+  --collections-path /opt/collections --output /etc/estus/bundle \
+  --module ansible.builtin.package --module ansible.builtin.apt \
+  --module ansible.builtin.dnf --module ansible.builtin.dnf5 \
+  --module community.general.apk --module community.general.zypper \
+  --module community.general.pacman
 ```
 
-Collection roles resolve only inside that runtime's selected collections. A
-standalone import takes the authoring role directory, whose basename must match
-the role name. Verification uses the persisted reviewed bundle instead:
+See [`examples/change_package.toml`](examples/change_package.toml),
+[`examples/change_apt.toml`](examples/change_apt.toml) and
+[`examples/change_dnf.toml`](examples/change_dnf.toml). Requirements and
+repositories remain operator-provisioned prerequisites: no request installs a
+dependency, refreshes a cache unless that reviewed option is approved, and no
+interrupted transaction is replayed.
+Target-host Python bindings are prerequisites for the package tools:
+`preview_package`/`change_package` and `preview_apt`/`change_apt` need
+`python3-apt` on Debian/Ubuntu, and `preview_dnf`/`change_dnf` need
+`python3-dnf` or `python3-libdnf5` on RHEL/Fedora. Estus does not install
+module dependencies (`auto_install_module_deps = false`): a missing binding
+fails closed as `dependency_unavailable`, and check-mode runs never mutate the
+target. `observe_packages` is a pure-stdlib collector and needs no manager
+binding.
 
-```sh
-estus schema import-role observe --role-path /etc/estus/roles/observe \
-  --output observe.role.json --schema observe.inputs.json
-estus schema verify-role observe.role.json \
-  --role-path "$(pwd)/observe.role.roles/observe"
-```
+### Sysctl preview pairing
 
-Role snapshots now use schema2. Imports copy the complete role parent once into
-a private snapshot-adjacent `.roles` bundle. Review every sibling made available
-there; startup and each call verify that same bundle, Ansible Core and all
-searchable collection content. Declared missing/external role dependencies fail
-closed. Catalog preparation shares one reviewed bundle across its selected roles.
-
-Set `execution.role_path` to `bundle_root/<role>` from the snapshot, never the
-original authoring source. Existing approvals require explicit reimport/review
-and configuration migration. Absolute bundle paths are deployment-specific;
-relocation requires explicit reimport. No request copies or refreshes approvals.
-Rebuild the paired Nix automation runtime with the updated application before
-reimporting: helper identity is checked, and mixed old/new artifacts fail closed.
-Reviewed controller code remains trusted, not sandboxed; external resources it
-reads are not universally attested.
-
-`--schema` supplies a reviewed closed JSON Schema when public role metadata
-exposes no argspec entry, for example:
-
-```json
-{
-  "type": "object",
-  "properties": {"instance": {"type": "string", "minLength": 1}},
-  "required": ["instance"],
-  "additionalProperties": false
-}
-```
-
-It cannot replace an available argspec. Role defaults are never inferred as
-inputs or injected. Recursive argspec `options`, aliases, choices, types and
-requiredness reuse module contract rules; unknown structural constraints fail
-explicitly. Use a reviewed `--overlay` with `input_schema`, `fixed_args` and
-`input_map` to narrow inputs or express supported JSON Schema conditionals;
-`verify-role --input` requires such an overlay. Neither command publishes a tool.
-
-Snapshots bind the role/entry point, runtime/collection identity, whole selected
-role or collection plus Core content, explicit schema and overlay. They omit
-private source paths, refuse overwrite and detect drift without refreshing
-approval. Source hashing rejects interior symlinks/nonregular files and is
-bounded; it is not transitive dependency attestation or protection against
-same-user changes after verification.
-Write snapshots outside the hashed source trees, including through symlinked
-parents. Canonical search paths containing `:`, `$` or Jinja delimiters are
-rejected because Ansible would reinterpret them rather than select literal content.
-
-Role tasks and dependencies do not execute during import/verification. Upstream
-role dependencies can run before the dependent role's argspec validation:
-Rust prevalidation remains the approval boundary, not upstream execution order.
-Import/verification does not enable execution; fixed role bindings are described below.
+Under `require_preview = true`, a qualified `preview_sysctl` run must precede
+the matching change tool with the same key and value:
+`preview_sysctl` with `{name, value, state: "present"}` pairs with
+`change_sysctl_config` (dedicated sysctl.d file plus exact-file apply, with
+verified readback), and `preview_sysctl` with
+`{name, value, state: "present", sysctl_set: true}` pairs with
+`change_sysctl_runtime` (single-key runtime write, no persistence). A preview
+authorizes only its paired change tool and the inputs it was given.
 
 ## Ordinary Ansible modules
 
 [`examples/automation_probe.toml`](examples/automation_probe.toml) enables one real,
-fixed `ansible.builtin.ping` binding. Provision its private workspace and import
-the snapshot from the same selected runtime before startup:
+fixed `ansible.builtin.ping` binding against an operator-built bundle. Build and
+inspect the pack first, then start the server with the same configuration:
 
 ```sh
-nix run .#automation-msrv -- schema import ansible.builtin.ping \
-  --output /etc/estus/ping.schema.json
-nix run .#automation-msrv -- --config examples/automation_probe.toml
+estus bundle build --python /opt/ansible/bin/python \
+  --module ansible.builtin.ping --output /etc/estus/bundle
+estus bundle inspect --bundle /etc/estus/bundle
+estus --config examples/automation_probe.toml
 ```
 
 The example's conventional absolute paths must be provisioned for the MCP account.
-The wheel's `estus` command accepts the same configuration with its installed
-`ansible` extra. Installing dependencies still does not enable a tool.
+No Ansible runtime is installed into the server; the pack is the only Ansible
+artifact consulted, and building one still does not enable a tool.
 
 Module calls use `{"host":"server","inputs":{}}`; optional `timeout_secs` is a
 transport field. The entire reviewed domain schema is published under `inputs`,
@@ -746,36 +698,38 @@ mixing them with transport controls. Native/controller tool input shapes are
 unchanged. Malformed input shapes produce protocol errors; valid shapes violating
 reviewed bounds or choices produce tool errors before execution.
 
-Each module definition fixes `execution.snapshot`, `authority = "automation"`,
-`result.kind = "ansible_summary"`, effects, logical targets, `input_schema`,
-`fixed_args` and `input_map`. A stored snapshot overlay, when present, must match.
-Only explicitly enabled/capability-effective definitions inspect snapshots or start
-Python. Enabled stale/incompatible bindings fail before MCP starts; requests
-never regenerate approval or install dependencies.
+Each module definition fixes its `execution.module`, optional `execution.bundle`,
+`authority = "automation"`, `result.kind`, effects, logical targets,
+`input_schema`, `fixed_args` and `input_map`. Only explicitly enabled and
+capability-effective definitions compile a contract or dispatch; enabled bindings
+whose module is absent from the pack fail before MCP starts, and requests never
+regenerate approval or install dependencies.
 
 `[automation.targets.<logical>]` fixes the SSH destination and absolute target
 Python interpreter independently of native sudo authority. This ordinary authority
-never becomes; named broader authorities below are separate. OpenSSH resolves operator aliases and the replacement SSH
-file. Runner connections do not use the Rust pool: sharing, forwarding, host-key
-updates, password prompts and remote TTY allocation are disabled. Automation uses
-the same validated local OpenSSH executable as native SSH and doctor; see
+never becomes; named broader authorities below are separate. OpenSSH resolves
+operator aliases and the replacement SSH file. Module transport does not use the
+Rust pool: sharing, forwarding, host-key updates, password prompts and remote TTY
+allocation are disabled. Automation uses the same validated local OpenSSH
+executable as native SSH and doctor; see
 [Local SSH executable](#local-ssh-executable) for selection and path resolution.
 An existing bounded absolute `SSH_AUTH_SOCK` reference is preserved for an
 out-of-band agent. The product does not load keys, create an agent, prompt for
 credentials or accept key/password contents as tool inputs.
 
-Summary-only results contain logical host, status, Runner return code, bounded task
-counts, change/censorship/completion, duration and local cleanup evidence. They
-still exclude module values. Typed bindings may expose only explicitly selected
-fields as described below; whole raw events/arguments/environment are not returned.
-`no_log` remains censored. Caller argument trees are wrapped with `!unsafe`,
-preventing nested Jinja evaluation while preserving string types—including empty,
-numeric-looking, boolean-looking and null-looking strings. Per-scalar unsafe tags
-are not used because Core can re-resolve their quoted contents as YAML native values.
+Summary-only results contain logical host, status, the runner return code, bounded
+task counts, change/censorship/completion, duration and local cleanup evidence.
+They still exclude module values. Typed bindings may expose only explicitly
+selected fields as described below; whole raw events/arguments/environment are not
+returned. `no_log` remains censored. Caller argument trees are wrapped with
+`!unsafe`, preventing nested Jinja evaluation while preserving string types —
+including empty, numeric-looking, boolean-looking and null-looking strings.
+Per-scalar unsafe tags are not used because Core can re-resolve their quoted
+contents as YAML native values.
 Failed modules may report mutation even when Core omits their changed count.
 That observation survives a known failure; it is not rewritten as unchanged or
 discarded as a protocol error.
-A singleton skipped module is complete success when Runner reports successful
+A singleton skipped module is complete success when the run reports successful
 completion with return code zero and matching skipped task statistics (for
 example, a verbosity-gated `debug` task). It preserves `tasks.skipped = 1`
 and known unchanged evidence; `no_log` keeps `changed = null`, not a fabricated
@@ -784,83 +738,70 @@ and known unchanged evidence; `no_log` keeps `changed = null`, not a fabricated
 `automation.max_concurrent` defaults to 2; each logical target admits one automation
 invocation at a time. The existing global operation cap also applies. Admission
 and private workspaces remain owned through cleanup, including client loss.
-Cancellation first lets the owned CLI propagate termination through Ansible's
-worker cleanup; bounded fallback remains available. Neither local cleanup nor a
-cancelled reply proves remote termination, rollback or escaped-child containment.
-No operation is automatically replayed.
+Cancellation first lets the owned worker propagate termination through its
+cleanup; bounded fallback remains available. Neither local cleanup nor a cancelled
+reply proves remote termination, rollback or escaped-child containment. No
+operation is automatically replayed.
 
-Scratch defaults to 16 MiB/512 entries. Byte/file polling cancels on an observed
-watermark, not a hard filesystem or memory quota. Runner's unavoidable private
-metadata/transient files can contain secrets; supported duplicate output/event
-capture is suppressed and invocation files are removed after ownership ends.
-Same-UID Unix sockets beneath the invocation's private temporary directory are
-permitted for Python multiprocessing IPC and still count toward the entry limit.
-Symlinks, sockets elsewhere and other special files remain rejected, apart from
-the fixed owned Runner lease FIFO.
-Crash recovery does not promise secure erasure. Privilege escalation and retained
-raw events remain outside this implementation.
+Scratch under `[controller].workspace_root` defaults to 16 MiB/512 entries. Byte and
+file polling cancels on an observed watermark, not a hard filesystem or memory
+quota. Transient worker files can contain secrets; duplicate output/event capture
+is suppressed and invocation files are removed after ownership ends. Same-UID Unix
+sockets beneath the invocation's private temporary directory are permitted for
+Python multiprocessing IPC and still count toward the entry limit. Symlinks,
+sockets elsewhere and other special files remain rejected. Crash recovery does not
+promise secure erasure. Privilege escalation and retained raw events remain outside
+this implementation.
 
-## Fixed ordinary Ansible roles
+## Native catalog payloads
 
-[`examples/app_config.toml`](examples/app_config.toml) and
-[`examples/roles/app_config`](examples/roles/app_config) converge one ordinary
-application JSON file. The role validates its contract, writes trusted JSON
-without evaluating caller strings, reads the actual bytes/checksum, asserts its
-postcondition and publishes a typed receipt. It does not install software,
-restart a service or escalate privilege.
+Catalog tools that are not bundle modules are controller-owned native Python
+payloads: `catalog/payloads/<tool>/{collector.py,manifest.json}`. No Ansible
+runtime, role snapshot or controller workspace is involved. The reviewed
+`native_payload` binding fixes the collector source, its manifest, the target
+interpreter and the argument adapter, and the collector runs over the ordinary
+SSH identity:
 
-Deploy the reviewed role independently, provision the configured private
-workspace and import its snapshot before enabling the binding:
-
-```sh
-estus schema import-role app_config \
-  --role-path /etc/estus/roles/app_config \
-  --output /etc/estus/app_config.schema.json
-estus --config examples/app_config.toml
+```toml
+execution = { kind = "native_payload", snapshot = "/etc/estus/observe_host_summary.payload.json", source = "/etc/estus/payloads/observe_host_summary/collector.py", no_log = false }
 ```
 
-Use the wheel's installed `ansible` extra or the selected Nix automation package.
-A reviewed `--overlay` may also bind the snapshot to the exact configured
-`input_schema`, `fixed_args` and `input_map`; when stored, it must match startup.
-Standalone execution fixes `role_path`; collection execution omits it and resolves
-only within the selected runtime. The reviewed snapshot fixes role and entry
-point. No caller can select role/path/entry, extra-vars, tags or connection controls.
+Produce that pair through `catalog export` and `catalog prepare`, which copy the
+reviewed collector bytes and write the snapshot manifest next to them:
 
-Roles use the same `{"host":"server","inputs":{...}}` envelope, target/capability
-authorization, timeout/admission, child owner and cancellation path as modules.
-Rust validates and canonicalizes the assembled inputs before starting any role
-or dependency. Source content is checked again before Runner dispatch; no
-per-request documentation introspection or approval refresh occurs.
+```sh
+estus catalog export --tool observe_host_summary --output ./health-export
+# Review health-export/payloads/observe_host_summary/{collector.py,manifest.json}.
+estus catalog prepare --site ./site.toml --definitions ./health-export/tools.toml \
+  --target server --output ./health-reviewed
+estus catalog inspect --site ./health-reviewed/estus.toml
+estus --config ./health-reviewed/estus.toml
+```
 
-Existing roles can return `ansible_summary` without a custom result protocol.
-For domain data, a role may `set_fact: mcp_result: ...`; `ansible_projection`
-selects only declared members beneath that fact, with the same recursive schema
-and aggregate bounds as module projections. Collection runs after ordinary role
-handlers. Missing/invalid results produce an independent output error without
-erasing verified execution, change or failure evidence; `no_log` remains censored.
+Preparation is offline: it approves collector source, adapter, typed contract and
+policy without importing Ansible and without contacting a target. Existing output
+paths are refused, and a changed source or manifest is never refreshed silently —
+export, review and prepare again.
 
-Summaries include authoritative failed/skipped outcomes and nonzero
-`tasks.rescued`/`tasks.ignored`; rescued or ignored failures do not become invisible.
-Observed prior changes survive a later failure or incomplete run. Execution is
-bounded to 128 root results/256 starts; loop items are not retained as raw events.
-A failed role task without positive change evidence leaves `changed=null`, rather
-than claiming the target was unchanged. Package procedures preserve independent
-dpkg change observations when apt or subsequent verification fails.
+Payloads use the same `{"host":"server","inputs":{...}}` envelope, target and
+capability authorization, timeout/admission, child owner and cancellation path as
+modules. Rust validates and canonicalizes the assembled inputs before dispatch.
+Source bytes are checked again immediately before the payload runs; that is drift
+detection, not immutable attestation.
 
-Role tasks, dependencies, handlers and templates are trusted operator code, not a
-sandbox. Selected-tree hashes do not attest external dependency trees or prevent
-same-user replacement after verification. No detached async tasks are generated;
-reviewed roles must not use them. Visible async metadata is rejected, including
-loop results, but public `no_log` events can hide it. Completion attests reconciled
-Runner workflow evidence, not remote quiescence, rollback or process confinement.
+Results are `capability_projection` (declared `mcp_result` members selected by the
+reviewed schema and aggregate bounds) or `command`. Missing or invalid results
+produce an independent output error without erasing verified execution, change or
+failure evidence; `no_log` remains censored.
 
-The catalog contains 106 controller-owned native Python payloads and 12 retained
-Ansible workflows. Native `payloads/<tool>/collector.py` bytes are approved together
-with a typed contract, fixed policy, argument adapter, requirements and authority.
-Delivery uses interpreter stdin, not a target source installation or cache.
-Positive discovery is process/config/SSH-generation/authority scoped; explicit
-interpreter failure never falls back. Target capability fingerprints are advisory,
-not immutable attestation.
+The catalog contains 112 controller-owned native Python payloads and 8
+`ansible_module` entries that require a bundle. Native
+`payloads/<tool>/collector.py` bytes are approved together with a typed contract,
+fixed policy, argument adapter, requirements and authority. Delivery uses
+interpreter stdin, not a target source installation or cache. Positive discovery
+is process/config/SSH-generation/authority scoped; explicit interpreter failure
+never falls back. Target capability fingerprints are advisory, not immutable
+attestation.
 
 Native revisions have the `_native1` suffix. Domain data remains at
 `data.projection.value`; `runner_rc` now carries the actual collector exit code
@@ -899,17 +840,19 @@ target dependencies. Parameter-setting keeps its explicit unsupported/no-write
 receipt when the approved sysfs parameter is absent; it does not require that
 optional parameter path during discovery.
 
-Retained role collectors remain under role-owned `files/collector.py`. Both forms
-preserve parser and domain semantics; source migration does not promote laboratory
-or site-policy qualifications. Fast tests import the actual collectors; real guest
-tests retain transport, permission, mutation and postcondition coverage.
+Collectors are plain Python modules with no third-party imports beyond the
+standard library their manifests declare. Migration to the native path does not
+promote laboratory or site-policy qualifications. Fast tests import the actual
+collectors; real guest tests retain transport, permission, mutation and
+postcondition coverage.
 
 ```sh
-nix run .#role-acceptance-msrv
+nix run .#catalog-acceptance-msrv
 ```
 
-This runs the installed real SSH/Runner role suite outside the Nix sandbox, using
-the same private-directory/non-root prerequisites as native acceptance.
+This runs the shipped catalog suite outside the Nix sandbox, using the same
+private-directory/non-root prerequisites as native acceptance. Native selections
+need no selected Ansible runtime; bundle-backed module tools require a built pack.
 
 ## Deployment trust boundary
 
@@ -937,19 +880,21 @@ explicitly reports `operator_managed_not_observed`.
 ## Bundled operational catalog
 
 Normal wheels and Nix packages include the versioned catalog: definitions,
-reviewed role sources and Python payloads. Ansible remains optional. Installing
-the package does **not** enable catalog tools or grant credentials or sudo.
-The repository's `catalog/` tree is the canonical shipped asset source;
-`examples/` contains demonstrations and deployment examples.
+payload sources and manifests. Eight entries are `ansible_module` templates and
+need an operator-built bundle; the other 112 are native payloads and need only the
+target interpreter. Installing the package does **not** enable catalog tools or
+grant credentials or sudo. The repository's `catalog/` tree is the canonical
+shipped asset source; `examples/` contains demonstrations and deployment examples.
 
 Source-checkout migration: use `catalog/` for catalog roots and selected
-definitions/roles. Installed `_catalog` and `share/estus/catalog` layouts,
-inventory version6 and reviewed payload bytes are unchanged. Existing exports
-and persisted approval bundles remain valid when their recorded paths and content
-remain unchanged. Update configurations/authoring commands that explicitly name
-the old source root; if an approval's recorded source path changes, explicitly
-export, review and import again. Estus never rewrites or silently refreshes an
-approval. No obsolete source copy or compatibility symlink remains.
+definitions. Installed `_catalog` and `share/estus/catalog` layouts, inventory
+version7 and reviewed payload bytes are unchanged. Existing exports and prepared
+approvals remain valid when their recorded paths and content remain unchanged.
+Update configurations and commands that explicitly name an old source root or
+that referenced removed role sources; if an approval's recorded source path
+changes, explicitly export, review and prepare again. Estus never rewrites or
+silently refreshes an approval. No obsolete source copy or compatibility symlink
+remains.
 
 ```sh
 estus catalog list
@@ -1003,16 +948,16 @@ published. It never writes EEPROM or runs an active hardware diagnostic.
 
 ### Review and prepare a site configuration
 
-Export creates private **inert** `tools.toml`, executor-specific role/payload assets,
+Export creates private **inert** `tools.toml`, executor-specific payload assets,
 exact JSON overlays and `catalog-selection.json` qualification/prerequisite metadata.
-It creates no credentials or active approvals. Review the selected definitions,
-payload manifests/source or retained role files first. Unit names, interfaces, paths, module
-parameters, package names and repositories outside `linux-health` are generally
-**fixture policies**, not production defaults: adapt the closed input enums,
-fixed policy and allowlists together.
+It creates no credentials or active approvals. Review the selected definitions and
+each `payloads/<tool>/{collector.py,manifest.json}` first. Unit names, interfaces,
+paths, module parameters, package names and repositories outside `linux-health` are
+generally **fixture policies**, not production defaults: adapt the closed input
+enums, fixed policy and allowlists together.
 
 For native Linux health tools, provide the actual SSH mapping in `site.toml`;
-no controller Ansible runtime or Runner workspace is needed:
+no controller Ansible bundle or workspace is needed:
 
 ```toml
 mode = "headless"
@@ -1046,9 +991,11 @@ estus catalog inspect --site ./reviewed/estus.toml
 estus --config ./reviewed/estus.toml
 ```
 
-Preparation is offline: native selections approve immutable source, adapters and
-typed policy without importing Ansible; selected modules/roles import against their
-authority's runtime. It writes a new configuration and never contacts targets.
+Preparation is offline. Native selections approve immutable collector source,
+adapters and typed policy without consulting Ansible. Selected `ansible_module`
+definitions instead compile their reviewed contract against the authority's bundle
+(or the configured pack) and fail with `runtime_unavailable` if none is present; no
+module is executed. It writes a new configuration and never contacts targets.
 Missing authority is not fabricated. The overall deadline includes all preparation
 (`--timeout-secs`, default60).
 Existing output paths and definition collisions fail; output parents must be
@@ -1080,8 +1027,9 @@ rejected rather than silently ignored.
 including the global native command-execution, file-read and file-write exposure
 booleans. These are global ceilings, not additional per-target grants. Inspection
 does not verify runtime health or remote capabilities; use `doctor` for explicit health
-checks. Review snapshots before using the generated configuration. Existing
-manual `schema import-role` authoring remains supported.
+checks. Review the prepared collectors, manifests and overlays before using the
+generated configuration; `catalog prepare` is the only authoring path, and no
+request-time approval refresh exists.
 
 ### Selection, authority and upgrades
 
@@ -1158,8 +1106,9 @@ escape hatch. A manager job may complete after cancellation; independently
 inspect it before deciding anything. A conservative failed replacement may leave
 a private stage: never automatically replay it or delete an unproven pathname.
 
-Recorded catalog scope: x86_64 Linux controller with CPython 3.14.8, Ansible Core
-2.21.5 and Runner 2.4.3; pinned disposable NixOS 26.11 x86_64 guest with Linux
+Recorded catalog scope: x86_64 Linux controller with CPython 3.14.8 and an
+Ansible Core 2.21.5 bundle build environment; pinned disposable NixOS 26.11 x86_64
+guest with Linux
 6.18.60. Replacement uses the Nix-built x86_64 Linux deployment image through an
 explicit Docker-compatible backend on Darwin 25 arm64. These fixture results do
 not qualify another site's identities, service health signals, storage durability
@@ -1274,7 +1223,7 @@ introducing second collectors:
 | `observe_packages` | [`package_facts`](https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/package_facts_module.html) | Installed package/version inventory and reported backend metadata |
 | `observe_nic_features` | `setup` network feature facts | Reported `ethtool -k` offload states, including fixed-state annotations |
 
-Use opt-in reviewed bindings/roles and closed bounded projections, never a public
+Use opt-in reviewed bindings and closed bounded projections, never a public
 dump-all-facts tool. Fix fact subsets, backend/source choices and timeouts;
 exclude raw event/context/environment data and undeclared identifiers. Setup
 filtering limits returned keys, not every internal probe. Mount facts must select
@@ -1289,8 +1238,8 @@ read-only setting: those request changes. Publish only approved status propertie
 The shipped `observe_host_summary`, `observe_cpu` and `observe_memory` remain useful:
 setup does not provide the boot UUID, raw CPU tick counters/two-sample deltas,
 or exact byte gauges plus the selected cumulative VM counters. They are currently
-**Ansible-backed custom collectors**, not native-core implementations; transport
-migration is a separate change.
+native payload collectors (`catalog/payloads/<tool>`), not bundle modules, so
+they need only the target interpreter.
 
 Keep richer systemd inventory/jobs/relationships, routing/address scope, live counters,
 PCI/DIMM/slot/health data, configured-path filesystem queries and package file
@@ -1301,37 +1250,29 @@ and their API demonstrations are different capabilities, not fact collectors.
 ## Opt-in Linux host summary
 
 [`catalog/observe_host_summary.toml`](catalog/observe_host_summary.toml) binds the reviewed
-[`observe_host_summary` role](catalog/roles/observe_host_summary) to one ordinary SSH target.
-It is not enabled by default. This is an optional Ansible automation tool, not a
-native-only observer: install the wheel's `ansible` extra or select the Nix
-automation runtime, and provision `/usr/bin/python3` on the Linux target.
-No packages are installed automatically and no privilege escalation is used.
+[`observe_host_summary` collector](catalog/payloads/observe_host_summary) to one ordinary
+SSH target. It is not enabled by default. This is a native payload: no Ansible
+runtime, role snapshot or controller workspace is involved, and only the target's
+`/usr/bin/python3` is needed. No packages are installed automatically and no
+privilege escalation is used.
 
-Deploy the reviewed role at `/etc/estus/roles/observe_host_summary`, provision
-`/var/lib/estus/runner` as a private mode0700 directory owned by the MCP account,
-and configure the `server-ordinary` SSH alias, identity and host-key policy.
-The example fixes both automation Python and the proc reader to
-`/usr/bin/python3`; change both operator settings together if needed.
-For native/Nix use, set `ESTUS_ANSIBLE_RUNTIME` to the provisioned automation
-runtime directory for both commands below. The installed wheel launcher can
-instead select its already-provisioned `ansible` environment.
-Import the exact binding overlay offline before enabling the example:
+Configure the `server-ordinary` SSH alias, identity and host-key policy, then run
+the offline catalog workflow; preparation copies the collector, writes its
+snapshot manifest and pins the interpreter:
 
 ```sh
-cat > observe_host_summary.overlay.json <<'JSON'
-{"input_schema":{"type":"object","required":[],"additionalProperties":false,"properties":{}},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}}
-JSON
-estus schema import-role observe_host_summary \
-  --role-path /etc/estus/roles/observe_host_summary \
-  --overlay observe_host_summary.overlay.json \
-  --output /etc/estus/observe_host_summary.schema.json
-estus --config catalog/observe_host_summary.toml
+estus catalog export --tool observe_host_summary --output ./host-review
+# Review host-review/payloads/observe_host_summary/{collector.py,manifest.json}.
+estus catalog prepare --site ./site.toml --definitions ./host-review/tools.toml \
+  --target server --output ./host-approved
+estus catalog inspect --site ./host-approved/estus.toml
+estus --config ./host-approved/estus.toml
 ```
 
-Import does not execute the role. Review the generated snapshot; no preapproved
-snapshot is shipped. The example explicitly selects only `observe_host_summary` in an
-`named = true` capability, restricts it to `server`, and caps execution at 30 seconds.
-Its only domain input is the empty object:
+Preparation does not execute the collector. Review the copied source, manifest and
+overlay; no preapproved snapshot is shipped. The example selects only
+`observe_host_summary` under `named = true`, restricts it to `server`, and caps
+execution at 30 seconds. Its only domain input is the empty object:
 
 ```json
 {"host":"server","inputs":{}}
@@ -1339,29 +1280,30 @@ Its only domain input is the empty object:
 
 The closed typed projection returns `system`, `distribution`,
 `distribution_version`, `kernel`, `architecture`, `boot_id`, `uptime_seconds`,
-`observed_at`, `scope`, `virtualization_type`, `virtualization_role` and `unavailable`, alongside
-normal execution/change/completion/cleanup evidence. There are no caller-selected
-paths, Python programs, role arguments or payload. Selective registered setup
-facts exclude local facts, environment, network and device collectors; the fixed
-isolated Python reader reads at most128 bytes from each of the two proc files.
-Unavailable optional observations are omitted and named in `unavailable`; malformed readable proc contents fail
-instead of becoming invented zeroes. Results are bounded to4096 bytes,64 items
-and depth4, and do not expose raw facts, command output or private scratch paths.
+`observed_at`, `scope`, `virtualization_type`, `virtualization_role` and
+`unavailable`, alongside normal execution/change/completion/cleanup evidence.
+There are no caller-selected paths, Python programs, arguments or payload. The
+collector reads a fixed set of standard-library sources and at most 128 bytes from
+each proc file it touches. Unavailable optional observations are omitted and named
+in `unavailable`; malformed readable proc contents fail instead of becoming
+invented zeroes. Results are bounded to 4096 bytes, 64 items and depth 4, and do
+not expose raw facts, command output or private paths.
 
-`observed_at` is the setup collector's UTC timestamp, not an atomic snapshot.
+`observed_at` is the collector's UTC timestamp, not an atomic snapshot.
 `scope="ssh_process_view"` means what the SSH process can observe: boot ID and
 uptime may be shared with a host or affected by procfs/time namespaces.
-Ansible virtualization values are heuristic hints, not complete layering or
-isolation attestation; absent/`NA` hints are unavailable, not proof of bare metal.
-Linux is required before proc reads; no other operating system is supported.
-The role reports no persistent changes, but Ansible still creates transient
-target work and private controller scratch under the normal cleanup contract.
+Virtualization values are heuristic hints, not complete layering or isolation
+attestation; absent hints are unavailable, not proof of bare metal. Linux is
+required before proc reads; no other operating system is supported. The payload
+reports no persistent changes, but it still creates transient target work under
+the normal cleanup contract.
 
-`nix run .#host-summary-acceptance-msrv` exercises the shipped role through the
-installed importer and MCP endpoint against the disposable Linux automation
-fixture. Set `ESTUS_TEST_FIXTURE` to the three-file
-`ssh-automation-fixture-image` artifact and `DOCKER_HOST` to the explicit
-Docker-compatible backend. No host account, service or sudo policy is changed.
+`nix run .#workflow-catalog-acceptance-msrv` exercises the shipped payload
+through `catalog prepare` and the MCP endpoint against a disposable Linux EFI
+guest, via `reviewed_health_workflow` and
+[`examples/workflows/health.toml`](examples/workflows/health.toml). The wrapper
+supplies `ESTUS_TEST_CATALOG_VM` and `ESTUS_TEST_ANSIBLE_BUNDLE`; no Docker
+backend is involved. No host account, service or sudo policy is changed.
 
 ## Opt-in Linux CPU counters and topology
 
@@ -1437,11 +1379,12 @@ It is bounded to4096 bytes,256 items and depth5. `topology_truncated` describes
 only the requested row limit; the projection status is authoritative if its
 aggregate byte/item budget truncates output. The logical IDs/global count still
 describe the observed view, not an effective CPU allowance.
-The role reports no persistent changes; normal transient target work and private
-controller scratch still follow the automation cleanup contract.
+The payload reports no persistent changes; normal transient target work still
+follows the cleanup contract.
 
-`nix run .#cpu-stats-acceptance-msrv` exercises both observation modes against
-the explicit Linux automation fixture (`ESTUS_TEST_FIXTURE`, `DOCKER_HOST`).
+`nix run .#ssh-native-msrv` exercises both observation modes on a loopback
+fixture (`ssh_workstation_dynamic_bundled_health_payloads`, plus the payload
+unit and concurrency cases); no Docker backend is involved.
 Accounting and topology semantics follow the kernel's
 [/proc documentation](https://docs.kernel.org/filesystems/proc.html) and
 [CPU topology ABI](https://docs.kernel.org/admin-guide/cputopology.html).
@@ -1511,93 +1454,52 @@ contents, command stdout or private paths.
 `observed_at` is target UTC at collection end, not an atomic snapshot across
 proc sources. Procfs may expose host/global memory even inside a container;
 these values are not effective cgroup, NUMA, cpuset or quota allowance.
-There is no sampling or derived delta. The role reports no persistent changes;
+There is no sampling or derived delta. The payload reports no persistent changes;
 normal transient target work and private controller scratch still follow the
 automation cleanup contract.
 
-`nix run .#memory-stats-acceptance-msrv` (or
-`nix run .#memory-stats-acceptance`) exercises the shipped assets against the
-explicit Linux automation fixture (`ESTUS_TEST_FIXTURE`, `DOCKER_HOST`).
+`nix run .#ssh-native-msrv` exercises the shipped assets on a loopback fixture
+(`ssh_workstation_dynamic_bundled_health_payloads` and the `observe_memory`
+parser cases); no Docker backend is involved.
 Field semantics follow the kernel's
 [/proc documentation](https://docs.kernel.org/filesystems/proc.html),
 [`proc_meminfo(5)`](https://man7.org/linux/man-pages/man5/proc_meminfo.5.html)
 and [`proc_vmstat(5)`](https://man7.org/linux/man-pages/man5/proc_vmstat.5.html).
 
-## Fixed ordinary Ansible playbooks
+## No role or playbook execution
 
-Review a deployed project without parsing or executing its YAML:
+Roles and playbooks are not execution kinds. The catalog cutover replaced
+controller-owned role sources with native payloads, and the binding schema accepts
+only `native_argv`, `controller_script`, `native_payload` and `ansible_module`.
+There is no `ansible_role`, no `ansible_playbook`, no `execution.role_path`,
+`execution.project_root` or `--role-path`, and no `estus schema` command:
+`estus --help` offers `doctor`, `bundle` and `catalog` only.
 
-```sh
-estus schema import-playbook site.yml \
-  --project-root /etc/estus/project \
-  --input-schema backend.schema.json --overlay binding.json \
-  --output /etc/estus/site.schema.json
-estus schema verify-playbook /etc/estus/site.schema.json \
-  --project-root /etc/estus/project --input request-inputs.json
-```
+Existing role- and playbook-based approvals are not migrated. Rework each site to a
+native payload (preferred: `catalog export`/`prepare` of a canonical tool) or to a
+bundle module binding, then review the resulting collector or module contract.
+Estus never rewrites or silently refreshes an approval, and no compatibility shim
+reads an old snapshot.
 
-`backend.schema.json` is an explicit closed schema for the complete constructed
-argument object. `binding.json` contains the reviewed caller `input_schema`,
-`fixed_args` and `input_map`, using the same recursive validator as roles.
-Store the snapshot outside the project, including through case/symlink aliases.
-Project roots must not contain the importer's or invocation's temporary workspace.
-The entry is a fixed canonical relative `.yml`/`.yaml` path; no caller path or YAML
-is accepted. Import does not infer a contract from play variables or defaults.
-
-An explicitly enabled tool uses `authority="automation"`, its reviewed overlay,
-operator-declared effects and an `ansible_summary` or `ansible_projection` result.
-Its fixed execution selector is:
-
-```toml
-[tools.site.execution]
-kind = "ansible_playbook"
-snapshot = "/etc/estus/site.schema.json"
-project_root = "/etc/estus/project"
-```
-
-Calls retain `{"host":"server","inputs":{...}}`. The playbook reads only the
-constructed dictionary as `estus_arguments`, for example
-`"{{ estus_arguments.configuration }}"`. Recursive caller strings are literal
-data, not arbitrary top-level extra-vars. Inventory, host patterns, tags, selected
-playbook/project, connection/interpreter and become controls are not caller inputs.
-The generated initial inventory contains only `estus_target`; the CLI fixes its
-limit, transport/interpreter settings and `ansible_become=false`. Existing target
-authorization, admission, timeouts, cancellation and cleanup remain in force.
-
-Runtime identity and bounded Core/project bytes are checked at startup and again
-before dispatch. Interior symlinks/nonregular files are rejected. Relative task,
-vars and template paths use the fixed project; project-local roles, plugins and
-`collections/ansible_collections` are reviewed content, not ambient search paths.
-The generated private configuration and HOME replace ambient Ansible settings.
-Source may still change after verification: this is drift detection, not immutable
-or transitive dependency attestation.
-
-Multi-play summaries use the same bounded reconciled evidence as roles. Optional
-`ansible_projection` selects declared `mcp_result` members after the imported plays;
-failed or missing output never erases known workload failure or earlier mutation.
-Binding `no_log=true` suppresses public values/change evidence even when trusted
-plays override their own logging defaults.
-
-Playbooks, plugins, lookups and external includes are trusted operator code.
-Initial inventory/CLI limits do not confine delegated or controller-side effects.
-The linear strategy/logging settings are defaults, not a rewrite of trusted play
-keywords. Unsupported execution evidence fails closed; it does not prove effects
-were prevented or rolled back. No detached async, elevation, multi-host scheduler,
-automatic replay, dependency installation or rollback guarantee is added.
-
-`nix run .#playbook-acceptance-msrv` runs the installed real SSH/Runner suite with
-the same non-root/private-directory prerequisites as role acceptance.
+The security properties that applied to trusted controller code still apply to both
+replacement paths: collector and module argument trees are validated and canonical
+before dispatch, caller strings stay literal data (`!unsafe` for wrapped trees)
+rather than template expressions, `no_log` remains censored, projections expose
+only declared members, and unsupported execution evidence fails closed instead of
+implying effects were prevented or rolled back. Neither path adds detached async,
+elevation beyond the configured authority, multi-host scheduling, automatic replay,
+dependency installation or a rollback guarantee.
 
 ## Explicit broader automation authorities
 
-`authority="automation"` remains ordinary. A reviewed module, role or playbook
-binding may instead select `authority="automation:ops"` and be explicitly enabled.
+`authority="automation"` remains ordinary. A reviewed module or payload binding
+may instead select `authority="automation:ops"` and be explicitly enabled.
 Configure that private capability independently from native sudo allowlists:
 
 ```toml
 [automation.authorities.ops]
 ssh_config_file = "/etc/estus/automation-ssh.conf"
-runtime = "/opt/estus/ansible-runtime"
+bundle = "/opt/estus/bundle"
 become = { method = "sudo", user = "root" }
 
 [automation.authorities.ops.targets.server]
@@ -1607,7 +1509,7 @@ python = "/usr/bin/python3"
 
 `become.executable` optionally pins an absolute remote sudo executable; the
 default is `/usr/bin/sudo`. For NixOS, select `/run/wrappers/bin/sudo`.
-The same operator-pinned path applies to native payloads and Ansible; callers
+The same operator-pinned path applies to native payloads and bundle modules; callers
 cannot override it, and it does not enable generic command or sudo tools.
 
 The replacement SSH configuration selects independently provisioned credentials
@@ -1616,10 +1518,10 @@ key is installed on ordinary targets. An optional `ssh_auth_sock` selects an
 existing bounded absolute agent socket; omitting it disables ambient agent
 inheritance for this authority. Estus never loads keys or creates agents.
 
-`runtime` may be omitted to inherit the existing selected runtime at startup.
-An explicit authority runtime does not depend on an unused ordinary runtime or
-ambient agent. Import the binding snapshot against that same runtime using the
-operator authoring configuration. Source/runtime approval is not refreshed on calls.
+`bundle` may be omitted to inherit the pack selected for ordinary automation.
+An explicit authority bundle does not depend on an unused ordinary pack or ambient
+agent, and it must contain every module that authority's bindings name. Bundle
+identity and source approval are not refreshed on calls.
 
 Authorities name declared logical targets only, never fallback native/elevated aliases.
 Missing authorities/mappings and malformed definitions fail startup even if disabled;
@@ -1643,11 +1545,10 @@ this is policy/credential selection, not a security sandbox. Privileged mutation
 and partial failures remain observable; cancellation never implies rollback or
 remote quiescence.
 
-`nix run .#authority-acceptance-msrv` exercises distinct keys/accounts and real
-root-owned effects in the explicit automation fixture. It requires
-`ESTUS_TEST_FIXTURE` pointing to the built `ssh-automation-fixture-image` artifact
-and an explicit Docker-compatible backend (`DOCKER_HOST`); no host sudoers or
-accounts are changed.
+`nix run .#ssh-baseline` exercises distinct keys/accounts and real root-owned
+effects through `ssh_sudo_authority` and the other `ssh_e2e` scenarios. `ci` and
+`ci-msrv` supply `ESTUS_TEST_FIXTURE` and require an explicit Docker-compatible
+backend (`DOCKER_HOST`); no host sudoers or accounts are changed.
 
 ## Typed module result fields
 
@@ -1684,12 +1585,13 @@ dispatch.
 Known private/event/argument/environment/diff containers are not selectable.
 Declared stdout strings and fact fields can still contain secrets: selection is
 not general redaction. Task or selected nested censorship suppresses values.
-Pinned Runner can omit oversized result data while retaining task/statistics;
+The pinned core can omit oversized result data while retaining task statistics;
 that yields `unavailable` without discarding known execution completion.
 
-`nix run .#projection-acceptance-msrv` runs the focused real Runner suite with the
-same non-root/private-runtime-directory prerequisites as native SSH acceptance.
-No request-time dependencies are installed.
+`nix run .#ssh-native-msrv` runs the focused projection suite
+(`ssh_native_payload_*` cases: read concurrency, candidate discovery failures
+and preview gating) with the same non-root/private-runtime-directory
+prerequisites as native SSH acceptance. No request-time dependencies are installed.
 
 ## Native / Nix
 
@@ -1702,9 +1604,10 @@ nix run .#msrv -- --help
 ```
 
 Native Nix packaging supplies OpenSSH and has no Python/Ansible runtime dependency.
-The separate `.#automation-msrv` output supplies the optional pinned Ansible runtime;
-see `examples/automation_runtime.toml` for explicit, non-mutating runtime health.
-That health check verifies imports and identity, not Ansible workload execution.
+The separate `.#automation-msrv` output supplies a pinned ansible-core environment
+usable for `estus bundle build`.
+See `examples/automation_runtime.toml` for explicit, non-mutating bundle health.
+That health check verifies pack digests and structure, not module execution.
 
 The OpenSSH control-socket readiness check requires Tokio's `fs` Cargo feature.
 
@@ -1729,14 +1632,19 @@ nix run --no-write-lock-file .#dev-mcp
 ```
 
 Nix builds the current native package when needed, then the app `exec`s it with
-the immutable `examples/dev-no-targets.toml` policy. No preparation command,
-readiness record or checkout-local launch script is required. The same
-`estus-dev-mcp` executable is available in the pinned default devshell.
+no `--config`, so the server starts in zero-config workstation mode: all five
+capability ceilings enabled, ordinary SSH destinations resolved normally, and
+catalog tools loaded from the installed assets. No preparation command, readiness
+record or checkout-local launch script is required. The same `estus-dev-mcp`
+executable is available in the pinned default devshell.
 
-The policy uses `actions-only`, no destinations, and a ten-second maximum
-operation timeout. The app clears inherited Estus configuration, SSH, runtime
-and catalog overrides. It provisions no fixtures and never refreshes capability
-approvals. Old `target/estus-dev/` preparation records are ignored and left alone.
+The wrapper clears inherited `ESTUS_CONFIG`, `ESTUS_SSH_CONFIG`, `ESTUS_SSH`,
+`ESTUS_CATALOG_ROOT` and `ESTUS_PYTHON_RUNTIME`, and pins
+`ESTUS_ANSIBLE_BUNDLE` to the Nix-built direct module bundle, so bundle-backed
+module tools work without an operator-built pack. Workstation mode still grants no
+credentials and performs no remote action until a request arrives; it provisions
+no fixtures and never refreshes approvals. `examples/dev-no-targets.toml` remains
+an explicit, restrictive policy for launching the ordinary app by hand.
 
 Build diagnostics go to stderr; server stdout remains MCP JSON. After startup,
 EOF and signals use the server's normal process lifecycle. A cold launch can take
@@ -1751,27 +1659,28 @@ For another explicitly reviewed policy, use the ordinary app instead:
 nix run --no-write-lock-file . -- --config /absolute/path/to/reviewed.toml
 ```
 
-### Local stdin shim test
+### Local bootstrap and bundle CLI tests
 
-The default devshell supplies the pinned Python 3.14 interpreter. The test uses
-`sys.orig_argv` to check launch arguments, including the `-c` source, without
-inspecting the live process. Outside the devshell, put `python3.14` on `PATH`.
+The default devshell supplies Python 3.14 and Cargo for running the target
+bootstrap protocol suite and the offline `estus bundle` CLI tests locally:
 
 ```sh
-nix develop --no-update-lock-file --command cargo test --test direct_module_spike \
-  stdin_adaptation_shim_preserves_wrapper_hides_args_and_cleans_tmpdir -- --exact
+python3 -I -m unittest discover -s src/native_payload -p 'test_bootstrap.py' -v
+cargo test --test bundle_cli
 ```
 
-### Opt-in OMP client
+### OMP workspace client
 
 The tracked `.omp/mcp.json` invokes `nix run --no-write-lock-file .#dev-mcp`
-from the checkout root and is disabled by default. Add `estus-dev` to the
-active profile's `enabledServers` list and reload MCP to opt in. The
-`disabledServers` denylist still wins. No user-level configuration is changed.
+from the checkout root in default `workstation` mode with `ESTUS_ANSIBLE_BUNDLE`
+set to the Nix-built base module bundle. Set `"disabled": true` or use
+`disabledServers` in your profile if you want to disable it locally.
 
 The entry allows 300,000 ms for MCP requests, including cold initialization.
-This does not raise the server policy's ten-second operation maximum.
-`OMP_MCP_TIMEOUT_MS` overrides the entry process-wide.
+That client-side timeout is separate from the server's own limits: zero-config
+workstation startup keeps the default `max_timeout_secs` of 600 and per-tool
+timeouts, and this entry changes neither. `OMP_MCP_TIMEOUT_MS` overrides the entry
+process-wide.
 
 OMP18.19.0 discards subprocess stderr and reports startup failure as generic EOF.
 For actionable build or configuration diagnostics, use the same app directly:
@@ -1792,8 +1701,8 @@ The generated workflow (`nix/ci.nix`; regenerate with
 | --- | --- |
 | Sandboxed checks | Default compiler and Rust 1.88 network-free tests; acceptance executable compilation; formatting and workflow consistency |
 | Installed MSRV native | Real SSH/SFTP, controller scripts, doctor and native/controller/SFTP progress |
-| Installed MSRV Ansible | Pinned runtime health and schema import/drift; real SSH/Runner modules, typed projections, roles, playbooks and progress |
-| Linux containers | Default/MSRV SSH baseline; MSRV module/facts smoke, automation authority and shipped host-summary, CPU and memory roles |
+| Installed MSRV bundle | Bundle build/inspect, digest drift, real SSH module execution, typed projections and progress |
+| Linux containers | Default/MSRV SSH baseline; bundle-backed module smoke, automation authority and shipped host-summary, CPU and memory payloads |
 
 The native Nix source filter keeps `skills/estus-sre/SKILL.md`,
 `python/estus/__init__.py`, and `setup.py` for the catalog distribution checks.
@@ -1811,39 +1720,39 @@ GNU tar, verifies the config bytes against `image-id`, then selects and checks
 the daemon ID for every running fixture. A changed tag or config still fails.
 
 Wheel installation/launcher acceptance remains opt-in (`nix run .#wheel-acceptance`);
-hosted coverage of the native package and Nix Ansible bundle does not prove the
+hosted coverage of the native package and Nix bundle does not prove the
 outside-Nix Python/wheel path.
 
 ## Fuzzing
 
-Six cargo-fuzz targets exercise real production modules — command
+Five cargo-fuzz targets exercise real production modules — command
 encoding/limits, the complete 16 MiB reply budget, file codecs, raw filename
-metadata, binding-schema compilation and the bounded Runner frame reducer —
-never copied parsers or mocked executors. Harnesses and seed corpora live in
-`fuzz/`; the root build excludes them, so fuzzing never changes production
-dependencies. The optional shell pins nightly Rust and cargo-fuzz:
+metadata and binding-schema compilation — never copied parsers or mocked
+executors. Harnesses and seed corpora live in `fuzz/`; the root build excludes
+them, so fuzzing never changes production dependencies. The optional shell pins
+nightly Rust and cargo-fuzz:
 
 ```sh
 nix develop .#fuzz -c cargo fuzz run binding_schema fuzz/corpus/binding_schema -- -runs=0 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
-nix develop .#fuzz -c cargo fuzz run adapter_protocol fuzz/corpus/adapter_protocol -- -runs=0 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+nix develop .#fuzz -c cargo fuzz run command_encoding fuzz/corpus/command_encoding -- -runs=0 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
 ```
 
 `binding_schema` drives reviewed-module contract import, recursive alias
 mapping, caller-input rejection of authority/transport fields and numeric
 bounds through the actual compiler; generated fixtures stay inside the
-production depth/node/byte budget or are rejected by it. `adapter_protocol`
-replays newlined private frames (ready/task/terminal, role and projection
-variants) through the real evidence reducer across module/role/playbook modes,
-checking literal outcomes, censorship, completion, chunk-fragmentation
-invariance and interruption/stop ordering against local completion evidence.
+production depth/node/byte budget or are rejected by it. `command_encoding`
+expands every fixture inside the same caps production enforces, then checks
+escaped length and byte accounting through the actual pinned encoder, so
+oversize commands and zero timeouts must fail as `invalid_argument` without
+ever marking remote state unknown.
 
 Time-bounded mutation campaigns write only to ignored
 `fuzz/generated-corpus/` directories, keeping committed seeds deterministic:
 
 ```sh
-mkdir -p fuzz/generated-corpus/binding_schema fuzz/generated-corpus/adapter_protocol
+mkdir -p fuzz/generated-corpus/binding_schema fuzz/generated-corpus/command_encoding
 nix develop .#fuzz -c cargo fuzz run binding_schema fuzz/generated-corpus/binding_schema fuzz/corpus/binding_schema -- -max_total_time=30 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
-nix develop .#fuzz -c cargo fuzz run adapter_protocol fuzz/generated-corpus/adapter_protocol fuzz/corpus/adapter_protocol -- -max_total_time=30 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
+nix develop .#fuzz -c cargo fuzz run command_encoding fuzz/generated-corpus/command_encoding fuzz/corpus/command_encoding -- -max_total_time=30 -seed=1 -max_len=16384 -rss_limit_mb=1024 -timeout=10
 ```
 
 Fuzzing never connects to SSH or Docker, does not execute Ansible workloads,
