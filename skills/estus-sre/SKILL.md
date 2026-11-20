@@ -6,16 +6,16 @@ description: Safe observation-first Linux triage, journal inspection, and change
 # Estus SRE Operating Method
 
 ## 1. Risk Tiers & Escalation
-- **`observe_*`** (auto-allow eligible): read-only system telemetry. Always start here (`observe_targets`, `observe_host_summary`, `observe_cpu`, `observe_memory`, `observe_pressure`, `observe_systemd_units`, `observe_network`).
+- **`observe_*`** (auto-allow eligible): read-only system telemetry. Always start here (`observe_targets`, `observe_host_summary`, `observe_cpu`, `observe_memory`, `observe_pressure`, `observe_systemd_units`, `observe_network`). A permitted operation does not prove the target supports it; observed capabilities stay unknown until a call succeeds.
 - **`inspect_*`** (ask): sensitive reads (files, directories, processes, sockets, journal logs) or active network probes. Narrow scope before calling.
 - **`preview_*`** (ask): pre-change dependency and plan checks (`preview_kernel_module_load`, `preview_systemd_service`, `preview_sysctl`, `preview_package`, `preview_apt`, `preview_dnf`). Run before the matching mutation.
 - **`change_*`** (ask): structured single-purpose mutations and `change_target_quarantine_clear`. Never automatically replayed.
 - **`exec_*`** (ask): generic command/argv/sudo execution (`exec_command`, `exec_argv`, `exec_sudo`). Escalate only when structured tools cannot express the operation.
 
 ## 2. Uncertainty, Quarantine & No Replay
-- Estus **never** retries or replays interrupted/timed-out operations automatically.
-- Any mutating call whose acknowledgement or worker ownership is lost after dispatch sets `remote_state_unknown=true` and quarantines further writes on that logical host (`target_quarantined`).
-- Read/observe tools stay open while quarantined. Inspect actual remote state first (`observe_stat`, `inspect_file`, `observe_systemd_unit`, `inspect_journal`), reconcile independently, and only then clear quarantine with `change_target_quarantine_clear` (`acknowledge_remote_state_reconciled=true`).
+- Estus **never** retries or replays interrupted or timed-out operations, and channel closure never proves rollback.
+- Any mutating call whose acknowledgement or owner is lost after dispatch sets `remote_state_unknown=true` and quarantines writes on that logical host (`target_quarantined`) for the rest of the session.
+- Read/observe/inspect/preview tools stay open while quarantined. Inspect actual remote state first (`observe_stat`, `inspect_file`, `observe_systemd_unit`, `inspect_journal`), reconcile independently, and only then call `change_target_quarantine_clear` with `acknowledge_remote_state_reconciled=true` — that flag is your assertion of reconciliation, not proof that remote work stopped.
 
 ## 3. Continuation & Output Handles
 - Paginated inspection tools use explicit single-use tokens or byte offsets:
@@ -25,11 +25,11 @@ description: Safe observation-first Linux triage, journal inspection, and change
 - Command and local-execution tools support `retain_output=true`, returning session-scoped handles readable via `inspect_output`.
 
 ## 4. Package Changes Across Distributions
-- `change_package` is the cross-distro transition: the reviewed bundle routes it to the target-detected manager (apt, dnf/dnf5, apk, zypper) and it accepts `name`, `state`, optional `version` and `update_cache`. A version pin requires `state="present"` and exactly one package name; it is rewritten as `name=version` on apt and `name-version` on dnf/dnf5/zypper.
+- `change_package` is the cross-distro transition: the reviewed bundle routes it to the target-detected manager (apt, dnf/dnf5, apk, zypper, pacman) and it accepts `name`, `state`, optional `version` and `update_cache`. A version pin requires `state="present"` and exactly one package name; it is rewritten as `name=version` on apt and `name-version` on dnf/dnf5/zypper. An undetected manager fails closed as `unsupported`, never via a shell fallback.
 - `change_apt` and `change_dnf` are explicit escape hatches for manager-specific options (purge, allow_downgrade, enablerepo, disablerepo, allowerasing, nobest). Use them only when the generic tool cannot express the change.
 - `preview_package`, `preview_apt` and `preview_dnf` are the qualified check-mode previews. A preview authorizes only the requested module and the reviewed options it was given: a `preview_package` run never authorizes `change_apt` or `change_dnf`, and neither does the reverse. Preview and change must select the same module with matching inputs/options; the package database detected at pre-state time is recorded independently, so a changed target manager invalidates reuse.
 - Package prerequisites and repositories are preprovisioned by the operator. Estus installs no dependencies and performs no repository refresh unless that reviewed option is approved.
-- Target-host Python bindings are prerequisites for the package tools: `preview_package`, `change_package`, `preview_apt` and `change_apt` need `python3-apt` (Debian/Ubuntu); `preview_dnf` and `change_dnf` need `python3-dnf` or `python3-libdnf5` (RHEL/Fedora). Estus never installs these (`auto_install_module_deps = false`): a missing binding fails closed with `dependency_unavailable` in check mode, and no check-mode run mutates the target. `observe_packages` is pure stdlib plus the shipped runtime helper and needs none of these bindings.
+- Target-host Python bindings are prerequisites: `preview_package`, `change_package`, `preview_apt` and `change_apt` need `python3-apt` (Debian/Ubuntu); `preview_dnf` and `change_dnf` need `python3-dnf` or `python3-libdnf5` (RHEL/Fedora). Estus never installs them: a missing binding fails closed with `dependency_unavailable`, and no check-mode run mutates the target. `observe_packages` is a pure-stdlib collector and needs none of these.
 
 ## 5. Preview Pairing Under `require_preview = true`
 - `preview_sysctl` with `{name, value, state: "present"}` is the qualified preview for `change_sysctl_config` (persistent dedicated sysctl.d file + exact-file apply, then readback).
@@ -39,9 +39,10 @@ description: Safe observation-first Linux triage, journal inspection, and change
 ## 6. MCP Guidance Surfaces
 - **Prompts**: `triage_host`, `diagnose_service`, `safe_change`, `network_triage`.
 - **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/preview`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
+- Both surfaces name only tools the running configuration publishes, and restate the tier, preview and quarantine rules above rather than adding policy.
 
 ## 7. Exact-Name Client Approval Policy (119 Published Tools)
-Published tools are the 15 builtin names plus the 104 bundled catalog tools. Which catalog tools exist depends on the selected configuration and, in zero-config workstation mode, on the installed catalog and bundle. Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies).
+Published tools are the 15 builtin names plus the 104 bundled catalog tools. Which catalog tools are actually published depends on the selected configuration: the `[capabilities]` ceiling, then `[selection]`, then each `[targets.<host>].selection` and `max_tier`. In zero-config workstation mode the installed catalog and bundle decide. The lists below are the full inventory grouped by category, not this site's policy. Configure exact tool names under your MCP client's permission rules; prefix globs are optional because client support varies.
 
 ### Allow (`observe_*` — 53 tools)
 ```json

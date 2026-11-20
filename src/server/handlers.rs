@@ -202,7 +202,7 @@ impl Estus {
 impl Estus {
     #[tool(
         name = "observe_targets",
-        description = "Discover configured logical targets, public advisory descriptions/labels, startup-permitted operations and resolved policy limits without connecting or probing. Permitted operations do not imply remote support or authorization; observed capabilities remain unknown. Limits are ceilings, further constrained by per-request escaping, request IDs and the response-wire budget. Open mode returns no target inventory and never enumerates SSH configuration. Backend aliases, credential/config paths and authentication state are not returned.",
+        description = "List configured logical targets with advisory descriptions, permitted operations and resolved policy limits. Connects to nothing, so permitted operations do not prove remote support.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<Empty>(),
         output_schema = schema_for_type::<ToolReply<TargetDiscovery<'static>>>()
@@ -256,7 +256,7 @@ impl Estus {
 
     #[tool(
         name = "inspect_output",
-        description = "Read a bounded exact raw-byte range from stdout/stderr retained by an explicitly opted-in synchronous native/controller command in this server session. Opaque handles select only private server-owned artifacts, never caller file paths or another process/session's output. No SSH or remote execution occurs. UTF-8 is strict; base64 is padded and lossless; SHA-256 covers returned raw bytes. eof means end of the retained prefix, not complete command output; the command's output receipt reports stream truncation and observed byte count. Expired/foreign/unknown handles return not_found without reflecting secrets. File/read limits and the complete reply budget apply. Retention, local storage failure and reads never change command exit/termination/uncertainty evidence. Automation private Runner frames are never eligible.",
+        description = "Read a bounded raw-byte range of stdout or stderr retained by an earlier command that set retain_output. Local only; handles are session capabilities and eof means the end of the retained prefix.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ReadOutputRequest>(),
         output_schema = schema_for_type::<ToolReply<ReadData>>()
@@ -319,7 +319,7 @@ impl Estus {
 
     #[tool(
         name = "exec_command",
-        description = "Execute a stateless noninteractive remote shell script (/bin/sh by default; Bash is opt-in). Potentially destructive; not idempotent. Timeout/cancellation closes only this channel: remote work may continue, and operations are never replayed. Ordinary shell authority can bypass same-account sudo approval separation. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
+        description = "Run a stateless noninteractive remote shell script (/bin/sh unless bash is requested). Not idempotent: timeout or cancellation may leave remote work running and nothing is replayed.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<ExecRequest>(),
         output_schema = schema_for_type::<ToolReply<CommandData>>()
@@ -334,7 +334,7 @@ impl Estus {
 
     #[tool(
         name = "exec_argv",
-        description = "Execute an explicit argv on the ordinary SSH identity, with optional absolute cwd and bounded stdin. Argument boundaries are preserved through POSIX command --, but the remote login shell still participates: this is not remote execve or a sandbox. Remote-PATH names may resolve shell builtins; use an absolute path to pin the executable. Use exec_command for shell syntax. Potentially destructive and non-idempotent; ordinary authority can bypass same-account sudo approval separation. Timeout/cancellation closes only this channel, remote work may continue, and operations are never replayed. Output may be truncated within the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
+        description = "Run an explicit argv on the ordinary SSH identity with optional absolute cwd and bounded stdin. The remote login shell still participates, so pass an absolute path to pin the executable; use exec_command for shell syntax.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<RunRequest>(),
         output_schema = schema_for_type::<ToolReply<CommandData>>()
@@ -349,7 +349,7 @@ impl Estus {
 
     #[tool(
         name = "inspect_file",
-        description = "Read a bounded range through an independent ordinary-identity SFTP channel. Paths are literal: no shell, tilde, environment or wildcard expansion, and no path sandbox. UTF-8 is strict, including split codepoints; use base64 for arbitrary bytes. content_sha256 is lowercase SHA-256 of returned raw bytes, excluding lookahead and before encoding. Optional expected_content_sha256 must be 64 hex characters; mismatch returns checksum_mismatch without content. This verifies only that range, not a whole-file snapshot. Reads follow server symlink semantics. No sudo, shell/SCP fallback, remote hash helper, installation or automatic retries/replay. Timeout/cancellation disconnects only this channel; remote completion is not guaranteed. The requested lossless range must fit both the configured file cap and fixed 16 MiB reply limit.",
+        description = "Read a bounded byte range of a literal remote path over SFTP. Pass expected_content_sha256 to verify the returned bytes; no expansion, sandbox, sudo or retry.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ReadRequest>(),
         output_schema = schema_for_type::<ToolReply<ReadData>>()
@@ -364,7 +364,7 @@ impl Estus {
 
     #[tool(
         name = "observe_stat",
-        description = "Query ordinary-identity SFTP metadata for a literal UTF-8 path. Default lstat reports a final symlink itself; follow_symlinks=true queries its target. Intermediate symlinks follow server semantics. No path sandbox, race-free no-follow guarantee, shell/SCP fallback, sudo or automatic retry. Missing attributes remain null and missing type is unknown; permissions contain only mode bits. Each call owns an independent SFTP channel under the original timeout.",
+        description = "Read SFTP metadata for a literal path: lstat by default, or follow_symlinks=true for a final symlink's target. Missing attributes stay null rather than being inferred.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<StatRequest>(),
         output_schema = schema_for_type::<ToolReply<StatData>>()
@@ -379,7 +379,7 @@ impl Estus {
 
     #[tool(
         name = "inspect_directory",
-        description = "List a literal UTF-8 directory path over an ordinary SFTP enumeration. max_entries defaults to 200 (1–1000); bounded page-entry bytes and the complete 16 MiB reply budget can shorten a page. Entries retain server order, omit dot/dot-dot, and use server-provided metadata without following each symlink. name_base64 preserves raw filename bytes; name is null for non-UTF-8 names, which UTF-8 path tools cannot address directly. One request returns a single bounded page; truncated=true means more entries existed, not an error, and the result is not a filesystem snapshot: mutation remains server-defined. No sorting, recursion, path sandbox, shell/SCP fallback, sudo or automatic retries. Remote completion is not guaranteed on interruption.",
+        description = "List one bounded page of a literal directory path (max_entries 1–1000, default 200). truncated=true means more entries existed; the page is not a filesystem snapshot.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true),
         input_schema = schema_for_type::<ListRequest>(),
         output_schema = schema_for_type::<ToolReply<ListData>>()
@@ -394,7 +394,7 @@ impl Estus {
 
     #[tool(
         name = "change_file_write",
-        description = "Write bounded content through an independent ordinary SFTP channel. Default exclusive create refuses an existing destination, including symlinks. overwrite=true directly creates or truncates and follows server symlink semantics: a later failure can leave partial, empty or completed changes. Success requires write and close acknowledgements, not atomic replacement or durable fsync. Paths are literal UTF-8, without shell expansion or a path sandbox. Content is UTF-8 by default (NUL allowed), or canonical padded standard base64; decoded bytes must fit the configured file cap before connecting. No append, parent creation, sudo, fallback, retries, replay or rollback. Failures after a mutating OPEN is dispatched report remote_state_unknown=true and null data. Timeout/cancellation closes only this channel; remote work may continue. SFTP v3 can report concurrent exclusive-create conflicts as io_error.",
+        description = "Write bounded content to a literal path, refusing an existing destination unless overwrite=true. Not atomic; a failure after dispatch reports remote_state_unknown=true.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<WriteRequest>(),
         output_schema = schema_for_type::<ToolReply<WriteData>>()
@@ -409,7 +409,7 @@ impl Estus {
 
     #[tool(
         name = "change_mkdir",
-        description = "Create one directory through an independently owned ordinary SFTP channel. Paths are literal UTF-8, without shell, tilde, variable or wildcard expansion or a path sandbox. Parents must exist; no recursive creation, exist_ok, mode override, sudo or shell/SCP fallback. Any entry observed at the path, including a final symlink, is rejected as already_exists; this preflight is not a race-free no-follow guarantee and intermediate symlinks follow server semantics. A successful acknowledgement returns created=true. Failure after MKDIR dispatch retains remote-state uncertainty, even for server refusal or cleanup failure. Timeout/cancellation closes only this channel, never asserts rollback, and never retries/replays.",
+        description = "Create one directory under an existing parent. Any entry already at the path, including a final symlink, is rejected as already_exists.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<MkdirRequest>(),
         output_schema = schema_for_type::<ToolReply<MkdirData>>()
@@ -424,7 +424,7 @@ impl Estus {
 
     #[tool(
         name = "change_rename",
-        description = "Rename one file, directory or symlink entry through ordinary SFTP. source and destination are literal UTF-8 without shell, tilde, variable or wildcard expansion or a path sandbox. overwrite defaults to false: this SFTP v3 backend cannot guarantee atomic no-overwrite rename, so false/omitted returns unsupported without mutation even when destination is absent. Explicit overwrite=true requires the advertised POSIX-rename extension and permits atomic replacement under server filesystem rules; no standard-rename, stat-then-rename, unlink, copy, sudo or shell/SCP fallback. Intermediate symlinks follow server semantics; a final source symlink itself moves. Success returns renamed=true only after acknowledgement and bounded channel cleanup. Any failure after rename dispatch retains remote-state uncertainty, including server refusal or cleanup failure. Never retries, replays or asserts rollback; no cross-filesystem or durability guarantee.",
+        description = "Rename one entry through POSIX rename; overwrite=true is required because this backend cannot guarantee atomic no-overwrite rename. A final source symlink moves itself, not its target.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<RenameRequest>(),
         output_schema = schema_for_type::<ToolReply<RenameData>>()
@@ -439,7 +439,7 @@ impl Estus {
 
     #[tool(
         name = "change_file_remove",
-        description = "Unlink one file or final symlink entry through an independently owned ordinary SFTP channel. path is literal UTF-8: no shell, tilde, variable or wildcard expansion or path sandbox. A final symlink itself is removed, not its file/directory target; intermediate symlinks follow server semantics. Directories and missing paths remain backend errors, never recursive deletion or missing_ok success. No RMDIR, canonicalization, sudo, shell/SCP fallback, retry or replay. Success returns removed=true only after REMOVE acknowledgement and bounded channel cleanup. Any failure after REMOVE dispatch retains remote-state uncertainty, including server refusal or cleanup failure; timeout/cancellation never asserts rollback or secure erasure.",
+        description = "Unlink one file or final symlink entry. Directories and missing paths are errors, and this is not secure erasure.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<RemoveFileRequest>(),
         output_schema = schema_for_type::<ToolReply<RemoveFileData>>()
@@ -454,7 +454,7 @@ impl Estus {
 
     #[tool(
         name = "change_directory_remove",
-        description = "Remove one empty directory through an independently owned ordinary SFTP channel. path is literal UTF-8 without shell, tilde, variable or wildcard expansion or a path sandbox. The server's RMDIR enforces emptiness; nonempty directories, files and missing entries remain backend errors, never recursive deletion or missing_ok success. No directory walk, REMOVE, canonicalization, sudo, shell/SCP fallback, retry or replay. Path components, symlinks and trailing slashes retain server filesystem semantics; no race-free no-follow or entry-identity guarantee is added. Success returns removed=true only after RMDIR acknowledgement and bounded cleanup. Any failure after RMDIR dispatch retains remote-state uncertainty, including server refusal or cleanup failure. Channel closure never proves rollback.",
+        description = "Remove one empty directory with a single RMDIR. Nonempty directories, files and missing paths are errors.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<RemoveDirectoryRequest>(),
         output_schema = schema_for_type::<ToolReply<RemoveDirectoryData>>()
@@ -469,7 +469,7 @@ impl Estus {
 
     #[tool(
         name = "change_file_replace",
-        description = "Explicit atomic-visibility file replacement over ordinary SFTP; requires overwrite=true and advertised POSIX rename before any mutation. Stages one random EXCL-created sibling with mode0600 in the original OPEN, confirms permissions by handle before content writes, completes write_all and file CLOSE before atomic rename. UTF-8/base64 content obeys the configured file byte limit. Literal UTF-8 paths; final segment must be a file name, not root, trailing slash, . or ... A final destination symlink entry is replaced, not its target; parent components retain server semantics. New inode/owner/server group rules, no old mode/ownership/ACL/xattr preservation, path sandbox, adversarial pathname/CAS or crash-durability guarantee. Success returns bytes_written after rename acknowledgement and bounded cleanup. Failures after mutating OPEN polling retain uncertainty. Normal pre-rename errors may remove only an acknowledged exclusively created staging entry; uncertain OPEN/cancel/loss/rename may leave .estus-replace-* siblings. Never cleans destination or any staging path after rename polling, retries/replays, uses weaker rename, truncate/unlink fallback, sudo or shell/SCP.",
+        description = "Replace a file atomically: stage a mode-0600 sibling, write and close it, then rename over the destination. Requires overwrite=true and advertised POSIX rename; an uncertain dispatch may leave .estus-replace-* siblings to inspect out of band.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<ReplaceRequest>(),
         output_schema = schema_for_type::<ToolReply<ReplaceData>>()
@@ -484,7 +484,7 @@ impl Estus {
 
     #[tool(
         name = "exec_sudo",
-        description = "Execute an authorized absolute executable via sudo -n -k with the target's configured identity/user/program policy. argv is not a shell script. Requires remote passwordless sudo; no passwords, PTY, environment preservation, or retries. Potentially destructive and not idempotent. Cancellation cannot guarantee remote termination. Permitted executables may themselves grant shell-like authority; sudoers remains authoritative. Output may be further truncated to fit the fixed 16 MiB reply; stdout has priority over stderr. The complete escaped command is limited to 65536 bytes before connecting.",
+        description = "Run one allowlisted absolute executable via sudo -H -n -k under the target's declared user and program policy. Requires passwordless sudo; no PTY, environment preservation or retry.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<SudoRequest>(),
         output_schema = schema_for_type::<ToolReply<CommandData>>()
@@ -499,7 +499,7 @@ impl Estus {
 
     #[tool(
         name = "change_target_quarantine_clear",
-        description = "Explicitly clear this session's in-memory mutation quarantine for a logical target after an uncertain remote mutation. Requires host and acknowledge_remote_state_reconciled=true; this is an operator assertion of independent reconciliation, not proof that remote work stopped. Only affects this server session's in-memory gate (estus doctor is a separate process and cannot clear session state). An unknown or non-quarantined target returns a bounded no-change result without probing or connecting.",
+        description = "Clear this session's write quarantine for one logical target after independently confirming remote state. Requires acknowledge_remote_state_reconciled=true; that assertion confirms reconciliation, not that remote work stopped.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<ClearTargetQuarantineRequest>(),
         output_schema = schema_for_type::<ToolReply<ClearTargetQuarantineData>>()
