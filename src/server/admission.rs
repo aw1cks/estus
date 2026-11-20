@@ -20,8 +20,11 @@ use nix::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore},
-    time::{Instant, sleep_until},
+    sync::{
+        OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore, mpsc,
+        oneshot,
+    },
+    time::{Duration, Instant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +38,7 @@ use crate::{
 const READ_SLOTS: usize = 4;
 const MAX_DYNAMIC_GATES: usize = 256;
 const MAX_PERSISTED_RECORD_BYTES: usize = 4096;
+const PERSIST_TIMEOUT: Duration = Duration::from_secs(30);
 static PERSIST_NONCE: AtomicU64 = AtomicU64::new(1);
 
 const KNOWN_EXECUTORS: &[&str] = &[
@@ -289,24 +293,61 @@ struct TargetGate {
     rw: Arc<RwLock<()>>,
     reads: Arc<Semaphore>,
     quarantine: Mutex<Option<QuarantineState>>,
+    persist: Option<mpsc::UnboundedSender<PersistOp>>,
+}
+
+impl Clone for TargetGate {
+    fn clone(&self) -> Self {
+        Self {
+            rw: Arc::clone(&self.rw),
+            reads: Arc::clone(&self.reads),
+            quarantine: Mutex::new(
+                self.quarantine
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            persist: self.persist.clone(),
+        }
+    }
+}
+
+/// Queued durable-state operation; the persistence worker executes writes and
+/// unlinks serially, off the async worker, preserving the former
+/// mutex-serialized ordering between save and clear.
+enum PersistOp {
+    Save {
+        host: String,
+        state: QuarantineState,
+        done: Option<oneshot::Sender<bool>>,
+    },
+    Remove(String, Option<oneshot::Sender<bool>>),
 }
 
 impl TargetGate {
-    fn new() -> Arc<Self> {
-        Self::with_quarantine(None)
+    fn new(persist: Option<mpsc::UnboundedSender<PersistOp>>) -> Arc<Self> {
+        Self::with_quarantine(None, persist)
     }
 
-    fn with_quarantine(initial: Option<QuarantineState>) -> Arc<Self> {
+    fn with_quarantine(
+        initial: Option<QuarantineState>,
+        persist: Option<mpsc::UnboundedSender<PersistOp>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             rw: Arc::new(RwLock::new(())),
             reads: Arc::new(Semaphore::new(READ_SLOTS)),
             quarantine: Mutex::new(initial),
+            persist,
         })
     }
 
-    fn set_quarantine(
+    /// Flips the in-memory gate and persists the record, so the reply that
+    /// reports the quarantine is never returned before the durable record
+    /// lands. The write+fsync runs on the persistence worker; the gate lock is
+    /// never held across it, and queue order matches the order the gate was
+    /// flipped, so a later owner-loss save can never overwrite an earlier one.
+    pub(super) async fn set_quarantine(
         &self,
-        persistence: Option<&Persistence>,
         host: &str,
         authority: String,
         executor: &'static str,
@@ -317,24 +358,125 @@ impl TargetGate {
             executor,
             cause,
         };
-        let mut guard = self
+        self.flip_quarantine(state.clone(), host, &authority, executor, cause);
+        self.enqueue_save(&state, host).await;
+    }
+
+    /// Synchronous variant for the drop path, where the runtime may be gone.
+    /// Flips the gate and enqueues the save without waiting for the worker.
+    pub(super) fn set_quarantine_blocking(
+        &self,
+        host: &str,
+        authority: String,
+        executor: &'static str,
+        cause: QuarantineCause,
+    ) {
+        let state = QuarantineState {
+            authority: authority.clone(),
+            executor,
+            cause,
+        };
+        self.flip_quarantine(state.clone(), host, &authority, executor, cause);
+        self.enqueue_save_sync(&state, host);
+    }
+
+    /// Removes the durable record before clearing the in-memory gate so the
+    /// cleared reply is never returned before the record is unlinked.
+    pub(super) async fn clear_quarantine(
+        &self,
+        host: &str,
+    ) -> Result<Option<ClearedQuarantine>, ToolError> {
+        let present = self
             .quarantine
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(persistence) = persistence
-            && persistence.save(host, &state).is_err()
-        {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if !present {
+            return Ok(None);
+        }
+        if let Some(tx) = &self.persist {
+            let (done_tx, done_rx) = oneshot::channel();
+            let queued = tx
+                .send(PersistOp::Remove(host.to_owned(), Some(done_tx)))
+                .is_ok();
+            let acked = matches!(
+                tokio::time::timeout(PERSIST_TIMEOUT, done_rx).await,
+                Ok(Ok(true))
+            );
+            if !queued || !acked {
+                return Err(ToolError::io_error(
+                    "Persistent target quarantine state could not be cleared",
+                    false,
+                ));
+            }
+        }
+        let previous = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("checked quarantine is_some");
+        Ok(Some(ClearedQuarantine {
+            authority: previous.authority,
+            executor: previous.executor,
+            cause: previous.cause.as_str(),
+        }))
+    }
+
+    async fn enqueue_save(&self, state: &QuarantineState, host: &str) {
+        let Some(tx) = &self.persist else {
+            return;
+        };
+        let (done_tx, done_rx) = oneshot::channel();
+        let queued = tx
+            .send(PersistOp::Save {
+                host: host.to_owned(),
+                state: state.clone(),
+                done: Some(done_tx),
+            })
+            .is_ok();
+        let persisted = queued
+            && matches!(
+                tokio::time::timeout(PERSIST_TIMEOUT, done_rx).await,
+                Ok(Ok(true))
+            );
+        if !persisted {
             audit::emit(&serde_json::json!({
                 "event": "quarantine_persist_failed",
                 "target": host,
             }));
         }
-        *guard = Some(state);
-        drop(guard);
+    }
+
+    fn enqueue_save_sync(&self, state: &QuarantineState, host: &str) {
+        if let Some(tx) = &self.persist {
+            let _ = tx.send(PersistOp::Save {
+                host: host.to_owned(),
+                state: state.clone(),
+                done: None,
+            });
+        }
+    }
+
+    fn flip_quarantine(
+        &self,
+        state: QuarantineState,
+        host: &str,
+        authority: &str,
+        executor: &'static str,
+        cause: QuarantineCause,
+    ) {
+        {
+            let mut guard = self
+                .quarantine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = Some(state);
+        }
         audit::target_quarantine(
             "quarantined",
             host,
-            Some(&authority),
+            Some(authority),
             Some(executor),
             cause.as_str(),
         );
@@ -345,34 +487,6 @@ impl TargetGate {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
-    }
-
-    fn clear_quarantine(
-        &self,
-        persistence: Option<&Persistence>,
-        host: &str,
-    ) -> Result<Option<ClearedQuarantine>, ToolError> {
-        let mut guard = self
-            .quarantine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.is_none() {
-            return Ok(None);
-        }
-        if let Some(persistence) = persistence {
-            persistence.remove(host).map_err(|_| {
-                ToolError::io_error(
-                    "Persistent target quarantine state could not be cleared",
-                    false,
-                )
-            })?;
-        }
-        let previous = guard.take().expect("checked quarantine is_some");
-        Ok(Some(ClearedQuarantine {
-            authority: previous.authority,
-            executor: previous.executor,
-            cause: previous.cause.as_str(),
-        }))
     }
 }
 
@@ -388,7 +502,8 @@ struct AdmissionState {
 
 pub(super) struct TargetAdmission {
     dynamic_hosts: bool,
-    persistence: Option<Arc<Persistence>>,
+    persist_tx: Mutex<Option<mpsc::UnboundedSender<PersistOp>>>,
+    persist_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     state: Mutex<AdmissionState>,
 }
 
@@ -399,6 +514,10 @@ impl TargetAdmission {
             .expect("in-memory target admission cannot fail")
     }
 
+    /// When a state directory is configured, spawns the persistence worker on
+    /// a blocking task. The worker outlives this struct so records written
+    /// during its lifetime reach disk before a successor instance reloads
+    /// them; it exits when every gate and this struct drop their senders.
     pub(super) fn new_with_persistence<'a>(
         hosts: impl Iterator<Item = &'a String>,
         dynamic_hosts: bool,
@@ -406,10 +525,24 @@ impl TargetAdmission {
     ) -> Result<Self, ConfigError> {
         let (persistence, mut restored) = match state_dir {
             Some(path) => {
-                let (p, map) = Persistence::open(path)?;
-                (Some(Arc::new(p)), map)
+                let (persistence, map) = Persistence::open(path)?;
+                (Some(persistence), map)
             }
             None => (None, BTreeMap::new()),
+        };
+        let (persist_tx, persist_rx) = match persistence {
+            Some(persistence) => {
+                let persistence = Arc::new(persistence);
+                let (tx, rx) = mpsc::unbounded_channel();
+                (
+                    Some(tx),
+                    Some(PersistWorker {
+                        persistence: Arc::clone(&persistence),
+                        rx,
+                    }),
+                )
+            }
+            None => (None, None),
         };
         let mut seq = 0u64;
         let mut gates: BTreeMap<String, GateEntry> = hosts
@@ -419,7 +552,7 @@ impl TargetAdmission {
                 (
                     host.clone(),
                     GateEntry {
-                        gate: TargetGate::with_quarantine(initial),
+                        gate: TargetGate::with_quarantine(initial, persist_tx.as_ref().cloned()),
                         last_used: seq,
                     },
                 )
@@ -434,25 +567,83 @@ impl TargetAdmission {
                 gates.insert(
                     host,
                     GateEntry {
-                        gate: TargetGate::with_quarantine(Some(initial)),
+                        gate: TargetGate::with_quarantine(
+                            Some(initial),
+                            persist_tx.as_ref().cloned(),
+                        ),
                         last_used: seq,
                     },
                 );
             }
         }
+        let persist_worker = persist_rx.map(|worker| tokio::spawn(worker.run()));
         Ok(Self {
             dynamic_hosts,
-            persistence,
+            persist_tx: Mutex::new(persist_tx),
+            persist_worker: Mutex::new(persist_worker),
             state: Mutex::new(AdmissionState { gates, seq }),
         })
     }
 
-    pub(super) fn contains(&self, host: &str) -> bool {
-        self.state
+    /// Closes the persistence channel (dropping every gate sender and the
+    /// admission's own sender) so the worker flushes its final record and
+    /// exits. Called from the shutdown path once every task and lease is gone.
+    /// Closes the persistence channel (dropping every gate sender and the
+    /// admission's own sender) and waits for the worker to flush its final
+    /// record and exit. Called from the shutdown path once every task and
+    /// lease is gone, and by tests before a successor instance reloads.
+    pub(super) async fn close_persistence(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.gates.clear();
+        let mut tx = self
+            .persist_tx
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .gates
-            .contains_key(host)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *tx = None;
+        let worker = self
+            .persist_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            let _ = tokio::time::timeout(Duration::from_secs(2), worker).await;
+        }
+    }
+}
+
+/// Dedicated persistence worker: runs the write+fsync and unlink operations
+/// serially on a blocking thread, off the async worker, preserving the
+/// former mutex-serialized ordering between saves and clears.
+pub(super) struct PersistWorker {
+    persistence: Arc<Persistence>,
+    rx: mpsc::UnboundedReceiver<PersistOp>,
+}
+
+impl PersistWorker {
+    pub(super) async fn run(mut self) {
+        while let Some(op) = self.rx.recv().await {
+            let (ok, done) = match op {
+                PersistOp::Save { host, state, done } => {
+                    (self.persistence.save(&host, &state).is_ok(), done)
+                }
+                PersistOp::Remove(host, done) => (self.persistence.remove(&host).is_ok(), done),
+            };
+            if let Some(done) = done {
+                let _ = done.send(ok);
+            }
+            if !ok {
+                audit::emit(&serde_json::json!({
+                    "event": "quarantine_persist_failed",
+                }));
+            }
+        }
+    }
+}
+
+impl TargetAdmission {
+    pub(super) fn contains(&self, host: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.gates.contains_key(host)
     }
 
     pub(super) fn quarantine_info(
@@ -557,7 +748,6 @@ impl TargetAdmission {
         }
         Ok(ExecLease {
             gate,
-            persistence: self.persistence.clone(),
             dispatched: None,
         })
     }
@@ -576,13 +766,12 @@ impl TargetAdmission {
         }
         Ok(WriteLease {
             gate,
-            persistence: self.persistence.clone(),
             _guard: guard,
             dispatched: None,
         })
     }
 
-    pub(super) fn clear_quarantine(
+    pub(super) async fn clear_quarantine(
         &self,
         host: &str,
     ) -> Result<Option<ClearedQuarantine>, ToolError> {
@@ -592,7 +781,7 @@ impl TargetAdmission {
         }) else {
             return Ok(None);
         };
-        gate.clear_quarantine(self.persistence.as_deref(), host)
+        gate.clear_quarantine(host).await
     }
 
     fn gate(&self, host: &str) -> Result<Arc<TargetGate>, ToolError> {
@@ -629,7 +818,12 @@ impl TargetAdmission {
             };
             state.gates.remove(&victim);
         }
-        let gate = TargetGate::new();
+        let persist = self
+            .persist_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let gate = TargetGate::new(persist);
         state.gates.insert(
             host.to_owned(),
             GateEntry {
@@ -698,7 +892,6 @@ pub(super) struct ProbeLease {
 
 pub(super) struct ExecLease {
     gate: Arc<TargetGate>,
-    persistence: Option<Arc<Persistence>>,
     dispatched: Option<DispatchContext>,
 }
 
@@ -711,27 +904,24 @@ impl ExecLease {
         });
     }
 
-    fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
+    pub(super) async fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         if let Some(ctx) = self.dispatched.take()
             && quarantine_target
             && let Some(cause) = cause.map(QuarantineCause::Error)
         {
-            self.gate.set_quarantine(
-                self.persistence.as_deref(),
-                &ctx.host,
-                ctx.authority,
-                ctx.executor,
-                cause,
-            );
+            self.gate
+                .set_quarantine(&ctx.host, ctx.authority, ctx.executor, cause)
+                .await;
         }
     }
 }
 
 impl Drop for ExecLease {
     fn drop(&mut self) {
-        if let Some(ctx) = self.dispatched.take() {
-            self.gate.set_quarantine(
-                self.persistence.as_deref(),
+        if let Some(ctx) = self.dispatched.take()
+            && !self.gate.is_quarantined()
+        {
+            self.gate.set_quarantine_blocking(
                 &ctx.host,
                 ctx.authority,
                 ctx.executor,
@@ -743,7 +933,6 @@ impl Drop for ExecLease {
 
 pub(super) struct WriteLease {
     gate: Arc<TargetGate>,
-    persistence: Option<Arc<Persistence>>,
     _guard: OwnedRwLockWriteGuard<()>,
     dispatched: Option<DispatchContext>,
 }
@@ -762,27 +951,24 @@ impl WriteLease {
         });
     }
 
-    pub(super) fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
+    pub(super) async fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         if let Some(ctx) = self.dispatched.take()
             && quarantine_target
             && let Some(cause) = cause.map(QuarantineCause::Error)
         {
-            self.gate.set_quarantine(
-                self.persistence.as_deref(),
-                &ctx.host,
-                ctx.authority,
-                ctx.executor,
-                cause,
-            );
+            self.gate
+                .set_quarantine(&ctx.host, ctx.authority, ctx.executor, cause)
+                .await;
         }
     }
 }
 
 impl Drop for WriteLease {
     fn drop(&mut self) {
-        if let Some(ctx) = self.dispatched.take() {
-            self.gate.set_quarantine(
-                self.persistence.as_deref(),
+        if let Some(ctx) = self.dispatched.take()
+            && !self.gate.is_quarantined()
+        {
+            self.gate.set_quarantine_blocking(
                 &ctx.host,
                 ctx.authority,
                 ctx.executor,
@@ -813,11 +999,11 @@ impl TargetLease {
         }
     }
 
-    pub(super) fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
+    pub(super) async fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         match self {
             Self::Read(_) | Self::Probe(_) => {}
-            Self::Exec(lease) => lease.finish(quarantine_target, cause),
-            Self::Write(lease) => lease.finish(quarantine_target, cause),
+            Self::Exec(lease) => lease.finish(quarantine_target, cause).await,
+            Self::Write(lease) => lease.finish(quarantine_target, cause).await,
         }
     }
 }
@@ -892,7 +1078,7 @@ mod tests {
                 .await
                 .unwrap();
             write_flag.store(1, Ordering::Release);
-            w.finish(false, None);
+            w.finish(false, None).await;
         });
 
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -978,7 +1164,7 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::Cancelled);
         assert!(!err.remote_state_unknown);
 
-        w.finish(false, None);
+        w.finish(false, None).await;
         drop(w);
 
         // All 4 read slots remain available after cancelled waits.
@@ -1012,7 +1198,7 @@ mod tests {
             .await
             .unwrap();
         w1.mark_dispatched("alpha".into(), "ordinary".into(), "native_payload");
-        w1.finish(true, Some(ErrorCode::Timeout));
+        w1.finish(true, Some(ErrorCode::Timeout)).await;
         drop(w1);
 
         let blocked = admission
@@ -1042,7 +1228,7 @@ mod tests {
             .await
             .unwrap();
         p.mark_dispatched("alpha".into(), "ordinary".into(), "native_payload");
-        p.finish(true, Some(ErrorCode::Timeout));
+        p.finish(true, Some(ErrorCode::Timeout)).await;
         drop(p);
 
         // Multiplexed exec is blocked while quarantined.
@@ -1060,10 +1246,16 @@ mod tests {
         assert_eq!(blocked_exec.code(), ErrorCode::TargetQuarantined);
 
         // Unknown or non-quarantined targets return None.
-        assert!(admission.clear_quarantine("missing").unwrap().is_none());
-        let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
+        assert!(
+            admission
+                .clear_quarantine("missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let cleared = admission.clear_quarantine("alpha").await.unwrap().unwrap();
         assert_eq!(cleared.cause, "timeout");
-        assert!(admission.clear_quarantine("alpha").unwrap().is_none());
+        assert!(admission.clear_quarantine("alpha").await.unwrap().is_none());
 
         // Multiplexed exec overlaps concurrently and quarantines on uncertain completion.
         let mut e1 = admission
@@ -1088,8 +1280,8 @@ mod tests {
             .unwrap();
         e1.mark_dispatched("alpha".into(), "ordinary".into(), "native_shell");
         e2.mark_dispatched("alpha".into(), "ordinary".into(), "native_shell");
-        e1.finish(false, None);
-        e2.finish(true, Some(ErrorCode::Timeout));
+        e1.finish(false, None).await;
+        e2.finish(true, Some(ErrorCode::Timeout)).await;
         drop((e1, e2));
         assert_eq!(
             admission
@@ -1100,7 +1292,7 @@ mod tests {
                 .code(),
             ErrorCode::TargetQuarantined
         );
-        let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
+        let cleared = admission.clear_quarantine("alpha").await.unwrap().unwrap();
         assert_eq!(cleared.executor, "native_shell");
         assert_eq!(cleared.cause, "timeout");
 
@@ -1118,7 +1310,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(blocked.code(), ErrorCode::TargetQuarantined);
-        let cleared = admission.clear_quarantine("alpha").unwrap().unwrap();
+        let cleared = admission.clear_quarantine("alpha").await.unwrap().unwrap();
         assert_eq!(cleared.cause, "worker_lost");
     }
 
@@ -1156,7 +1348,7 @@ mod tests {
             .await
             .unwrap();
         w0.mark_dispatched("host-000".into(), "ordinary".into(), "native_payload");
-        w0.finish(true, Some(ErrorCode::Timeout));
+        w0.finish(true, Some(ErrorCode::Timeout)).await;
 
         // host-000 is idle but quarantined: 257th host still cannot evict it while 255 others remain active.
         let blocked_evict = admission
@@ -1186,6 +1378,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dbg_persist_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("quarantine");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let hosts = ["alpha".to_owned()];
+        let ct = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        {
+            let adm1 = TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir))
+                .unwrap();
+            let mut w = adm1
+                .acquire_write("alpha", deadline, &ct, &shutdown)
+                .await
+                .unwrap();
+            w.mark_dispatched("alpha".into(), "ordinary".into(), "native_sftp");
+            w.finish(true, Some(ErrorCode::Timeout)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        eprintln!(
+            "DBG dir contents: {:?}",
+            std::fs::read_dir(&state_dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn persistent_quarantine_survives_restart_and_rejects_unsafe_state_dir() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -1212,7 +1435,8 @@ mod tests {
                 .await
                 .unwrap();
             w.mark_dispatched("alpha".into(), "ordinary".into(), "native_sftp");
-            w.finish(true, Some(ErrorCode::Timeout));
+            w.finish(true, Some(ErrorCode::Timeout)).await;
+            adm1.close_persistence().await;
         }
         let adm2 =
             TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
@@ -1226,7 +1450,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(blocked.code(), ErrorCode::TargetQuarantined);
-        let cleared = adm2.clear_quarantine("alpha").unwrap().unwrap();
+        let cleared = adm2.clear_quarantine("alpha").await.unwrap().unwrap();
         assert_eq!(cleared.executor, "native_sftp");
         assert_eq!(cleared.cause, "timeout");
         drop(adm2);

@@ -165,10 +165,12 @@ impl State {
                     },
                 )
                 .await;
-                target_lease.finish(
-                    reply.error().is_some_and(|e| e.remote_state_unknown),
-                    reply.error().map(|error| error.code()),
-                );
+                target_lease
+                    .finish(
+                        reply.error().is_some_and(|e| e.remote_state_unknown),
+                        reply.error().map(|error| error.code()),
+                    )
+                    .await;
                 if matches!(
                     reply.data().map(|data| &data.termination),
                     Some(Termination::ConnectionLost)
@@ -179,7 +181,7 @@ impl State {
                 reply
             }
             Err(error) => {
-                target_lease.finish(false, Some(error.code()));
+                target_lease.finish(false, Some(error.code())).await;
                 ToolReply::failure(error)
             }
         };

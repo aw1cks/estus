@@ -575,7 +575,7 @@ impl Estus {
             Err(error) => return reject(error),
         };
         let audit = Audit::start(metadata, started);
-        let cleared = match self.state.admission.clear_quarantine(&request.host) {
+        let cleared = match self.state.admission.clear_quarantine(&request.host).await {
             Ok(cleared) => cleared,
             Err(error) => {
                 audit.finish(None, Some(&error));
