@@ -50,116 +50,6 @@ pub(super) struct ClearTargetQuarantineRequest {
 // registered schema to identify only declared paths and constraint kinds.
 pub(super) struct Arguments<T>(T);
 
-fn resolve_ref<'a>(
-    root: &'a serde_json::Value,
-    node: &'a serde_json::Value,
-) -> &'a serde_json::Value {
-    let Some(reference) = node.get("$ref").and_then(serde_json::Value::as_str) else {
-        return node;
-    };
-    let Some(pointer) = reference.strip_prefix('#') else {
-        return node;
-    };
-    root.pointer(pointer).unwrap_or(node)
-}
-
-fn classify_constraint(error: &jsonschema::ValidationError<'_>) -> &'static str {
-    classify_kind(error.kind(), error.schema_path().as_str())
-}
-
-fn classify_kind(kind: &jsonschema::error::ValidationErrorKind, schema_path: &str) -> &'static str {
-    use jsonschema::error::ValidationErrorKind as K;
-    match kind {
-        K::AdditionalProperties { .. } | K::UnevaluatedProperties { .. } => "unknown_field",
-        K::FalseSchema
-            if schema_path.ends_with("/additionalProperties")
-                || schema_path.ends_with("/unevaluatedProperties") =>
-        {
-            "unknown_field"
-        }
-        K::Required { .. } => "missing_field",
-        K::Type { .. } => "invalid_type",
-        K::Enum { .. } => "invalid_enum",
-        K::Minimum { .. } | K::ExclusiveMinimum { .. } => "below_minimum",
-        K::Maximum { .. } | K::ExclusiveMaximum { .. } => "above_maximum",
-        K::MinLength { .. } | K::MinItems { .. } | K::MinProperties { .. } => "too_short",
-        K::MaxLength { .. } | K::MaxItems { .. } | K::MaxProperties { .. } => "too_long",
-        K::Pattern { .. } | K::BacktrackLimitExceeded { .. } | K::Format { .. } => {
-            "pattern_mismatch"
-        }
-        K::Constant { .. } => "const_mismatch",
-        K::AnyOf { context } | K::OneOfNotValid { context } => context
-            .iter()
-            .flatten()
-            .find(|err| !matches!(err.kind(), K::Type { .. }))
-            .map(|err| classify_constraint(err))
-            .unwrap_or("invalid_type"),
-        _ => "invalid_type",
-    }
-}
-
-fn safe_schema_path(root: &serde_json::Value, error: &jsonschema::ValidationError<'_>) -> String {
-    use jsonschema::error::ValidationErrorKind as K;
-    use jsonschema::paths::LocationSegment;
-    use serde_json::Value;
-
-    let mut path = String::from("arguments");
-    let mut cursor = resolve_ref(root, root);
-    for segment in error.instance_path().iter() {
-        cursor = resolve_ref(root, cursor);
-        match segment {
-            LocationSegment::Property(prop) => {
-                if let Some(next) = cursor
-                    .get("properties")
-                    .and_then(Value::as_object)
-                    .and_then(|props| props.get(prop.as_ref()))
-                {
-                    path.push('.');
-                    path.push_str(prop.as_ref());
-                    cursor = resolve_ref(root, next);
-                } else {
-                    return path;
-                }
-            }
-            LocationSegment::Index(idx) => {
-                let items = cursor.get("items").or_else(|| {
-                    cursor
-                        .get("anyOf")
-                        .and_then(Value::as_array)
-                        .and_then(|branches| {
-                            branches
-                                .iter()
-                                .map(|branch| resolve_ref(root, branch))
-                                .find_map(|branch| branch.get("items"))
-                        })
-                });
-                if let Some(next) = items {
-                    path.push('.');
-                    path.push_str(&idx.to_string());
-                    cursor = resolve_ref(root, next);
-                } else {
-                    return path;
-                }
-            }
-        }
-    }
-    if let K::Required {
-        property: Value::String(prop),
-    } = error.kind()
-    {
-        cursor = resolve_ref(root, cursor);
-        if cursor
-            .get("properties")
-            .and_then(Value::as_object)
-            .is_some_and(|props| props.contains_key(prop))
-        {
-            path.push('.');
-            path.push_str(prop);
-        }
-    }
-    path
-}
-
 fn diagnose_schema_error(
     route: Option<&super::registration::RouteSchema>,
     value: &serde_json::Value,
@@ -172,8 +62,8 @@ fn diagnose_schema_error(
         .iter_errors(value)
         .map(|error| {
             (
-                safe_schema_path(&route.schema, &error),
-                classify_constraint(&error),
+                crate::contracts::schema::safe_path(&route.schema, &error, "arguments"),
+                crate::contracts::schema::classify_error(&error, "invalid_type"),
             )
         })
         .min()

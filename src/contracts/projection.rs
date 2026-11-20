@@ -4,6 +4,8 @@ use std::{collections::BTreeMap, io};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::schema;
+
 const INVALID: &str = "invalid_projection";
 const MAX_PLAN_BYTES: usize = 16 * 1024;
 
@@ -13,78 +15,7 @@ pub struct ProjectionViolation {
     pub constraint: &'static str,
 }
 
-fn classify_jsonschema_error(error: &jsonschema::ValidationError<'_>) -> &'static str {
-    use jsonschema::error::ValidationErrorKind as K;
-    let schema_path = error.schema_path().as_str();
-    match error.kind() {
-        K::AdditionalProperties { .. } | K::UnevaluatedProperties { .. } => "unknown_field",
-        K::FalseSchema
-            if schema_path.ends_with("/additionalProperties")
-                || schema_path.ends_with("/unevaluatedProperties") =>
-        {
-            "unknown_field"
-        }
-        K::Required { .. } => "missing_field",
-        K::Type { .. } => "invalid_type",
-        K::Enum { .. } => "invalid_enum",
-        K::Minimum { .. } | K::ExclusiveMinimum { .. } => "below_minimum",
-        K::Maximum { .. } | K::ExclusiveMaximum { .. } => "above_maximum",
-        K::MinLength { .. } | K::MinItems { .. } | K::MinProperties { .. } => "too_short",
-        K::MaxLength { .. } | K::MaxItems { .. } | K::MaxProperties { .. } => "too_long",
-        K::Pattern { .. } | K::BacktrackLimitExceeded { .. } | K::Format { .. } => {
-            "pattern_mismatch"
-        }
-        K::Constant { .. } => "const_mismatch",
-        _ => "schema_violation",
-    }
-}
-
-fn safe_projection_path(root: &Value, error: &jsonschema::ValidationError<'_>) -> String {
-    use jsonschema::error::ValidationErrorKind as K;
-    use jsonschema::paths::LocationSegment;
-    let mut path = String::from("result");
-    let mut cursor = root;
-    for segment in error.instance_path().iter() {
-        match segment {
-            LocationSegment::Property(prop) => {
-                if let Some(next) = cursor
-                    .get("properties")
-                    .and_then(Value::as_object)
-                    .and_then(|props| props.get(prop.as_ref()))
-                {
-                    path.push('.');
-                    path.push_str(prop.as_ref());
-                    cursor = next;
-                } else {
-                    return path;
-                }
-            }
-            LocationSegment::Index(idx) => {
-                if let Some(next) = cursor.get("items") {
-                    path.push('.');
-                    path.push_str(&idx.to_string());
-                    cursor = next;
-                } else {
-                    return path;
-                }
-            }
-        }
-    }
-    if let K::Required {
-        property: Value::String(prop),
-    } = error.kind()
-        && cursor
-            .get("properties")
-            .and_then(Value::as_object)
-            .is_some_and(|props| props.contains_key(prop))
-    {
-        path.push('.');
-        path.push_str(prop);
-    }
-    path
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
     pub fields: BTreeMap<String, Vec<String>>,
@@ -92,32 +23,27 @@ pub struct Plan {
     pub max_bytes: usize,
     pub max_items: usize,
     pub max_depth: usize,
+    /// Compiled once by `compile_with_diff`; kept out of the serialized policy
+    /// so plan distribution stays a pure data document.
+    #[serde(skip)]
+    pub(crate) validator: std::sync::OnceLock<jsonschema::Validator>,
 }
 
-fn identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .enumerate()
-            .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
-}
+impl Plan {
+    fn with(self, validator: jsonschema::Validator) -> Self {
+        let _ = self.validator.set(validator);
+        self
+    }
 
-fn source_key(value: &str, allow_diff: bool) -> bool {
-    identifier(value)
-        && !value.starts_with('_')
-        && !matches!(
-            value,
-            "invocation"
-                | "module_args"
-                | "args"
-                | "argv"
-                | "cmd"
-                | "env"
-                | "environment"
-                | "ansible_env"
-        )
-        && (allow_diff || value != "diff")
+    /// Plans are built by `compile_with_diff`, which compiles the validator.
+    /// A plan deserialized from distributed policy compiles on first use.
+    fn validator(&self) -> Result<&jsonschema::Validator, &'static str> {
+        if let Some(validator) = self.validator.get() {
+            return Ok(validator);
+        }
+        let compiled = jsonschema::validator_for(&self.schema).map_err(|_| INVALID)?;
+        Ok(self.validator.get_or_init(|| compiled))
+    }
 }
 
 pub fn compile(config: Value) -> Result<Plan, &'static str> {
@@ -132,10 +58,10 @@ pub(crate) fn compile_with_diff(config: Value, allow_diff: bool) -> Result<Plan,
         || plan.fields.is_empty()
         || plan.fields.len() > 16
         || plan.fields.iter().any(|(alias, path)| {
-            !identifier(alias)
+            !schema::name(alias)
                 || path.is_empty()
                 || path.len() > 8
-                || path.iter().any(|key| !source_key(key, allow_diff))
+                || path.iter().any(|key| !schema::source_key(key, allow_diff))
         })
     {
         return Err(INVALID);
@@ -147,75 +73,16 @@ pub(crate) fn compile_with_diff(config: Value, allow_diff: bool) -> Result<Plan,
         &plan,
     )
     .map_err(|_| INVALID)?;
-    crate::contracts::module_schema::check_projection_schema(&plan.schema).map_err(|_| INVALID)?;
+    let validator =
+        crate::contracts::module_schema::check_projection_schema(&plan.schema, allow_diff)
+            .map_err(|_| INVALID)?;
     let properties = plan.schema["properties"].as_object().ok_or(INVALID)?;
     if properties.len() != plan.fields.len()
         || plan.fields.keys().any(|key| !properties.contains_key(key))
     {
         return Err(INVALID);
     }
-    check_node(&plan.schema, 0, true, true, allow_diff)?;
-    Ok(plan)
-}
-
-// Assertions may be partial schemas; every actual property/item has a concrete,
-// recursively bounded shape independent of conditional assertions. These hard
-// shape ceilings are independent of the plan's aggregate value budgets, which
-// may deliberately produce schema-valid prefixes or omit optional branches.
-fn check_node(
-    schema: &Value,
-    depth: usize,
-    concrete: bool,
-    root: bool,
-    allow_diff: bool,
-) -> Result<(), &'static str> {
-    if depth > 8 {
-        return Err(INVALID);
-    }
-    let kind = schema.get("type").and_then(Value::as_str);
-    if concrete && kind.is_none() {
-        return Err(INVALID);
-    }
-    if kind == Some("string")
-        && schema
-            .get("maxLength")
-            .and_then(Value::as_u64)
-            .is_none_or(|n| n > 65536)
-    {
-        return Err(INVALID);
-    }
-    if kind == Some("array")
-        && schema
-            .get("maxItems")
-            .and_then(Value::as_u64)
-            .is_none_or(|n| n > 1024)
-    {
-        return Err(INVALID);
-    }
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for (key, child) in properties {
-            if !root && !source_key(key, allow_diff) {
-                return Err(INVALID);
-            }
-            check_node(child, depth + 1, true, false, allow_diff)?;
-        }
-    }
-    if let Some(items) = schema.get("items") {
-        check_node(items, depth + 1, true, false, allow_diff)?;
-    }
-    for key in ["if", "then", "else", "not"] {
-        if let Some(child) = schema.get(key) {
-            check_node(child, depth, false, root, allow_diff)?;
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf"] {
-        if let Some(children) = schema.get(key).and_then(Value::as_array) {
-            for child in children {
-                check_node(child, depth, false, root, allow_diff)?;
-            }
-        }
-    }
-    Ok(())
+    Ok(plan.with(validator))
 }
 
 struct ByteLimit {
@@ -298,26 +165,23 @@ impl Plan {
             schema_path: "result".to_owned(),
             constraint: "max_bytes",
         })?;
-        if crate::contracts::module_schema::validate(&self.schema, value).is_err() {
-            if let Ok(validator) = jsonschema::validator_for(&self.schema)
-                && let Some((schema_path, constraint)) = validator
-                    .iter_errors(value)
-                    .map(|err| {
-                        (
-                            safe_projection_path(&self.schema, &err),
-                            classify_jsonschema_error(&err),
-                        )
-                    })
-                    .min()
-            {
-                return Err(ProjectionViolation {
-                    schema_path,
-                    constraint,
-                });
-            }
+        let validator = self.validator().map_err(|_| ProjectionViolation {
+            schema_path: "result".to_owned(),
+            constraint: "schema_violation",
+        })?;
+        if let Some((schema_path, constraint)) = validator
+            .iter_errors(value)
+            .map(|err| {
+                (
+                    schema::safe_path(&self.schema, &err, "result"),
+                    schema::classify_error(&err, "schema_violation"),
+                )
+            })
+            .min()
+        {
             return Err(ProjectionViolation {
-                schema_path: "result".to_owned(),
-                constraint: "schema_violation",
+                schema_path,
+                constraint,
             });
         }
         Ok(())

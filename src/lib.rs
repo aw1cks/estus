@@ -47,7 +47,7 @@ pub mod internal {
         pub mod module_schema {
             pub use crate::contracts::module_schema::{
                 CapabilityBinding, bounded, compile_binding, import_document,
-                import_explicit_schema, validate, validate_input_shape, validate_overlay,
+                import_explicit_schema, validate_input_shape, validate_overlay,
             };
         }
 

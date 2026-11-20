@@ -8,8 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::schema::{self, Names, Profile, name, parameter};
+
 const INVALID: &str = "unsupported_module_contract";
-const SCHEMA: &str = "invalid_binding_schema";
+const SCHEMA: &str = schema::SCHEMA;
 const INPUT: &str = "invalid_binding_arguments";
 const LIMIT: usize = 256 * 1024;
 const DEPTH: usize = 32;
@@ -42,15 +44,6 @@ const RESERVED: &[&str] = &[
     "module_name",
 ];
 
-fn name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .enumerate()
-            .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
-}
-
 fn matches_display(value: &Value, expected: &str) -> bool {
     struct StrEq<'a>(&'a str);
     impl std::fmt::Write for StrEq<'_> {
@@ -61,16 +54,6 @@ fn matches_display(value: &Value, expected: &str) -> bool {
     }
     let mut eq = StrEq(expected);
     std::fmt::write(&mut eq, format_args!("{value}")).is_ok() && eq.0.is_empty()
-}
-
-fn parameter(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.bytes().enumerate().all(|(i, c)| {
-            c == b'_' || c.is_ascii_alphabetic() || (i > 0 && (c.is_ascii_digit() || c == b'-'))
-        })
-        && !value.starts_with('_')
-        && !value.starts_with("ansible_")
 }
 
 fn public_parameter(value: &str) -> bool {
@@ -392,8 +375,11 @@ fn import_options(
             } else {
                 &mut schema
             };
+            let validator = compile_validator(target).map_err(|_| INVALID)?;
             for choice in &choices {
-                validate(target, choice).map_err(|_| INVALID)?;
+                if !validator.is_valid(choice) {
+                    return Err(INVALID);
+                }
             }
             target
                 .as_object_mut()
@@ -505,133 +491,47 @@ fn import_type(
 
 // Ordinary JSON Schema subset, intentionally no references, regexes, coercion,
 // defaults, open objects, tuple arrays, or dialect-dependent keywords.
-fn check_schema(schema: &Value, root: bool) -> Result<(), &'static str> {
+fn check_schema_validator(
+    schema: &Value,
+    root: bool,
+) -> Result<jsonschema::Validator, &'static str> {
     if !bounded(schema) {
         return Err(SCHEMA);
     }
-    check_schema_node(schema, false)?;
+    schema::check(schema, &Profile::MODULE)?;
     if root && schema.get("type").and_then(Value::as_str) != Some("object") {
         return Err(SCHEMA);
     }
-    Ok(())
+    compile_validator(schema)
 }
 
-pub(crate) fn check_projection_schema(schema: &Value) -> Result<(), &'static str> {
+fn check_schema(schema: &Value, root: bool) -> Result<(), &'static str> {
+    check_schema_validator(schema, root).map(drop)
+}
+
+pub(crate) fn check_projection_schema(
+    schema: &Value,
+    allow_diff: bool,
+) -> Result<jsonschema::Validator, &'static str> {
     if !bounded(schema) || schema.get("type").and_then(Value::as_str) != Some("object") {
         return Err(SCHEMA);
     }
-    check_schema_node(schema, true)
+    schema::check(
+        schema,
+        &Profile {
+            names: Names::Projection { allow_diff },
+            depth: 8,
+            concrete: true,
+            max_length: Some(65_536),
+            max_items: Some(1024),
+            open_root: true,
+        },
+    )?;
+    compile_validator(schema)
 }
 
-fn check_schema_node(schema: &Value, projection: bool) -> Result<(), &'static str> {
-    let object = schema.as_object().ok_or(SCHEMA)?;
-    for (key, value) in object {
-        match key.as_str() {
-            "type" => {
-                if !matches!(
-                    value.as_str(),
-                    Some("object" | "array" | "string" | "integer" | "number" | "boolean" | "null")
-                ) {
-                    return Err(SCHEMA);
-                }
-            }
-            "properties" => {
-                for (key, value) in value.as_object().ok_or(SCHEMA)? {
-                    if !(if projection {
-                        name(key)
-                    } else {
-                        parameter(key)
-                    }) {
-                        return Err(SCHEMA);
-                    }
-                    check_schema_node(value, projection)?;
-                }
-            }
-            "required" => {
-                let mut seen = BTreeSet::new();
-                for key in value.as_array().ok_or(SCHEMA)? {
-                    let key = key
-                        .as_str()
-                        .filter(|v| if projection { name(v) } else { parameter(v) })
-                        .ok_or(SCHEMA)?;
-                    if !seen.insert(key) {
-                        return Err(SCHEMA);
-                    }
-                }
-            }
-            "additionalProperties" => {
-                if value != &Value::Bool(false) {
-                    return Err(SCHEMA);
-                }
-            }
-            "items" | "not" | "if" | "then" | "else" => check_schema_node(value, projection)?,
-            "allOf" | "anyOf" | "oneOf" => {
-                let values = value.as_array().filter(|v| !v.is_empty()).ok_or(SCHEMA)?;
-                for value in values {
-                    check_schema_node(value, projection)?;
-                }
-            }
-            "enum" => {
-                let values = value.as_array().filter(|v| !v.is_empty()).ok_or(SCHEMA)?;
-                if values
-                    .iter()
-                    .enumerate()
-                    .any(|(i, v)| values[..i].iter().any(|other| equal(other, v)))
-                {
-                    return Err(SCHEMA);
-                }
-            }
-            "const" => (),
-            "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" => {
-                if !value.is_number() {
-                    return Err(SCHEMA);
-                }
-            }
-            "minLength" | "maxLength" | "minItems" | "maxItems" | "minProperties"
-            | "maxProperties" => {
-                if value.as_u64().is_none_or(|n| n > LIMIT as u64) {
-                    return Err(SCHEMA);
-                }
-            }
-            "uniqueItems" => {
-                if !value.is_boolean() {
-                    return Err(SCHEMA);
-                }
-            }
-            "title" | "description" => {
-                if !value.is_string() {
-                    return Err(SCHEMA);
-                }
-            }
-            _ => return Err(SCHEMA),
-        }
-    }
-    if object.get("type").and_then(Value::as_str) == Some("object") {
-        let props = object
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or(SCHEMA)?;
-        if object.get("additionalProperties") != Some(&Value::Bool(false)) {
-            return Err(SCHEMA);
-        }
-        if let Some(required) = object.get("required")
-            && required
-                .as_array()
-                .ok_or(SCHEMA)?
-                .iter()
-                .any(|v| v.as_str().is_none_or(|s| !props.contains_key(s)))
-        {
-            return Err(SCHEMA);
-        }
-    }
-    if object.get("type").and_then(Value::as_str) == Some("array") && !object.contains_key("items")
-    {
-        return Err(SCHEMA);
-    }
-    if (object.contains_key("then") || object.contains_key("else")) && !object.contains_key("if") {
-        return Err(SCHEMA);
-    }
-    Ok(())
+fn compile_validator(schema: &Value) -> Result<jsonschema::Validator, &'static str> {
+    jsonschema::validator_for(schema).map_err(|_| SCHEMA)
 }
 
 // Preserve the decoded JSON value, not the original decimal spelling. This
@@ -653,21 +553,6 @@ fn canonical_integer(value: &Value) -> Option<i64> {
     // so this cast cannot saturate or lose integer precision.
     let integer = number as i64;
     (integer as f64 == number).then_some(integer)
-}
-
-fn equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
-        (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| equal(a, b))
-        }
-        (Value::Object(a), Value::Object(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .all(|(k, v)| b.get(k).is_some_and(|other| equal(v, other)))
-        }
-        _ => left == right,
-    }
 }
 
 /// Protocol shape only. Value bounds, choices and conditional assertions remain policy errors.
@@ -714,140 +599,6 @@ pub fn validate_input_shape(schema: &Value, input: &Value) -> Result<(), &'stati
         for value in values {
             validate_input_shape(items, value)?;
         }
-    }
-    Ok(())
-}
-
-pub fn validate(schema: &Value, value: &Value) -> Result<(), &'static str> {
-    let object = schema.as_object().ok_or(INPUT)?;
-    if let Some(kind) = object.get("type").and_then(Value::as_str) {
-        let valid = match kind {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "integer" => canonical_integer(value).is_some(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            _ => false,
-        };
-        if !valid {
-            return Err(INPUT);
-        }
-    }
-    if object.get("const").is_some_and(|v| !equal(v, value)) {
-        return Err(INPUT);
-    }
-    if object
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.iter().any(|v| equal(v, value)))
-    {
-        return Err(INPUT);
-    }
-    if let Some(values) = value.as_object() {
-        if let Some(required) = object.get("required").and_then(Value::as_array)
-            && required
-                .iter()
-                .any(|k| k.as_str().is_none_or(|k| !values.contains_key(k)))
-        {
-            return Err(INPUT);
-        }
-        let props = object.get("properties").and_then(Value::as_object);
-        for (key, value) in values {
-            if let Some(schema) = props.and_then(|p| p.get(key)) {
-                validate(schema, value)?;
-            } else if object.get("additionalProperties") == Some(&Value::Bool(false)) {
-                return Err(INPUT);
-            }
-        }
-        length(object, values.len(), "minProperties", "maxProperties")?;
-    }
-    if let Some(values) = value.as_array() {
-        length(object, values.len(), "minItems", "maxItems")?;
-        if let Some(items) = object.get("items") {
-            for value in values {
-                validate(items, value)?;
-            }
-        }
-        if object.get("uniqueItems") == Some(&Value::Bool(true))
-            && values
-                .iter()
-                .enumerate()
-                .any(|(i, v)| values[..i].iter().any(|other| equal(other, v)))
-        {
-            return Err(INPUT);
-        }
-    }
-    if let Some(value) = value.as_str() {
-        length(object, value.chars().count(), "minLength", "maxLength")?;
-    }
-    if let Some(value) = value.as_f64() {
-        for (key, exclusive, lower) in [
-            ("minimum", false, true),
-            ("maximum", false, false),
-            ("exclusiveMinimum", true, true),
-            ("exclusiveMaximum", true, false),
-        ] {
-            if let Some(limit) = object.get(key).and_then(Value::as_f64)
-                && (lower && value < limit
-                    || exclusive && value == limit
-                    || !lower && value > limit)
-            {
-                return Err(INPUT);
-            }
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf"] {
-        if let Some(schemas) = object.get(key).and_then(Value::as_array) {
-            let matches = schemas
-                .iter()
-                .filter(|s| validate(s, value).is_ok())
-                .count();
-            if match key {
-                "allOf" => matches != schemas.len(),
-                "anyOf" => matches == 0,
-                _ => matches != 1,
-            } {
-                return Err(INPUT);
-            }
-        }
-    }
-    if object
-        .get("not")
-        .is_some_and(|s| validate(s, value).is_ok())
-    {
-        return Err(INPUT);
-    }
-    if let Some(condition) = object.get("if") {
-        let branch = if validate(condition, value).is_ok() {
-            "then"
-        } else {
-            "else"
-        };
-        if let Some(schema) = object.get(branch) {
-            validate(schema, value)?;
-        }
-    }
-    Ok(())
-}
-
-fn length(
-    object: &Map<String, Value>,
-    length: usize,
-    min: &str,
-    max: &str,
-) -> Result<(), &'static str> {
-    if object
-        .get(min)
-        .and_then(Value::as_u64)
-        .is_some_and(|n| (length as u64) < n)
-        || object
-            .get(max)
-            .and_then(Value::as_u64)
-            .is_some_and(|n| (length as u64) > n)
-    {
-        return Err(INPUT);
     }
     Ok(())
 }
@@ -1016,7 +767,10 @@ pub(crate) fn validate_setup_overlay(module: &str, overlay: &Value) -> Result<()
 #[derive(Debug)]
 pub struct CapabilityBinding {
     contract: Contract,
-    input_schema: Value,
+    /// Compiled once: the reviewed public surface and the canonical backend
+    /// contract. Every request is validated by these, never by a fresh walk.
+    input_validator: jsonschema::Validator,
+    backend_validator: jsonschema::Validator,
     pub(crate) fixed_args: Map<String, Value>,
     input_map: BTreeMap<String, String>,
 }
@@ -1059,7 +813,8 @@ pub fn compile_binding(
             }
         }
     }
-    check_schema(&overlay.input_schema, true)?;
+    let backend_validator = compile_validator(&contract.schema)?;
+    let overlay_validator = check_schema_validator(&overlay.input_schema, true)?;
     let fixed = canonicalize(
         &contract.schema,
         &contract.aliases,
@@ -1073,7 +828,12 @@ pub fn compile_binding(
         .ok_or(SCHEMA)?;
     // Fixed subtrees must already be valid; only root requiredness is deferred.
     for (key, value) in &fixed_args {
-        validate(backend.get(key).ok_or(SCHEMA)?, value)?;
+        if !compile_validator(backend.get(key).ok_or(SCHEMA)?)
+            .map_err(|_| SCHEMA)?
+            .is_valid(value)
+        {
+            return Err(INPUT);
+        }
     }
     let public = overlay
         .input_schema
@@ -1126,7 +886,8 @@ pub fn compile_binding(
     }
     Ok(CapabilityBinding {
         contract,
-        input_schema: overlay.input_schema,
+        backend_validator,
+        input_validator: overlay_validator,
         fixed_args,
         input_map,
     })
@@ -1158,14 +919,17 @@ fn opaque_node<'a>(
 }
 
 fn check_representation(schema: &Value) -> Result<(), &'static str> {
-    check_schema(schema, false)?;
+    let validator = check_schema_validator(schema, false)?;
     let kind = schema.get("type").and_then(Value::as_str).ok_or(SCHEMA)?;
     if let Some(value) = schema.get("const") {
-        return validate(schema, value).map_err(|_| SCHEMA);
+        if !validator.is_valid(value) {
+            return Err(SCHEMA);
+        }
+        return Ok(());
     }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        for value in values {
-            validate(schema, value).map_err(|_| SCHEMA)?;
+        if values.iter().any(|value| !validator.is_valid(value)) {
+            return Err(SCHEMA);
         }
         return Ok(());
     }
@@ -1256,14 +1020,19 @@ fn compatible(input: &Value, backend: &Value, aliases: &Aliases) -> Result<(), &
         )?,
         _ => (),
     }
+    let validator = compile_validator(backend)?;
     if let Some(choices) = input.get("enum").and_then(Value::as_array) {
         for value in choices {
             let canonical = canonicalize(backend, aliases, value)?;
-            validate(backend, &canonical)?;
+            if !validator.is_valid(&canonical) {
+                return Err(SCHEMA);
+            }
         }
     }
-    if let Some(value) = input.get("const") {
-        validate(backend, &canonicalize(backend, aliases, value)?)?;
+    if let Some(value) = input.get("const")
+        && !validator.is_valid(&canonicalize(backend, aliases, value)?)
+    {
+        return Err(SCHEMA);
     }
     Ok(())
 }
@@ -1273,7 +1042,9 @@ impl CapabilityBinding {
         if !bounded(input) {
             return Err(INPUT);
         }
-        validate(&self.input_schema, input)?;
+        if !self.input_validator.is_valid(input) {
+            return Err(INPUT);
+        }
         let input = input.as_object().ok_or(INPUT)?;
         let mut output = self.fixed_args.clone();
         let props = self
@@ -1298,7 +1069,9 @@ impl CapabilityBinding {
         if !bounded(&output) {
             return Err(INPUT);
         }
-        validate(&self.contract.schema, &output)?;
+        if !self.backend_validator.is_valid(&output) {
+            return Err(INPUT);
+        }
         Ok(output)
     }
 }
@@ -1505,15 +1278,18 @@ mod tests {
 
     #[test]
     fn numeric_equality_and_conditional_combinators_follow_json_schema() {
-        assert!(validate(&json!({"enum":[1]}), &json!(1.0)).is_ok());
+        let validator = compile_validator(&json!({"enum":[1]})).unwrap();
+        assert!(validator.is_valid(&json!(1.0)));
         assert!(check_schema(&json!({"enum":[1,1.0]}), false).is_err());
-        assert!(validate(&json!({"uniqueItems":true}), &json!([1, 1.0])).is_err());
-        let schema = json!({"allOf":[{"minimum":1},{"maximum":4}],
+        let validator = compile_validator(&json!({"uniqueItems":true})).unwrap();
+        assert!(!validator.is_valid(&json!([1, 1.0])));
+        let validator = compile_validator(&json!({"allOf":[{"minimum":1},{"maximum":4}],
             "anyOf":[{"const":1},{"const":2},{"const":3}],
-            "oneOf":[{"const":1},{"const":2}]});
-        assert!(validate(&schema, &json!(1)).is_ok());
-        assert!(validate(&schema, &json!(3)).is_err());
-        assert!(validate(&schema, &json!(5)).is_err());
+            "oneOf":[{"const":1},{"const":2}]}))
+        .unwrap();
+        assert!(validator.is_valid(&json!(1)));
+        assert!(!validator.is_valid(&json!(3)));
+        assert!(!validator.is_valid(&json!(5)));
         assert!(!bounded(&json!(9_007_199_254_740_992u64)));
     }
 
@@ -1584,6 +1360,12 @@ mod named_arguments {
 mod integer_normalization {
     use super::*;
 
+    // The decoder budget is the only authority on integer magnitude; the
+    // compiled validator then applies the schema to whatever survived it.
+    fn accepts(schema: &Value, value: &Value) -> bool {
+        bounded(value) && compile_validator(schema).unwrap().is_valid(value)
+    }
+
     fn binding(kind: &str) -> CapabilityBinding {
         let schema = json!({
             "type":"object",
@@ -1628,7 +1410,7 @@ mod integer_normalization {
         ] {
             let value: Value = serde_json::from_str(source).unwrap();
             assert!(validate_input_shape(&schema, &value).is_ok(), "{source}");
-            assert!(validate(&schema, &value).is_ok(), "{source}");
+            assert!(accepts(&schema, &value), "{source}");
             let prepared = binding.prepare(&json!({"value":value})).unwrap();
             assert_eq!(
                 serde_json::to_string(&prepared).unwrap(),
@@ -1674,7 +1456,7 @@ mod integer_normalization {
         }
         for value in invalid {
             assert_eq!(validate_input_shape(&schema, &value), Err(INPUT), "{value}");
-            assert_eq!(validate(&schema, &value), Err(INPUT), "{value}");
+            assert!(!accepts(&schema, &value), "{value}");
             assert_eq!(
                 canonicalize(&schema, &Aliases::default(), &value),
                 Err(INPUT),
@@ -1905,251 +1687,5 @@ mod setup_overlay {
                 "setup overlay unexpectedly accepted: {bad}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod differential_jsonschema {
-    use super::*;
-    use serde_json::json;
-
-    fn draft202012(schema: &Value) -> jsonschema::Validator {
-        jsonschema::draft202012::new(schema).expect("supported subset compiles in jsonschema")
-    }
-
-    #[test]
-    fn supported_subset_matches_jsonschema_evaluator() {
-        let schema = json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["mode", "enabled"],
-            "minProperties": 2,
-            "maxProperties": 7,
-            "properties": {
-                "mode": {
-                    "type": "string",
-                    "enum": ["0600", "0644", "0755"]
-                },
-                "enabled": {
-                    "type": "boolean"
-                },
-                "count": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 10
-                },
-                "ratio": {
-                    "type": "number",
-                    "exclusiveMinimum": 0.0,
-                    "exclusiveMaximum": 1.0
-                },
-                "label": {
-                    "type": "string",
-                    "minLength": 2,
-                    "maxLength": 4
-                },
-                "tags": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 3,
-                    "uniqueItems": true,
-                    "items": {
-                        "anyOf": [
-                            {"const": "alpha"},
-                            {"type": "integer", "minimum": 1, "maximum": 3}
-                        ]
-                    }
-                },
-                "marker": {
-                    "oneOf": [
-                        {"type": "null"},
-                        {"allOf": [{"type": "string"}, {"not": {"const": "forbidden"}}]}
-                    ]
-                }
-            },
-            "if": {
-                "properties": {"enabled": {"const": true}},
-                "required": ["enabled"]
-            },
-            "then": {
-                "required": ["count"]
-            },
-            "else": {
-                "not": {"required": ["count"]}
-            }
-        });
-        check_schema(&schema, true).expect("schema fits bounded subset");
-        let reference = draft202012(&schema);
-
-        let cases = [
-            (json!({"mode": "0644", "enabled": true, "count": 5}), true),
-            (
-                json!({"mode": "0755", "enabled": false, "label": "é🙂", "tags": ["alpha", 1, 1.0]}),
-                false,
-            ), // uniqueItems: 1 == 1.0
-            (
-                json!({"mode": "0755", "enabled": false, "label": "é🙂", "tags": ["alpha", 2]}),
-                true,
-            ),
-            (
-                json!({"mode": "0600", "enabled": true, "count": 0, "ratio": 0.5, "marker": null}),
-                true,
-            ),
-            (
-                json!({"mode": "0600", "enabled": true, "count": 0, "marker": "ok"}),
-                true,
-            ),
-            // Octal-mode strings remain strict strings, never integer or stripped-zero coercions.
-            (json!({"mode": 644, "enabled": false}), false),
-            (json!({"mode": "644", "enabled": false}), false),
-            (json!({"mode": "0o644", "enabled": false}), false),
-            // Strict booleans reject Ansible truthy strings and integers.
-            (json!({"mode": "0644", "enabled": "yes"}), false),
-            (json!({"mode": "0644", "enabled": "true"}), false),
-            (json!({"mode": "0644", "enabled": 1}), false),
-            (json!({"mode": "0644", "enabled": 0}), false),
-            // Conditional if/then/else.
-            (json!({"mode": "0644", "enabled": true}), false),
-            (json!({"mode": "0644", "enabled": false, "count": 1}), false),
-            // Bounds & Unicode scalar minLength/maxLength.
-            (
-                json!({"mode": "0644", "enabled": false, "label": "a"}),
-                false,
-            ),
-            (
-                json!({"mode": "0644", "enabled": false, "label": "é🙂a!"}),
-                true,
-            ),
-            (
-                json!({"mode": "0644", "enabled": false, "label": "é🙂a!x"}),
-                false,
-            ),
-            (
-                json!({"mode": "0644", "enabled": false, "ratio": 0.0}),
-                false,
-            ),
-            (
-                json!({"mode": "0644", "enabled": false, "ratio": 1.0}),
-                false,
-            ),
-            (json!({"mode": "0644", "enabled": false, "tags": []}), false),
-            (
-                json!({"mode": "0644", "enabled": false, "tags": ["alpha", 1, 2, 3]}),
-                false,
-            ),
-            (
-                json!({"mode": "0644", "enabled": false, "tags": [4]}),
-                false,
-            ),
-            (
-                json!({"mode": "0644", "enabled": false, "marker": "forbidden"}),
-                false,
-            ),
-            (json!({"mode": "0644", "enabled": false, "extra": 1}), false),
-            (
-                json!({"mode": "0644", "enabled": true, "count": 1.5}),
-                false,
-            ),
-            (json!({"mode": "0644", "enabled": true, "count": 2.0}), true),
-        ];
-        for (value, expected) in cases {
-            assert_eq!(
-                validate(&schema, &value).is_ok(),
-                expected,
-                "local validate diverged from expectation for {value}"
-            );
-            assert_eq!(
-                validate(&schema, &value).is_ok(),
-                reference.is_valid(&value),
-                "local validate diverged from jsonschema for {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn documents_exact_divergences_for_integer_precision_aliases_and_recursion() {
-        // 1. Integer precision: MAX_EXACT_INTEGER (2^53 - 1) is the exact binary64 boundary.
-        let int_schema = json!({"type": "integer"});
-        let int_validator = draft202012(&int_schema);
-        let exact_max = json!(MAX_EXACT_INTEGER);
-        assert!(validate(&int_schema, &exact_max).is_ok());
-        assert!(int_validator.is_valid(&exact_max));
-
-        let imprecise = json!(MAX_EXACT_INTEGER + 1);
-        assert!(
-            validate(&int_schema, &imprecise).is_err(),
-            "evaluator must reject integers beyond binary64 exactness"
-        );
-        assert!(
-            int_validator.is_valid(&imprecise),
-            "documented divergence: jsonschema accepts > 2^53 - 1 integers"
-        );
-        assert!(!bounded(&imprecise));
-
-        // Integral JSON floats/exponentials satisfy both evaluators and canonicalize to integers.
-        let exp_int: Value = serde_json::from_str("1e2").unwrap();
-        assert!(validate(&int_schema, &exp_int).is_ok());
-        assert!(int_validator.is_valid(&exp_int));
-        assert_eq!(canonical_integer(&exp_int), Some(100));
-
-        // 2. Aliases: module contract preparation canonicalizes documented aliases before validate,
-        // whereas raw jsonschema against the canonical backend schema sees uncanonicalized keys.
-        let contract = import_document(&json!({
-            "doc": {
-                "options": {
-                    "path": {
-                        "type": "str",
-                        "required": true,
-                        "aliases": ["dest"]
-                    }
-                }
-            }
-        }))
-        .unwrap();
-        let overlay = json!({
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "src": {"type": "string"}
-                },
-                "required": ["src"],
-                "additionalProperties": false
-            },
-            "fixed_args": {},
-            "input_map": {"dest": "src"}
-        });
-        let compiled = compile_binding(&contract, &overlay).unwrap();
-        assert_eq!(
-            compiled.prepare(&json!({"src": "/etc/hosts"})).unwrap(),
-            json!({"path": "/etc/hosts"})
-        );
-        let raw_backend = draft202012(&contract["schema"]);
-        assert!(raw_backend.is_valid(&json!({"path": "/etc/hosts"})));
-        assert!(
-            !raw_backend.is_valid(&json!({"dest": "/etc/hosts"})),
-            "documented divergence: raw jsonschema does not apply Ansible alias canonicalization"
-        );
-
-        // 3. Recursion and depth bounds: jsonschema allows $ref recursion, whereas
-        // import_explicit_schema rejects $ref and bounds structure depth at DEPTH (32).
-        let recursive = json!({
-            "$defs": {
-                "node": {
-                    "type": "object",
-                    "properties": {"next": {"$ref": "#/$defs/node"}}
-                }
-            },
-            "$ref": "#/$defs/node"
-        });
-        assert!(draft202012(&recursive).is_valid(&json!({"next": {"next": {}}})));
-        assert!(import_explicit_schema(&recursive).is_err());
-
-        let mut shallow = json!(1);
-        for _ in 0..31 {
-            shallow = json!({"a": shallow});
-        }
-        assert!(bounded(&shallow));
-        let too_deep = json!({"a": {"a": shallow}});
-        assert!(!bounded(&too_deep));
     }
 }

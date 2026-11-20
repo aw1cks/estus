@@ -1428,6 +1428,7 @@ mod tests {
             max_bytes: 1024,
             max_items: 16,
             max_depth: 4,
+            ..Default::default()
         };
         assert_eq!(
             project(&plan, &json!({"present":true})),
