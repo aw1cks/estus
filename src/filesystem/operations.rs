@@ -1549,16 +1549,22 @@ where
         .await
         .is_err();
     match result {
-        Ok(data) if !cleanup_timed_out => FileOutcome {
-            reply: ToolReply::success(data),
-            check_master: false,
-            lost_ack: false,
-        },
-        Ok(_) => FileOutcome {
-            reply: ToolReply::failure(Failure::cleanup().error),
-            check_master: false,
-            lost_ack: true,
-        },
+        // A slow child cleanup after an acknowledged result must not rewrite
+        // that result or quarantine the target; the acknowledgement already
+        // proves the remote operation completed.
+        Ok(data) => {
+            if cleanup_timed_out {
+                crate::audit::emit(&serde_json::json!({
+                    "event": "sftp_cleanup_timeout",
+                    "remote_state_unknown": false,
+                }));
+            }
+            FileOutcome {
+                reply: ToolReply::success(data),
+                check_master: false,
+                lost_ack: false,
+            }
+        }
         Err(mut failure) => {
             let lost_ack = cleanup_timed_out
                 || failure.error.remote_state_unknown
