@@ -1190,7 +1190,7 @@ revision = "1"
 targets = ["server"]
 authority = "automation"
 effects = ["runtime_write", "read"]
-execution = { kind = "native_payload", snapshot = "/etc/estus/change_systemd_restart.payload.json", source = "/etc/estus/payloads/change_systemd_restart/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/change_systemd_restart/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3", manager_scope = "system" }
 input_map = { unit = "unit" }
 constraints = { allowed_units = ["nginx.service", "caddy.service"] }

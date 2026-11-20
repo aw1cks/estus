@@ -380,10 +380,6 @@ impl Config {
         self.mode
     }
 
-    pub(crate) fn capabilities(&self) -> Capabilities {
-        self.capabilities
-    }
-
     pub(crate) fn allows_dynamic_hosts(&self) -> bool {
         self.targets.is_none()
     }
@@ -602,25 +598,6 @@ impl Config {
 
     pub(crate) fn requires_preview(&self, host: &str) -> bool {
         rules::requires_preview(&self.rules, host)
-    }
-
-    /// Import against exactly the runtime used by this authority at activation.
-    pub(crate) fn catalog_runtime(&self, authority: &str) -> Result<Option<PathBuf>, ConfigError> {
-        if authority == "automation" {
-            return self.automation_runtime();
-        }
-        let name = authority
-            .strip_prefix("automation:")
-            .ok_or_else(|| invalid("tools", "invalid catalog automation authority"))?;
-        let selected = self
-            .automation
-            .authorities
-            .get(name)
-            .ok_or_else(|| invalid("tools", "automation authority is not configured"))?;
-        match &selected.bundle {
-            Some(path) => Ok(Some(path.clone())),
-            None => self.automation_runtime(),
-        }
     }
 
     pub(crate) fn binding_enabled(&self, id: BindingId) -> bool {

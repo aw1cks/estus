@@ -1,5 +1,5 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/inspect_journal/manifest.json and fixed policy, then catalog prepare.
+# Export, review payloads/inspect_journal/manifest.json and the fixed policy here, then enable it by name.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 mode = "headless"
 capabilities = { named = true }
@@ -22,7 +22,7 @@ revision = "2_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
-execution = { kind = "native_payload", snapshot = "/etc/estus/inspect_journal.payload.json", source = "/etc/estus/payloads/inspect_journal/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/inspect_journal/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3" }
 input_map = { "unit" = "unit", "boot_id" = "boot_id", "since" = "since", "journal_until" = "until", "priority" = "priority", "cursor" = "cursor", "limit" = "limit", "contains" = "contains", "direction" = "direction" }
 limits = { timeout_secs = 40 }

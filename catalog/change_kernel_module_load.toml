@@ -1,5 +1,5 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_kernel_module_load/manifest.json and fixed policy, then catalog prepare.
+# Export, review payloads/change_kernel_module_load/manifest.json and the fixed policy here, then enable it by name.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 mode = "headless"
 capabilities = { named = true }
@@ -22,7 +22,7 @@ revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "runtime_write", "availability"]
-execution = { kind = "native_payload", snapshot = "/etc/estus/change_kernel_module_load.payload.json", source = "/etc/estus/payloads/change_kernel_module_load/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/change_kernel_module_load/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 input_map = { "name" = "name", "parameters" = "parameters" }
 limits = { timeout_secs = 60 }

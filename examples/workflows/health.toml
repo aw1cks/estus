@@ -1,13 +1,12 @@
 # Reviewed Linux SSH-process-view observation; NOT an application health assertion.
-# Export only this canonical tool, review its collector source and manifest, then
-# prepare with a provisioned site (plain destination, no controller workspace needed).
-# Approval snapshots are produced by catalog prepare, never shipped here.
+# Enable only this canonical tool in a provisioned site (plain destination, no
+# controller workspace needed); no approval file is produced or shipped.
 # MCP: observe_host_summary {"host":"plain","inputs":{}}
 tool = "observe_host_summary"
 authority = "automation"
 #
+# enabled_tools = ["observe_host_summary"] in provisioned-site.toml; no input or
+# fixed policy changes are needed. To read the collector first:
 # estus catalog export --tool observe_host_summary --output health-export
-# Review health-export/payloads and tools.toml; no input/fixed policy changes needed.
-# estus catalog prepare --site provisioned-site.toml --definitions health-export/tools.toml --target plain --output health-reviewed
-# estus catalog inspect --site health-reviewed/estus.toml
-# estus --config health-reviewed/estus.toml
+# Review health-export/payloads/observe_host_summary/{collector.py,manifest.json}.
+# estus --config provisioned-site.toml

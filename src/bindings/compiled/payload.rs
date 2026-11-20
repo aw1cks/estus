@@ -8,7 +8,6 @@ pub(super) struct UnactivatedPayload {
     authority: AutomationAuthority,
     overlay: Value,
     projection: Arc<crate::contracts::projection::Plan>,
-    snapshot: PathBuf,
     source: PathBuf,
     no_log: bool,
 }
@@ -61,12 +60,7 @@ impl CompiledBinding {
         workstation: bool,
     ) -> Result<Self, ConfigError> {
         validate_risk_prefix_effects(&name, &raw.effects)?;
-        let RawExecution::NativePayload {
-            snapshot,
-            source,
-            no_log,
-        } = raw.execution
-        else {
+        let RawExecution::NativePayload { source, no_log } = raw.execution else {
             return Err(invalid("Not a payload binding"));
         };
         let authority = AutomationAuthority::parse(&raw.authority)?;
@@ -76,7 +70,6 @@ impl CompiledBinding {
             || raw.description.is_empty()
             || raw.description.len() > 1024
             || !identifier(&raw.revision)
-            || !absolute(&snapshot)
             || !absolute(&source)
             || (!dynamic_targets
                 && (targets.is_empty()
@@ -177,7 +170,6 @@ impl CompiledBinding {
                 authority,
                 overlay,
                 projection,
-                snapshot: snapshot.into(),
                 source: source.into(),
                 no_log,
             })),
@@ -192,31 +184,15 @@ impl CompiledBinding {
         source: Vec<u8>,
         manifest_bytes: &[u8],
     ) -> Result<(), ConfigError> {
-        let revision = self.revision.clone();
         let Execution::Payload(PayloadState::Unactivated(unactivated)) = &self.execution else {
             return Err(invalid("Not an unactivated payload binding"));
         };
-        let authority = serde_json::to_value(&unactivated.authority)
-            .map_err(|_| invalid("Invalid payload authority"))?
-            .as_str()
-            .ok_or_else(|| invalid("Invalid payload authority"))?
-            .to_owned();
-        let result = json!({
-            "kind": "capability_projection",
-            "fields": unactivated.projection.fields,
-            "schema": unactivated.projection.schema,
-            "max_bytes": unactivated.projection.max_bytes,
-            "max_items": unactivated.projection.max_items,
-            "max_depth": unactivated.projection.max_depth,
-        });
         let loaded = crate::native_payload::PayloadPlan::load_from_bytes(
             source,
             manifest_bytes,
-            &crate::native_payload::PayloadApprovalInline {
+            &crate::native_payload::PayloadSource {
+                source: Path::new(""),
                 overlay: &unactivated.overlay,
-                result: &result,
-                authority: &authority,
-                revision: &revision,
                 no_log: unactivated.no_log,
                 projection: Some(Arc::clone(&unactivated.projection)),
             },
@@ -285,40 +261,21 @@ impl Bindings {
         let Execution::Payload(PayloadState::Unactivated(unactivated)) = &binding.execution else {
             return Err(invalid("Not an unactivated payload binding"));
         };
-        let snapshot = unactivated.snapshot.clone();
         let source = unactivated.source.clone();
         let overlay = unactivated.overlay.clone();
         let projection = Arc::clone(&unactivated.projection);
-        let revision = binding.revision.clone();
         let no_log = unactivated.no_log;
-        let authority = serde_json::to_value(&unactivated.authority)
-            .map_err(|_| invalid("Invalid payload authority"))?
-            .as_str()
-            .ok_or_else(|| invalid("Invalid payload authority"))?
-            .to_owned();
-        let result = json!({
-            "kind": "capability_projection",
-            "fields": projection.fields,
-            "schema": projection.schema,
-            "max_bytes": projection.max_bytes,
-            "max_items": projection.max_items,
-            "max_depth": projection.max_depth,
-        });
         // Await blocking ownership even if activation cancellation arrives meanwhile.
         let loaded = tokio::task::spawn_blocking(move || {
-            crate::native_payload::PayloadPlan::load(crate::native_payload::PayloadApproval {
-                snapshot: &snapshot,
+            crate::native_payload::PayloadPlan::load(&crate::native_payload::PayloadSource {
                 source: &source,
                 overlay: &overlay,
-                result: &result,
-                authority: &authority,
-                revision: &revision,
                 no_log,
                 projection: Some(projection),
             })
         })
         .await
-        .map_err(|_| invalid("Payload approval loading failed"))??;
+        .map_err(|_| invalid("Payload source loading failed"))??;
         if ct.is_cancelled() {
             return Err(invalid("Payload activation cancelled"));
         }

@@ -1017,7 +1017,7 @@ pub(crate) fn validate_setup_overlay(module: &str, overlay: &Value) -> Result<()
 pub struct CapabilityBinding {
     contract: Contract,
     input_schema: Value,
-    fixed_args: Map<String, Value>,
+    pub(crate) fixed_args: Map<String, Value>,
     input_map: BTreeMap<String, String>,
 }
 

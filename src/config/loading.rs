@@ -147,13 +147,14 @@ fn resolve_catalog_selection(
     base: &Path,
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<(), ConfigError> {
-    let definitions: BTreeSet<&str> = document.tools.keys().map(String::as_str).collect();
-    let unknown = |names: &[String]| names.iter().any(|n| !definitions.contains(n.as_str()));
+    let defined: BTreeSet<String> = document.tools.keys().cloned().collect();
+    let unknown = |names: &[String]| names.iter().any(|n| !defined.contains(n));
     let target_needs_catalog = document.targets.iter().flat_map(|t| t.values()).any(|t| {
         t.tool_presets.as_ref().is_some_and(|v| !v.is_empty())
             || t.enabled_tools.as_deref().is_some_and(unknown)
             || unknown(&t.disabled_tools)
     });
+    // A name that has no local definition is enabled from the installed catalog.
     let needs_catalog = !document.tool_presets.is_empty()
         || target_needs_catalog
         || unknown(&document.enabled_tools)
@@ -176,18 +177,8 @@ fn resolve_catalog_selection(
     } else {
         None
     };
-    let uses_presets = !document.tool_presets.is_empty()
-        || document
-            .targets
-            .iter()
-            .flat_map(|t| t.values())
-            .any(|t| t.tool_presets.as_ref().is_some_and(|v| !v.is_empty()));
-    if uses_presets && document.catalog.version.is_none() {
-        return Err(invalid(
-            "catalog.version",
-            "preset selection requires an explicit catalog version",
-        ));
-    }
+    // `catalog.version` is an optional assertion: when present the installed
+    // inventory must still be the one the operator reviewed.
     if let Some(version) = &document.catalog.version
         && catalog
             .as_ref()
@@ -195,10 +186,16 @@ fn resolve_catalog_selection(
     {
         return Err(invalid(
             "catalog.version",
-            "review the changed catalog version before selecting presets",
+            "installed catalog version differs from the configured assertion",
         ));
     }
     let manifest = catalog.as_ref().map(|c| c.manifest());
+    // Every known name is selectable: local `[tools]` definitions and the
+    // installed catalog's templates alike.
+    let mut definitions: BTreeSet<String> = defined;
+    if let Some(manifest) = manifest {
+        definitions.extend(manifest.tools.keys().cloned());
+    }
     let selected = crate::catalog::selection::expand(
         &definitions,
         manifest,
@@ -207,14 +204,12 @@ fn resolve_catalog_selection(
         &document.disabled_tools,
     )
     .map_err(|reason| invalid("enabled_tools", reason))?;
-    if selected
-        .iter()
-        .any(|name| !definitions.contains(name.as_str()))
+    // Workstation exposure is its own reviewed path; site definitions here
+    // describe a configured destination policy and do not apply.
+    if let Some(catalog) = &catalog
+        && document.mode == Mode::Headless
     {
-        return Err(invalid(
-            "tools",
-            "selected catalog tools require prepared reviewed definitions",
-        ));
+        materialize_catalog_tools(document, catalog, &selected)?;
     }
     if let Some(targets) = &mut document.targets {
         for target in targets.values_mut() {
@@ -279,6 +274,44 @@ fn resolve_catalog_selection(
     Ok(())
 }
 
+/// Replace selected catalog names with the installed definition, applying site
+/// policy from the config's `[tools.<name>]` table. A table without `execution`
+/// is site policy only (targets, authority, fixed args, constraints, limits);
+/// a table with `execution` is a complete operator-authored definition and is
+/// left alone.
+fn materialize_catalog_tools(
+    document: &mut Document,
+    catalog: &crate::catalog::assets::Catalog,
+    selected: &BTreeSet<String>,
+) -> Result<(), ConfigError> {
+    let destinations: Vec<String> = document
+        .targets
+        .iter()
+        .flat_map(|targets| targets.keys().cloned())
+        .collect();
+    let mut resolved: BTreeMap<String, toml::Value> = BTreeMap::new();
+    for name in selected {
+        let local = document.tools.get(name);
+        let overrides = match local {
+            None => None,
+            Some(value) if value.get("execution").is_some() => continue,
+            Some(value) => Some(value),
+        };
+        let definition = catalog
+            .site_definition(
+                name,
+                overrides.and_then(toml::Value::as_table),
+                &destinations,
+            )
+            .map_err(|reason| invalid("tools", reason))?;
+        resolved.insert(name.clone(), definition);
+    }
+    for (name, definition) in resolved {
+        document.tools.insert(name, definition);
+    }
+    Ok(())
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Controller {
@@ -304,15 +337,6 @@ impl Config {
         cli: Cli,
         cwd: &Path,
         env: impl Fn(&str) -> Option<OsString>,
-    ) -> Result<Self, ConfigError> {
-        Self::load_with_catalog_root(cli, cwd, env, None)
-    }
-
-    fn load_with_catalog_root(
-        cli: Cli,
-        cwd: &Path,
-        env: impl Fn(&str) -> Option<OsString>,
-        catalog_root: Option<PathBuf>,
     ) -> Result<Self, ConfigError> {
         let config_path = cli
             .config
@@ -397,9 +421,6 @@ impl Config {
             TargetMode::Open => {}
         }
 
-        if let Some(root) = catalog_root {
-            document.catalog.root = Some(root);
-        }
         resolve_catalog_selection(&mut document, &base, &env)?;
         let ssh_override = cli
             .ssh_config
@@ -600,19 +621,6 @@ impl Config {
             bindings,
             automation: document.automation,
         })
-    }
-
-    pub(crate) fn from_file_with_catalog_root(
-        mut cli: Cli,
-        path: PathBuf,
-        root: Option<PathBuf>,
-    ) -> Result<Self, ConfigError> {
-        let cwd = std::env::current_dir()
-            .map_err(|_| invalid("config", "cannot determine launch directory"))?;
-        // --site is the explicit catalog document. The caller rejects an
-        // explicit --config conflict; ambient ESTUS_CONFIG does not replace it.
-        cli.config = Some(path);
-        Self::load_with_catalog_root(cli, &cwd, |key| std::env::var_os(key), root)
     }
 }
 
@@ -1401,35 +1409,42 @@ tool_presets = []
     }
 
     #[test]
-    fn presets_are_pinned_inert_templates_not_authority_or_definition_grants() {
+    fn presets_enable_installed_templates_and_a_version_pin_still_asserts() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
         let catalog = crate::catalog::assets::Catalog::load(Some(&root)).unwrap();
         let pin = format!("version={:?}", catalog.manifest().version);
         let inert = load(&format!("[catalog]\nroot={root:?}\n{pin}\n")).unwrap();
         assert_eq!(inert.bindings.entries().count(), 0);
         assert!(!inert.automation.required);
-        let prefix = format!(
-            "capabilities = {{ named = true }}\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[targets.two]\nssh_host='two'\n"
-        );
-        assert!(
-            load(&prefix).is_err(),
-            "preset fabricated unreviewed definitions"
-        );
+        // A preset names installed templates; the definitions come from the
+        // catalog with an absolute payload source, never from the config. These
+        // three templates carry no site policy, so they need no overrides.
+        // The health templates run through the automation authority, which the
+        // site must configure (and provision separately) exactly as before.
         let text = format!(
-            "{prefix}{}{}{}",
-            definition("observe_cpu"),
-            definition("observe_memory"),
-            definition("observe_pressure")
+            "capabilities = {{ named = true }}\ntool_presets=['linux-health']\n[catalog]\nroot={root:?}\n{pin}\n[targets.one]\nssh_host='one'\n[automation.targets.one]\ndestination='one'\npython='/usr/bin/python3'\n"
         );
         let config = load(&text).unwrap();
+        let enabled: Vec<_> = config
+            .bindings
+            .entries()
+            .filter(|(id, _)| config.binding_enabled(*id))
+            .map(|(_, binding)| binding.name.as_str())
+            .collect();
+        assert_eq!(
+            enabled,
+            ["observe_cpu", "observe_memory", "observe_pressure"]
+        );
         assert!(
             config
                 .bindings
                 .entries()
-                .all(|(id, _)| config.binding_enabled(id))
+                .all(|(_, binding)| !binding.payload_activated()),
+            "installed definitions must not be pre-activated"
         );
         assert!(load(&text.replace(&pin, "version='unreviewed-upgrade'")).is_err());
-        assert!(load(&text.replace(&pin, "")).is_err());
+        // Without a pin the installed inventory is used as-is.
+        assert!(load(&text.replace(&pin, "")).is_ok());
         assert!(load(&text.replace("linux-health", "unknown-preset")).is_err());
     }
 }

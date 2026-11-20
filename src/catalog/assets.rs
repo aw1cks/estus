@@ -14,7 +14,6 @@ use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
 };
-use serde_json::{Value, json};
 
 const MANIFEST_LIMIT: u64 = 256 * 1024;
 const DEFINITION_LIMIT: u64 = 256 * 1024;
@@ -304,10 +303,6 @@ impl Catalog {
         })
     }
 
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
@@ -367,6 +362,102 @@ impl Catalog {
             .get(name)
             .ok_or("unknown catalog tool")?;
         Self::validate_definition(&self.directory, name, &template.definition)
+    }
+
+    /// The installed definition for `name`, wired to the installed payload
+    /// directory and to the site's own targets.
+    ///
+    /// `overrides` is the config's `[tools.<name>]` table when it carries no
+    /// `execution`; each key it names replaces the installed one wholesale.
+    /// `targets` and `constraints` never survive from the catalog: they name
+    /// hosts and allowlists that only the site knows. Targets default to every
+    /// configured destination (per-host permission is still checked
+    /// separately). A `policy_required` template must restate its fixed
+    /// arguments or supply constraints, so an example allowlist can never be
+    /// inherited by an operator who did not review it.
+    pub(crate) fn site_definition(
+        &self,
+        name: &str,
+        overrides: Option<&toml::Table>,
+        destinations: &[String],
+    ) -> Result<toml::Value, &'static str> {
+        const SITE_KEYS: [&str; 7] = [
+            "targets",
+            "authority",
+            "fixed_args",
+            "constraints",
+            "input_schema",
+            "input_map",
+            "limits",
+        ];
+        let template = self.manifest.tools.get(name).ok_or(ERROR)?;
+        if let Some(overrides) = overrides
+            && overrides
+                .keys()
+                .any(|key| !SITE_KEYS.contains(&key.as_str()))
+        {
+            return Err("catalog_definition_override_not_site_policy");
+        }
+        if template.policy_required
+            && overrides.is_none_or(|table| {
+                !(table.contains_key("fixed_args")
+                    || table.contains_key("constraints")
+                    || table.contains_key("input_schema"))
+            })
+        {
+            return Err("catalog_definition_requires_site_policy");
+        }
+        let mut document = Self::validate_definition(&self.directory, name, &template.definition)?;
+        let tools = document
+            .remove("tools")
+            .and_then(|value| value.try_into::<toml::Table>().ok())
+            .ok_or(ERROR)?;
+        let mut definition = tools
+            .into_iter()
+            .next()
+            .map(|(_, value)| value)
+            .ok_or(ERROR)?;
+        let table = definition.as_table_mut().ok_or(ERROR)?;
+        table.remove("targets");
+        table.remove("constraints");
+        if let Executor::NativePayload { path } = &template.executor {
+            table.insert(
+                "execution".into(),
+                toml::Value::Table(toml::Table::from_iter([
+                    ("kind".to_owned(), toml::Value::from("native_payload")),
+                    (
+                        "source".to_owned(),
+                        toml::Value::from(
+                            self.root
+                                .join(path)
+                                .join("collector.py")
+                                .to_str()
+                                .ok_or(ERROR)?,
+                        ),
+                    ),
+                ])),
+            );
+        }
+        if let Some(overrides) = overrides {
+            for (key, value) in overrides {
+                table.insert(key.clone(), value.clone());
+            }
+        }
+        if !table.contains_key("targets") {
+            if destinations.is_empty() {
+                return Err("catalog_definition_requires_targets");
+            }
+            table.insert(
+                "targets".into(),
+                toml::Value::Array(
+                    destinations
+                        .iter()
+                        .map(|name| name.as_str().into())
+                        .collect(),
+                ),
+            );
+        }
+        Ok(definition)
     }
 
     /// Build a workstation-mode entry from its declared policy. The definition's
@@ -437,26 +528,10 @@ impl Catalog {
                     open_child(&tool_dir, Path::new("manifest.json"), false)?,
                     262_144,
                 )?;
-                let mut manifest_val: Value =
-                    crate::strict_json::parse(&manifest_raw).map_err(|_| ERROR)?;
-                // The activated approval must equal the overlay the definition
-                // compiles to, so the declared policy replaces the reviewed one.
-                let overlay = json!({
-                    "input_schema": policy.input_schema,
-                    "fixed_args": policy.fixed_args,
-                    "input_map": policy.input_map,
-                });
-                if let Some(approval) = manifest_val
-                    .get_mut("approval")
-                    .and_then(Value::as_object_mut)
-                {
-                    approval.insert("overlay".into(), overlay);
-                }
-                let manifest_bytes = serde_json::to_vec(&manifest_val).map_err(|_| ERROR)?;
                 Ok(WorkstationEntry::Payload {
                     definition,
                     source: source_bytes,
-                    manifest: manifest_bytes,
+                    manifest: manifest_raw,
                 })
             }
         }

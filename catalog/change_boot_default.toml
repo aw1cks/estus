@@ -1,5 +1,5 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/change_boot_default/manifest.json and fixed policy, then catalog prepare.
+# Export, review payloads/change_boot_default/manifest.json and the fixed policy here, then enable it by name.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 mode = "headless"
 capabilities = { named = true }
@@ -22,7 +22,7 @@ revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"
 effects = ["read", "persistent_write"]
-execution = { kind = "native_payload", snapshot = "/etc/estus/change_boot_default.payload.json", source = "/etc/estus/payloads/change_boot_default/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/change_boot_default/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3", allowed_entries = ["estus-current.conf", "estus-alternate.conf"] }
 input_map = { "entry_id" = "entry_id" }
 limits = { timeout_secs = 60 }

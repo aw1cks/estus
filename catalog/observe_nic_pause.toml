@@ -1,5 +1,5 @@
 # Reviewed controller-owned native Python payload; no Ansible runtime required.
-# Export, review payloads/observe_nic_pause/manifest.json and fixed policy, then catalog prepare.
+# Export, review payloads/observe_nic_pause/manifest.json and the fixed policy here, then enable it by name.
 # Preparation creates explicit source/adapter/contract/authority approval; activation never refreshes it.
 mode = "headless"
 capabilities = { named = true }
@@ -15,7 +15,7 @@ revision = "1_native1"
 targets = ["server"]
 authority = "automation"
 effects = ["read"]
-execution = { kind = "native_payload", snapshot = "/etc/estus/observe_nic_pause.payload.json", source = "/etc/estus/payloads/observe_nic_pause/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_nic_pause/collector.py", no_log = false }
 fixed_args = {"target_python" = "/usr/bin/python3","operator_policy" = {"interface" = "pause0","mac" = "52:54:00:12:34:58","driver" = "e1000e"}}
 input_map = {"interface" = "interface"}
 limits = { timeout_secs = 40 }

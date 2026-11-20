@@ -6463,13 +6463,6 @@ while not os.path.exists(release) and time.monotonic() < deadline:
     time.sleep(0.02)
 print(json.dumps({"ok": True}))
 "#;
-        let projection_fields = json!({"ok": ["ok"]});
-        let projection_schema = json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["ok"],
-            "properties": {"ok": {"type": "boolean"}}
-        });
         #[derive(serde::Serialize)]
         struct Requirements {
             python_min: [u16; 2],
@@ -6489,32 +6482,17 @@ print(json.dumps({"ok": True}))
                 fields: std::collections::BTreeMap<&'static str, ArgumentValue>,
             },
         }
-        #[derive(serde::Serialize)]
-        struct Approval {
-            overlay: Value,
-            result: Value,
-            authority: &'static str,
-            no_log: bool,
-            revision: String,
-        }
+        // A payload directory holds the collector and the manifest that pins
+        // its bytes; site policy lives in the config, not in the manifest.
         let write_signed = |name: &str,
                             change_policy: &str,
-                            revision: &str,
                             source_code: &str|
-         -> Result<(PathBuf, PathBuf)> {
-            let source_path = fixture.root.path().join(format!("{name}.py"));
-            let snapshot_path = fixture.root.path().join(format!("{name}.snapshot.json"));
+         -> Result<PathBuf> {
+            let directory = fixture.root.path().join(name);
+            fs::create_dir_all(&directory)?;
+            let source_path = directory.join("collector.py");
             fs::write(&source_path, source_code)?;
             let source_sha256 = hex::encode(Sha256::digest(source_code.as_bytes()));
-            let input_schema = json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["marker", "release"],
-                "properties": {
-                    "marker": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "release": {"type": "string", "minLength": 1, "maxLength": 4096}
-                }
-            });
             let contract = json!({
                 "schema": {
                     "type": "object",
@@ -6537,19 +6515,6 @@ print(json.dumps({"ok": True}))
                 "defaults": {},
                 "review_required": []
             });
-            let overlay = json!({
-                "input_schema": input_schema,
-                "fixed_args": {"target_python": python.to_string_lossy()},
-                "input_map": {"marker": "marker", "release": "release"}
-            });
-            let result = json!({
-                "kind": "capability_projection",
-                "fields": projection_fields,
-                "schema": projection_schema,
-                "max_bytes": 1024,
-                "max_items": 16,
-                "max_depth": 3
-            });
             let argv = vec![Arg::Object {
                 fields: std::collections::BTreeMap::from([
                     ("marker", ArgumentValue { name: "marker" }),
@@ -6563,30 +6528,7 @@ print(json.dumps({"ok": True}))
                 executables: Vec::new(),
                 paths: Vec::new(),
             };
-            let approval = Approval {
-                overlay,
-                result,
-                authority: "automation",
-                no_log: false,
-                revision: revision.to_owned(),
-            };
-            let digest_bytes = serde_json::to_vec(&(
-                true,
-                1u32,
-                1u32,
-                1u32,
-                change_policy,
-                &source_sha256,
-                1_048_576usize,
-                &argv,
-                &requirements,
-                &contract,
-                &approval,
-            ))?;
-            let manifest_sha256 = hex::encode(Sha256::digest(&digest_bytes));
             let manifest = json!({
-                "approved": true,
-                "manifest_sha256": manifest_sha256,
                 "schema": 1,
                 "protocol": 1,
                 "adapter_version": 1,
@@ -6595,20 +6537,16 @@ print(json.dumps({"ok": True}))
                 "max_source_bytes": 1_048_576,
                 "argv": argv,
                 "requirements": requirements,
-                "contract": contract,
-                "approval": approval
+                "contract": contract
             });
-            fs::write(&snapshot_path, serde_json::to_vec_pretty(&manifest)?)?;
-            Ok((snapshot_path, source_path))
+            fs::write(
+                directory.join("manifest.json"),
+                serde_json::to_vec_pretty(&manifest)?,
+            )?;
+            Ok(source_path)
         };
-        let (read_snapshot, read_source) =
-            write_signed("read_probe", "read_only", "read-1", read_source_code)?;
-        let (write_snapshot, write_source) = write_signed(
-            "write_probe",
-            "mutation_success",
-            "write-1",
-            write_source_code,
-        )?;
+        let read_source = write_signed("read_probe", "read_only", read_source_code)?;
+        let write_source = write_signed("write_probe", "mutation_success", write_source_code)?;
         let config = fixture.root.path().join("payload-admission.toml");
         fs::write(
             &config,
@@ -6633,7 +6571,7 @@ print(json.dumps({"ok": True}))
                 targets = ["plain"]
                 authority = "automation"
                 effects = ["read"]
-                execution = {{kind="native_payload",snapshot={read_snap},source={read_src}}}
+                execution = {{kind="native_payload",source={read_src}}}
                 fixed_args = {{target_python={python_path}}}
                 input_map = {{marker="marker",release="release"}}
                 input_schema = {{type="object",additionalProperties=false,required=["marker","release"],properties={{marker={{type="string",minLength=1,maxLength=4096}},release={{type="string",minLength=1,maxLength=4096}}}}}}
@@ -6644,7 +6582,7 @@ print(json.dumps({"ok": True}))
                 targets = ["plain"]
                 authority = "automation"
                 effects = ["persistent_write"]
-                execution = {{kind="native_payload",snapshot={write_snap},source={write_src}}}
+                execution = {{kind="native_payload",source={write_src}}}
                 fixed_args = {{target_python={python_path}}}
                 input_map = {{marker="marker",release="release"}}
                 input_schema = {{type="object",additionalProperties=false,required=["marker","release"],properties={{marker={{type="string",minLength=1,maxLength=4096}},release={{type="string",minLength=1,maxLength=4096}}}}}}
@@ -6652,9 +6590,7 @@ print(json.dumps({"ok": True}))
             "#,
                 ssh_config = serde_json::to_string(&fixture.ssh_config.to_string_lossy())?,
                 python_path = serde_json::to_string(&python.to_string_lossy())?,
-                read_snap = serde_json::to_string(&read_snapshot.to_string_lossy())?,
                 read_src = serde_json::to_string(&read_source.to_string_lossy())?,
-                write_snap = serde_json::to_string(&write_snapshot.to_string_lossy())?,
                 write_src = serde_json::to_string(&write_source.to_string_lossy())?,
             },
         )?;
@@ -7104,23 +7040,17 @@ async fn ssh_native_payload_candidate_and_python_min_discovery_failures() -> Res
             #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
             executable_candidates: std::collections::BTreeMap<String, Vec<String>>,
         }
-        #[derive(serde::Serialize)]
-        struct Approval {
-            overlay: Value,
-            result: Value,
-            authority: &'static str,
-            no_log: bool,
-            revision: &'static str,
-        }
-        let write_manifest = |snap_name: &str,
+        // Two payload directories share the collector, so each can pin a
+        // different requirement set against identical bytes.
+        let write_manifest = |dir_name: &str,
                               python_min: [u16; 2],
                               exec_cands: std::collections::BTreeMap<String, Vec<String>>|
          -> Result<PathBuf> {
-            let snap = fixture.root.path().join(snap_name);
-            let input_schema = json!({"type":"object","additionalProperties":false,"required":[],"properties":{}});
+            let directory = fixture.root.path().join(dir_name);
+            fs::create_dir_all(&directory)?;
+            let source = directory.join("collector.py");
+            fs::copy(&src_path, &source)?;
             let contract = json!({"schema":{"type":"object","additionalProperties":false,"required":["target_python"],"properties":{"target_python":{"type":"string","minLength":1,"maxLength":4096}}},"aliases":{"aliases":{},"properties":{"target_python":{"aliases":{},"properties":{}}}},"defaults":{},"review_required":[]});
-            let overlay = json!({"input_schema":input_schema,"fixed_args":{"target_python":python.to_string_lossy()},"input_map":{}});
-            let result = json!({"kind":"capability_projection","fields":{"ok":["mcp_result","ok"]},"schema":{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}},"max_bytes":1024,"max_items":16,"max_depth":3});
             let argv: Vec<Value> = Vec::new();
             let requirements = Requirements {
                 python_min,
@@ -7130,33 +7060,26 @@ async fn ssh_native_payload_candidate_and_python_min_discovery_failures() -> Res
                 paths: Vec::new(),
                 executable_candidates: exec_cands,
             };
-            let approval = Approval {
-                overlay,
-                result,
-                authority: "automation",
-                no_log: false,
-                revision: "r1",
-            };
-            let digest_bytes = serde_json::to_vec(&(true, 1u32, 1u32, 1u32, "read_only", &source_sha256, 1_048_576usize, &argv, &requirements, &contract, &approval))?;
-            let manifest_sha256 = hex::encode(Sha256::digest(&digest_bytes));
-            fs::write(&snap, serde_json::to_vec_pretty(&json!({
-                "approved": true, "manifest_sha256": manifest_sha256,
-                "schema": 1, "protocol": 1, "adapter_version": 1, "change_policy": "read_only",
-                "source_sha256": source_sha256, "max_source_bytes": 1_048_576usize,
-                "argv": argv, "requirements": requirements, "contract": contract, "approval": approval
-            }))?)?;
-            Ok(snap)
+            fs::write(
+                directory.join("manifest.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "schema": 1, "protocol": 1, "adapter_version": 1, "change_policy": "read_only",
+                    "source_sha256": source_sha256, "max_source_bytes": 1_048_576usize,
+                    "argv": argv, "requirements": requirements, "contract": contract
+                }))?,
+            )?;
+            Ok(source)
         };
 
         let missing_exec = write_manifest(
-            "missing_exec.json",
+            "missing_exec",
             [3, 8],
             std::collections::BTreeMap::from([(
                 "missing-tool".to_owned(),
                 vec!["/usr/sbin/definitely-missing-estus-c17".to_owned()],
             )]),
         )?;
-        let high_py = write_manifest("high_py.json", [3, 99], Default::default())?;
+        let high_py = write_manifest("high_py", [3, 99], Default::default())?;
         let config_path = fixture.root.path().join("operator.toml");
         fs::write(
             &config_path,
@@ -7178,7 +7101,7 @@ revision = "r1"
 targets = ["plain"]
 authority = "automation"
 effects = ["read"]
-execution = {{ kind = "native_payload", snapshot = {missing_exec:?}, source = {src_path:?}, no_log = false }}
+execution = {{ kind = "native_payload", source = {missing_exec:?}, no_log = false }}
 fixed_args = {{ target_python = {python:?} }}
 input_map = {{}}
 input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
@@ -7189,7 +7112,7 @@ revision = "r1"
 targets = ["plain"]
 authority = "automation"
 effects = ["read"]
-execution = {{ kind = "native_payload", snapshot = {high_py:?}, source = {src_path:?}, no_log = false }}
+execution = {{ kind = "native_payload", source = {high_py:?}, no_log = false }}
 fixed_args = {{ target_python = {python:?} }}
 input_map = {{}}
 input_schema = {{ type = "object", additionalProperties = false, required = [], properties = {{}} }}
@@ -7257,21 +7180,15 @@ async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
             executables: Vec<String>,
             paths: Vec<String>,
         }
-        #[derive(serde::Serialize)]
-        struct Approval {
-            overlay: Value,
-            result: Value,
-            authority: &'static str,
-            no_log: bool,
-            revision: &'static str,
-        }
-        let write_kmod_manifest = |snap_name: &str,
+        let write_kmod_manifest = |dir_name: &str,
                                    src: &str,
                                    policy: &'static str,
-                                   revision: &'static str,
                                    with_params: bool|
          -> Result<(PathBuf, Value, Value, Value)> {
-            let snap = fixture.root.path().join(snap_name);
+            let directory = fixture.root.path().join(dir_name);
+            fs::create_dir_all(&directory)?;
+            let source_path = directory.join("collector.py");
+            fs::write(&source_path, src)?;
             let source_sha256 = hex::encode(Sha256::digest(src.as_bytes()));
             let (input_schema, contract, input_map) = if with_params {
                 (
@@ -7367,32 +7284,9 @@ async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
                 executables: Vec::new(),
                 paths: Vec::new(),
             };
-            let approval = Approval {
-                overlay: overlay.clone(),
-                result: result.clone(),
-                authority: "automation",
-                no_log: false,
-                revision,
-            };
-            let digest_bytes = serde_json::to_vec(&(
-                true,
-                1u32,
-                1u32,
-                1u32,
-                policy,
-                &source_sha256,
-                1_048_576usize,
-                &argv,
-                &requirements,
-                &contract,
-                &approval,
-            ))?;
-            let manifest_sha256 = hex::encode(Sha256::digest(&digest_bytes));
             fs::write(
-                &snap,
+                directory.join("manifest.json"),
                 serde_json::to_vec_pretty(&json!({
-                    "approved": true,
-                    "manifest_sha256": manifest_sha256,
                     "schema": 1,
                     "protocol": 1,
                     "adapter_version": 1,
@@ -7401,30 +7295,27 @@ async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
                     "max_source_bytes": 1_048_576usize,
                     "argv": argv,
                     "requirements": requirements,
-                    "contract": contract,
-                    "approval": approval
+                    "contract": contract
                 }))?,
             )?;
             Ok((
-                snap,
+                source_path,
                 overlay["input_schema"].clone(),
                 overlay["input_map"].clone(),
                 result,
             ))
         };
 
-        let (preview_snap, preview_schema, preview_map, preview_res) = write_kmod_manifest(
-            "preview_kmod.json",
+        let (preview_py, preview_schema, preview_map, preview_res) = write_kmod_manifest(
+            "preview_payload",
             preview_src,
             "read_only",
-            "preview_v2",
             false,
         )?;
-        let (apply_snap, apply_schema, apply_map, apply_res) = write_kmod_manifest(
-            "apply_kmod.json",
+        let (apply_py, apply_schema, apply_map, apply_res) = write_kmod_manifest(
+            "apply_payload",
             &apply_src,
             "mutation_success",
-            "apply_v1",
             true,
         )?;
         let config_doc = json!({
@@ -7442,7 +7333,7 @@ async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
                     "targets": ["plain"],
                     "authority": "automation",
                     "effects": ["read"],
-                    "execution": {"kind": "native_payload", "snapshot": preview_snap, "source": preview_py, "no_log": false},
+                    "execution": {"kind": "native_payload", "source": preview_py, "no_log": false},
                     "fixed_args": {"target_python": python.to_string_lossy()},
                     "input_map": preview_map,
                     "input_schema": preview_schema,
@@ -7454,7 +7345,7 @@ async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
                     "targets": ["plain"],
                     "authority": "automation",
                     "effects": ["runtime_write"],
-                    "execution": {"kind": "native_payload", "snapshot": apply_snap, "source": apply_py, "no_log": false},
+                    "execution": {"kind": "native_payload", "source": apply_py, "no_log": false},
                     "fixed_args": {"target_python": python.to_string_lossy()},
                     "input_map": apply_map,
                     "input_schema": apply_schema,

@@ -694,17 +694,9 @@ fn interpreters<'a>(
         }
         return Ok(vec![configured]);
     }
-    let fixed = plan
-        .manifest
-        .approval
-        .overlay
-        .get("fixed_args")
-        .and_then(|arguments| arguments.get("target_python"));
+    let fixed = plan.target_python();
     let mut candidates: Vec<&str> = Vec::new();
     if let Some(fixed) = fixed {
-        let fixed = fixed.as_str().ok_or_else(|| {
-            ToolError::resource_unavailable("Invalid approved collector interpreter")
-        })?;
         candidates.push(fixed);
     }
     if dynamic_python || fixed.is_none() {
@@ -1611,9 +1603,7 @@ mod tests {
 
     #[test]
     fn configured_target_python_takes_precedence_over_template_default() {
-        let mut manifest = super::super::Manifest {
-            approved: true,
-            manifest_sha256: String::new(),
+        let manifest = super::super::Manifest {
             schema: 1,
             protocol: 1,
             adapter_version: 1,
@@ -1640,15 +1630,7 @@ mod tests {
                 "defaults": {},
                 "review_required": ["test"]
             }),
-            approval: super::super::Approval {
-                overlay: json!({"fixed_args": {"target_python": "/usr/bin/python3"}}),
-                result: json!({"kind": "capability_projection"}),
-                authority: "automation".into(),
-                no_log: false,
-                revision: "1".into(),
-            },
         };
-        manifest.manifest_sha256 = "0".repeat(64);
         let plan = PayloadPlan {
             manifest,
             source: Arc::from(b"# empty\n".as_slice()),

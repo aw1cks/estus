@@ -4673,30 +4673,6 @@ async fn controller_tools_publish_hostless_private_contract_and_actual_typed_res
                     "sandbox": "not_provided_by_estus"
                 }
             }));
-            let inspected = command(&[
-                "catalog", "--root",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/catalog"),
-                "inspect", "--site",
-                fixture.config_path.to_str().context("controller config path")?,
-            ]).output().await?;
-            ensure!(inspected.status.success(), "controller inspection failed");
-            fixture.public_only(&inspected.stdout)?;
-            fixture.public_only(&inspected.stderr)?;
-            let report: Value = serde_json::from_slice(&inspected.stdout)?;
-            ensure!(report["deployment_boundary"] == json!({
-                "mcp": "request_policy",
-                "same_identity_arbitrary_execution": "outside_restriction",
-                "service_account_separation": "operator_managed_not_observed",
-                "sandbox": "not_provided_by_estus"
-            }));
-            let inspected_tool = report["tools"].as_array().context("inspected controller tools")?
-                .iter().find(|tool| tool["name"] == "observe_controller")
-                .context("inspected controller binding")?;
-            for field in ["executor", "authority", "execution_location", "trusted_controller_code", "restriction_boundary"] {
-                ensure!(inspected_tool[field] == tool["_meta"][field], "controller inspection changed {field}");
-            }
-            ensure!(inspected_tool["enabled"] == true);
-            ensure!(inspected_tool["catalog_template"] == json!({"qualification":"unqualified"}));
             ensure!(tool["annotations"]["readOnlyHint"] == true);
             ensure!(tool["annotations"]["destructiveHint"] == false);
             let input = &tool["inputSchema"];

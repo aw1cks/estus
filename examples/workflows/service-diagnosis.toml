@@ -1,16 +1,15 @@
 # Reviewed disposable Linux system-manager state inspection, ordinary identity.
-# Apply allowed_units to BOTH fixed_args.allowed_units and input_schema unit enum
-# in canonical exported tools.toml before catalog prepare --target plain.
+# Restate allowed_units in the site's [tools.observe_systemd_unit] table; the
+# shipped allowlist is a fixture policy, never inherited.
 # Inactive/failed are state data; active does not prove application health.
 # MCP: observe_systemd_unit {"host":"plain","inputs":{"unit":"estus-fixture.service"}}
 tool = "observe_systemd_unit"
 authority = "automation"
 allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service"]
 #
-# estus catalog export --tool observe_systemd_unit --output diagnosis-export
-# Review diagnosis-export/payloads; replace BOTH unit lists in
-# diagnosis-export/tools.toml with the allowed_units above. This recipe is
-# intentionally not a complete site config.
-# estus catalog prepare --site provisioned-site.toml --definitions diagnosis-export/tools.toml --target plain --output diagnosis-reviewed
-# estus catalog inspect --site diagnosis-reviewed/estus.toml
-# estus --config diagnosis-reviewed/estus.toml
+# enabled_tools = ["observe_systemd_unit"]
+# [tools.observe_systemd_unit]
+# targets = ["plain"]
+# constraints = { allowed_units = ["estus-fixture.service", "estus-fixture-idle.service", "estus-fixture-fail.service"] }
+# This recipe is intentionally not a complete site config.
+# estus --config provisioned-site.toml

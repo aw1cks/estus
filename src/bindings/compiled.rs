@@ -67,6 +67,48 @@ fn unique_bounded(list: &[String], check: impl Fn(&str) -> bool) -> bool {
         && list.iter().collect::<BTreeSet<_>>().len() == list.len()
 }
 
+/// The literal overlay a definition's `[tools.<name>]` table compiles to:
+/// catalog policy (`constraints`) folded in, nothing inferred.
+#[cfg(test)]
+pub(crate) fn definition_overlay(text: &str, name: &str) -> Result<Value, &'static str> {
+    let document: toml::Table = text.parse().map_err(|_| "invalid definition TOML")?;
+    let table = document
+        .get("tools")
+        .and_then(|tools| tools.get(name))
+        .and_then(toml::Value::as_table)
+        .ok_or("definition has no such tool")?;
+    let mut input_schema = serde_json::to_value(
+        table
+            .get("input_schema")
+            .ok_or("definition lacks an input schema")?,
+    )
+    .map_err(|_| "invalid definition")?;
+    let mut fixed_args = serde_json::to_value(
+        table
+            .get("fixed_args")
+            .ok_or("definition lacks fixed arguments")?,
+    )
+    .map_err(|_| "invalid definition")?;
+    let input_map = serde_json::to_value(
+        table
+            .get("input_map")
+            .unwrap_or(&toml::Value::Table(toml::Table::new())),
+    )
+    .map_err(|_| "invalid definition")?;
+    let constraints: Option<SiteConstraints> = table
+        .get("constraints")
+        .cloned()
+        .map(|value| value.try_into())
+        .transpose()
+        .map_err(|_| "invalid site constraints")?;
+    apply_site_constraints(&mut input_schema, &mut fixed_args, constraints.as_ref())?;
+    Ok(json!({
+        "input_schema": input_schema,
+        "fixed_args": fixed_args,
+        "input_map": input_map,
+    }))
+}
+
 pub(crate) fn apply_site_constraints(
     input_schema: &mut Value,
     fixed_args: &mut Value,

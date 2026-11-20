@@ -2,8 +2,10 @@
 use super::assets::Manifest;
 use std::collections::BTreeSet;
 
+/// `definitions` holds every known name: locally authored definitions and the
+/// installed catalog's templates.
 pub(crate) fn expand(
-    definitions: &BTreeSet<&str>,
+    definitions: &BTreeSet<String>,
     manifest: Option<&Manifest>,
     included: &[String],
     presets: &[String],
@@ -51,7 +53,7 @@ mod tests {
     }
     #[test]
     fn disable_wins_without_forcing_a_disabled_definition() {
-        let definitions = BTreeSet::from(["one", "two"]);
+        let definitions = BTreeSet::from(["one".to_owned(), "two".to_owned()]);
         let selected = expand(
             &definitions,
             None,

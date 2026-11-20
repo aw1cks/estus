@@ -10,8 +10,8 @@ The command, Cargo package/binary and Python distribution/import package are now
 such as `/etc/estus`, `/var/lib/estus` and `/opt/estus`. There are no compatibility
 aliases. Ansible internal variables use the `estus_` prefix.
 
-Reimport and review existing automation snapshots before enabling them: helper
-identity and content-hash namespaces have changed, so previous approval digests
+Reimport and re-review existing automation definitions before enabling them: helper
+identity and content-hash namespaces have changed, so previous approval-like digests
 are not reusable. Deploy the reviewed content and update configuration accordingly.
 
 The automation-only `automation.ssh_executable` setting and
@@ -686,7 +686,7 @@ Each module definition fixes its `execution.module`, optional `execution.bundle`
 `input_schema`, `fixed_args` and `input_map`. Only explicitly enabled and
 capability-effective definitions compile a contract or dispatch; enabled bindings
 whose module is absent from the pack fail before MCP starts, and requests never
-regenerate approval or install dependencies.
+install dependencies.
 
 `[automation.targets.<logical>]` fixes the SSH destination and absolute target
 Python interpreter independently of native sudo authority. This ordinary authority
@@ -740,37 +740,26 @@ this implementation.
 
 Catalog tools that are not bundle modules are controller-owned native Python
 payloads: `catalog/payloads/<tool>/{collector.py,manifest.json}`. No Ansible
-runtime, role snapshot or controller workspace is involved. The reviewed
-`native_payload` binding fixes the collector source, its manifest, the target
-interpreter and the argument adapter, and the collector runs over the ordinary
-SSH identity:
+runtime, role snapshot or controller workspace is involved. A `native_payload`
+binding fixes the collector source, its manifest's argument adapter and contract,
+the target interpreter and the site's fixed policy; the collector runs over the
+ordinary SSH identity:
 
 ```toml
-execution = { kind = "native_payload", snapshot = "/etc/estus/observe_host_summary.payload.json", source = "/etc/estus/payloads/observe_host_summary/collector.py", no_log = false }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_host_summary/collector.py", no_log = false }
 ```
 
-Produce that pair through `catalog export` and `catalog prepare`, which copy the
-reviewed collector bytes and write the snapshot manifest next to them:
-
-```sh
-estus catalog export --tool observe_host_summary --output ./health-export
-# Review health-export/payloads/observe_host_summary/{collector.py,manifest.json}.
-estus catalog prepare --site ./site.toml --definitions ./health-export/tools.toml \
-  --target server --output ./health-reviewed
-estus catalog inspect --site ./health-reviewed/estus.toml
-estus --config ./health-reviewed/estus.toml
-```
-
-Preparation is offline: it approves collector source, adapter, typed contract and
-policy without importing Ansible and without contacting a target. Existing output
-paths are refused, and a changed source or manifest is never refreshed silently —
-export, review and prepare again.
+The manifest always sits beside the collector it names. One integrity check
+remains: the collector bytes must equal the manifest's `source_sha256`, so an
+accidental edit or a partial install fails at load instead of on a target. That
+catches drift; it is not attestation. Anyone who can rewrite both files can also
+replace this binary, so no offline approval step is asked to defend against them.
 
 Payloads use the same `{"host":"server","inputs":{...}}` envelope, target and
 capability authorization, timeout/admission, child owner and cancellation path as
 modules. Rust validates and canonicalizes the assembled inputs before dispatch.
-Source bytes are checked again immediately before the payload runs; that is drift
-detection, not immutable attestation.
+Source bytes are checked against the manifest immediately before the payload
+runs; that is drift detection, not immutable attestation.
 
 Results are `capability_projection` (declared `mcp_result` members selected by the
 reviewed schema and aggregate bounds) or `command`. Missing or invalid results
@@ -801,8 +790,8 @@ Native network link/address/route mutations declare `/usr/bin/ip` as a mandatory
 prerequisite. Module load declares `/usr/bin/modinfo`, `/usr/bin/modprobe` and
 `/usr/bin/ip` (needed for the approved load-parameter readback); unload requires
 the two kmod utilities. These declarations are bound into the reviewed manifest.
-Existing snapshots do not acquire them automatically: export, review and prepare
-a fresh approval to adopt them.
+An installed catalog predating a prerequisite simply fails that check at
+dispatch; upgrade the catalog to adopt the new requirement.
 
 The eight native NIC setters (channels, rings, coalescing, pause, RSS, features,
 FEC and EEE) similarly bind `/usr/bin/ethtool` as a required executable. Missing
@@ -849,7 +838,7 @@ Remote SSH identities and target OS authorization remain authoritative.
 the claimed restriction:** it can use that identity's credentials, SSH control
 sockets and runtimes without going through MCP.
 
-Named tool metadata and catalog inspection expose the executor, configured
+Named tool metadata exposes the executor, configured
 authority, execution location, trusted-controller-code requirement and restriction
 boundary. Ansible and controller code are trusted operator code running with the
 service account's access, including access to its credentials. `no_log`,
@@ -875,13 +864,11 @@ shipped asset source; `examples/` contains demonstrations and deployment example
 
 Source-checkout migration: use `catalog/` for catalog roots and selected
 definitions. Installed `_catalog` and `share/estus/catalog` layouts, inventory
-version7 and reviewed payload bytes are unchanged. Existing exports and prepared
-approvals remain valid when their recorded paths and content remain unchanged.
-Update configurations and commands that explicitly name an old source root or
-that referenced removed role sources; if an approval's recorded source path
-changes, explicitly export, review and prepare again. Estus never rewrites or
-silently refreshes an approval. No obsolete source copy or compatibility symlink
-remains.
+version7 and reviewed payload bytes are unchanged. Existing exports remain valid
+as `[tools]` tables with an `execution` key; a configuration that names a catalog
+tool directly needs no export at all. Update configurations that explicitly name an
+old source root or that referenced removed role sources. No obsolete source copy or
+compatibility symlink remains.
 
 ```sh
 estus catalog list
@@ -933,90 +920,74 @@ Transceiver observation publishes only vendor/part and selected typed sensors
 from an explicitly synthetic SFF-8472 EEPROM; serial, date and raw pages are not
 published. It never writes EEPROM or runs an active hardware diagnostic.
 
-### Review and prepare a site configuration
+### Enable catalog tools in a site configuration
 
-Export creates private **inert** `tools.toml`, executor-specific payload assets,
-exact JSON overlays and `catalog-selection.json` qualification/prerequisite metadata.
-It creates no credentials or active approvals. Review the selected definitions and
+Export copies inert definitions and payload sources out for review; it creates no
+credentials, no approvals and no configuration. Review the selected definitions and
 each `payloads/<tool>/{collector.py,manifest.json}` first. Unit names, interfaces,
 paths, module parameters, package names and repositories outside `linux-health` are
 generally **fixture policies**, not production defaults: adapt the closed input
 enums, fixed policy and allowlists together.
 
-For native Linux health tools, provide the actual SSH mapping in `site.toml`;
-no controller Ansible bundle or workspace is needed:
+A site configuration then enables catalog tools by name. Definitions come from the
+installed catalog; the site supplies the policy only it knows — targets, authority
+and fixed arguments:
 
 ```toml
 mode = "headless"
 capabilities = { named = true }
-tool_presets = ["linux-health"]
-disabled_tools = []
+enabled_tools = ["observe_cpu", "observe_memory", "observe_pressure"]
 
 [catalog]
-version = "8"
+version = "8"          # optional assertion; must match the installed inventory
 
 [targets.server]
 ssh_host = "server-ordinary"
-# Omitted selection inherits globally; [] explicitly denies all named tools.
-enabled_tools = ["observe_cpu", "observe_memory", "observe_pressure"]
 
 [automation.targets.server]
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 ```
 
-For a single-tool export, replace the global `tool_presets` selector with
-`enabled_tools = ["<tool>"]` and narrow the target's `enabled_tools` likewise.
-Do not retain a preset that selects definitions absent from that export.
-
-Then explicitly import the reviewed contracts, inspect the output, and launch:
+That is the whole flow:
 
 ```sh
-estus catalog prepare --site ./site.toml --definitions ./health/tools.toml \
-  --target server --output ./reviewed
-estus catalog inspect --site ./reviewed/estus.toml
-estus --config ./reviewed/estus.toml
+estus catalog export --preset linux-health --output ./health   # review only
+estus --config ./site.toml
 ```
 
-Preparation is offline. Native selections approve immutable collector source,
-adapters and typed policy without consulting Ansible. Selected `ansible_module`
-definitions instead compile their reviewed contract against the authority's bundle
-(or the configured pack) and fail with `runtime_unavailable` if none is present; no
-module is executed. It writes a new configuration and never contacts targets.
-Missing authority is not fabricated. The overall deadline includes all preparation
-(`--timeout-secs`, default60).
-Existing output paths and definition collisions fail; output parents must be
-controlled by the account/root, not foreign-owned or non-sticky shared writable
-directories. Relative site paths retain the supplied site's directory even
-when the site file is a symlink.
+`tool_presets` works the same way and needs no export. Each selected catalog name
+whose `[tools.<name>]` table is absent — or present without `execution` — is
+materialized from the installed definition, and the table's keys override the
+installed ones:
 
-`inspect` and `prepare` honor the shared SSH selection precedence: explicit
-`--ssh`/`--ssh-config`, then their environment variables, then site settings
-(and PATH for an otherwise unspecified executable). CLI/environment relative
-paths use the launch directory; site-relative paths use the site's directory.
-An explicit `--config` conflicts with `--site` and is rejected; ambient
-`ESTUS_CONFIG` does not replace the explicit site.
+```toml
+[tools.change_systemd_restart]
+targets = ["server"]
+authority = "automation:catalog"
+constraints = { allowed_units = ["site-app.service"] }
+```
 
-Preparation pins the effective executable and replacement SSH configuration as
-absolute paths in `estus.toml`. A subsequent launch without overrides therefore
-uses that selection even from another directory. Later CLI/environment overrides
-still follow the normal precedence; clear them when using the pinned values.
-The SSH configuration's contents remain operator-managed, not snapshotted.
+- Only `targets`, `authority`, `fixed_args`, `constraints`, `input_schema`,
+  `input_map` and `limits` may be overridden; anything else (description,
+  revision, effects, result, contract) comes from the catalog and is rejected as a
+  site override, so a site cannot rewrite what a tool claims.
+- A template marked `policy_required` must restate `fixed_args`, `constraints` or
+  `input_schema`, so a fixture allowlist is never inherited by an operator who did
+  not review it.
+- Catalog `targets` and `constraints` are never inherited; targets default to every
+  configured destination, and per-target permission is still checked separately.
+- A `[tools.<name>]` table **with** `execution` is a complete operator-authored
+  definition (a custom tool, or an edited export) and is used as written. Its
+  manifest must sit beside the collector it names.
 
-Named automation authorities keep their separate SSH configuration files; the
-shared executable selection still applies.
+Selected `ansible_module` definitions still compile their reviewed contract
+against the authority's bundle (or the configured pack) at startup and fail with
+`runtime_unavailable` if none is present; no module is executed then.
 
-Offline `list`/`export` ignore ambient configuration/SSH variables and need no SSH
-or Ansible. Explicit `--config`, `--ssh` or `--ssh-config` on those commands is
+`list`/`export` ignore ambient configuration/SSH variables and need no SSH or
+Ansible. Explicit `--config`, `--ssh` or `--ssh-config` on those commands is
 rejected rather than silently ignored.
-
-`inspect` explains resolved named-tool exposure and per-target permission,
-including the global native command-execution, file-read and file-write exposure
-booleans. These are global ceilings, not additional per-target grants. Inspection
-does not verify runtime health or remote capabilities; use `doctor` for explicit health
-checks. Review the prepared collectors, manifests and overlays before using the
-generated configuration; `catalog prepare` is the only authoring path, and no
-request-time approval refresh exists.
 
 ### Selection, authority and upgrades
 
@@ -1026,13 +997,13 @@ explicit empty selection denies, and global disable always wins. Unknown or
 duplicate names fail. Catalog templates are inert until reviewed definitions
 are supplied; up to 256 named bindings are supported.
 
-Presets require an explicit catalog version; use the version reported by
-`estus catalog list --json` after reviewing the installed inventory. Catalog
-schema3/version8 declares per-entry workstation policy, so workstation mode
-loads only reviewed templates; version7 added executor-specific assets and the
-native catalog cutover.
-Review existing pins rather than silently adopting an upgrade. Source/runtime/
-overlay drift still invalidates snapshots; startup never refreshes approval.
+`catalog.version` is an optional assertion: when present it must equal the
+installed inventory version, so a reviewed pin cannot silently adopt an upgrade.
+Catalog schema3/version8 declares per-entry workstation policy, so workstation
+mode loads only reviewed templates; version7 added executor-specific assets and
+the native catalog cutover.
+Collector bytes are checked against the installed manifest's `source_sha256` at
+activation; an edited collector fails to load.
 
 `[capabilities]` (`named`, `file_read`, `file_write`, `exec`, `sudo`) sets
 independent exposure ceilings, **not** task presets. Explicit configuration files
@@ -1061,11 +1032,10 @@ mutations are never automatically replayed and do not imply rollback.
 ### Four reviewed operational workflows
 
 These recipes are the narrow operational qualification set, not blanket approval
-of every catalog entry or site. The first three select canonical definitions and
-produce concrete runtime/content approvals through `catalog prepare`; their
-recipe TOML is not a runnable server configuration. Follow the public
-export/review/prepare/inspect/start commands in each recipe. Never copy an
-approval from another runtime or silently refresh one.
+of every catalog entry or site. The first three select canonical catalog tools and
+the site policy (allowlists, targets, authority) they need; their recipe TOML is
+not a runnable server configuration. Follow the enable-by-name steps in each
+recipe.
 
 | Workflow | Reviewed input | Independent confirmation |
 | --- | --- | --- |
@@ -1246,21 +1216,28 @@ runtime, role snapshot or controller workspace is involved, and only the target'
 `/usr/bin/python3` is needed. No packages are installed automatically and no
 privilege escalation is used.
 
-Configure the `server-ordinary` SSH alias, identity and host-key policy, then run
-the offline catalog workflow; preparation copies the collector, writes its
-snapshot manifest and pins the interpreter:
+Configure the `server-ordinary` SSH alias, identity and host-key policy, then
+enable the tool by name in a site configuration:
+
+```toml
+enabled_tools = ["observe_host_summary"]
+[targets.server]
+ssh_host = "server-ordinary"
+[automation.targets.server]
+destination = "server-ordinary"
+python = "/usr/bin/python3"
+```
+
+Nothing is executed at startup and no approval file exists. To read the collector
+and manifest an operator is about to trust, copy them out first:
 
 ```sh
 estus catalog export --tool observe_host_summary --output ./host-review
 # Review host-review/payloads/observe_host_summary/{collector.py,manifest.json}.
-estus catalog prepare --site ./site.toml --definitions ./host-review/tools.toml \
-  --target server --output ./host-approved
-estus catalog inspect --site ./host-approved/estus.toml
-estus --config ./host-approved/estus.toml
+estus --config ./site.toml
 ```
 
-Preparation does not execute the collector. Review the copied source, manifest and
-overlay; no preapproved snapshot is shipped. The example selects only
+The example selects only
 `observe_host_summary` under `named = true`, restricts it to `server`, and caps
 execution at 30 seconds. Its only domain input is the empty object:
 
@@ -1289,7 +1266,7 @@ reports no persistent changes, but it still creates transient target work under
 the normal cleanup contract.
 
 `nix run .#workflow-catalog-acceptance-msrv` exercises the shipped payload
-through `catalog prepare` and the MCP endpoint against a disposable Linux EFI
+through a site configuration and the MCP endpoint against a disposable Linux EFI
 guest, via `reviewed_health_workflow` and
 [`examples/workflows/health.toml`](examples/workflows/health.toml). The wrapper
 supplies `ESTUS_TEST_CATALOG_VM` and `ESTUS_TEST_ANSIBLE_BUNDLE`; no Docker
@@ -1303,14 +1280,10 @@ authority and the `named = true` capability. It requires target `/usr/bin/python
 not Ansible or a controller workspace. Nothing installs packages, escalates,
 changes services/sysctls or hotplugs CPUs.
 
-Use the public catalog workflow with the site mapping above:
+Enable it by name in the site configuration from above:
 
-```sh
-estus catalog export --tool observe_cpu --output ./cpu-review
-# Review source, manifest and fixed policy before approval.
-estus catalog prepare --site ./site.toml --definitions ./cpu-review/tools.toml \
-  --target server --output ./cpu-approved
-estus --config ./cpu-approved/estus.toml
+```toml
+enabled_tools = ["observe_cpu"]
 ```
 
 The example permits only `server`, read effects and a20-second execution budget.
@@ -1387,16 +1360,12 @@ Accounting and topology semantics follow the kernel's
 `/usr/bin/python3`, not Ansible or a controller workspace, and installs nothing.
 No sudo, service changes or sysctl writes occur.
 
-```sh
-estus catalog export --tool observe_memory --output ./memory-review
-# Review source, manifest and fixed policy before approval.
-estus catalog prepare --site ./site.toml --definitions ./memory-review/tools.toml \
-  --target server --output ./memory-approved
-estus --config ./memory-approved/estus.toml
+```toml
+enabled_tools = ["observe_memory"]
 ```
 
-Preparation does not execute the payload. The example permits only `server`, read
-effects and a20-second budget. Its closed caller domain is empty:
+Nothing is executed until a call arrives. The definition permits only `server`,
+read effects and a20-second budget. Its closed caller domain is empty:
 
 ```json
 {"host":"server","inputs":{}}
@@ -1465,11 +1434,10 @@ There is no `ansible_role`, no `ansible_playbook`, no `execution.role_path`,
 `execution.project_root` or `--role-path`, and no `estus schema` command:
 `estus --help` offers `doctor`, `bundle` and `catalog` only.
 
-Existing role- and playbook-based approvals are not migrated. Rework each site to a
-native payload (preferred: `catalog export`/`prepare` of a canonical tool) or to a
-bundle module binding, then review the resulting collector or module contract.
-Estus never rewrites or silently refreshes an approval, and no compatibility shim
-reads an old snapshot.
+Existing role- and playbook-based definitions are not migrated. Rework each site to
+a native payload (preferred: enable a canonical catalog tool by name) or to a bundle
+module binding, then review the resulting collector or module contract. No
+compatibility shim reads an old snapshot or approval file.
 
 The security properties that applied to trusted controller code still apply to both
 replacement paths: collector and module argument trees are validated and canonical
@@ -1511,7 +1479,7 @@ inheritance for this authority. Estus never loads keys or creates agents.
 `bundle` may be omitted to inherit the pack selected for ordinary automation.
 An explicit authority bundle does not depend on an unused ordinary pack or ambient
 agent, and it must contain every module that authority's bindings name. Bundle
-identity and source approval are not refreshed on calls.
+identity is verified once at load and is not refreshed on calls.
 
 Authorities name declared logical targets only, never fallback native/elevated aliases.
 Missing authorities/mappings and malformed definitions fail startup even if disabled;
@@ -1543,8 +1511,9 @@ backend (`DOCKER_HOST`); no host sudoers or accounts are changed.
 ## Typed module result fields
 
 [`examples/observe_platform.toml`](examples/observe_platform.toml) selects platform
-and Python facts from the real setup module. Import its reviewed snapshot first;
-the result declaration fixes paths and schema, never a caller expression:
+and Python facts from the real setup module. Compile its reviewed contract against
+a built bundle first; the result declaration fixes paths and schema, never a caller
+expression:
 
 ```toml
 [tools.observe_platform.result]
@@ -1638,7 +1607,7 @@ The wrapper clears inherited `ESTUS_CONFIG`, `ESTUS_SSH_CONFIG`, `ESTUS_SSH`,
 `ESTUS_ANSIBLE_BUNDLE` to the Nix-built direct module bundle, so bundle-backed
 module tools work without an operator-built pack. Workstation mode still grants no
 credentials and performs no remote action until a request arrives; it provisions
-no fixtures and never refreshes approvals. `examples/dev-no-targets.toml` remains
+no fixtures and installs nothing. `examples/dev-no-targets.toml` remains
 an explicit, restrictive policy for launching the ordinary app by hand.
 
 Build diagnostics go to stderr; server stdout remains MCP JSON. After startup,

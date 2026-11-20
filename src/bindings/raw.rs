@@ -20,7 +20,7 @@ pub(crate) struct SiteConstraints {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RawBinding {
+pub(crate) struct RawBinding {
     pub(super) description: String,
     pub(super) revision: String,
     pub(super) targets: Option<Vec<String>>,
@@ -50,7 +50,8 @@ pub(super) enum RawExecution {
         cwd: Option<String>,
     },
     NativePayload {
-        snapshot: String,
+        /// Collector file; its directory supplies the shipped `manifest.json`
+        /// unless the manifest sits beside the catalog definition.
         source: String,
         #[serde(default)]
         no_log: bool,

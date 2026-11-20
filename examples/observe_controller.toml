@@ -2,7 +2,7 @@
 # Deploy observe_controller.py separately at the reviewed path below, and create
 # /tmp/estus-controller as an owned directory with mode 0700 before enabling.
 # Declare your site's absolute Python 3 interpreter; the server installs nothing.
-# The source snapshot is verified at startup. Review source/digest and restart to update.
+# The controller source digest is verified at startup. Review it and restart to update.
 mode = "headless"
 capabilities = { named = true }
 enabled_tools = ["observe_controller"]

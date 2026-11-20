@@ -1,4 +1,6 @@
-//! Digest-approved controller payloads over owned SSH mux channels.
+//! Reviewed controller payloads over owned SSH mux channels. The collector bytes
+//! are pinned by the shipped manifest's `source_sha256`; nothing else about the
+//! installation is treated as an integrity boundary.
 mod engine;
 use crate::{
     config::ConfigError,
@@ -28,20 +30,7 @@ pub(crate) struct Requirements {
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Approval {
-    pub overlay: Value,
-    pub result: Value,
-    pub authority: String,
-    pub no_log: bool,
-    pub revision: String,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
-    #[serde(default)]
-    pub approved: bool,
-    #[serde(default)]
-    pub manifest_sha256: String,
     pub schema: u32,
     pub protocol: u32,
     pub adapter_version: u32,
@@ -51,7 +40,6 @@ pub(crate) struct Manifest {
     pub argv: Vec<Arg>,
     pub requirements: Requirements,
     pub contract: Value,
-    pub approval: Approval,
 }
 /// The reviewed adapter. Only the forms a shipped manifest uses may deserialize:
 /// an unknown `kind` or `format` is a manifest authoring error, not a new capability.
@@ -129,7 +117,10 @@ impl ChangePolicy {
     }
 }
 fn invalid() -> ConfigError {
-    ConfigError::new("tools", "Native payload approval is invalid or has drifted")
+    ConfigError::new(
+        "tools",
+        "Native payload manifest or collector bytes are invalid",
+    )
 }
 pub(crate) fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -155,51 +146,6 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ConfigError> {
         return Err(invalid());
     }
     Ok(bytes)
-}
-/// Explicit offline authoring only; activation never rewrites an approval.
-pub(crate) fn prepare_manifest(
-    source: &Path,
-    snapshot: &Path,
-    mut manifest: Manifest,
-) -> Result<(), ConfigError> {
-    let bytes = read_bounded(source, manifest.max_source_bytes.min(MAX_SOURCE))?;
-    manifest.source_sha256 = digest(&bytes);
-    manifest.approved = true;
-    validate_manifest(&manifest)?;
-    module_schema::compile_binding(&manifest.contract, &manifest.approval.overlay)
-        .map_err(|_| invalid())?;
-    manifest.manifest_sha256 = manifest_digest(&manifest)?;
-    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| invalid())?;
-    if bytes.len() > MAX_INPUT {
-        return Err(invalid());
-    }
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(snapshot)
-        .map_err(|_| invalid())?;
-    file.write_all(&bytes).map_err(|_| invalid())
-}
-fn manifest_digest(manifest: &Manifest) -> Result<String, ConfigError> {
-    let bytes = serde_json::to_vec(&(
-        manifest.approved,
-        manifest.schema,
-        manifest.protocol,
-        manifest.adapter_version,
-        &manifest.change_policy,
-        &manifest.source_sha256,
-        manifest.max_source_bytes,
-        &manifest.argv,
-        &manifest.requirements,
-        &manifest.contract,
-        &manifest.approval,
-    ))
-    .map_err(|_| invalid())?;
-    Ok(digest(&bytes))
 }
 
 fn validate_manifest(m: &Manifest) -> Result<(), ConfigError> {
@@ -315,98 +261,57 @@ pub(crate) struct PayloadPlan {
 }
 impl std::fmt::Debug for PayloadPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PayloadPlan { approved: <private> }")
+        f.write_str("PayloadPlan { manifest: <private> }")
     }
 }
-pub(crate) struct PayloadApproval<'a> {
-    pub(crate) snapshot: &'a Path,
+/// The one integrity check that survives: collector bytes must match the
+/// manifest's `source_sha256`. This catches an accidental edit or a partial
+/// install, not an operator who can rewrite both files and the binary.
+pub(crate) struct PayloadSource<'a> {
     pub(crate) source: &'a Path,
     pub(crate) overlay: &'a Value,
-    pub(crate) result: &'a Value,
-    pub(crate) authority: &'a str,
-    pub(crate) revision: &'a str,
-    pub(crate) no_log: bool,
-    pub(crate) projection: Option<Arc<projection::Plan>>,
-}
-
-pub(crate) struct PayloadApprovalInline<'a> {
-    pub(crate) overlay: &'a Value,
-    pub(crate) result: &'a Value,
-    pub(crate) authority: &'a str,
-    pub(crate) revision: &'a str,
     pub(crate) no_log: bool,
     pub(crate) projection: Option<Arc<projection::Plan>>,
 }
 
 impl PayloadPlan {
-    pub(crate) fn load(approval: PayloadApproval<'_>) -> Result<Self, ConfigError> {
-        let PayloadApproval {
-            snapshot,
-            source,
-            overlay,
-            result,
-            authority,
-            revision,
-            no_log,
-            projection,
-        } = approval;
-        let manifest: Manifest = parse(&read_bounded(snapshot, MAX_INPUT)?)
-            .and_then(serde_json::from_value)
-            .map_err(|_| invalid())?;
-        validate_manifest(&manifest)?;
-        if !manifest.approved || manifest.manifest_sha256 != manifest_digest(&manifest)? {
-            return Err(invalid());
-        }
-        if manifest.approval.overlay != *overlay
-            || manifest.approval.result != *result
-            || manifest.approval.authority != authority
-            || manifest.approval.revision != revision
-            || manifest.approval.no_log != no_log
-        {
-            return Err(invalid());
-        }
-        let source = read_bounded(source, manifest.max_source_bytes)?;
-        if digest(&source) != manifest.source_sha256 {
-            return Err(invalid());
-        }
-        let binding =
-            module_schema::compile_binding(&manifest.contract, overlay).map_err(|_| invalid())?;
-        Ok(Self {
-            manifest,
-            source: source.into(),
-            binding,
-            no_log,
-            projection,
-        })
+    /// Load a payload from a collector file. One rule for shipped and custom
+    /// tools: `manifest.json` sits beside `collector.py`.
+    pub(crate) fn load(source: &PayloadSource<'_>) -> Result<Self, ConfigError> {
+        let manifest_path = source
+            .source
+            .parent()
+            .ok_or_else(invalid)?
+            .join("manifest.json");
+        let manifest_bytes = read_bounded(&manifest_path, MAX_INPUT)?;
+        let bytes = read_bounded(source.source, MAX_SOURCE)?;
+        Self::assemble(bytes, &manifest_bytes, source)
     }
 
     pub(crate) fn load_from_bytes(
         source: Vec<u8>,
         manifest_bytes: &[u8],
-        approval: &PayloadApprovalInline<'_>,
+        approval: &PayloadSource<'_>,
     ) -> Result<Self, ConfigError> {
-        let mut manifest: Manifest = parse(manifest_bytes)
+        Self::assemble(source, manifest_bytes, approval)
+    }
+
+    fn assemble(
+        source: Vec<u8>,
+        manifest_bytes: &[u8],
+        approval: &PayloadSource<'_>,
+    ) -> Result<Self, ConfigError> {
+        let manifest: Manifest = parse(manifest_bytes)
             .and_then(serde_json::from_value)
             .map_err(|_| invalid().with_cause("manifest_schema", "payload_validation"))?;
         if source.is_empty() || source.len() > manifest.max_source_bytes.min(MAX_SOURCE) {
             return Err(invalid().with_cause("source_bounds", "payload_validation"));
         }
-        let computed_source = digest(&source);
-        if !manifest.source_sha256.is_empty() && manifest.source_sha256 != computed_source {
+        if manifest.source_sha256 != digest(&source) {
             return Err(invalid().with_cause("source_digest", "payload_validation"));
         }
-        manifest.source_sha256 = computed_source;
-        manifest.approval = Approval {
-            overlay: approval.overlay.clone(),
-            result: approval.result.clone(),
-            authority: approval.authority.to_owned(),
-            no_log: approval.no_log,
-            revision: approval.revision.to_owned(),
-        };
-        manifest.approved = true;
         validate_manifest(&manifest)
             .map_err(|error| error.with_cause("manifest_constraints", "payload_validation"))?;
-        manifest.manifest_sha256 = manifest_digest(&manifest)?;
         let binding = module_schema::compile_binding(&manifest.contract, approval.overlay)
             .map_err(|code| invalid().with_cause(code, "payload_binding"))?;
         Ok(Self {
@@ -429,6 +334,15 @@ impl PayloadPlan {
         })?;
         let request = adapt(&self.manifest.argv, &args)?;
         Ok((request, args))
+    }
+
+    /// Operator policy for the target interpreter, taken from the reviewed
+    /// fixed arguments rather than from the manifest.
+    pub(crate) fn target_python(&self) -> Option<&str> {
+        self.binding
+            .fixed_args
+            .get("target_python")
+            .and_then(Value::as_str)
     }
 }
 fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
@@ -571,17 +485,22 @@ mod tests {
     #[test]
     fn shipped_manifest_adapters_accept_their_own_defaults() {
         use crate::contracts::module_schema::compile_binding;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/payloads");
+        let catalog = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
         let mut checked = 0;
-        for entry in std::fs::read_dir(&root).unwrap() {
-            let manifest_path = entry.unwrap().path().join("manifest.json");
+        for entry in std::fs::read_dir(catalog.join("payloads")).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_str().unwrap();
+            let manifest_path = catalog.join("payloads").join(name).join("manifest.json");
             if !manifest_path.is_file() {
                 continue;
             }
             let manifest: Manifest =
                 serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-            let overlay = &manifest.approval.overlay;
-            let binding = compile_binding(&manifest.contract, overlay).unwrap();
+            // Site policy lives in the shipped definition; the manifest carries
+            // only the collector contract and its adapter.
+            let definition = std::fs::read_to_string(catalog.join(format!("{name}.toml"))).unwrap();
+            let overlay = crate::bindings::definition_overlay(&definition, name).unwrap();
+            let binding = compile_binding(&manifest.contract, &overlay).unwrap();
             // Scalar format means "a bare string", so the reviewed schema must
             // agree and every default must already be a string.
             let properties = overlay
@@ -724,8 +643,6 @@ mod tests {
     #[test]
     fn executable_candidates_validate_allowed_dirs_and_normalization_collisions() {
         let mut manifest: Manifest = serde_json::from_value(serde_json::json!({
-            "approved": true,
-            "manifest_sha256": "",
             "schema": 1,
             "protocol": 1,
             "adapter_version": 1,
@@ -742,8 +659,7 @@ mod tests {
                     "apt-get": ["/usr/bin/apt-get", "/bin/apt-get"]
                 }
             },
-            "contract": {"schema":{"type":"object","properties":{"target_python":{"type":"string"}},"required":["target_python"],"additionalProperties":false},"aliases":{"aliases":{},"properties":{"target_python":{"aliases":{},"properties":{}}}},"defaults":{},"review_required":[]},
-            "approval": {"overlay":{"input_schema":{"type":"object","properties":{},"additionalProperties":false,"required":[]},"fixed_args":{"target_python":"/usr/bin/python3"},"input_map":{}},"result":{"kind":"capability_projection","fields":{"ok":["mcp_result","ok"]},"max_bytes":128,"max_items":4,"max_depth":2,"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}},"authority":"ordinary","revision":"1","no_log":false}
+            "contract": {"schema":{"type":"object","properties":{"target_python":{"type":"string"}},"required":["target_python"],"additionalProperties":false},"aliases":{"aliases":{},"properties":{"target_python":{"aliases":{},"properties":{}}}},"defaults":{},"review_required":[]}
         })).unwrap();
         assert!(validate_manifest(&manifest).is_ok());
 
