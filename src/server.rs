@@ -78,9 +78,8 @@ impl Estus {
             )
         };
         let outputs = OutputStore::new(config.output_limits(), shutdown.clone());
-        // The quarantine persistence worker writes and unlinks records
-        // serially off the async worker; it is spawned when a state directory
-        // is configured and flushes when the admission state closes.
+        // Durable quarantine records are written through per transition when a
+        // state directory is configured, so no shutdown flush is required.
         let admission = admission::TargetAdmission::new_with_persistence(
             config.automation_hosts(),
             config.allows_dynamic_hosts(),
@@ -132,9 +131,6 @@ impl Estus {
             self.state.local_tasks.wait(),
             tokio::time::timeout(Duration::from_secs(3), self.state.tasks.wait()),
         );
-        // Close the persistence channel (dropping every gate sender) so the
-        // worker flushes its final record; the runtime waits for it on teardown.
-        self.state.admission.close_persistence().await;
         self.state.payload.shutdown().await;
         self.state.pool.shutdown().await;
         self.state.outputs.shutdown().await;
