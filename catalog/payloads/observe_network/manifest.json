@@ -3,14 +3,26 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "fd2b22cec505b4228676159dcba7295c4c98e8cfce66bf6c17306e1900b662ef",
+  "source_sha256": "57bc62a90b8ba4f37a21e47b7e9ebc0a501d0b251081e1d5e3e013c2b1f7cd5a",
   "max_source_bytes": 1048576,
   "argv": [
     {
       "kind": "object",
       "fields": {
+        "aspect": {
+          "name": "aspect",
+          "default": null
+        },
         "interface": {
           "name": "interface",
+          "default": null
+        },
+        "family": {
+          "name": "family",
+          "default": null
+        },
+        "scope": {
+          "name": "scope",
           "default": null
         },
         "limit": {
@@ -33,11 +45,7 @@
     "modules": [
       "json",
       "os",
-      "re",
-      "selectors",
-      "subprocess",
-      "sys",
-      "time"
+      "re"
     ],
     "executables": [],
     "paths": [],
@@ -55,8 +63,7 @@
       "type": "object",
       "properties": {
         "target_python": {
-          "type": "string",
-          "description": "Operator-fixed Python interpreter"
+          "type": "string"
         },
         "operator_policy": {
           "type": "object",
@@ -125,8 +132,32 @@
           "additionalProperties": false,
           "description": "Fixed reviewed destination and interface policy, never caller supplied"
         },
+        "aspect": {
+          "type": "string",
+          "enum": [
+            "links",
+            "addresses",
+            "neighbors",
+            "stats"
+          ]
+        },
         "interface": {
           "type": "string"
+        },
+        "family": {
+          "type": "string",
+          "enum": [
+            "inet",
+            "inet6"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "host",
+            "link",
+            "global"
+          ]
         },
         "limit": {
           "type": "integer"
@@ -134,7 +165,8 @@
       },
       "required": [
         "target_python",
-        "operator_policy"
+        "operator_policy",
+        "aspect"
       ],
       "additionalProperties": false
     },
@@ -226,7 +258,19 @@
             }
           }
         },
+        "aspect": {
+          "aliases": {},
+          "properties": {}
+        },
         "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "family": {
+          "aliases": {},
+          "properties": {}
+        },
+        "scope": {
           "aliases": {},
           "properties": {}
         },

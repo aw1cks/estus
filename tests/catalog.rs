@@ -109,12 +109,9 @@ mod tools {
     mod observe_kernel_module_parameters;
     mod observe_kernel_modules;
     mod observe_kernel_state;
-    mod observe_network_addresses;
+    mod observe_network;
     mod observe_network_device;
-    mod observe_network_interface_stats;
-    mod observe_network_links;
     mod observe_network_namespaces;
-    mod observe_network_neighbors;
     mod observe_network_route_lookup;
     mod observe_network_routes;
     mod observe_network_rules;

@@ -348,7 +348,7 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             "change_sysctl_runtime",
             "change_systemd_unit",
             "observe_filesystem_usage",
-            "observe_network_links",
+            "observe_network",
             "inspect_sockets",
         ] {
             ensure!(

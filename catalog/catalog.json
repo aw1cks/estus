@@ -8,13 +8,12 @@
       "observe_pressure"
     ],
     "network-observe": [
-      "observe_network_links",
-      "observe_network_addresses",
+      "observe_network",
+      "observe_network_device",
       "observe_network_routes",
       "observe_network_route_lookup",
       "observe_network_rules",
-      "observe_network_neighbors",
-      "observe_network_interface_stats"
+      "observe_network_namespaces"
     ],
     "network-probes": [
       "inspect_dns_lookup",
@@ -1062,8 +1061,8 @@
         "input_map": {}
       }
     },
-    "observe_network_addresses": {
-      "definition": "observe_network_addresses.toml",
+    "observe_network": {
+      "definition": "observe_network.toml",
       "qualification": "site_policy_template",
       "policy_required": true,
       "requires": [
@@ -1073,7 +1072,7 @@
       ],
       "executor": {
         "kind": "native_payload",
-        "path": "payloads/observe_network_addresses"
+        "path": "payloads/observe_network"
       }
     },
     "observe_network_device": {
@@ -1090,34 +1089,6 @@
         "path": "payloads/observe_network_device"
       }
     },
-    "observe_network_interface_stats": {
-      "definition": "observe_network_interface_stats.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "iproute2"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_network_interface_stats"
-      }
-    },
-    "observe_network_links": {
-      "definition": "observe_network_links.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "iproute2"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_network_links"
-      }
-    },
     "observe_network_namespaces": {
       "definition": "observe_network_namespaces.toml",
       "qualification": "site_policy_template",
@@ -1130,20 +1101,6 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_network_namespaces"
-      }
-    },
-    "observe_network_neighbors": {
-      "definition": "observe_network_neighbors.toml",
-      "qualification": "site_policy_template",
-      "policy_required": true,
-      "requires": [
-        "linux",
-        "python3",
-        "iproute2"
-      ],
-      "executor": {
-        "kind": "native_payload",
-        "path": "payloads/observe_network_neighbors"
       }
     },
     "observe_network_route_lookup": {
