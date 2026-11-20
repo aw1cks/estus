@@ -31,7 +31,7 @@
         touch "$out"
       '';
       checks.python-min-version = pkgs.runCommand "estus-python-min-version" {
-        nativeBuildInputs = [ pkgs.python3 pkgs.vermin ];
+        nativeBuildInputs = [ pkgs.python3 pkgs.vermin pkgs.python3Packages.pyflakes ];
       } ''
         python3 - <<'PY'
         import json, pathlib, subprocess, sys
@@ -51,6 +51,15 @@
             groups.setdefault(f"{maj}.{mino}", []).append(p / "collector.py")
         for py_min, files in sorted(groups.items()):
             check(py_min, files)
+        # A NameError only surfaces when the collector runs on a target, and the
+        # parser tables do not reach every code path; reject undefined names here.
+        undefined = subprocess.run(
+            ["pyflakes", *[str(p) for p in sorted((src / "catalog/payloads").glob("*/collector.py"))]],
+            check=False, capture_output=True, text=True,
+        ).stdout.splitlines()
+        undefined = [line for line in undefined if "undefined name" in line]
+        if undefined:
+            raise SystemExit("undefined names in collectors:\n" + "\n".join(undefined))
         import ast, re
         guarded = [src / "src/native_payload/prestate.py", src / "python/estus/__init__.py", src / "setup.py"]
         guarded.extend(sorted((src / "catalog/payloads").glob("*/collector.py")))

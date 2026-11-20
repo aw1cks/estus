@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import datetime, json, platform, re, uuid
+    import datetime, json, platform, re
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     a = estus_runtime.request()[0]
@@ -16,18 +16,7 @@ def main():
             raise ValueError('source read exceeds bound')
         return b
 
-    def text(value, maximum=4096):
-        if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
-            raise ValueError('invalid or oversized source string')
-        return value
-
-    def boot_id():
-        v = read('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
-        if str(uuid.UUID(v)) != v:
-            raise ValueError('invalid boot ID')
-        return v
-
-    result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
+    result = {'boot_id':estus_runtime.boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
     def modules():
         rows = read('/proc/modules', 262144).decode('ascii').splitlines()
         if len(rows) > 512:
@@ -43,8 +32,8 @@ def main():
             holders = p[3].strip(',').split(',') if p[3] != '-' else []
             if len(holders) > 128:
                 raise ValueError('holders exceed bound')
-            values.append({'name':text(p[0],64), 'size_bytes':size, 'references':refs,
-                'holders':[text(h,64) for h in holders], 'state':text(p[4],32)})
+            values.append({'name':estus_runtime.check_text(p[0],64), 'size_bytes':size, 'references':refs,
+                'holders':[estus_runtime.check_text(h,64) for h in holders], 'state':estus_runtime.check_text(p[4],32)})
         return values
 
     offset = a['offset']

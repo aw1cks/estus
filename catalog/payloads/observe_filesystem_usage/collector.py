@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import os, json, re, signal, platform, datetime, errno
+    import os, json, re, signal, platform, datetime
     signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('observation deadline')))
     signal.alarm(12)
     if platform.system() != 'Linux':

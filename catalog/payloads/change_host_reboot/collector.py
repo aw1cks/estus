@@ -1,5 +1,8 @@
+import estus_runtime
+
+
 def main():
-    import datetime, json, os, platform, resource, uuid
+    import datetime, json, os, platform
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     def read(path, maximum=4096, optional=False):
@@ -14,22 +17,12 @@ def main():
             raise ValueError('source read exceeds bound')
         return b
 
-    def boot_id():
-        v = read('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
-        if str(uuid.UUID(v)) != v:
-            raise ValueError('invalid boot ID')
-        return v
-
-    def child_limits():
-        os.setsid()
-        resource.setrlimit(resource.RLIMIT_FSIZE, (262144, 262144))
-
     def run(argv):
         return estus_runtime.run_bounded(
             argv, timeout=12, max_bytes=262144, accepted=None,
             env={'SYSTEMD_COLORS': '0', 'SYSTEMD_PAGER': 'cat'})
 
-    result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
+    result = {'boot_id':estus_runtime.boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 
     mutation = run([os.environ['ESTUS_EXEC_SYSTEMD_RUN'],'--unit=estus-catalog-reboot','--on-active=5s','--timer-property=AccuracySec=1s',os.environ['ESTUS_EXEC_SYSTEMCTL'],'reboot'])
     result.update({'outcome':'uncertain' if mutation['timed_out'] else ('scheduled' if mutation['returncode'] == 0 else 'rejected'),

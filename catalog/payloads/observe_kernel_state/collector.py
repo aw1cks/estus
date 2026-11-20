@@ -1,5 +1,8 @@
+import estus_runtime
+
+
 def main():
-    import datetime, json, platform, uuid
+    import datetime, json, platform
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     def read(path, maximum=4096, optional=False):
@@ -14,18 +17,7 @@ def main():
             raise ValueError('source read exceeds bound')
         return b
 
-    def text(value, maximum=4096):
-        if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
-            raise ValueError('invalid or oversized source string')
-        return value
-
-    def boot_id():
-        v = read('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
-        if str(uuid.UUID(v)) != v:
-            raise ValueError('invalid boot ID')
-        return v
-
-    result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
+    result = {'boot_id':estus_runtime.boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 
     def taint():
         value = int(read('/proc/sys/kernel/tainted',128).strip())
@@ -33,13 +25,13 @@ def main():
             raise ValueError('taint exceeds bound')
         return value
 
-    result.update({'taint':taint(),'kernel_release':text(platform.release(),256)})
+    result.update({'taint':taint(),'kernel_release':estus_runtime.check_text(platform.release(),256)})
     for field,path in [('lockdown','/sys/kernel/security/lockdown'),('signature_enforce','/sys/module/module/parameters/sig_enforce'),('modules_disabled','/proc/sys/kernel/modules_disabled')]:
         value = read(path,4096,optional=True)
         if value is None:
             result['unavailable'].append(field)
         else:
-            result[field] = text(value.decode('ascii').strip(),4096)
+            result[field] = estus_runtime.check_text(value.decode('ascii').strip(),4096)
 
     result['observed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z')
     encoded = json.dumps(result,separators=(',',':'),allow_nan=False)

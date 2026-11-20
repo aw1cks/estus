@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import json, os, re
+    import os, re
     p=estus_runtime.request()[0]; policy=estus_runtime.request()[1]
     def run(args):
         return estus_runtime.run_bounded(
@@ -30,10 +30,6 @@ def main():
     def switch(value):
         if value not in ('on','off'): raise ValueError('invalid boolean driver field')
         return value=='on'
-    def emit(value):
-        raw=json.dumps(value,separators=(',',':'),allow_nan=False)
-        if len(raw.encode())>4096: raise ValueError('projection bound exceeded')
-        print(raw)
     if os.geteuid()!=0 or policy.get('allow_runtime_tuning') is not True: raise ValueError('privileged operator runtime tuning policy required')
     import hashlib
     standard='6d5a56da255b0ec24167253d43a38fb0d0ca2bcbae7b30b477cb2da38030f20c6a42b73bbeac01fa'
@@ -55,7 +51,7 @@ def main():
     after=observe()
     if after!=expected: raise ValueError('RSS key readback mismatch; partial effects possible, no automatic recovery')
     def summary(key): return {'key_bytes':len(key),'key_sha256':hashlib.sha256(key).hexdigest()}
-    emit({'interface':dev,'before':summary(before),'after':summary(after),'changed':before!=after,'verified':True,'persistence':'runtime_only'})
+    estus_runtime.emit({'interface':dev,'before':summary(before),'after':summary(after),'changed':before!=after,'verified':True,'persistence':'runtime_only'})
 
 
 if __name__ == "__main__":

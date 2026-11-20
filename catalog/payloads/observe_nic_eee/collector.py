@@ -89,13 +89,6 @@ def identity(p, policy):
     return dev, driver
 
 
-def emit(result):
-    raw = json.dumps(result, separators=(',', ':'), allow_nan=False)
-    if len(raw.encode('utf8')) > 4096:
-        raise ValueError('projection bound exceeded')
-    print(raw)
-
-
 def main():
     p = estus_runtime.request()[0]
     policy = estus_runtime.request()[1]
@@ -103,7 +96,7 @@ def main():
         raise ValueError('closed EEE input required')
     dev, driver = identity(p, policy)
     state = parse_eee(run(['--json', '--show-eee', dev]), dev)
-    emit({'interface': dev, 'driver': driver, 'scope': 'software_model', **state})
+    estus_runtime.emit({'interface': dev, 'driver': driver, 'scope': 'software_model', **state})
 
 
 if __name__ == '__main__':

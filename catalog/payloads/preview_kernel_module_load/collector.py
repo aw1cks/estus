@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import datetime, json, os, platform, re, resource, uuid
+    import datetime, json, os, platform, re
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     a = estus_runtime.request()[0]
@@ -16,21 +16,6 @@ def main():
             raise ValueError('source read exceeds bound')
         return b
 
-    def text(value, maximum=4096):
-        if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
-            raise ValueError('invalid or oversized source string')
-        return value
-
-    def boot_id():
-        v = read('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
-        if str(uuid.UUID(v)) != v:
-            raise ValueError('invalid boot ID')
-        return v
-
-    def child_limits():
-        os.setsid()
-        resource.setrlimit(resource.RLIMIT_FSIZE, (262144, 262144))
-
     def run(argv):
         return estus_runtime.run_bounded(
             argv, timeout=12, max_bytes=262144, accepted=None,
@@ -39,7 +24,7 @@ def main():
     def checked(argv):
         return run(argv)['stdout']
 
-    result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
+    result = {'boot_id':estus_runtime.boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
     def modules():
         rows = read('/proc/modules', 262144).decode('ascii').splitlines()
         if len(rows) > 512:
@@ -55,8 +40,8 @@ def main():
             holders = p[3].strip(',').split(',') if p[3] != '-' else []
             if len(holders) > 128:
                 raise ValueError('holders exceed bound')
-            values.append({'name':text(p[0],64), 'size_bytes':size, 'references':refs,
-                'holders':[text(h,64) for h in holders], 'state':text(p[4],32)})
+            values.append({'name':estus_runtime.check_text(p[0],64), 'size_bytes':size, 'references':refs,
+                'holders':[estus_runtime.check_text(h,64) for h in holders], 'state':estus_runtime.check_text(p[4],32)})
         return values
 
     def approved():
@@ -79,7 +64,7 @@ def main():
             k, sep, v = row.partition(separator)
             if not sep:
                 raise ValueError('malformed module metadata')
-            k, v = k.strip(), text(v.strip(),4096)
+            k, v = k.strip(), estus_runtime.check_text(v.strip(),4096)
             if k in ('filename','name','license','description','depends','softdep','vermagic','signer','sig_key','sig_hashalgo','parm','parmtype'):
                 values.setdefault(k, []).append(v)
         # Signature is metadata only; kernel policy, keys, hooks and current state still decide loadability.
@@ -90,7 +75,7 @@ def main():
     plan = checked([os.environ['ESTUS_EXEC_MODPROBE'],'--show-depends','--dry-run','--verbose',name]).splitlines()
     if len(plan) > 128:
         raise ValueError('load plan exceeds bound')
-    result.update({'name':name,'plan':[text(v,4096) for v in plan], 'permission_granted':False,
+    result.update({'name':name,'plan':[estus_runtime.check_text(v,4096) for v in plan], 'permission_granted':False,
         'loaded':any(v['name'] == name for v in modules()), 'hooks_may_execute_on_load':True,
         'scope':'installed dependencies and effective modprobe configuration; preview can race; not a trust or loadability proof'})
 

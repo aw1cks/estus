@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import json, os, re
+    import os, re
     p=estus_runtime.request()[0]; policy=estus_runtime.request()[1]
     def run(args):
         return estus_runtime.run_bounded(
@@ -30,10 +30,6 @@ def main():
     def switch(value):
         if value not in ('on','off'): raise ValueError('invalid boolean driver field')
         return value=='on'
-    def emit(value):
-        raw=json.dumps(value,separators=(',',':'),allow_nan=False)
-        if len(raw.encode())>4096: raise ValueError('projection bound exceeded')
-        print(raw)
     if os.geteuid()!=0 or policy.get('allow_runtime_tuning') is not True: raise ValueError('privileged operator runtime tuning policy required')
     if type(p['rx']) is not int or not 1<=p['rx']<=4: raise ValueError('RX channels outside reviewed range')
     def observe():
@@ -46,7 +42,7 @@ def main():
     after=observe()
     expected={'rx':p['rx'],'tx':before['tx']}
     if after!=expected: raise ValueError('NIC mutation readback mismatch; partial effects possible, no automatic recovery')
-    emit({'interface':dev,'before':before,'after':after,'changed':before!=after,'verified':True,'persistence':'runtime_only'})
+    estus_runtime.emit({'interface':dev,'before':before,'after':after,'changed':before!=after,'verified':True,'persistence':'runtime_only'})
 
 
 if __name__ == "__main__":

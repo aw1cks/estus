@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "boot_selection",
-  "source_sha256": "3d20152474fb0ca2ee172b26bbc2d9dc67114c7e4994db70eae81fcdcafb1dfe",
+  "source_sha256": "0cbfadfc05fe627a1031dc76501e0678b31eab19a54d2692bdd0d8b2e57b6a8c",
   "max_source_bytes": 1048576,
   "argv": [
     {

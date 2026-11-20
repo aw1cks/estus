@@ -1,7 +1,6 @@
 import estus_runtime
 def main():
     import os, json, re
-    MAX=9007199254740991
     args=estus_runtime.request()
     def read(path, bound=65536):
         with open(path,'rb') as f: data=f.read(bound+1)

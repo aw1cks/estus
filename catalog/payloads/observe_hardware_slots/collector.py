@@ -1,3 +1,6 @@
+import estus_runtime
+
+
 def main():
     import json, os, re, datetime
     unavailable=[]

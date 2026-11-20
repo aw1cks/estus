@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import json, os, pwd, re, stat, time
+    import json, os, pwd, re, stat
     request = estus_runtime.request()[0]
     scope = request['manager_scope']
     if scope not in ('system', 'user'):
@@ -8,7 +8,6 @@ def main():
     env = dict(os.environ, LC_ALL='C', SYSTEMD_PAGER='', SYSTEMD_COLORS='0')
     if scope == 'user':
         env['XDG_RUNTIME_DIR'] = '/run/user/' + str(os.getuid())
-    collection_deadline = time.monotonic() + 20
     base = [os.environ['ESTUS_EXEC_SYSTEMCTL'], '--' + scope, '--no-pager', '--no-ask-password']
     def run(args, accepted=(0,)):
         return estus_runtime.run_bounded(

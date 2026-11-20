@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import datetime, json, os, platform, stat, uuid
+    import datetime, json, os, platform, stat
     if platform.system() != 'Linux':
         raise ValueError('requires Linux')
     a = estus_runtime.request()[0]
@@ -16,18 +16,7 @@ def main():
             raise ValueError('source read exceeds bound')
         return b
 
-    def text(value, maximum=4096):
-        if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
-            raise ValueError('invalid or oversized source string')
-        return value
-
-    def boot_id():
-        v = read('/proc/sys/kernel/random/boot_id', 128).decode('ascii').strip()
-        if str(uuid.UUID(v)) != v:
-            raise ValueError('invalid boot ID')
-        return v
-
-    result = {'boot_id':boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
+    result = {'boot_id':estus_runtime.boot_id(), 'source':'Linux procfs/sysfs; installed target utilities', 'unavailable':[]}
 
     def approved():
         name = a['name']
@@ -46,7 +35,7 @@ def main():
             else:
                 mode = os.stat(path).st_mode
                 values.append({'parameter':parameter,'supported':True,'writable':bool(mode & stat.S_IWUSR),
-                    'value':text(data.decode('utf-8').strip(),4096),'source':'sysfs'})
+                    'value':estus_runtime.check_text(data.decode('utf-8').strip(),4096),'source':'sysfs'})
         return values
 
     name = approved()

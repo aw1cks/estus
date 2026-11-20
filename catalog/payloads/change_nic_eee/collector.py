@@ -89,13 +89,6 @@ def identity(p, policy):
     return dev, driver
 
 
-def emit(result):
-    raw = json.dumps(result, separators=(',', ':'), allow_nan=False)
-    if len(raw.encode('utf8')) > 4096:
-        raise ValueError('projection bound exceeded')
-    print(raw)
-
-
 def main():
     p = estus_runtime.request()[0]
     policy = estus_runtime.request()[1]
@@ -126,7 +119,7 @@ def main():
             raise ValueError('EEE mutation readback mismatch; partial effects possible, no automatic recovery')
     else:
         after = before
-    emit({'interface': dev, 'driver': driver, 'scope': 'software_model',
+    estus_runtime.emit({'interface': dev, 'driver': driver, 'scope': 'software_model',
           'before': before, 'after': after, 'changed': changed,
           'verified': True, 'persistence': 'runtime_only'})
 

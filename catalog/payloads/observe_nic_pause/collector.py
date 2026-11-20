@@ -1,6 +1,6 @@
 import estus_runtime
 def main():
-    import json, os, re
+    import os, re
     p=estus_runtime.request()[0]; policy=estus_runtime.request()[1]
     def run(args):
         return estus_runtime.run_bounded(
@@ -30,12 +30,8 @@ def main():
     def switch(value):
         if value not in ('on','off'): raise ValueError('invalid boolean driver field')
         return value=='on'
-    def emit(value):
-        raw=json.dumps(value,separators=(',',':'),allow_nan=False)
-        if len(raw.encode())>4096: raise ValueError('projection bound exceeded')
-        print(raw)
     v=selected('-a',['Autonegotiate','RX','TX'])
-    emit({'interface':dev,'autoneg':switch(v['Autonegotiate']),'rx':switch(v['RX']),'tx':switch(v['TX']),'source':'ethtool -a; driver-reported flow control, not wire-level proof'})
+    estus_runtime.emit({'interface':dev,'autoneg':switch(v['Autonegotiate']),'rx':switch(v['RX']),'tx':switch(v['TX']),'source':'ethtool -a; driver-reported flow control, not wire-level proof'})
 
 
 if __name__ == "__main__":
