@@ -18,7 +18,7 @@ user = "root"
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_systemd_manager_reload]
-description = "Fixed change_systemd_manager_reload operation in operator manager scope. Explicit completion/readback is separate from application health. Dependencies/activation can affect other units; interrupted work is not replayed."
+description = "Reload the systemd manager so pending unit-file changes take effect. This affects every unit, so call it only after the unit-file change you meant to apply."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

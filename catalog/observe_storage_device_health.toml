@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 [tools.observe_storage_device_health]
-description = "Read actual SMART log 02 and controller state of reviewed QEMU NVMe nvme0 (ESTUS-LAB-NVME). Virtual/reported controller scope only: warnings, temperature when reported, spare/use gauges and exact decimal-string 128-bit cumulative counters. No physical-media health guarantee; no self-test, format, trim or repair. Requires preinstalled /usr/bin/nvme."
+description = "Read SMART log 02 and controller state of the reviewed lab NVMe device. Virtual controller scope only; it does not run self-tests."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

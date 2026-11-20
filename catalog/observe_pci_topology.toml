@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_pci_topology]
-description = "Numeric full-address PCI observation; bounded sysfs only, no exhaustive configuration-space access or external name lookup. Unknown fields explicit."
+description = "Read the PCI topology: root bridges, buses and the device tree beneath them. Numeric addresses only, from bounded sysfs reads."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

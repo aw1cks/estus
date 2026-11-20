@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_sysctl_runtime]
-description = "Set one operator-approved integer sysctl key (constraints.allowed_keys, applied as approved_keys; kernel.printk_ratelimit is additionally bounded to 0..=60 seconds). Runtime only, no persistence or all-settings reload. Verified readback is not CAS, rollback, or application-health assurance; interruption may leave effects."
+description = "Set one approved integer sysctl key in the live kernel and read it back. Nothing is persisted and no file is reloaded."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

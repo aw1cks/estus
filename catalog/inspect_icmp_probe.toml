@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.inspect_icmp_probe]
-description = "icmp probe. Active bounded diagnostics; only operator-approved fixture destinations; no application payload."
+description = "Send bounded ICMP probes to one approved destination and report loss and latency. Active probe; ICMP may be filtered even when the path works."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

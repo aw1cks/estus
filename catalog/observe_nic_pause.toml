@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_nic_pause]
-description = "observe_nic_pause: selected driver-reported pause state; inspection grants no tuning permission."
+description = "Read an interface's driver-reported pause and autonegotiation state. Read-only; it does not tune anything."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

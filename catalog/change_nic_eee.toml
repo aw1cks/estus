@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_nic_eee]
-description = "change_nic_eee: Reviewed runtime-only synthetic EEE configuration, fixed Tx LPI on and actual readback; not negotiated link proof."
+description = "Configure synthetic EEE state with a fixed Tx LPI timer and read it back. Lab model only; it does not negotiate a link."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

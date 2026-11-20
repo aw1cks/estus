@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_host_reboot]
-description = "Schedule one fixed host reboot five seconds later. Receipt is scheduling only: require independent reconnect and changed boot ID to confirm reboot, then separate health checks. Never interpret SSH loss as confirmed success/failure or replay automatically."
+description = "Schedule a host reboot in five seconds and return a scheduling receipt. Confirm it independently by reconnecting and comparing boot IDs; SSH loss proves nothing."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

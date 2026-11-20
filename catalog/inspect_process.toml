@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.inspect_process]
-description = "Inspect one exact boot/start/PID identity: owner, state, cumulative CPU ticks, virtual bytes/resident pages, limits and cgroup membership. No argv/env/memory contents. Sequential observation is not atomic; gone, denied, raced and identity_mismatch publish no process record."
+description = "Read one exact process identity: owner, state, CPU ticks, memory, limits and cgroup. No arguments, environment or memory contents."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

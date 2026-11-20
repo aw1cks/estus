@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_filesystem_usage]
-description = "Resolve one operator-configured logical path and statvfs its actual filesystem, beyond mount inventory. Report capacity/available bytes and inode counts; available may exclude reserved blocks. Resolution is observed, not atomic against rename/mount changes. No caller paths or device mutation."
+description = "Report capacity, available bytes and inode counts for one configured path's filesystem. Available may exclude reserved blocks."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

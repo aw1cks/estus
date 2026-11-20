@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_nic_coalesce]
-description = "change_nic_coalesce: disruptive reviewed runtime-only tuning, actual readback required; independent surviving control path required."
+description = "Set one interface's coalescing parameters at runtime and read them back. Disruptive to latency and throughput, not persistent."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

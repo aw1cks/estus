@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_nic_stats]
-description = "Actual bounded driver-specific cumulative statistics, not duplicated standard interface counters or invented rates."
+description = "Read an interface's driver-specific cumulative counters, optionally filtered by name. Not the standard interface counters, and not rates."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_cgroup_stats]
-description = "Observe approved cgroup v2 controller files with cumulative/gauge/limit/pressure labels and actual ancestor constraints; absent controllers remain unavailable. No writes."
+description = "Read one approved cgroup's controller files, limits and pressure. Absent controllers are reported unavailable."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

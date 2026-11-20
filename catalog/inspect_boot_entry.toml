@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.inspect_boot_entry]
-description = "Read one exact approved installed boot entry, including explicitly sensitive command line with source and unknown fields. No editing, wildcard or special entry selectors."
+description = "Read one approved boot entry, including its command line and any unknown fields. Sensitive; no editing or wildcard selectors."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

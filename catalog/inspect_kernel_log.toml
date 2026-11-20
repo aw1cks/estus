@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.inspect_kernel_log]
-description = "Read selected bounded retained kernel-only journal records. Explicit boot/time/priority scope; cursor expiry is not silently complete. Sensitive root read, no follow/deletion."
+description = "Read bounded kernel-only journal records for one boot and time window. Cursor expiry means incomplete, not no records."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_boot_clear_oneshot]
-description = "Clear systemd-boot EFI next-boot override and verify absence. Does not clear persistent defaults or reboot."
+description = "Clear the systemd-boot next-boot override and confirm it is gone. Leaves the persistent default and the current boot alone."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

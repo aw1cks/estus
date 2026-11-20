@@ -11,7 +11,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_storage_devices]
-description = "Maintained block geometry, partitions and holder/master relationships; no health probing or sensitive UUIDs/labels/serials."
+description = "List block devices with geometry, partitions and holder relationships. No health probing and no UUIDs, labels or serials."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

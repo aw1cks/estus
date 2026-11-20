@@ -18,7 +18,7 @@ user = "root"
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_systemd_signal]
-description = "Fixed signal operation in operator manager scope. Explicit completion/readback is separate from application health. Dependencies/activation can affect other units; interrupted work is not replayed."
+description = "Send one approved signal to the main process of an allowed unit and return the post-state. Delivery is not application health."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

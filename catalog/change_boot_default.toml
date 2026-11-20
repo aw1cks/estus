@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_boot_default]
-description = "Set a separate persistent systemd-boot EFI default to one exact approved installed ID and read it back. Does not reboot or change one-shot override."
+description = "Point the persistent systemd-boot default at one approved installed entry and read it back. Does not reboot or touch the one-shot override."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

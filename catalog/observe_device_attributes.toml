@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_device_attributes]
-description = "Read reviewed net/block sysfs device attributes through operator logical aliases. No caller paths, arbitrary classes, privileged controls, reset, unbind or config-space reads. Symlink resolution stays below /sys/devices. Values are bounded text with missing/denied explicit, not hardware capability claims."
+description = "Read reviewed sysfs attributes of an allowlisted net or block device. No privileged controls, resets or unbinds."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

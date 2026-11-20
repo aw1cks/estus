@@ -11,7 +11,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_storage_mounts]
-description = "Current mounts including overmount duplicates; no static configuration, options, labels, UUIDs or raw context. Capacity is non-atomic."
+description = "List current mounts, including overmount duplicates. Capacity is non-atomic and no labels or UUIDs are exposed."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

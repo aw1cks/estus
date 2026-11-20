@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.change_package]
-description = "Apply generic OS package install, upgrade or removal via target-detected package manager (apt, dnf, dnf5, apk, zypper); interrupted operations are never replayed."
+description = "Install, upgrade or remove packages through the target's own package manager and return the result. Invalid or interrupted transitions are not replayed."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

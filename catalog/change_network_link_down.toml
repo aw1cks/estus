@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_network_link_down]
-description = "network link down. One runtime-only mutation with readback; independent surviving root-control recovery REQUIRED, no persistence or automatic replay."
+description = "Bring one approved interface down at runtime and read the result back. Not persistent, and it can cut the path you are managing over."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

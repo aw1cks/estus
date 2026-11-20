@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_systemd_unit_dependencies]
-description = "Bounded forward/reverse dependency, ordering and activation relationships. Traversal depth is not the full mutation blast radius."
+description = "Read one unit's forward or reverse dependencies to a bounded depth. Depth is not the full blast radius of a change."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

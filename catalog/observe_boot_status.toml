@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.observe_boot_status]
-description = "Observe actual EFI loader identity, raw loader current/default/one-shot selections and Secure Boot/SetupMode. Missing variables are unknown, not disabled. A missing default EFI override does not imply no loader.conf default."
+description = "Read the EFI loader identity, current/default/one-shot selections and Secure Boot state. Missing variables mean unknown, not disabled."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

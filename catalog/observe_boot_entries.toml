@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.observe_boot_entries]
-description = "List bounded real bootctl entries with exact IDs and kernel/initrd associations. Source/type may be unknown on older bootctl. Command lines are withheld as sensitive."
+description = "List bootctl entries with their IDs, kernels and initrds. Command lines are withheld because they are sensitive."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

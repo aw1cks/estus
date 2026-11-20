@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.inspect_processes]
-description = "Bounded procfs process inventory filtered by exact real UID and literal name substring. No argv, environment, memory contents or FD targets. PID identity includes boot ID and start ticks; churn is skipped and counted, truncated means incomplete scan or result. Counters are cumulative ticks/pages, not rates."
+description = "List processes by exact real UID and literal name substring, with boot ID and start ticks for identity. No arguments, environment or memory contents."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

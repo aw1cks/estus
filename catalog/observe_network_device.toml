@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_network_device]
-description = "Actual selected driver observe_network_device fields; absent capabilities named, never fabricated zeros. Fixed ethtool command, no changes or duplicate setup offload features."
+description = "Read a network interface's driver-reported device facts through a fixed ethtool query. Absent capabilities are named, never filled with zeros."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

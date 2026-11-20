@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.inspect_journal_record]
-description = "Read a bounded UTF-8 byte slice (base64-encoded) of one retained journal record by exact boot_id and cursor. Returns cursor_unavailable if the journal rotated or the cursor no longer matches; a changed record is not a retained immutable artifact."
+description = "Read a bounded byte slice of one retained journal record by boot ID and cursor. The record may have rotated away or changed."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

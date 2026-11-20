@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.preview_systemd_service]
-description = "Preview systemd unit state, enablement or mask transitions in check mode without mutating unit state."
+description = "Preview a systemd unit state, enablement or mask transition without changing anything. A change then needs the same fields to be authorized."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

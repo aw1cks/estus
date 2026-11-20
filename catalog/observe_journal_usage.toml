@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.observe_journal_usage]
-description = "Observe journal disk-usage text and selected configured retention assignments with exact sources. Configuration is not proof of running journald settings; no reload or retention mutation."
+description = "Report journal disk usage and the configured retention assignments. Configuration is not proof of the running journald settings."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

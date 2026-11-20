@@ -11,7 +11,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_nic_features]
-description = "Selected maintained offload facts retain fixed/requested annotations. Missing capabilities explicit; no duplicate ethtool feature collector."
+description = "Read an interface's offload feature flags with their fixed and requested annotations. Missing capabilities are reported explicitly."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

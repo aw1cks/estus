@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_systemd_sockets]
-description = "Bounded actual Listen endpoints, activation relationships and socket counters; no process attribution."
+description = "List socket units' listen endpoints, activation links and counters. No process attribution."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

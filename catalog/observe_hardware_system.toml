@@ -11,7 +11,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_hardware_system]
-description = "Selected firmware-reported DMI fields; unknown placeholders omitted, not authenticated identity."
+description = "Read selected DMI fields the firmware reports, such as vendor, product and BIOS version. Not an authenticated identity."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

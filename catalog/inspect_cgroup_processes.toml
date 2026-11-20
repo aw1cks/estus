@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.inspect_cgroup_processes]
-description = "Bounded direct membership of approved cgroup only, without command arguments. PID membership races are explicit; no process signalling or migration."
+description = "List the processes directly in one approved cgroup, without arguments. Membership races as processes come and go."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_sysctl_config]
-description = "Set one operator-approved integer sysctl key (constraints.allowed_keys, applied as approved_keys; kernel.printk_ratelimit is additionally bounded to 0..=60 seconds). Persist one dedicated root-owned sysctl.d file and apply exactly that file; other settings are not reloaded. Later boot/config precedence may override it. Verified readback is not CAS, rollback, or application-health assurance; interruption may leave effects."
+description = "Persist one approved integer sysctl key to a dedicated sysctl.d file and apply exactly that file. Other settings are not reloaded and other files may still override it."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

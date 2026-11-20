@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.preview_sysctl]
-description = "Preview sysctl parameter change and file diff in check mode without modifying runtime or persistent configuration."
+description = "Preview a sysctl change and its file diff without touching runtime or persistent configuration."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

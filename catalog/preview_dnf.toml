@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.preview_dnf]
-description = "Preview dnf/dnf5 package change and optional diff in check mode without mutating packages."
+description = "Preview a dnf/dnf5 change in check mode. Nothing is installed."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

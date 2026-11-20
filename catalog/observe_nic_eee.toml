@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_nic_eee]
-description = "observe_nic_eee: Synthetic model EEE configuration and separate active state via real ethtool; no tuning or physical link proof."
+description = "Read a lab interface's synthetic EEE configuration and its active state from real ethtool output. Model data, not physical link proof."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

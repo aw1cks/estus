@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.inspect_process_fds]
-description = "Separately sensitive FD targets for one exact boot/start/PID identity. Paths may disclose secrets; explicitly privileged reviewed authority. Bounded live enumeration is not atomic: individual FDs may disappear or be reused, and process identity changes discard all targets. No file content reads."
+description = "List the file descriptors of one exact process identity. Paths can disclose secrets, and descriptors may vanish or be reused mid-scan."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

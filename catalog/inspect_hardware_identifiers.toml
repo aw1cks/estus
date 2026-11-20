@@ -20,7 +20,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.inspect_hardware_identifiers]
-description = "Selected firmware-reported DMI fields; unknown placeholders omitted, not authenticated identity. Sensitive serial/UUID/asset capability requires independent privileged approval; results intentionally disclose these selected identifiers."
+description = "Read selected firmware serial and asset identifiers. Sensitive and separately approved; not an authenticated identity."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

@@ -13,7 +13,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_cpu]
-description = "Observe raw Linux aggregate CPU clock-tick counters and bounded raw topology IDs, optionally sampling twice. The procfs/sysfs view may be host/global, not affinity, quota, utilization or isolation evidence; collection is not atomic."
+description = "Read aggregate CPU tick counters and topology IDs, optionally sampling twice. The view may be host-wide, not your affinity or quota."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

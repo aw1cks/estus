@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_cgroup_tree]
-description = "Walk only the approved cgroup v2 subtree, bounded depth and nodes; exact hierarchy names retain systemd unit/slice relationships. Ancestor limits are context, not a computed effective capacity."
+description = "Walk one approved cgroup subtree to a bounded depth. Ancestor limits are context, not an effective capacity."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

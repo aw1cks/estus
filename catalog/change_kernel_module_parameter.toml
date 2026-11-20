@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_kernel_module_parameter]
-description = "Write one approved bounded integer to the fixture-reviewed estus_catalog value sysfs parameter and read back. Unsupported writable capability is explicit; no arbitrary parameter names or persistence."
+description = "Write one approved bounded integer to the reviewed estus_catalog sysfs parameter and read it back. Other parameter names and persistence are not available."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

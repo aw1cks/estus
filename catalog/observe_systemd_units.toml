@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_systemd_units]
-description = "Bounded loaded-unit or installed-unit-file/template inventory. Installed file state is distinct from active state; overflow fails explicitly."
+description = "List loaded units or installed unit files and templates. Installed file state differs from active state."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

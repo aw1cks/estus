@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_kernel_module_unload]
-description = "Unload one approved installed module through normal modprobe removal, including its configured hooks and unused dependencies. Never remove holders or force; observe loaded-set and taint deltas; no replay or recovery promise."
+description = "Unload one approved module through normal modprobe removal, honouring configured hooks and unused dependencies. Never forces removal or drops holders."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

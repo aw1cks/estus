@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_systemd_timers]
-description = "Bounded timer last/next trigger timestamps and associated service relationships. Values retain systemd clock units and unset representations."
+description = "List timer units' last and next trigger times and their service links. Values stay in systemd's own units."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

@@ -13,7 +13,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_kernel_module]
-description = "Read installed approved module metadata, dependencies and declared parameters. Signer metadata is not proof of trust, signature acceptance or loadability."
+description = "Read one approved module's metadata, dependencies and declared parameters. Signer metadata is not proof it will load."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

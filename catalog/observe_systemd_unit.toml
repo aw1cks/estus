@@ -11,7 +11,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_systemd_unit]
-description = "Query-only maintained systemd_service status, closed non-secret properties. Inactive/failed state is data, not application health."
+description = "Read one allowed unit's non-secret status properties. Inactive or failed is state, not application health."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

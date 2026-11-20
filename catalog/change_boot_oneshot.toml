@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_boot_oneshot]
-description = "Set one exact approved installed systemd-boot EFI entry for next boot; read back EFI selection. Never reboots; no automatic replay or rollback."
+description = "Boot one approved installed systemd-boot entry on the next boot only, then read the selection back. Never reboots."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_cgroup_sample]
-description = "Finite approved cgroup CPU cumulative-use samples, actual monotonic elapsed interval, identity and counter-reset evidence; rates withheld on resets. Includes controller/ancestor context and first/last full resource observations."
+description = "Sample one approved cgroup's cumulative CPU use over a real interval. Rates are withheld when the counter resets."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

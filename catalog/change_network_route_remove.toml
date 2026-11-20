@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_network_route_remove]
-description = "network route remove. One runtime-only mutation with readback; independent surviving root-control recovery REQUIRED, no persistence or automatic replay."
+description = "Remove one approved route at runtime and read the result back. Not persistent, and removing a default route can cut connectivity."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

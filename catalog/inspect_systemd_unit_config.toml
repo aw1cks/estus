@@ -18,7 +18,7 @@ user = "root"
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.inspect_systemd_unit_config]
-description = "Separately approved sensitive fragment and drop-in content; may contain credentials. No ordinary status environment disclosure."
+description = "Read one allowed unit's fragment and drop-in configuration. Sensitive: it may contain credentials."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

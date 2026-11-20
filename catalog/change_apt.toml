@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.change_apt]
-description = "Apply Debian/Ubuntu apt package transitions with apt-specific options (purge, allow_downgrade, update_cache); interrupted operations are never replayed."
+description = "Install, upgrade or remove Debian/Ubuntu packages, optionally purging and allowing downgrades. Invalid or interrupted transitions are not replayed."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

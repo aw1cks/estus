@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_nic_features]
-description = "change_nic_features: disruptive reviewed runtime-only tuning, actual readback required; independent surviving control path required."
+description = "Enable or disable one offload feature at runtime and read the resulting flags back. Disruptive, not persistent."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

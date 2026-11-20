@@ -17,7 +17,7 @@ destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 
 [tools.change_kernel_module_load]
-description = "Load one approved installed module with only typed approved parameters and observe module-set and taint deltas. Effective modprobe dependency/install hooks may run; no arbitrary ko, force, flags or persistence; preview does not authorize this mutation."
+description = "Load one approved installed module with typed parameters and report module-set and taint deltas. modprobe hooks still run; a bare preview does not authorize this."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

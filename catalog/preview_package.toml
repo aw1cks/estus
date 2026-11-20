@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.preview_package]
-description = "Preview generic OS package install, upgrade or removal in check mode via target-detected package manager (apt, dnf, dnf5, apk, zypper) without mutating packages."
+description = "Preview a package change in check mode via the target's package manager. Nothing is installed."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

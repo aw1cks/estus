@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.observe_journal_boots]
-description = "List bounded retained boot histories with source timestamps. Retention/access may omit older boots; no deletion."
+description = "List retained journal boots with their timestamps. Retention may omit older boots."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

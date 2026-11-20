@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.inspect_sockets]
-description = "network sockets list. Bounded Linux observations; operator-approved interfaces; no process attribution, flags, namespace execution or mutation."
+description = "List sockets filtered by protocol, state, address or port. No process attribution and no namespace execution."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_hardware_slots]
-description = "Selected per-expansion slot SMBIOS inventory with explicit firmware provenance and unknowns; identifiers/serials omitted, no capacity/occupancy inference from missing data. Requires dmidecode and approved firmware access."
+description = "Read expansion-slot SMBIOS inventory without serials. Requires dmidecode; missing data is not inferred."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_pressure]
-description = "Read Linux PSI some/full averages in percent (10/60/300 second windows) and cumulative stall microseconds. Omit unsupported metrics; CPU full may be absent or kernel-defined zero. Procfs view, not cgroup-effective pressure; non-atomic observation."
+description = "Read PSI some/full averages and cumulative stall time. Procfs view, not cgroup-effective pressure."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

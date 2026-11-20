@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_sysctl]
-description = "Read exact reviewed side-effect-free sysctl keys, never enumerate /proc/sys. Operator approved_keys is intersected with the implemented reviewed safe key set. Missing and denied are explicit; no writes, cache drops, SysRq or arbitrary paths."
+description = "Read reviewed side-effect-free sysctl keys by name. Missing and denied keys are explicit; it never enumerates /proc/sys."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

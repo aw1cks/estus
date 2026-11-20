@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog-admin"
 python = "/usr/bin/python3"
 [tools.observe_nic_transceiver]
-description = "Read selected nonserial identity and typed sensors from a lab-only synthetic SFP EEPROM decoded by real ethtool; not physical optical measurements."
+description = "Read nonserial identity and typed sensor fields from a lab-only synthetic SFP EEPROM via real ethtool. Not physical optical measurement."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

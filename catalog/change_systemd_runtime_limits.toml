@@ -18,7 +18,7 @@ user = "root"
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_systemd_runtime_limits]
-description = "Fixed set_runtime_limits operation in operator manager scope. Explicit completion/readback is separate from application health. Dependencies/activation can affect other units; interrupted work is not replayed. Runtime-only resource changes with readback; never persistent. Reductions can throttle execution or trigger OOM."
+description = "Set runtime memory, task or CPU-quota limits on one allowed unit and read them back. Never persistent, and tighter limits can throttle or OOM the unit."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

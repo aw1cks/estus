@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_storage_raid]
-description = "Observe a pre-existing two-member Linux MD RAID1 md0 on reviewed vdb/vdc through ordinary-readable kernel sysfs only; no raw block-device access. Report array state, degraded count, sync action and member states/errors. Non-atomic reported software redundancy, not hardware RAID or physical-media health. Never creates, assembles, tests or repairs an array."
+description = "Read the reviewed MD RAID1 array's state, degraded count, sync action and member errors from sysfs. Reported redundancy only; never assembles or repairs."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

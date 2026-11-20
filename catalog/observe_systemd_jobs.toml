@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_systemd_jobs]
-description = "Bounded actual pending/running systemd jobs. Snapshot can change immediately."
+description = "List pending and running systemd jobs. The snapshot can change immediately."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

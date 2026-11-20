@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_nic_fec]
-description = "observe_nic_fec: driver-reported FEC configuration and active encoding; no physical proof or tuning permission."
+description = "Read the driver-reported FEC configuration and active encoding. Lab-only; no physical proof."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

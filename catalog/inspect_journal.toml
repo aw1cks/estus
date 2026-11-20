@@ -17,7 +17,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.inspect_journal]
-description = "Read bounded retained journal records with optional approved unit filter, literal substring filter, and backward/forward direction-bound continuation cursor. Explicit boot/time/priority scope; cursor expiry is not silently complete. Sensitive root read, no follow/deletion."
+description = "Read bounded journal records filtered by unit, boot, time, priority or literal substring, with a continuation cursor. Cursor expiry means incomplete, not no records."
 revision = "2_native1"
 targets = ["server"]
 authority = "automation:catalog"

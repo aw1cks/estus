@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_time_sync]
-description = "Observable manager synchronization state; unknown never means synchronized or NTP enabled. Source/offset/failure explicitly unavailable when not reported; no clock adjustment."
+description = "Read the manager's observed clock synchronization state. Unknown never means synchronized or that NTP is enabled."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

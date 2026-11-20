@@ -16,7 +16,7 @@ become = { method = "sudo", user = "root" }
 destination = "server-catalog"
 python = "/usr/bin/python3"
 [tools.change_network_route_add]
-description = "network route add. One runtime-only mutation with readback; independent surviving root-control recovery REQUIRED, no persistence or automatic replay."
+description = "Add one approved route at runtime and read the result back. Not persistent, and a wrong route can cut connectivity."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

@@ -19,7 +19,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.change_dnf]
-description = "Apply dnf/dnf5 package transitions with dnf-specific options (enablerepo, disablerepo, allowerasing, nobest, update_cache); interrupted operations are never replayed."
+description = "Install, upgrade or remove packages with dnf/dnf5, including the repo and best-effort options. Invalid or interrupted transitions are not replayed."
 revision = "1"
 targets = ["server"]
 authority = "automation:catalog"

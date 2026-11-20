@@ -11,7 +11,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.observe_packages]
-description = "Maintained package_facts apt inventory; no install or refresh."
+description = "List installed packages from the maintained apt inventory. It does not refresh the cache or install anything."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

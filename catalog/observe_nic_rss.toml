@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.observe_nic_rss]
-description = "Actual RSS queue indirection and algorithm state; secret hash key excluded. Missing capability explicit; no changes."
+description = "Read an interface's RSS indirection table and hash algorithms, excluding the secret key. Missing capability is explicit."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

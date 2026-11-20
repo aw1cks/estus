@@ -20,7 +20,7 @@ destination = "server-catalog"
 python = "/usr/bin/python3"
 
 [tools.change_systemd_unit_file]
-description = "Enable, disable, mask or unmask one allowed unit's unit file with --no-reload and return the on-disk state. Never starts or stops it; manager configuration stays stale until change_systemd_manager_reload, and manager_reload_required reports that."
+description = "Enable, disable, mask or unmask one allowed unit's unit file without reloading the manager, and return the on-disk state. Run change_systemd_manager_reload before relying on the change."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation:catalog"

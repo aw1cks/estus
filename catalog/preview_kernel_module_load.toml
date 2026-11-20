@@ -13,7 +13,7 @@ destination = "server-ordinary"
 python = "/usr/bin/python3"
 
 [tools.preview_kernel_module_load]
-description = "Preview installed approved module dependencies and effective modprobe hooks without loading. Sensitive plan text is not executable caller input, trust proof, authorization or a promise of future effects."
+description = "Preview one module's dependencies and effective modprobe hooks without loading it. The plan text is not a promise of what will happen."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"

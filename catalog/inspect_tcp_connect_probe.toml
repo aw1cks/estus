@@ -10,7 +10,7 @@ ssh_host = "server-ordinary"
 destination = "server-ordinary"
 python = "/usr/bin/python3"
 [tools.inspect_tcp_connect_probe]
-description = "tcp connect probe. Active bounded diagnostics; only operator-approved fixture destinations; no application payload."
+description = "Attempt one bounded TCP connection to an approved destination and port. Active probe; success proves reachability only."
 revision = "1_native1"
 targets = ["server"]
 authority = "automation"
