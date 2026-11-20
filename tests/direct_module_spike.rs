@@ -822,18 +822,19 @@ struct PairQualification {
 
 #[test]
 fn stdin_adaptation_shim_preserves_wrapper_hides_args_and_cleans_tmpdir() -> Result<()> {
-    let py = support::find_program("python3")?;
+    let py = support::find_program("python3.14")
+        .context("run with `nix develop` or put Python 3.14 on PATH")?;
     let td = tempfile::tempdir()?;
 
     // Stub AnsiballZ wrapper matching exact _ansiballz_main signature to independently
     // verify the stdin-adaptation shim without modifying the shipped wrapper contract.
     let stub_wrapper = r#"import datetime, json, os, sys
 def _ansiballz_main(zip_data, ansible_module, module_fqn, params, profile, date_time, extensions, rlimit_nofile):
-    cmdline = open('/proc/self/cmdline', 'rb').read().decode('utf-8', 'replace')
     parsed = json.loads(params)
     args = parsed['ANSIBLE_MODULE_ARGS']
     assert args['_ansible_tmpdir'] and os.path.isdir(args['_ansible_tmpdir']), 'missing live tmpdir'
-    assert 'SHIM_SECRET_XYZ' not in cmdline, 'secret leaked to argv/cmdline'
+    # sys.argv omits the source Python consumes after -c.
+    assert all('SHIM_SECRET_XYZ' not in arg for arg in sys.orig_argv), 'secret leaked to interpreter argv'
     assert 'SHIM_SECRET_XYZ' not in ' '.join(sys.argv), 'secret leaked to sys.argv'
     assert sys.stdin.read() == '', 'stdin was not closed/isolated from module'
     marker_file = os.path.join(args['_ansible_tmpdir'], 'marker')

@@ -1749,6 +1749,17 @@ For another explicitly reviewed policy, use the ordinary app instead:
 nix run --no-write-lock-file . -- --config /absolute/path/to/reviewed.toml
 ```
 
+### Local stdin shim test
+
+The default devshell supplies the pinned Python 3.14 interpreter. The test uses
+`sys.orig_argv` to check launch arguments, including the `-c` source, without
+inspecting the live process. Outside the devshell, put `python3.14` on `PATH`.
+
+```sh
+nix develop --no-update-lock-file --command cargo test --test direct_module_spike \
+  stdin_adaptation_shim_preserves_wrapper_hides_args_and_cleans_tmpdir -- --exact
+```
+
 ### Opt-in OMP client
 
 The tracked `.omp/mcp.json` invokes `nix run --no-write-lock-file .#dev-mcp`

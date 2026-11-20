@@ -6,8 +6,8 @@ let
   package = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts cargoTestExtraArgs;
     nativeBuildInputs = [ pkgs.makeWrapper pkgs.jq ];
-    # Captured production parsers need only isolated stdlib Python, not Ansible.
-    nativeCheckInputs = controllerTestPrograms ++ [ pkgs.openssh pkgs.python3 ];
+    # Parser and shim tests use isolated stdlib Python, not Ansible.
+    nativeCheckInputs = controllerTestPrograms ++ [ pkgs.openssh pkgs.python314 ];
     postInstall = ''
       catalog="$out/share/estus/catalog"
       mkdir -p "$catalog/roles" "$catalog/payloads"

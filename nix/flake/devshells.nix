@@ -20,6 +20,7 @@
         packages = [
           devMcp
           pkgs.openssh
+          pkgs.python314
           pkgs.coreutils
           pkgs.docker-client
           pkgs.gnutar
