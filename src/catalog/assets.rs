@@ -27,31 +27,266 @@ struct PinnedDynamicPayload {
     toml_sha256: &'static str,
     source_sha256: &'static str,
     manifest_sha256: &'static str,
+    workstation_adapted: bool,
 }
 
 const PINNED_DYNAMIC_PAYLOADS: &[PinnedDynamicPayload] = &[
+    PinnedDynamicPayload {
+        name: "inspect_processes",
+        toml_sha256: "b8eb943622bb4b5727ffe005293b6f57f421c08e79b205ffd2a8f306459df4c3",
+        source_sha256: "55116ba7c26c2fae296246afcc26c7247ce6122bc0cbacb4af94d4af7cbfd5ab",
+        manifest_sha256: "6057feb1cb38b1779dab3123f415249cf566d24a1595a3973675799299e308a6",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "inspect_sockets",
+        toml_sha256: "7935f68c69775859ea77c977bea139c7b4a19c65cb90bb74dadbd7c84e98dc70",
+        source_sha256: "8221541c2274dcdfad554037844b5cf762ebfaa9287989e4f3c073f4aabb2347",
+        manifest_sha256: "dc06e0988eaabfecbf8e4105678aa2768526822b69c9b900e21163c2ccb90697",
+        workstation_adapted: true,
+    },
     PinnedDynamicPayload {
         name: "observe_cpu",
         toml_sha256: "dfaa4def61f1f3d2ae6383eaa2f6f6f09475910a35f306ced1294f5eac117200",
         source_sha256: "f8767fb99e075259f3b104f23e5cbff8478cf502f2c91308a9fd27b9117cef64",
         manifest_sha256: "6035fca16346ca8913557980e4f6925ff42fb3b271fb65a84a34fa80f8a7cbce",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_filesystem_usage",
+        toml_sha256: "2ba61be0af96b8159436940d68c9759792f1c976ef4c011cdf4f212605d97001",
+        source_sha256: "7b1c7c1b72b5e6bf11f8a14cd329fad5557532854e68e09ee39473e57c3e3930",
+        manifest_sha256: "cd387051a7eb8d1a1b49919fe73bae740b5ac637a2889cf9a32f92bda6b630e3",
+        workstation_adapted: true,
+    },
+    PinnedDynamicPayload {
+        name: "observe_kernel_modules",
+        toml_sha256: "c21eb8a9a2fb06d8c7b7900cf0fc60e05b4624bc01f271d4a2d3e76a575304fb",
+        source_sha256: "6310b9d1738cb4995869d86bbd849b9a5443ef8883fabfaf48bd515520394e01",
+        manifest_sha256: "2c1795173447652afd471d32abed056b00610adb6e595e4c262b99c2ad704a34",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_kernel_state",
+        toml_sha256: "55b660094ce9cacc140f96282674546ea4272386aa677d93f6ae5bd6a95fe903",
+        source_sha256: "8ebfab3f0114bf8828bd7f8ee8e1307df218747f85b5028ceca222bdabe2beb8",
+        manifest_sha256: "0455b24d107bea1c3c322177f9a099830d7ae0395b0ad974d4c5524e7d3b22ef",
+        workstation_adapted: false,
     },
     PinnedDynamicPayload {
         name: "observe_memory",
         toml_sha256: "75e97867765313558ad6257716c903fdb4f08944bef9557734b820b6c936ff0e",
         source_sha256: "eae9433cc26d1bb5ae810b9b680ef35acd120da960fadb9db205087d90814b27",
         manifest_sha256: "e88b7365b9c8afc9f8f2c4fba59b81fd4975a5e612e5291ab61623853d851811",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_network_addresses",
+        toml_sha256: "80c7df78100a443b81277d9da32839e2f7105744e5706b052b4e2441d180480d",
+        source_sha256: "ef4437b785e62981d7efdfb6aa530f31ad35bb2fcbc7d728da595c78481e0c35",
+        manifest_sha256: "3164e652cdfa1b20abefeb491a9825e3551f891ab822e84a662a995dfea7412d",
+        workstation_adapted: true,
+    },
+    PinnedDynamicPayload {
+        name: "observe_network_interface_stats",
+        toml_sha256: "03746d2ab916c211dee501fe237ee38a0ffdb34156d77c6ff45b0d81e1563b72",
+        source_sha256: "a84a9f194aace5824ffd3d9606af8acfeb3cc4104b7a379a2d93075f8ec9ecec",
+        manifest_sha256: "7eedd026b1d3a08454d7511ad5b273fcbfb44a4716f4f885f2e94a844ccd1035",
+        workstation_adapted: true,
+    },
+    PinnedDynamicPayload {
+        name: "observe_network_links",
+        toml_sha256: "6a4e473a17bdf2ccb867c11d7eb2ad02a682db4f10e121f2525349e26b42a562",
+        source_sha256: "cf1548cebfd20f9897af0b4831aab28de5ee665795760e67c013f8c5cd38d6aa",
+        manifest_sha256: "ebaf11547572f2b9b2fba68a05b3640ae7889346b5bfb9fa80a407b81de69909",
+        workstation_adapted: true,
+    },
+    PinnedDynamicPayload {
+        name: "observe_network_routes",
+        toml_sha256: "c117178c0aa42afa378933966b2a97ee1a5e47f2f05f54ba898837e60cd13f5b",
+        source_sha256: "2c53406cce4262b69e206175eb77cae07369704f386167484307cf8fef5cc75a",
+        manifest_sha256: "c5f0432482c5c6acc29fc494cffdaa74cb06c1c511597715841be602281be072",
+        workstation_adapted: true,
+    },
+    PinnedDynamicPayload {
+        name: "observe_pci_devices",
+        toml_sha256: "3153077113d09ccb47ed0560229e4bb0cdb9449041d85e2490269fd179af44d2",
+        source_sha256: "56312c1c3ec5bef4df87d1c6db9747edf3aa2adf4c5ee04ad86d95fcb825df35",
+        manifest_sha256: "6a732c412db51140782856fd8adb03486a7ebd5a095f34c279046ffa2686547a",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_pci_topology",
+        toml_sha256: "ad3d2d9b4b15f144056c0de6e77c032c97bbcc5c6d3553d1b507d2dd7910bdfc",
+        source_sha256: "11f02d36676815324a2b234beed97c16e8887ed8753b46420a5eb03fa401420b",
+        manifest_sha256: "e5e51166a3c930eae30ed4cdf662a20d157259fc61347d4aace7013e53aa5acc",
+        workstation_adapted: false,
     },
     PinnedDynamicPayload {
         name: "observe_pressure",
         toml_sha256: "7751ea63a765e676e7cf9c250e8aeb4855773230016aa93174a40ff2aad81476",
         source_sha256: "bf1e7663c14cd92cdaa8cc5e603007adea8c668a359ce7e22f907c83f88bdf9e",
         manifest_sha256: "3c38e3ea311dc50792f6d10684c6b16df1d0200d28005fb202eb934b8b459868",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_systemd_jobs",
+        toml_sha256: "0793aeaa3d7c9c71c6784b65025237eb30ccc06100d7ffd4235e85ed357c8af4",
+        source_sha256: "2d88cd269a15566130a5823d1f2c9880507a7530ca4d8f4c245c0094459a8f57",
+        manifest_sha256: "c3350bf95c8626a5ab0e51bfcfed2769bc1e551766dd70a36f0d8775ebb08df3",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_systemd_sockets",
+        toml_sha256: "e188a88f6bf68886e7fef7413b9662f6d52c52339b22af7e0fa37e9e067675ad",
+        source_sha256: "9c1919e4aa7ec6933dbe9029fc6b0917c71884b6bc9d0ca4f140f87b9bbd8403",
+        manifest_sha256: "41657219ba4886ac42ddafd7f45ca76b4918f58da27a072a045b8f2fa6c08e25",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_systemd_timers",
+        toml_sha256: "5caa815b71654c03aaf7aec50572d896cfee43df62df6110efcd37a9e1bcbef1",
+        source_sha256: "51a914545bb0a5d013466993adaacad56faebdff2651f251373706a113b4118b",
+        manifest_sha256: "855f69d6a987768a039f58e4ee48ca184af002a1f46970ca939c9b05379a654f",
+        workstation_adapted: false,
+    },
+    PinnedDynamicPayload {
+        name: "observe_systemd_units",
+        toml_sha256: "260395ced357942ee029e08904574368d1b232100657b7f8c43cc262e977bb73",
+        source_sha256: "793438fbace6b73f6ab7f14a9a9c5281bf8f8baa4ac92ceee28679da7c9ca323",
+        manifest_sha256: "051cf5f8c068fc5006a0d30d8e702904d3916c33a3e9a50abbb9d436b7f3a867",
+        workstation_adapted: true,
+    },
+    PinnedDynamicPayload {
+        name: "observe_time_sync",
+        toml_sha256: "699bfba894bfaea288b6e9c0dff1ec5f7266809405bb33e7a252b01d8c791ef3",
+        source_sha256: "a99e7d8104373bd2b9a522d3f0ac6ce90168b65c742f1b78a4247389f385247d",
+        manifest_sha256: "c71f16b5f418682e1d5b7a659ac5d4c854c7312dd0e9278822b6f90edfe663ff",
+        workstation_adapted: false,
     },
 ];
 
 pub(crate) fn pinned_dynamic_payload_names() -> impl Iterator<Item = &'static str> {
     PINNED_DYNAMIC_PAYLOADS.iter().map(|p| p.name)
+}
+
+pub(crate) fn discover_default_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    for relative in [
+        "../share/estus/catalog",
+        "../../catalog",
+        "../../../catalog",
+    ] {
+        let candidate = exe_dir.join(relative);
+        if candidate.join("catalog.json").is_file() {
+            return candidate.canonicalize().ok();
+        }
+    }
+    None
+}
+
+fn adapt_workstation_definition(
+    name: &str,
+    tool_def: &mut toml::Value,
+) -> Result<(), &'static str> {
+    let table = tool_def.as_table_mut().ok_or(ERROR)?;
+    match name {
+        "observe_systemd_units" => {
+            table
+                .get_mut("fixed_args")
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?
+                .insert("unit_pattern".into(), toml::Value::String("*".into()));
+        }
+        "observe_filesystem_usage" => {
+            let mut paths = toml::Table::new();
+            for (id, path) in [
+                ("root", "/"),
+                ("var", "/var"),
+                ("tmp", "/tmp"),
+                ("home", "/home"),
+                ("run", "/run"),
+            ] {
+                paths.insert(id.into(), toml::Value::String(path.into()));
+            }
+            table
+                .get_mut("fixed_args")
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?
+                .insert("configured_paths".into(), toml::Value::Table(paths));
+            table
+                .get_mut("input_schema")
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|s| s.get_mut("properties"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|p| p.get_mut("path_id"))
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?
+                .insert(
+                    "enum".into(),
+                    toml::Value::Array(
+                        ["root", "var", "tmp", "home", "run"]
+                            .into_iter()
+                            .map(|s| toml::Value::String(s.into()))
+                            .collect(),
+                    ),
+                );
+        }
+        "observe_network_links"
+        | "observe_network_addresses"
+        | "observe_network_interface_stats" => {
+            table
+                .get_mut("fixed_args")
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|f| f.get_mut("operator_policy"))
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?
+                .insert(
+                    "interfaces".into(),
+                    toml::Value::Array(vec![toml::Value::String("*".into())]),
+                );
+            let iface = table
+                .get_mut("input_schema")
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|s| s.get_mut("properties"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|p| p.get_mut("interface"))
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?;
+            iface.remove("enum");
+            iface.insert("minLength".into(), toml::Value::Integer(1));
+            iface.insert("maxLength".into(), toml::Value::Integer(15));
+        }
+        "observe_network_routes" => {
+            let dest = table
+                .get_mut("input_schema")
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|s| s.get_mut("properties"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|p| p.get_mut("destination"))
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?;
+            dest.remove("enum");
+            dest.insert("minLength".into(), toml::Value::Integer(1));
+            dest.insert("maxLength".into(), toml::Value::Integer(64));
+        }
+        "inspect_sockets" => {
+            let addr = table
+                .get_mut("input_schema")
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|s| s.get_mut("properties"))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|p| p.get_mut("address"))
+                .and_then(toml::Value::as_table_mut)
+                .ok_or(ERROR)?;
+            addr.remove("enum");
+            addr.insert("minLength".into(), toml::Value::Integer(1));
+            addr.insert("maxLength".into(), toml::Value::Integer(64));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -361,7 +596,7 @@ impl Catalog {
             .get(name)
             .ok_or("unknown catalog tool")?;
         if matches!(template.qualification, Qualification::LaboratoryOnly)
-            || template.policy_required
+            || (template.policy_required && !pinned.workstation_adapted)
             || !matches!(template.executor, Executor::NativePayload { .. })
         {
             return Err(ERROR);
@@ -381,9 +616,12 @@ impl Catalog {
             .remove("tools")
             .and_then(|v| v.try_into::<toml::Table>().ok())
             .ok_or(ERROR)?;
-        let tool_def = tools.remove(name).ok_or(ERROR)?;
+        let mut tool_def = tools.remove(name).ok_or(ERROR)?;
         if !tools.is_empty() {
             return Err(ERROR);
+        }
+        if pinned.workstation_adapted {
+            adapt_workstation_definition(name, &mut tool_def)?;
         }
         let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
         let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
@@ -579,7 +817,13 @@ mod pinned_tests {
         let catalog = Catalog::load(Some(&root)).unwrap();
         let mut names: Vec<&str> = pinned_dynamic_payload_names().collect();
         names.sort_unstable();
-        assert_eq!(names, ["observe_cpu", "observe_memory", "observe_pressure"]);
+        assert_eq!(names.len(), 19);
+        assert!(names.contains(&"observe_cpu"));
+        assert!(names.contains(&"observe_systemd_units"));
+        assert!(names.contains(&"observe_filesystem_usage"));
+        assert!(names.contains(&"observe_network_links"));
+        assert!(names.contains(&"inspect_processes"));
+        assert!(names.contains(&"inspect_sockets"));
         for name in names {
             let (tool_def, source, manifest) = catalog.load_pinned_payload(name).unwrap();
             assert!(tool_def.is_table());

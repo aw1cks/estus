@@ -85,14 +85,20 @@ def main():
                 raise ValueError('malformed installed-unit inventory record')
             keys = ('unit_file', 'state', 'preset')
         rows.append(dict(zip(keys, fields)))
-    if not isinstance(rows, list) or len(rows) > 256:
-        raise ValueError('inventory exceeds 256 entries')
+    if not isinstance(rows, list):
+        raise ValueError('invalid inventory rows')
+    capped = False
+    if len(rows) > 256:
+        if pattern == '*':
+            rows = rows[:256]
+            capped = True
+        else:
+            raise ValueError('inventory exceeds 256 entries')
     keys = ('unit', 'load', 'active', 'sub', 'description') if view == 'loaded' else ('unit_file', 'state', 'preset')
-    entries = [{key: text(row[key], 1024) for key in keys if key in row and row[key] is not None} for row in rows]
+    entries = [{key: text(row[key], 1024) for key in keys if key in row and row[key] is not None} for row in rows[:8]]
     result.update(view=view, unit_type=kind, state=state, units=entries)
     result['source_count'] = len(rows)
-    result['truncated'] = len(rows) > 8
-    result['units'] = result['units'][:8]
+    result['truncated'] = capped or len(rows) > 8
     while len(json.dumps(result, separators=(',', ':')).encode('utf-8')) > 3800 and result['units']:
         result['units'].pop()
         result['truncated'] = True

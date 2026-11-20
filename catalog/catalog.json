@@ -796,7 +796,7 @@
     "inspect_processes": {
       "definition": "inspect_processes.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1072,7 +1072,7 @@
     "observe_kernel_modules": {
       "definition": "observe_kernel_modules.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1085,7 +1085,7 @@
     "observe_kernel_state": {
       "definition": "observe_kernel_state.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1449,7 +1449,7 @@
     "observe_pci_devices": {
       "definition": "observe_pci_devices.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1488,7 +1488,7 @@
     "observe_pci_topology": {
       "definition": "observe_pci_topology.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1598,7 +1598,7 @@
     "observe_systemd_jobs": {
       "definition": "observe_systemd_jobs.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1612,7 +1612,7 @@
     "observe_systemd_sockets": {
       "definition": "observe_systemd_sockets.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1626,7 +1626,7 @@
     "observe_systemd_timers": {
       "definition": "observe_systemd_timers.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1682,7 +1682,7 @@
     "observe_time_sync": {
       "definition": "observe_time_sync.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",

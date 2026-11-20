@@ -38,6 +38,37 @@ fn valid_unit_name(unit: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_@.:-".contains(&byte))
 }
 
+fn valid_sysctl_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn valid_interface_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 15
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_package_name(pkg: &str) -> bool {
+    !pkg.is_empty()
+        && pkg.len() <= 128
+        && pkg
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+._-".contains(&byte))
+}
+
+fn unique_bounded(list: &[String], check: impl Fn(&str) -> bool) -> bool {
+    !list.is_empty()
+        && list.len() <= 32
+        && list.iter().all(|item| check(item))
+        && list.iter().collect::<BTreeSet<_>>().len() == list.len()
+}
+
 pub(crate) fn apply_site_constraints(
     input_schema: &mut Value,
     fixed_args: &mut Value,
@@ -52,35 +83,123 @@ pub(crate) fn apply_site_constraints(
         .and_then(|props| props.get("unit"))
         .and_then(|unit| unit.get("enum"))
         .cloned();
-    if let Some(constraints) = constraints {
-        if let Some(units) = &constraints.allowed_units {
-            if units.is_empty()
-                || units.len() > 32
-                || units.iter().any(|u| !valid_unit_name(u))
-                || units.iter().collect::<BTreeSet<_>>().len() != units.len()
-            {
-                return Err("Invalid site unit constraints");
-            }
-            if existing_fixed.is_some() || existing_enum.is_some() {
-                return Err(
-                    "constraints.allowed_units cannot be combined with manual allowed_units or unit enum",
-                );
-            }
-            let unit_prop = input_schema
-                .get_mut("properties")
-                .and_then(Value::as_object_mut)
-                .and_then(|props| props.get_mut("unit"))
-                .and_then(Value::as_object_mut)
-                .ok_or("constraints.allowed_units requires input_schema.properties.unit")?;
-            let units_value =
-                Value::Array(units.iter().map(|u| Value::String(u.clone())).collect());
-            unit_prop.insert("enum".into(), units_value.clone());
-            fixed_obj.insert("allowed_units".into(), units_value);
+    let Some(constraints) = constraints else {
+        if let (Some(fixed_units), Some(enum_units)) = (existing_fixed, existing_enum)
+            && fixed_units != enum_units
+        {
+            return Err(
+                "Inconsistent fixed_args.allowed_units and input_schema.properties.unit.enum",
+            );
         }
-    } else if let (Some(fixed_units), Some(enum_units)) = (existing_fixed, existing_enum)
-        && fixed_units != enum_units
-    {
-        return Err("Inconsistent fixed_args.allowed_units and input_schema.properties.unit.enum");
+        return Ok(());
+    };
+    if let Some(units) = &constraints.allowed_units {
+        if !unique_bounded(units, valid_unit_name) {
+            return Err("Invalid site unit constraints");
+        }
+        if existing_fixed.is_some() || existing_enum.is_some() {
+            return Err(
+                "constraints.allowed_units cannot be combined with manual allowed_units or unit enum",
+            );
+        }
+        let unit_prop = input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|props| props.get_mut("unit"))
+            .and_then(Value::as_object_mut)
+            .ok_or("constraints.allowed_units requires input_schema.properties.unit")?;
+        let units_value = Value::Array(units.iter().cloned().map(Value::String).collect());
+        unit_prop.insert("enum".into(), units_value.clone());
+        fixed_obj.insert("allowed_units".into(), units_value);
+    }
+    if let Some(keys) = &constraints.allowed_keys {
+        if !unique_bounded(keys, valid_sysctl_key) {
+            return Err("Invalid site sysctl key constraints");
+        }
+        let keys_value = Value::Array(keys.iter().cloned().map(Value::String).collect());
+        let props = input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .ok_or("constraints.allowed_keys requires input_schema.properties")?;
+        if let Some(key_prop) = props.get_mut("key").and_then(Value::as_object_mut) {
+            key_prop.insert("enum".into(), keys_value.clone());
+            fixed_obj.insert("approved_keys".into(), keys_value);
+        } else if let Some(items_prop) = props
+            .get_mut("keys")
+            .and_then(Value::as_object_mut)
+            .and_then(|k| k.get_mut("items"))
+            .and_then(Value::as_object_mut)
+        {
+            items_prop.insert("enum".into(), keys_value.clone());
+            fixed_obj.insert("approved_keys".into(), keys_value);
+        } else if let Some(name_prop) = props.get_mut("name").and_then(Value::as_object_mut) {
+            name_prop.insert("enum".into(), keys_value);
+        } else {
+            return Err("constraints.allowed_keys requires key, keys.items, or name property");
+        }
+    }
+    if let Some(interfaces) = &constraints.allowed_interfaces {
+        if !unique_bounded(interfaces, valid_interface_name) {
+            return Err("Invalid site interface constraints");
+        }
+        let ifaces_value = Value::Array(interfaces.iter().cloned().map(Value::String).collect());
+        let mut matched = false;
+        if let Some(iface_prop) = input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|props| props.get_mut("interface"))
+            .and_then(Value::as_object_mut)
+        {
+            iface_prop.insert("enum".into(), ifaces_value.clone());
+            matched = true;
+        }
+        if let Some(policy) = fixed_obj
+            .get_mut("operator_policy")
+            .and_then(Value::as_object_mut)
+            && policy.contains_key("interfaces")
+        {
+            policy.insert("interfaces".into(), ifaces_value);
+            matched = true;
+        }
+        if !matched {
+            return Err(
+                "constraints.allowed_interfaces requires interface schema or operator_policy.interfaces",
+            );
+        }
+    }
+    if let Some(packages) = &constraints.allowed_packages {
+        if !unique_bounded(packages, valid_package_name) {
+            return Err("Invalid site package constraints");
+        }
+        let pkgs_value = Value::Array(packages.iter().cloned().map(Value::String).collect());
+        let mut matched = false;
+        if let Some(props) = input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        {
+            if let Some(pkg_prop) = props.get_mut("package").and_then(Value::as_object_mut) {
+                pkg_prop.insert("enum".into(), pkgs_value.clone());
+                fixed_obj.insert("approved_packages".into(), pkgs_value.clone());
+                matched = true;
+            } else if let Some(items_prop) = props
+                .get_mut("name")
+                .and_then(Value::as_object_mut)
+                .and_then(|n| n.get_mut("items"))
+                .and_then(Value::as_object_mut)
+            {
+                items_prop.insert("enum".into(), pkgs_value.clone());
+                matched = true;
+            }
+        }
+        if !matched && fixed_obj.contains_key("approved_packages") {
+            fixed_obj.insert("approved_packages".into(), pkgs_value);
+            matched = true;
+        }
+        if !matched {
+            return Err(
+                "constraints.allowed_packages requires package, name.items, or approved_packages",
+            );
+        }
     }
     Ok(())
 }

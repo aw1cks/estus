@@ -31,7 +31,7 @@ def main():
         return rows
     def interface():
         value=p.get('interface',policy['interface'])
-        if value not in policy['interfaces'] or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
+        if ('*' not in policy['interfaces'] and value not in policy['interfaces']) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
         return value
     def emit(value):
         def measure(v,depth=0):

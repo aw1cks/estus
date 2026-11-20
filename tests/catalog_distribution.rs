@@ -665,3 +665,41 @@ fn role_and_payload_export_rejects_unexpected_asset_types_and_subdirectories() {
             .is_ok()
     );
 }
+
+#[test]
+fn sre_skill_lists_every_published_builtin_and_catalog_tool() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let catalog = Catalog::load(Some(&root.join("catalog"))).unwrap();
+    let skill = fs::read_to_string(root.join("skills/estus-sre/SKILL.md")).unwrap();
+    let mut blocks = skill.split("```json\n").skip(1);
+    let allow_json = blocks.next().unwrap().split("```").next().unwrap();
+    let ask_json = blocks.next().unwrap().split("```").next().unwrap();
+    let allow: Vec<String> = serde_json::from_str(allow_json).unwrap();
+    let ask: Vec<String> = serde_json::from_str(ask_json).unwrap();
+    assert!(allow.iter().all(|name| name.starts_with("observe_")));
+    assert!(ask.iter().all(|name| !name.starts_with("observe_")));
+
+    let mut actual: std::collections::BTreeSet<String> = allow.into_iter().chain(ask).collect();
+    let builtins = [
+        "observe_targets",
+        "observe_stat",
+        "inspect_file",
+        "inspect_directory",
+        "inspect_output",
+        "change_file_write",
+        "change_file_replace",
+        "change_mkdir",
+        "change_rename",
+        "change_file_remove",
+        "change_directory_remove",
+        "change_target_quarantine_clear",
+        "exec_command",
+        "exec_argv",
+        "exec_sudo",
+    ];
+    let mut expected: std::collections::BTreeSet<String> =
+        builtins.into_iter().map(str::to_owned).collect();
+    expected.extend(catalog.manifest().tools.keys().cloned());
+    assert_eq!(actual, expected);
+    actual.clear();
+}

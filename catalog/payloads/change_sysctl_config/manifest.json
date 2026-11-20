@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "mutation_success",
-  "source_sha256": "f81dfc30ddab2ab81aa19703c7cfa74c5136b7cf70714316c1b17c7acfaa9792",
+  "source_sha256": "3ffdbce266c94f6343844fe9fc2444afb80a6f946539f2e1c20a752d227569c4",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -16,6 +16,15 @@
       "kind": "argument",
       "name": "value",
       "format": "json",
+      "omit_if_absent": false
+    },
+    {
+      "kind": "argument",
+      "name": "approved_keys",
+      "format": "json",
+      "default": [
+        "kernel.printk_ratelimit"
+      ],
       "omit_if_absent": false
     }
   ],
@@ -58,6 +67,16 @@
         },
         "value": {
           "type": "integer"
+        },
+        "approved_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 32
         }
       },
       "required": [
@@ -79,6 +98,10 @@
           "properties": {}
         },
         "value": {
+          "aliases": {},
+          "properties": {}
+        },
+        "approved_keys": {
           "aliases": {},
           "properties": {}
         }

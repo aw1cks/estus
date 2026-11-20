@@ -1534,3 +1534,72 @@ fn risk_prefix_effects_invariant_rejects_mismatches_and_preview_maps_to_preview_
         crate::config::RiskTier::Preview
     );
 }
+
+#[test]
+fn site_constraints_propagate_keys_interfaces_and_packages_to_schema_and_fixed_args() {
+    let mut sysctl_schema = json!({
+        "type": "object",
+        "properties": { "key": { "type": "string" }, "value": { "type": "integer" } }
+    });
+    let mut sysctl_fixed = json!({ "target_python": "/usr/bin/python3" });
+    apply_site_constraints(
+        &mut sysctl_schema,
+        &mut sysctl_fixed,
+        Some(&SiteConstraints {
+            allowed_keys: Some(vec!["vm.swappiness".into(), "net.ipv4.ip_forward".into()]),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        sysctl_schema["properties"]["key"]["enum"],
+        json!(["vm.swappiness", "net.ipv4.ip_forward"])
+    );
+    assert_eq!(
+        sysctl_fixed["approved_keys"],
+        json!(["vm.swappiness", "net.ipv4.ip_forward"])
+    );
+
+    let mut net_schema = json!({
+        "type": "object",
+        "properties": { "interface": { "type": "string" } }
+    });
+    let mut net_fixed = json!({ "operator_policy": { "interfaces": ["lo"] } });
+    apply_site_constraints(
+        &mut net_schema,
+        &mut net_fixed,
+        Some(&SiteConstraints {
+            allowed_interfaces: Some(vec!["eth0".into(), "bond0".into()]),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        net_schema["properties"]["interface"]["enum"],
+        json!(["eth0", "bond0"])
+    );
+    assert_eq!(
+        net_fixed["operator_policy"]["interfaces"],
+        json!(["eth0", "bond0"])
+    );
+
+    let mut pkg_schema = json!({
+        "type": "object",
+        "properties": { "package": { "type": "string" } }
+    });
+    let mut pkg_fixed = json!({ "target_python": "/usr/bin/python3" });
+    apply_site_constraints(
+        &mut pkg_schema,
+        &mut pkg_fixed,
+        Some(&SiteConstraints {
+            allowed_packages: Some(vec!["htop".into(), "strace".into()]),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        pkg_schema["properties"]["package"]["enum"],
+        json!(["htop", "strace"])
+    );
+    assert_eq!(pkg_fixed["approved_packages"], json!(["htop", "strace"]));
+}

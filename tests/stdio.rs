@@ -301,7 +301,28 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             );
             if !is_builtin {
                 ensure!(
-                    matches!(*extra, "observe_cpu" | "observe_memory" | "observe_pressure"),
+                    matches!(
+                        *extra,
+                        "inspect_processes"
+                            | "inspect_sockets"
+                            | "observe_cpu"
+                            | "observe_filesystem_usage"
+                            | "observe_kernel_modules"
+                            | "observe_kernel_state"
+                            | "observe_memory"
+                            | "observe_network_addresses"
+                            | "observe_network_interface_stats"
+                            | "observe_network_links"
+                            | "observe_network_routes"
+                            | "observe_pci_devices"
+                            | "observe_pci_topology"
+                            | "observe_pressure"
+                            | "observe_systemd_jobs"
+                            | "observe_systemd_sockets"
+                            | "observe_systemd_timers"
+                            | "observe_systemd_units"
+                            | "observe_time_sync"
+                    ),
                     "unexpected extra tool in no-config workstation: {extra}"
                 );
                 let tool = tools.iter().find(|t| t["name"] == *extra).unwrap();
@@ -313,6 +334,14 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
                 );
             }
         }
+        let dynamic_count = names
+            .iter()
+            .filter(|name| matches!(**name, "observe_cpu" | "observe_systemd_units" | "observe_filesystem_usage" | "observe_network_links" | "inspect_processes" | "inspect_sockets"))
+            .count();
+        ensure!(
+            dynamic_count == 6,
+            "expected auto-discovered workstation catalog tools in default startup, got: {names:?}"
+        );
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];
@@ -6789,9 +6818,10 @@ enum = ["/etc/hosts"]
             .context("prompt text")?;
         ensure!(text.contains("prod-web") && text.contains("nginx.service"));
         ensure!(text.contains("deny_tiers") && text.contains("/etc/hosts"));
+        ensure!(!text.contains("observe_systemd_unit`") && !text.contains("inspect_journal`"));
+        ensure!(text.contains("`observe_stat`") && text.contains("`inspect_file`"));
         ensure!(!text.contains("private-ssh-target.invalid"));
         ensure!(!text.contains("PRIVATE_SUDO_USER") && !text.contains("PRIVATE_SUDO_PROG"));
-
         server.send(json!({"jsonrpc":"2.0","id":4,"method":"resources/list","params":{}})).await?;
         let resources = server.response(4).await?;
         let uris: Vec<_> = resources["result"]["resources"]

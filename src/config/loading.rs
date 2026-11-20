@@ -502,13 +502,15 @@ impl Config {
         )?;
         validate_bindings(&bindings, document.targets.as_ref(), &document.automation)?;
         if document.mode == Mode::Workstation && capabilities.named {
-            let catalog_source = document
+            let catalog_source = match document
                 .catalog
                 .root
                 .clone()
                 .or_else(|| env("ESTUS_CATALOG_ROOT").map(PathBuf::from))
-                .map(|p| resolve_path(p, &base, "catalog.root"))
-                .transpose()?;
+            {
+                Some(p) => Some(resolve_path(p, &base, "catalog.root")?),
+                None => crate::catalog::assets::discover_default_root(),
+            };
             if let Some(path) = catalog_source {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
                     .map_err(|reason| invalid("catalog", reason))?;

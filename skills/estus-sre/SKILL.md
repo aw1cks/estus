@@ -28,7 +28,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 - **Prompts**: `triage_host`, `diagnose_service`, `safe_change`, `network_triage`.
 - **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
 
-## 5. Exact-Name Client Approval Policy (134 Published Tools)
+## 5. Exact-Name Client Approval Policy (138 Published Tools)
 Configure exact tool names according to your MCP client's permission rules (prefix globs are optional because client support varies):
 
 ### Allow (`observe_*` — 63 tools)
@@ -100,7 +100,7 @@ Configure exact tool names according to your MCP client's permission rules (pref
 ]
 ```
 
-### Ask (`inspect_*`, `preview_*`, `change_*`, `exec_*` — 71 tools)
+### Ask (`inspect_*`, `preview_*`, `change_*`, `exec_*` — 75 tools)
 ```json
 [
   "change_boot_clear_oneshot",
@@ -173,6 +173,10 @@ Configure exact tool names according to your MCP client's permission rules (pref
   "inspect_sockets",
   "inspect_systemd_unit_config",
   "inspect_tcp_connect_probe",
-  "preview_kernel_module_load"
+  "preview_apt",
+  "preview_dnf",
+  "preview_kernel_module_load",
+  "preview_sysctl",
+  "preview_systemd_service"
 ]
 ```

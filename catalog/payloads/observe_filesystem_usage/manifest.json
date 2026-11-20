@@ -52,11 +52,24 @@
           "properties": {
             "data": {
               "type": "string"
+            },
+            "root": {
+              "type": "string"
+            },
+            "var": {
+              "type": "string"
+            },
+            "tmp": {
+              "type": "string"
+            },
+            "home": {
+              "type": "string"
+            },
+            "run": {
+              "type": "string"
             }
           },
-          "required": [
-            "data"
-          ],
+          "required": [],
           "additionalProperties": false
         }
       },
@@ -82,6 +95,26 @@
           "aliases": {},
           "properties": {
             "data": {
+              "aliases": {},
+              "properties": {}
+            },
+            "root": {
+              "aliases": {},
+              "properties": {}
+            },
+            "var": {
+              "aliases": {},
+              "properties": {}
+            },
+            "tmp": {
+              "aliases": {},
+              "properties": {}
+            },
+            "home": {
+              "aliases": {},
+              "properties": {}
+            },
+            "run": {
               "aliases": {},
               "properties": {}
             }

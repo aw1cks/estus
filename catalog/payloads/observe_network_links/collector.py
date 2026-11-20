@@ -32,7 +32,7 @@ def main():
         return rows
     def interface():
         value=p.get('interface',policy['interface'])
-        if value not in policy['interfaces'] or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
+        if ('*' not in policy['interfaces'] and value not in policy['interfaces']) or not re.fullmatch('[a-zA-Z0-9_.-]{1,15}',value): raise ValueError('interface outside operator policy')
         return value
     def emit(value):
         if 'entries' in value:
@@ -66,7 +66,7 @@ def main():
     rows=ip(args)
     out=[]
     for r in rows:
-        if r['ifname'] not in policy['interfaces']: continue
+        if '*' not in policy['interfaces'] and r['ifname'] not in policy['interfaces']: continue
         x={'interface':r['ifname'],'index':r['ifindex'],'mtu':r['mtu'],'state':r['operstate'],'flags':r.get('flags',[])}
         for k in ['address','master']:
             if k in r: x[k]=str(r[k])

@@ -215,86 +215,48 @@ pub(super) fn list_prompts() -> ListPromptsResult {
     ])
 }
 
+fn format_available(
+    permitted: &std::collections::BTreeSet<&str>,
+    candidates: &[&str],
+    fallback: &str,
+) -> String {
+    let available: Vec<String> = candidates
+        .iter()
+        .copied()
+        .filter(|tool| permitted.contains(tool))
+        .map(|tool| format!("`{tool}`"))
+        .collect();
+    if available.is_empty() {
+        fallback.to_owned()
+    } else {
+        available.join(", ")
+    }
+}
+
 pub(super) fn get_prompt(
     server: &Estus,
     request: GetPromptRequestParams,
 ) -> Result<GetPromptResult, ErrorData> {
     let args = &request.arguments;
-    let (description, host, body) = match request.name.as_str() {
+    let host = match request.name.as_str() {
         "triage_host" => {
             check_allowed_keys(args, &["host", "symptom"])?;
-            let host = require_string_arg(args, "host", true)?.expect("required host");
-            let symptom = require_string_arg(args, "symptom", false)?;
-            let symptom_line = symptom.map_or_else(
-                || "Symptom: general host health triage.".to_owned(),
-                |s| format!("Symptom: {s}"),
-            );
-            (
-                "Structured host triage plan",
-                host,
-                format!(
-                    "Perform structured read-only triage for host `{host}`.\n{symptom_line}\n\
-                     1. Start with `observe_*` tools (e.g. `observe_host_summary`, `observe_cpu`, `observe_memory`, `observe_pressure`, `observe_systemd_units`, `observe_filesystem_usage`).\n\
-                     2. Escalate to `inspect_*` (`inspect_journal`, `inspect_processes`, `inspect_sockets`) only where initial telemetry narrows the scope.\n\
-                     3. Avoid mutations or generic `exec_*` during triage."
-                ),
-            )
+            require_string_arg(args, "host", true)?.expect("required host")
         }
         "diagnose_service" => {
             check_allowed_keys(args, &["host", "unit"])?;
-            let host = require_string_arg(args, "host", true)?.expect("required host");
-            let unit = require_string_arg(args, "unit", true)?.expect("required unit");
-            (
-                "Systemd service diagnosis plan",
-                host,
-                format!(
-                    "Diagnose systemd unit `{unit}` on host `{host}`.\n\
-                     1. Read manager state with `observe_systemd_unit` and `observe_systemd_unit_dependencies`.\n\
-                     2. Inspect unit configuration via `inspect_systemd_unit_config` and recent logs via `inspect_journal` (filtered by unit `{unit}`, `direction=\"backward\"`).\n\
-                     3. For truncated long messages, reconstruct via `inspect_journal_record` using `boot_id`, `cursor`, `offset`, and `max_bytes`."
-                ),
-            )
+            require_string_arg(args, "host", true)?.expect("required host")
         }
         "safe_change" => {
             check_allowed_keys(args, &["host", "operation", "target_object"])?;
-            let host = require_string_arg(args, "host", true)?.expect("required host");
-            let operation =
-                require_string_arg(args, "operation", true)?.expect("required operation");
-            let target_object =
-                require_string_arg(args, "target_object", true)?.expect("required target_object");
-            (
-                "Safe change and reconciliation checklist",
-                host,
-                format!(
-                    "Plan safe change `{operation}` on `{target_object}` for host `{host}`.\n\
-                     1. Capture pre-change baseline with matching `observe_*` / `inspect_*` tools.\n\
-                     2. Run any available `preview_*` tool first.\n\
-                     3. Confirm the host is not quarantined before applying `change_*`.\n\
-                     4. Never auto-replay on timeout/interruption; if `remote_state_unknown=true`, inspect actual state and clear quarantine explicitly via `change_target_quarantine_clear` only after reconciliation."
-                ),
-            )
+            require_string_arg(args, "host", true)?.expect("required host")
         }
         "network_triage" => {
             check_allowed_keys(args, &["host", "peer"])?;
-            let host = require_string_arg(args, "host", true)?.expect("required host");
-            let peer = require_string_arg(args, "peer", false)?;
-            let peer_step = peer.map_or_else(
-                || "2. Inspect active sockets with `inspect_sockets`; probe peers only if required.".to_owned(),
-                |p| format!("2. Inspect sockets with `inspect_sockets` and run targeted probes toward `{p}` (`inspect_dns_lookup`, `inspect_tcp_connect_probe`, `inspect_icmp_probe`, `inspect_network_path_probe`)."),
-            );
-            (
-                "Observation-first network triage plan",
-                host,
-                format!(
-                    "Perform network triage on host `{host}`.\n\
-                     1. Collect link, address, route, rule, neighbor, and interface stats (`observe_network_*`, `observe_nic_*`).\n\
-                     {peer_step}"
-                ),
-            )
+            require_string_arg(args, "host", true)?.expect("required host")
         }
         _ => return Err(ErrorData::invalid_params("Unknown prompt name", None)),
     };
-
     let policy = server
         .state
         .config
@@ -304,6 +266,159 @@ pub(super) fn get_prompt(
             server.state.admission.quarantine_info(host),
         )
         .ok_or_else(|| ErrorData::invalid_params("Unknown or invalid host for prompt", None))?;
+    let permitted: std::collections::BTreeSet<&str> = policy["permitted_operations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+
+    let (description, body) = match request.name.as_str() {
+        "triage_host" => {
+            let symptom = require_string_arg(args, "symptom", false)?;
+            let symptom_line = symptom.map_or_else(
+                || "Symptom: general host health triage.".to_owned(),
+                |s| format!("Symptom: {s}"),
+            );
+            let observe_list = format_available(
+                &permitted,
+                &[
+                    "observe_host_summary",
+                    "observe_cpu",
+                    "observe_memory",
+                    "observe_pressure",
+                    "observe_systemd_units",
+                    "observe_filesystem_usage",
+                    "observe_stat",
+                ],
+                "permitted `observe_*` tools from the policy below",
+            );
+            let inspect_list = format_available(
+                &permitted,
+                &[
+                    "inspect_journal",
+                    "inspect_processes",
+                    "inspect_sockets",
+                    "inspect_file",
+                    "inspect_directory",
+                ],
+                "permitted `inspect_*` tools from the policy below",
+            );
+            (
+                "Structured host triage plan",
+                format!(
+                    "Perform structured read-only triage for host `{host}`.\n{symptom_line}\n\
+                     1. Start with `observe_*` tools ({observe_list}).\n\
+                     2. Escalate to `inspect_*` ({inspect_list}) only where initial telemetry narrows the scope.\n\
+                     3. Avoid mutations or generic `exec_*` during triage."
+                ),
+            )
+        }
+        "diagnose_service" => {
+            let unit = require_string_arg(args, "unit", true)?.expect("required unit");
+            let observe_step = format_available(
+                &permitted,
+                &[
+                    "observe_systemd_unit",
+                    "observe_systemd_unit_dependencies",
+                    "observe_systemd_units",
+                    "observe_stat",
+                ],
+                "permitted `observe_*` tools in `permitted_operations` below",
+            );
+            let inspect_step = format_available(
+                &permitted,
+                &[
+                    "inspect_systemd_unit_config",
+                    "inspect_journal",
+                    "inspect_journal_record",
+                    "inspect_file",
+                ],
+                "permitted `inspect_*` tools in `permitted_operations` below",
+            );
+            (
+                "Systemd service diagnosis plan",
+                format!(
+                    "Diagnose systemd unit `{unit}` on host `{host}`.\n\
+                     1. Read unit and host state with {observe_step}.\n\
+                     2. Inspect unit configuration and recent logs for `{unit}` via {inspect_step}.\n\
+                     3. Stay within `permitted_operations` listed below; avoid mutations during diagnosis."
+                ),
+            )
+        }
+        "safe_change" => {
+            let operation =
+                require_string_arg(args, "operation", true)?.expect("required operation");
+            let target_object =
+                require_string_arg(args, "target_object", true)?.expect("required target_object");
+            let previews: Vec<String> = permitted
+                .iter()
+                .copied()
+                .filter(|tool| tool.starts_with("preview_"))
+                .map(|tool| format!("`{tool}`"))
+                .collect();
+            let preview_step = if previews.is_empty() {
+                "2. No `preview_*` tool is registered for this host; verify target paths/units carefully before mutating.".to_owned()
+            } else {
+                format!("2. Run matching preview first ({}).", previews.join(", "))
+            };
+            let clear_note = if permitted.contains("change_target_quarantine_clear") {
+                "clear quarantine explicitly via `change_target_quarantine_clear` only after reconciliation"
+            } else {
+                "escalate to the operator after reconciling actual host state"
+            };
+            (
+                "Safe change and reconciliation checklist",
+                format!(
+                    "Plan safe change `{operation}` on `{target_object}` for host `{host}`.\n\
+                     1. Capture pre-change baseline with permitted `observe_*` / `inspect_*` tools.\n\
+                     {preview_step}\n\
+                     3. Confirm the host is not quarantined before applying `{operation}`.\n\
+                     4. Never auto-replay on timeout/interruption; if `remote_state_unknown=true`, inspect actual state and {clear_note}."
+                ),
+            )
+        }
+        "network_triage" => {
+            let peer = require_string_arg(args, "peer", false)?;
+            let net_observe = format_available(
+                &permitted,
+                &[
+                    "observe_network_links",
+                    "observe_network_addresses",
+                    "observe_network_routes",
+                    "observe_network_interface_stats",
+                    "observe_network_neighbors",
+                    "observe_network_rules",
+                ],
+                "permitted `observe_*` tools from `permitted_operations` below",
+            );
+            let peer_tools = format_available(
+                &permitted,
+                &[
+                    "inspect_sockets",
+                    "inspect_dns_lookup",
+                    "inspect_tcp_connect_probe",
+                    "inspect_icmp_probe",
+                    "inspect_network_path_probe",
+                ],
+                "permitted `inspect_*` tools from `permitted_operations` below",
+            );
+            let peer_step = peer.map_or_else(
+                || format!("2. Inspect active sockets and endpoints via {peer_tools}."),
+                |p| format!("2. Inspect sockets and targeted reachability toward `{p}` via {peer_tools}."),
+            );
+            (
+                "Observation-first network triage plan",
+                format!(
+                    "Perform network triage on host `{host}`.\n\
+                     1. Collect link, address, route, and interface state ({net_observe}).\n\
+                     {peer_step}"
+                ),
+            )
+        }
+        _ => unreachable!(),
+    };
+
     let policy_json = serde_json::to_string_pretty(&policy)
         .map_err(|_| ErrorData::internal_error("Failed to format target policy", None))?;
     let full = format!("{body}\n\nResolved target policy:\n```json\n{policy_json}\n```");

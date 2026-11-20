@@ -30,12 +30,18 @@ def main():
         if len(encoded.encode())>4096: raise ValueError('result bound')
         print(encoded)
 
-    key,value=args
-    if key!='kernel.printk_ratelimit' or type(value) is not int or not 0<=value<=60: raise ValueError('unapproved typed sysctl')
-    proc='/proc/sys/kernel/printk_ratelimit'
+    key,value=args[0],args[1]
+    approved_keys=args[2] if len(args)>=3 else ['kernel.printk_ratelimit']
+    if (not isinstance(approved_keys,list) or not isinstance(key,str) or key not in approved_keys
+            or '..' in key or '/' in key or not re.fullmatch(r'[a-z0-9_]+(?:\.[a-z0-9_-]+)+',key)
+            or type(value) is not int or not 0<=value<=MAX):
+        raise ValueError('unapproved typed sysctl')
+    if key=='kernel.printk_ratelimit' and not 0<=value<=60:
+        raise ValueError('unapproved typed sysctl')
+    proc='/proc/sys/'+key.replace('.','/')
     def current():
         text=read(proc,64)
-        if not re.fullmatch('[0-9]{1,10}',text): raise ValueError('invalid sysctl readback')
+        if not re.fullmatch('[0-9]{1,16}',text): raise ValueError('invalid sysctl readback')
         return int(text)
     before=current()
 

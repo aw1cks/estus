@@ -10,6 +10,12 @@ use super::compiled::Effect;
 pub(crate) struct SiteConstraints {
     #[serde(default)]
     pub(crate) allowed_units: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_interfaces: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_packages: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
