@@ -1,3 +1,11 @@
+//! Reviewed catalog assets: the installed catalog manifest, tool definitions
+//! and payload sources, loaded fail-closed and exported inert for review.
+//!
+//! Every failure is a `CatalogError` variant grouped by what an operator does
+//! about it. Variants carry only safe context (a tool name or a relative asset
+//! path), never file contents; the config boundary projects the static reason
+//! into a `ConfigError`, and the catalog CLI emits the variant code plus the
+//! context as an audit record.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
@@ -19,7 +27,98 @@ const MANIFEST_LIMIT: u64 = 256 * 1024;
 const DEFINITION_LIMIT: u64 = 256 * 1024;
 const PAYLOAD_LIMIT: u64 = 8 * 1024 * 1024;
 const PAYLOAD_FILES: usize = 256;
-const ERROR: &str = "invalid or unavailable catalog assets";
+const MAX_PATH_NAME: usize = 255;
+
+/// A catalog problem, grouped by what an operator does about it: fix the
+/// installed files, re-review the catalog data, or enable a different name.
+/// Context is always a tool name or a relative asset path, never contents.
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogError {
+    #[error("catalog file or directory missing: {asset}")]
+    Missing { asset: String },
+    #[error("catalog asset unreadable: {asset}")]
+    Unreadable { asset: String },
+    #[error("catalog asset exceeds its size limit: {asset}")]
+    Oversized { asset: String },
+    #[error("catalog asset has invalid JSON or TOML: {asset}")]
+    Malformed { asset: String },
+    #[error("catalog layout is not a safe regular file: {asset}")]
+    UnsafePath { asset: String },
+    #[error("catalog asset type or depth is not allowed: {asset}")]
+    UnsupportedAsset { asset: String },
+    #[error("unknown catalog tool: {tool}")]
+    UnknownTool { tool: String },
+    #[error("catalog manifest is invalid: {asset}")]
+    InvalidManifest { asset: String },
+    #[error("catalog definition is invalid for tool {tool}")]
+    InvalidDefinition { tool: String },
+    #[error("catalog definition overrides must be site policy for tool {tool}")]
+    OverrideNotSitePolicy { tool: String },
+    #[error("catalog definition requires site policy for tool {tool}")]
+    SitePolicyRequired { tool: String },
+    #[error("catalog definition requires targets for tool {tool}")]
+    TargetsRequired { tool: String },
+}
+
+impl CatalogError {
+    /// Stable code emitted by the catalog CLI and used as the `ConfigError`
+    /// reason at the config boundary.
+    pub(crate) fn reason(&self) -> &'static str {
+        match self {
+            Self::Missing { .. } => "catalog_missing_asset",
+            Self::Unreadable { .. } => "catalog_asset_unreadable",
+            Self::Oversized { .. } => "catalog_asset_oversized",
+            Self::Malformed { .. } => "catalog_asset_malformed",
+            Self::UnsafePath { .. } => "catalog_path_unsafe",
+            Self::UnsupportedAsset { .. } => "catalog_asset_unsupported",
+            Self::UnknownTool { .. } => "catalog_tool_unknown",
+            Self::InvalidManifest { .. } => "catalog_manifest_invalid",
+            Self::InvalidDefinition { .. } => "catalog_definition_invalid",
+            Self::OverrideNotSitePolicy { .. } => "catalog_definition_override_not_site_policy",
+            Self::SitePolicyRequired { .. } => "catalog_definition_requires_site_policy",
+            Self::TargetsRequired { .. } => "catalog_definition_requires_targets",
+        }
+    }
+
+    /// The safe context value (a tool name or relative asset path).
+    pub(crate) fn detail(&self) -> &str {
+        match self {
+            Self::Missing { asset }
+            | Self::Unreadable { asset }
+            | Self::Oversized { asset }
+            | Self::Malformed { asset }
+            | Self::UnsafePath { asset }
+            | Self::UnsupportedAsset { asset }
+            | Self::InvalidManifest { asset } => asset,
+            Self::UnknownTool { tool }
+            | Self::InvalidDefinition { tool }
+            | Self::OverrideNotSitePolicy { tool }
+            | Self::SitePolicyRequired { tool }
+            | Self::TargetsRequired { tool } => tool,
+        }
+    }
+
+    /// The audit record the catalog CLI emits: a stable code plus the safe
+    /// context. File contents never enter a diagnostic.
+    pub(crate) fn payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "event": "error",
+            "code": self.reason(),
+            "detail": self.detail(),
+        })
+    }
+}
+
+fn bounded_name(path: &Path) -> String {
+    let mut name = path.to_string_lossy().to_string();
+    if name.len() > MAX_PATH_NAME {
+        let end = (0..=MAX_PATH_NAME)
+            .rfind(|index| name.is_char_boundary(*index))
+            .expect("index 0 is a char boundary");
+        name.truncate(end);
+    }
+    name
+}
 
 pub(crate) enum WorkstationEntry {
     Payload {
@@ -131,6 +230,7 @@ where
     deserializer.deserialize_map(Unique(std::marker::PhantomData))
 }
 
+#[derive(Debug)]
 pub struct Catalog {
     root: PathBuf,
     directory: File,
@@ -189,14 +289,16 @@ fn risk_prefix_matches_effects(name: &str, effects: &[&str]) -> bool {
     }
 }
 
-fn open_child(directory: &File, name: &Path, is_directory: bool) -> Result<File, &'static str> {
+fn open_child(directory: &File, name: &Path, is_directory: bool) -> Result<File, CatalogError> {
     if name.components().count() != 1
         || !matches!(
             name.components().next(),
             Some(std::path::Component::Normal(_))
         )
     {
-        return Err(ERROR);
+        return Err(CatalogError::Missing {
+            asset: bounded_name(name),
+        });
     }
     let flags = OFlag::O_RDONLY
         | OFlag::O_NOFOLLOW
@@ -207,59 +309,96 @@ fn open_child(directory: &File, name: &Path, is_directory: bool) -> Result<File,
         } else {
             OFlag::empty()
         };
-    let file = File::from(openat(directory, name, flags, Mode::empty()).map_err(|_| ERROR)?);
-    let metadata = file.metadata().map_err(|_| ERROR)?;
+    let file = File::from(openat(directory, name, flags, Mode::empty()).map_err(|_| {
+        CatalogError::Missing {
+            asset: bounded_name(name),
+        }
+    })?);
+    let metadata = file.metadata().map_err(|_| CatalogError::Unreadable {
+        asset: bounded_name(name),
+    })?;
     if (is_directory && !metadata.is_dir()) || (!is_directory && !metadata.is_file()) {
-        return Err(ERROR);
+        return Err(CatalogError::Missing {
+            asset: bounded_name(name),
+        });
     }
     Ok(file)
 }
 
-fn bounded_read(file: File, limit: u64) -> Result<Vec<u8>, &'static str> {
-    if file.metadata().map_err(|_| ERROR)?.len() > limit {
-        return Err(ERROR);
+fn bounded_read(file: File, asset: &str, limit: u64) -> Result<Vec<u8>, CatalogError> {
+    if file
+        .metadata()
+        .map_err(|_| CatalogError::Unreadable {
+            asset: asset.to_owned(),
+        })?
+        .len()
+        > limit
+    {
+        return Err(CatalogError::Oversized {
+            asset: asset.to_owned(),
+        });
     }
     let mut bytes = Vec::new();
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| ERROR)?;
+        .map_err(|_| CatalogError::Unreadable {
+            asset: asset.to_owned(),
+        })?;
     if bytes.len() as u64 > limit {
-        return Err(ERROR);
+        return Err(CatalogError::Oversized {
+            asset: asset.to_owned(),
+        });
     }
     Ok(bytes)
 }
 
 impl Catalog {
-    pub fn load(root: Option<&Path>) -> Result<Self, &'static str> {
+    pub fn load(root: Option<&Path>) -> Result<Self, CatalogError> {
         let root = match root {
             Some(root) => root.to_path_buf(),
-            None => PathBuf::from(std::env::var_os("ESTUS_CATALOG_ROOT").ok_or(ERROR)?),
+            None => PathBuf::from(std::env::var_os("ESTUS_CATALOG_ROOT").ok_or_else(|| {
+                CatalogError::Missing {
+                    asset: "catalog root".to_owned(),
+                }
+            })?),
         };
+        let root_name = bounded_name(&root);
         if fs::symlink_metadata(&root)
-            .map_err(|_| ERROR)?
+            .map_err(|_| CatalogError::Missing {
+                asset: root_name.clone(),
+            })?
             .file_type()
             .is_symlink()
         {
-            return Err(ERROR);
+            return Err(CatalogError::Missing { asset: root_name });
         }
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&root)
-            .map_err(|_| ERROR)?;
-        let root = fs::canonicalize(root).map_err(|_| ERROR)?;
+            .map_err(|_| CatalogError::Missing {
+                asset: root_name.clone(),
+            })?;
+        let root =
+            fs::canonicalize(&root).map_err(|_| CatalogError::Unreadable { asset: root_name })?;
         let bytes = bounded_read(
             open_child(&directory, Path::new("catalog.json"), false)?,
+            "catalog.json",
             MANIFEST_LIMIT,
         )?;
-        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).map_err(|_| CatalogError::Malformed {
+                asset: "catalog.json".to_owned(),
+            })?;
         if manifest.schema != 3
             || !name_valid(&manifest.version)
             || manifest.tools.is_empty()
             || manifest.tools.len() > 1024
             || manifest.presets.len() > 64
         {
-            return Err(ERROR);
+            return Err(CatalogError::InvalidManifest {
+                asset: "catalog.json".to_owned(),
+            });
         }
         for (name, template) in &manifest.tools {
             if !name_valid(name)
@@ -280,7 +419,7 @@ impl Catalog {
                 // is required; site-policy templates stay out of open mode.
                 || template.workstation.is_some() && template.policy_required
             {
-                return Err(ERROR);
+                return Err(CatalogError::InvalidDefinition { tool: name.clone() });
             }
             Self::validate_definition(&directory, name, &template.definition)?;
         }
@@ -293,7 +432,9 @@ impl Catalog {
                     .iter()
                     .any(|tool| !manifest.tools.contains_key(tool) || !seen.insert(tool))
             {
-                return Err(ERROR);
+                return Err(CatalogError::InvalidManifest {
+                    asset: name.clone(),
+                });
             }
         }
         Ok(Self {
@@ -321,46 +462,69 @@ impl Catalog {
         directory: &File,
         name: &str,
         definition: &str,
-    ) -> Result<toml::Table, &'static str> {
+    ) -> Result<toml::Table, CatalogError> {
         let bytes = bounded_read(
             open_child(directory, Path::new(definition), false)?,
+            definition,
             DEFINITION_LIMIT,
         )?;
         let table: toml::Table = std::str::from_utf8(&bytes)
-            .map_err(|_| ERROR)?
+            .map_err(|_| CatalogError::Malformed {
+                asset: definition.to_owned(),
+            })?
             .parse()
-            .map_err(|_| ERROR)?;
+            .map_err(|_| CatalogError::Malformed {
+                asset: definition.to_owned(),
+            })?;
         let tools = table
             .get("tools")
             .and_then(toml::Value::as_table)
-            .ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
         let tool = tools
             .get(name)
             .and_then(toml::Value::as_table)
-            .ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
         if tools.len() != 1 {
-            return Err(ERROR);
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
         }
         let effects = tool
             .get("effects")
             .and_then(toml::Value::as_array)
-            .ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
         let mut effect_names = Vec::with_capacity(effects.len());
         for effect in effects {
-            effect_names.push(effect.as_str().ok_or(ERROR)?);
+            effect_names.push(
+                effect
+                    .as_str()
+                    .ok_or_else(|| CatalogError::InvalidDefinition {
+                        tool: name.to_owned(),
+                    })?,
+            );
         }
         if !risk_prefix_matches_effects(name, &effect_names) {
-            return Err(ERROR);
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
         }
         Ok(table)
     }
 
-    pub fn definition(&self, name: &str) -> Result<toml::Table, &'static str> {
+    pub fn definition(&self, name: &str) -> Result<toml::Table, CatalogError> {
         let template = self
             .manifest
             .tools
             .get(name)
-            .ok_or("unknown catalog tool")?;
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
         Self::validate_definition(&self.directory, name, &template.definition)
     }
 
@@ -380,7 +544,7 @@ impl Catalog {
         name: &str,
         overrides: Option<&toml::Table>,
         destinations: &[String],
-    ) -> Result<toml::Value, &'static str> {
+    ) -> Result<toml::Value, CatalogError> {
         const SITE_KEYS: [&str; 7] = [
             "targets",
             "authority",
@@ -390,13 +554,21 @@ impl Catalog {
             "input_map",
             "limits",
         ];
-        let template = self.manifest.tools.get(name).ok_or(ERROR)?;
+        let template = self
+            .manifest
+            .tools
+            .get(name)
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
         if let Some(overrides) = overrides
             && overrides
                 .keys()
                 .any(|key| !SITE_KEYS.contains(&key.as_str()))
         {
-            return Err("catalog_definition_override_not_site_policy");
+            return Err(CatalogError::OverrideNotSitePolicy {
+                tool: name.to_owned(),
+            });
         }
         if template.policy_required
             && overrides.is_none_or(|table| {
@@ -405,19 +577,29 @@ impl Catalog {
                     || table.contains_key("input_schema"))
             })
         {
-            return Err("catalog_definition_requires_site_policy");
+            return Err(CatalogError::SitePolicyRequired {
+                tool: name.to_owned(),
+            });
         }
         let mut document = Self::validate_definition(&self.directory, name, &template.definition)?;
         let tools = document
             .remove("tools")
             .and_then(|value| value.try_into::<toml::Table>().ok())
-            .ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
         let mut definition = tools
             .into_iter()
             .next()
             .map(|(_, value)| value)
-            .ok_or(ERROR)?;
-        let table = definition.as_table_mut().ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
+        let table = definition
+            .as_table_mut()
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
         table.remove("targets");
         table.remove("constraints");
         if let Executor::NativePayload { path } = &template.executor {
@@ -432,7 +614,9 @@ impl Catalog {
                                 .join(path)
                                 .join("collector.py")
                                 .to_str()
-                                .ok_or(ERROR)?,
+                                .ok_or_else(|| CatalogError::InvalidDefinition {
+                                    tool: name.to_owned(),
+                                })?,
                         ),
                     ),
                 ])),
@@ -445,7 +629,9 @@ impl Catalog {
         }
         if !table.contains_key("targets") {
             if destinations.is_empty() {
-                return Err("catalog_definition_requires_targets");
+                return Err(CatalogError::TargetsRequired {
+                    tool: name.to_owned(),
+                });
             }
             table.insert(
                 "targets".into(),
@@ -466,26 +652,48 @@ impl Catalog {
     pub(crate) fn load_workstation_entry(
         &self,
         name: &str,
-    ) -> Result<WorkstationEntry, &'static str> {
+    ) -> Result<WorkstationEntry, CatalogError> {
         let template = self
             .manifest
             .tools
             .get(name)
-            .ok_or("unknown catalog tool")?;
-        let policy = template.workstation.as_ref().ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
+        let policy =
+            template
+                .workstation
+                .as_ref()
+                .ok_or_else(|| CatalogError::InvalidDefinition {
+                    tool: name.to_owned(),
+                })?;
         if matches!(template.qualification, Qualification::LaboratoryOnly) {
-            return Err(ERROR);
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
         }
         let mut table = Self::validate_definition(&self.directory, name, &template.definition)?;
         let mut tools = table
             .remove("tools")
             .and_then(|v| v.try_into::<toml::Table>().ok())
-            .ok_or(ERROR)?;
-        let mut definition = tools.remove(name).ok_or(ERROR)?;
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
+        let mut definition = tools
+            .remove(name)
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
         if !tools.is_empty() {
-            return Err(ERROR);
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
         }
-        let table = definition.as_table_mut().ok_or(ERROR)?;
+        let table = definition
+            .as_table_mut()
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
         table.remove("constraints");
         table.insert(
             "fixed_args".into(),
@@ -522,10 +730,12 @@ impl Catalog {
                 let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
                 let source_bytes = bounded_read(
                     open_child(&tool_dir, Path::new("collector.py"), false)?,
+                    &format!("payloads/{name}/collector.py"),
                     1_048_576,
                 )?;
                 let manifest_raw = bounded_read(
                     open_child(&tool_dir, Path::new("manifest.json"), false)?,
+                    &format!("payloads/{name}/manifest.json"),
                     262_144,
                 )?;
                 Ok(WorkstationEntry::Payload {
@@ -537,15 +747,21 @@ impl Catalog {
         }
     }
 
-    pub fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), &'static str> {
+    pub fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), CatalogError> {
         let template = self
             .manifest
             .tools
             .get(name)
-            .ok_or("unknown catalog tool")?;
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
         let required: &[&str] = match &template.executor {
             Executor::NativePayload { .. } => &["collector.py", "manifest.json"],
-            Executor::AnsibleModule { .. } => return Err(ERROR),
+            Executor::AnsibleModule { .. } => {
+                return Err(CatalogError::InvalidDefinition {
+                    tool: name.to_owned(),
+                });
+            }
         };
         if destination.components().any(|component| {
             matches!(
@@ -553,7 +769,9 @@ impl Catalog {
                 std::path::Component::ParentDir | std::path::Component::CurDir
             )
         }) {
-            return Err(ERROR);
+            return Err(CatalogError::UnsafePath {
+                asset: bounded_name(destination),
+            });
         }
         let payloads = open_child(&self.directory, Path::new("payloads"), true)?;
         let directory = open_child(&payloads, Path::new(name), true)?;
@@ -570,11 +788,13 @@ impl Catalog {
             0,
         )?;
         let files = scan.files;
-        if required
+        if let Some(missing) = required
             .iter()
-            .any(|req| !files.iter().any(|(path, _)| path == Path::new(req)))
+            .find(|req| !files.iter().any(|(path, _)| path == Path::new(*req)))
         {
-            return Err(ERROR);
+            return Err(CatalogError::Missing {
+                asset: format!("payloads/{name}/{missing}"),
+            });
         }
         let parent = destination
             .parent()
@@ -584,18 +804,24 @@ impl Catalog {
         while let Some(path) = ancestor {
             if !path.as_os_str().is_empty()
                 && fs::symlink_metadata(path)
-                    .map_err(|_| ERROR)?
+                    .map_err(|_| CatalogError::Unreadable {
+                        asset: bounded_name(path),
+                    })?
                     .file_type()
                     .is_symlink()
             {
-                return Err(ERROR);
+                return Err(CatalogError::UnsafePath {
+                    asset: bounded_name(path),
+                });
             }
             ancestor = path.parent();
         }
         fs::DirBuilder::new()
             .mode(0o700)
             .create(destination)
-            .map_err(|_| ERROR)?;
+            .map_err(|_| CatalogError::UnsafePath {
+                asset: bounded_name(destination),
+            })?;
         let result = (|| {
             for (relative, bytes) in files {
                 let output = destination.join(relative);
@@ -604,16 +830,22 @@ impl Catalog {
                         .recursive(true)
                         .mode(0o700)
                         .create(parent)
-                        .map_err(|_| ERROR)?;
+                        .map_err(|_| CatalogError::Unreadable {
+                            asset: bounded_name(parent),
+                        })?;
                 }
+                let output_name = bounded_name(&output);
                 let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .mode(0o600)
                     .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
                     .open(output)
-                    .map_err(|_| ERROR)?;
-                file.write_all(&bytes).map_err(|_| ERROR)?;
+                    .map_err(|_| CatalogError::Unreadable {
+                        asset: output_name.clone(),
+                    })?;
+                file.write_all(&bytes)
+                    .map_err(|_| CatalogError::Unreadable { asset: output_name })?;
             }
             Ok(())
         })();
@@ -636,18 +868,27 @@ fn collect_payload(
     relative: &Path,
     scan: &mut PayloadScan,
     depth: usize,
-) -> Result<(), &'static str> {
+) -> Result<(), CatalogError> {
     if depth > 16 {
-        return Err(ERROR);
+        return Err(CatalogError::UnsupportedAsset {
+            asset: bounded_name(source),
+        });
     }
-    for entry in fs::read_dir(source).map_err(|_| ERROR)? {
-        let entry = entry.map_err(|_| ERROR)?;
+    let source_name = bounded_name(source);
+    for entry in fs::read_dir(source).map_err(|_| CatalogError::Unreadable {
+        asset: source_name.clone(),
+    })? {
+        let entry = entry.map_err(|_| CatalogError::Unreadable {
+            asset: source_name.clone(),
+        })?;
         scan.entries += 1;
         if scan.entries > PAYLOAD_FILES {
-            return Err(ERROR);
+            return Err(CatalogError::UnsupportedAsset { asset: source_name });
         }
         let name = entry.file_name();
-        let kind = entry.file_type().map_err(|_| ERROR)?;
+        let kind = entry.file_type().map_err(|_| CatalogError::Unreadable {
+            asset: source_name.clone(),
+        })?;
         let path = relative.join(&name);
         if kind.is_dir() {
             if name == "__pycache__" {
@@ -670,16 +911,21 @@ fn collect_payload(
                     .and_then(|extension| extension.to_str()),
                 Some("yml" | "yaml" | "py" | "json" | "toml")
             ) {
-                return Err(ERROR);
+                return Err(CatalogError::UnsupportedAsset {
+                    asset: bounded_name(&path),
+                });
             }
             let bytes = bounded_read(
                 open_child(directory, Path::new(&name), false)?,
+                &bounded_name(&path),
                 scan.remaining,
             )?;
             scan.remaining -= bytes.len() as u64;
             scan.files.push((path, bytes));
         } else {
-            return Err(ERROR);
+            return Err(CatalogError::UnsafePath {
+                asset: bounded_name(&path),
+            });
         }
     }
     Ok(())
@@ -714,7 +960,7 @@ mod workstation_tests {
                 manifest,
             } = catalog
                 .load_workstation_entry(name)
-                .unwrap_or_else(|e| panic!("{name}: {e}"))
+                .unwrap_or_else(|e| panic!("{name}: {}", e.reason()))
                 && let Err(error) = bindings.push_dynamic_payload(
                     name.to_owned(),
                     definition,
@@ -727,5 +973,113 @@ mod workstation_tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod error_variant_tests {
+    use super::*;
+
+    fn small_catalog(root: &Path) {
+        let payload = root.join("payloads/observe_cpu");
+        fs::create_dir_all(&payload).expect("fixture directory");
+        fs::write(
+            root.join("catalog.json"),
+            r#"{"schema":3,"version":"1","presets":{},"tools":{"observe_cpu":{"definition":"observe_cpu.toml","executor":{"kind":"native_payload","path":"payloads/observe_cpu"},"qualification":"site_policy_template","policy_required":false,"requires":["linux"]}}}"#,
+        )
+        .expect("fixture catalog.json");
+        fs::write(
+            root.join("observe_cpu.toml"),
+            "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\"]\n",
+        )
+        .expect("fixture observe_cpu.toml");
+        fs::write(payload.join("collector.py"), "raise SystemExit(0)\n")
+            .expect("fixture collector.py");
+        fs::write(payload.join("manifest.json"), "{}\n").expect("fixture manifest.json");
+    }
+
+    #[test]
+    fn error_variants_carry_safe_context_without_contents() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+
+        // Missing: the catalog root itself is absent.
+        let error = Catalog::load(Some(&root.join("missing"))).expect_err("absent root must fail");
+        assert!(matches!(&error, CatalogError::Missing { .. }), "{error:?}");
+
+        small_catalog(&root);
+        let catalog = Catalog::load(Some(&root)).expect("fixture loads");
+
+        // UnknownTool: a name that is not in the manifest.
+        let error = catalog
+            .definition("not_a_tool")
+            .expect_err("unknown name must fail");
+        assert!(
+            error.to_string() == "unknown catalog tool: not_a_tool",
+            "{error}"
+        );
+        assert!(error.reason() == "catalog_tool_unknown", "{}", error);
+
+        // Oversized: the definition exceeds its limit; its contents stay out.
+        let marker = "SECRET_MARKER_MUST_NOT_LEAK";
+        let mut definition = vec![b'x'; DEFINITION_LIMIT as usize + 1];
+        definition[1024..1024 + marker.len()].copy_from_slice(marker.as_bytes());
+        fs::write(root.join("observe_cpu.toml"), &definition).unwrap();
+        let error = catalog
+            .definition("observe_cpu")
+            .expect_err("oversized definition must fail");
+        assert!(
+            matches!(&error, CatalogError::Oversized { asset } if asset == "observe_cpu.toml"),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains(marker));
+
+        // Malformed: TOML that does not parse.
+        fs::write(root.join("observe_cpu.toml"), "[not valid toml = =\n").unwrap();
+        let error = catalog
+            .definition("observe_cpu")
+            .expect_err("malformed definition must fail");
+        assert!(
+            matches!(&error, CatalogError::Malformed { asset } if asset == "observe_cpu.toml"),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("not valid toml"));
+        fs::write(
+            root.join("observe_cpu.toml"),
+            "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\"]\n",
+        )
+        .unwrap();
+
+        // UnsupportedAsset: a payload file type the catalog does not review.
+        let payload = root.join("payloads/observe_cpu");
+        fs::write(payload.join("extra.sh"), "#!/bin/sh\n").unwrap();
+        let error = catalog
+            .copy_assets("observe_cpu", &root.join("out"))
+            .expect_err("unexpected payload type must fail");
+        assert!(
+            matches!(&error, CatalogError::UnsupportedAsset { asset } if asset.ends_with("extra.sh")),
+            "{error:?}"
+        );
+        fs::remove_file(payload.join("extra.sh")).unwrap();
+
+        // Missing: a payload without its mandatory files names the exact path.
+        fs::remove_file(payload.join("collector.py")).unwrap();
+        let error = catalog
+            .copy_assets("observe_cpu", &root.join("out"))
+            .expect_err("incomplete payload must fail");
+        assert!(
+            matches!(&error, CatalogError::Missing { asset } if asset == "payloads/observe_cpu/collector.py"),
+            "{error:?}"
+        );
+
+        // The CLI audit record carries the stable code plus safe context only.
+        let error = catalog
+            .definition("not_a_tool")
+            .expect_err("unknown name again");
+        let record = error.payload();
+        assert_eq!(record["event"], "error");
+        assert_eq!(record["code"], "catalog_tool_unknown");
+        assert_eq!(record["detail"], "not_a_tool");
+        assert!(!record.to_string().contains("fixture"));
     }
 }

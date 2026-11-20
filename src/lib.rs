@@ -71,7 +71,9 @@ pub mod internal {
     }
 
     pub mod catalog_assets {
-        pub use crate::catalog::assets::{Catalog, Executor, Manifest, Qualification, Template};
+        pub use crate::catalog::assets::{
+            Catalog, CatalogError, Executor, Manifest, Qualification, Template,
+        };
     }
 }
 

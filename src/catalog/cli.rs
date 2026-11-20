@@ -16,11 +16,18 @@ use crate::catalog::assets::Catalog;
 enum Failure {
     Code(&'static str),
     Config(crate::config::ConfigError),
+    Catalog(crate::catalog::assets::CatalogError),
 }
 
 impl From<&'static str> for Failure {
     fn from(code: &'static str) -> Self {
         Self::Code(code)
+    }
+}
+
+impl From<crate::catalog::assets::CatalogError> for Failure {
+    fn from(error: crate::catalog::assets::CatalogError) -> Self {
+        Self::Catalog(error)
     }
 }
 
@@ -36,6 +43,11 @@ impl Failure {
             Self::Config(error) => crate::audit::emit(&error.record()),
             Self::Code(code) => {
                 crate::audit::emit(&json!({"event":"error","code":code,"phase":operation}))
+            }
+            Self::Catalog(error) => {
+                let mut record = error.payload();
+                record["phase"] = json!(operation);
+                crate::audit::emit(&record)
             }
         }
         2
@@ -88,29 +100,29 @@ fn selected(
     catalog: &Catalog,
     tools: Vec<String>,
     presets: Vec<String>,
-) -> Result<BTreeSet<String>, &'static str> {
+) -> Result<BTreeSet<String>, Failure> {
     let mut names = BTreeSet::new();
     let mut explicit = BTreeSet::new();
     for name in tools {
         if !catalog.manifest().tools.contains_key(&name) || !explicit.insert(name.clone()) {
-            return Err("catalog_tool_unknown_or_duplicate");
+            return Err(Failure::Code("catalog_tool_unknown_or_duplicate"));
         }
         names.insert(name);
     }
     let mut seen = BTreeSet::new();
     for preset in presets {
         if !seen.insert(preset.clone()) {
-            return Err("catalog_preset_duplicate");
+            return Err(Failure::Code("catalog_preset_duplicate"));
         }
         let members = catalog
             .manifest()
             .presets
             .get(&preset)
-            .ok_or("catalog_preset_unknown")?;
+            .ok_or(Failure::Code("catalog_preset_unknown"))?;
         names.extend(members.iter().cloned());
     }
     if names.is_empty() || names.len() > 256 {
-        return Err("catalog_selection_limit");
+        return Err(Failure::Code("catalog_selection_limit"));
     }
     Ok(names)
 }
@@ -124,7 +136,7 @@ fn template_metadata(template: &super::assets::Template) -> Value {
     })
 }
 
-fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
+fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, Failure> {
     let mut tools = Vec::with_capacity(catalog.manifest().tools.len());
     for (name, template) in &catalog.manifest().tools {
         let definition = catalog.definition(name)?;
@@ -133,12 +145,12 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
             .and_then(|v| v.get(name))
             .and_then(|v| v.get("description"))
             .and_then(toml::Value::as_str)
-            .ok_or("catalog_definition_invalid")?;
+            .ok_or(Failure::Code("catalog_definition_invalid"))?;
         tools.push(json!({"name":name,"description":description,"qualification":template.qualification,"policy_required":template.policy_required,"requires":template.requires}));
     }
     if as_json {
         let mut bytes = serde_json::to_vec(&json!({"schema":catalog.manifest().schema,"version":catalog.manifest().version,"presets":catalog.manifest().presets,"tools":tools}))
-            .map_err(|_| "catalog_output_invalid")?;
+            .map_err(|_| Failure::Code("catalog_output_invalid"))?;
         bytes.push(b'\n');
         return Ok(bytes);
     }
@@ -152,10 +164,12 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
     for tool in tools {
         text.push_str(&format!(
             "{}\t{}\t{}\t{}\t",
-            tool["name"].as_str().ok_or("catalog_output_invalid")?,
+            tool["name"]
+                .as_str()
+                .ok_or(Failure::Code("catalog_output_invalid"))?,
             tool["qualification"]
                 .as_str()
-                .ok_or("catalog_output_invalid")?,
+                .ok_or(Failure::Code("catalog_output_invalid"))?,
             if tool["policy_required"] == true {
                 "review fixed policy before enabling"
             } else {
@@ -163,33 +177,37 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, &'static str> {
             },
             tool["description"]
                 .as_str()
-                .ok_or("catalog_output_invalid")?
+                .ok_or(Failure::Code("catalog_output_invalid"))?
         ));
         for (index, requirement) in tool["requires"]
             .as_array()
-            .ok_or("catalog_output_invalid")?
+            .ok_or(Failure::Code("catalog_output_invalid"))?
             .iter()
             .enumerate()
         {
             if index != 0 {
                 text.push(',');
             }
-            text.push_str(requirement.as_str().ok_or("catalog_output_invalid")?);
+            text.push_str(
+                requirement
+                    .as_str()
+                    .ok_or(Failure::Code("catalog_output_invalid"))?,
+            );
         }
         text.push('\n');
     }
     Ok(text.into_bytes())
 }
 
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), &'static str> {
+fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Failure> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(mode)
         .open(path)
-        .map_err(|_| "catalog_output_unavailable")?;
+        .map_err(|_| Failure::Code("catalog_output_unavailable"))?;
     file.write_all(bytes)
-        .map_err(|_| "catalog_output_unavailable")
+        .map_err(|_| Failure::Code("catalog_output_unavailable"))
 }
 
 fn export(
@@ -197,17 +215,17 @@ fn export(
     tools: Vec<String>,
     presets: Vec<String>,
     path: &Path,
-) -> Result<Value, &'static str> {
+) -> Result<Value, Failure> {
     let names = selected(catalog, tools, presets)?;
     DirBuilder::new()
         .mode(0o700)
         .create(path)
-        .map_err(|_| "catalog_output_exists_or_unavailable")?;
+        .map_err(|_| Failure::Code("catalog_output_exists_or_unavailable"))?;
     let result = (|| {
         DirBuilder::new()
             .mode(0o700)
             .create(path.join("payloads"))
-            .map_err(|_| "catalog_output_unavailable")?;
+            .map_err(|_| Failure::Code("catalog_output_unavailable"))?;
         let mut definitions = toml::Table::new();
         let mut metadata = serde_json::Map::new();
         for name in &names {
@@ -215,27 +233,27 @@ fn export(
                 .manifest()
                 .tools
                 .get(name)
-                .ok_or("catalog_tool_unknown")?;
+                .ok_or(Failure::Code("catalog_tool_unknown"))?;
             metadata.insert(name.clone(), template_metadata(template));
             let mut document = catalog.definition(name)?;
             let mut definition = document
                 .get_mut("tools")
                 .and_then(toml::Value::as_table_mut)
                 .and_then(|tools| tools.remove(name))
-                .ok_or("catalog_definition_invalid")?;
+                .ok_or(Failure::Code("catalog_definition_invalid"))?;
             if let super::assets::Executor::NativePayload { .. } = &template.executor {
                 let bundle = path.join("payloads").join(name);
                 catalog.copy_assets(name, &bundle)?;
                 definition
                     .get_mut("execution")
                     .and_then(toml::Value::as_table_mut)
-                    .ok_or("catalog_definition_invalid")?
+                    .ok_or(Failure::Code("catalog_definition_invalid"))?
                     .insert(
                         "source".into(),
                         bundle
                             .join("collector.py")
                             .to_str()
-                            .ok_or("catalog_output_unavailable")?
+                            .ok_or(Failure::Code("catalog_output_unavailable"))?
                             .into(),
                     );
             }
@@ -246,7 +264,8 @@ fn export(
         let text = format!(
             "# Inert definitions for review. Edit fixed_args/constraints here, then\n\
              # enable these names (and this file's [tools] table) in your site configuration.\n{}",
-            toml::to_string_pretty(&document).map_err(|_| "catalog_output_invalid")?
+            toml::to_string_pretty(&document)
+                .map_err(|_| Failure::Code("catalog_output_invalid"))?
         );
         write_new(&path.join("tools.toml"), text.as_bytes(), 0o600)?;
         write_new(
@@ -255,7 +274,7 @@ fn export(
                 "schema":catalog.manifest().schema,"version":catalog.manifest().version,
                 "scope":"catalog_templates","tools":metadata,
             }))
-            .map_err(|_| "catalog_output_invalid")?,
+            .map_err(|_| Failure::Code("catalog_output_invalid"))?,
             0o600,
         )?;
         Ok(())
@@ -290,8 +309,8 @@ pub(crate) async fn run(
         Ok(Ok((catalog, command))) if !shutdown.is_cancelled() => match command {
             CatalogCommand::List { json } => {
                 match tokio::task::spawn_blocking(move || describe(&catalog, json)).await {
-                    Ok(value) => value.map_err(Failure::from),
-                    Err(_) => Err("catalog_unavailable".into()),
+                    Ok(value) => value,
+                    Err(_) => Err(Failure::Code("catalog_unavailable")),
                 }
             }
             CatalogCommand::Export {
@@ -303,15 +322,15 @@ pub(crate) async fn run(
                     .await
                 {
                     Ok(Ok(value)) => serde_json::to_vec(&value)
-                        .map_err(|_| Failure::from("catalog_output_invalid")),
-                    Ok(Err(error)) => Err(error.into()),
-                    Err(_) => Err("catalog_output_unavailable".into()),
+                        .map_err(|_| Failure::Code("catalog_output_invalid")),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err(Failure::Code("catalog_output_unavailable")),
                 }
             }
         },
         Ok(Err(error)) => Err(error),
-        Ok(Ok(_)) => Err("cancelled".into()),
-        Err(_) => Err("catalog_unavailable".into()),
+        Ok(Ok(_)) => Err(Failure::Code("cancelled")),
+        Err(_) => Err(Failure::Code("catalog_unavailable")),
     };
     match result {
         Ok(mut bytes) if !shutdown.is_cancelled() => {
@@ -324,7 +343,7 @@ pub(crate) async fn run(
                 2
             }
         }
-        Ok(_) => Failure::from("cancelled").publish(phase),
+        Ok(_) => Failure::Code("cancelled").publish(phase),
         Err(error) => error.publish(phase),
     }
 }

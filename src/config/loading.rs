@@ -172,7 +172,7 @@ fn resolve_catalog_selection(
             .transpose()?;
         Some(
             crate::catalog::assets::Catalog::load(path.as_deref())
-                .map_err(|reason| invalid("catalog", reason))?,
+                .map_err(|e| invalid("catalog", e.reason()))?,
         )
     } else {
         None
@@ -303,7 +303,7 @@ fn materialize_catalog_tools(
                 overrides.and_then(toml::Value::as_table),
                 &destinations,
             )
-            .map_err(|reason| invalid("tools", reason))?;
+            .map_err(|e| invalid("tools", e.reason()))?;
         resolved.insert(name.clone(), definition);
     }
     for (name, definition) in resolved {
@@ -543,7 +543,7 @@ impl Config {
             };
             if let Some(path) = catalog_source {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
-                    .map_err(|reason| invalid("catalog", reason))?;
+                    .map_err(|e| invalid("catalog", e.reason()))?;
                 for name in catalog.workstation_tool_names() {
                     if document.disabled_tools.iter().any(|d| d == name)
                         || bindings.entries().any(|(_, b)| b.name == name)
@@ -552,7 +552,7 @@ impl Config {
                     }
                     match catalog
                         .load_workstation_entry(name)
-                        .map_err(|reason| invalid("catalog", reason))?
+                        .map_err(|e| invalid("catalog", e.reason()))?
                     {
                         crate::catalog::assets::WorkstationEntry::Payload {
                             definition,

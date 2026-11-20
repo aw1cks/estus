@@ -2,7 +2,7 @@
 
 use estus::internal::catalog_assets as assets;
 
-use assets::Catalog;
+use assets::{Catalog, CatalogError};
 use serde_json::Value;
 use std::{
     fs,
@@ -47,13 +47,21 @@ fn canonical_catalog_exports_every_operational_definition_and_executor_asset() {
             }
         }
     }
-    assert!(catalog.definition("../observe_cpu").is_err());
-    assert!(catalog.definition("not_a_tool").is_err());
-    assert!(
+    // The traversal name is not a manifest key, so it fails as unknown.
+    assert!(matches!(
+        catalog.definition("../observe_cpu").unwrap_err(),
+        CatalogError::UnknownTool { .. }
+    ));
+    assert!(matches!(
+        catalog.definition("not_a_tool").unwrap_err(),
+        CatalogError::UnknownTool { tool } if tool == "not_a_tool"
+    ));
+    assert!(matches!(
         catalog
             .copy_assets("not_a_tool", &output.join("unknown"))
-            .is_err()
-    );
+            .unwrap_err(),
+        CatalogError::UnknownTool { tool } if tool == "not_a_tool"
+    ));
     assert!(!output.join("unknown").exists());
 }
 
