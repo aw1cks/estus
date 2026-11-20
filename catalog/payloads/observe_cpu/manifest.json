@@ -3,21 +3,21 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "da3392209f7ab8fdb75562d16138a093782242e05af8298097ae4f44f1c05ada",
+  "source_sha256": "67745059005cc996fa1855dd26a961f9c53bd14af585b623b2adcd2ce7f954fe",
   "max_source_bytes": 1048576,
   "argv": [
     {
       "kind": "argument",
       "name": "limit",
       "default": 8,
-      "format": "scalar",
+      "format": "json",
       "omit_if_absent": false
     },
     {
       "kind": "argument",
       "name": "sample_ms",
       "default": 0,
-      "format": "scalar",
+      "format": "json",
       "omit_if_absent": false
     }
   ],

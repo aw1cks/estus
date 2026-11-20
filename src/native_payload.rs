@@ -53,12 +53,11 @@ pub(crate) struct Manifest {
     pub contract: Value,
     pub approval: Approval,
 }
+/// The reviewed adapter. Only the forms a shipped manifest uses may deserialize:
+/// an unknown `kind` or `format` is a manifest authoring error, not a new capability.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Arg {
-    Fixed {
-        value: String,
-    },
     Argument {
         name: String,
         format: Format,
@@ -78,9 +77,10 @@ pub(crate) enum Arg {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Format {
+    /// A bare scalar string, passed through unchanged.
     Scalar,
+    /// A JSON value the collector parses from typed input.
     Json,
-    PythonBool,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -292,9 +292,6 @@ fn validate_manifest(m: &Manifest) -> Result<(), ConfigError> {
     }
     for arg in &m.argv {
         match arg {
-            Arg::Fixed { value } if value.len() > 8192 || value.contains('\0') => {
-                return Err(invalid());
-            }
             Arg::Argument { name, .. } if name.is_empty() || name.len() > 128 => {
                 return Err(invalid());
             }
@@ -442,7 +439,6 @@ fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
     let mut bytes = 0usize;
     for arg in adapter {
         let value = match arg {
-            Arg::Fixed { value } => Value::String(value.clone()),
             Arg::Object { fields } => {
                 let mut object = serde_json::Map::new();
                 for (key, field) in fields {
@@ -475,11 +471,6 @@ fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
                     Format::Scalar => match value {
                         Value::String(_) => value.clone(),
                         _ => return Err(invalid()),
-                    },
-                    Format::PythonBool => match value.as_bool() {
-                        Some(true) => Value::String("True".into()),
-                        Some(false) => Value::String("False".into()),
-                        None => return Err(invalid()),
                     },
                 }
             }
@@ -515,6 +506,32 @@ mod tests {
         assert_eq!(
             adapt(&adapter, &json!({"x":{"literal":"{{ x }};\n☃"}})).unwrap(),
             vec![json!({"literal":"{{ x }};\n☃"}), json!("")]
+        );
+    }
+
+    #[test]
+    fn retired_adapter_variants_fail_to_parse() {
+        // Only the shapes a shipped manifest uses may deserialize.
+        for adapter in [
+            json!([{"kind": "fixed", "value": "--now"}]),
+            json!([{"kind": "argument", "name": "x", "format": "python_bool"}]),
+            json!([{"kind": "argument", "name": "x", "format": "shell"}]),
+            json!([{"kind": "constant", "value": "x"}]),
+            json!([{"kind": "object", "fields": {}, "extra": 1}]),
+        ] {
+            assert!(
+                serde_json::from_value::<Vec<Arg>>(adapter.clone()).is_err(),
+                "{adapter} must not deserialize"
+            );
+        }
+        // The shipped shapes still do.
+        assert!(
+            serde_json::from_value::<Vec<Arg>>(json!([
+                {"kind": "object", "fields": {"unit": {"name": "unit"}}},
+                {"kind": "argument", "name": "limit", "format": "scalar", "default": 8},
+                {"kind": "argument", "name": "keys", "format": "json"},
+            ]))
+            .is_ok()
         );
     }
 

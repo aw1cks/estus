@@ -34,13 +34,12 @@ def main():
 
     if platform.system() != 'Linux':
         raise ValueError('CPU observation requires Linux')
-    limit_value, sample_value = estus_runtime.request()[:2]
-    if not isinstance(limit_value, str) or not isinstance(sample_value, str):
-        raise ValueError('CPU observation requires string scalars')
-    limit = integer(limit_value.encode('ascii'), 16)
-    sample_ms = integer(sample_value.encode('ascii'), 2000)
-    if limit < 1:
-        raise ValueError('topology limit must be positive')
+    limit, sample_ms = estus_runtime.request()[:2]
+    for value in (limit, sample_ms):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError('CPU observation requires integer bounds')
+    if not 1 <= limit <= 16 or not 0 <= sample_ms <= 2000:
+        raise ValueError('CPU observation outside supported range')
     hz = os.sysconf('SC_CLK_TCK')
     if not isinstance(hz, int) or not 1 <= hz <= 1000000:
         raise ValueError('unsupported clock tick frequency')
