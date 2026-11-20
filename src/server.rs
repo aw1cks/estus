@@ -42,6 +42,7 @@ struct State {
     outputs: OutputStore,
     directories: Option<operations::DirectoryStore>,
     progress: crate::progress::Registry,
+    pending_replies: Arc<crate::progress::PendingReplies>,
     automation: Arc<Semaphore>,
     admission: admission::TargetAdmission,
     payload: Arc<crate::native_payload::Engine>,
@@ -58,6 +59,8 @@ impl Estus {
             input_schemas,
         } = registration::register(&config)?;
         let shutdown = CancellationToken::new();
+        let pending_replies =
+            crate::progress::PendingReplies::new(shutdown.clone(), CancellationToken::new());
         let pool = Pool::new(
             config.ssh_executable().to_path_buf(),
             config.ssh_config().map(std::path::Path::to_path_buf),
@@ -92,12 +95,17 @@ impl Estus {
                 cleanup_quarantine: Arc::new(crate::controller::CleanupQuarantine::new()),
                 previews: preview::PreviewStore::new(),
                 progress: crate::progress::Registry::default(),
+                pending_replies,
             }),
         })
     }
 
     pub(crate) fn shutdown_token(&self) -> CancellationToken {
         self.state.shutdown.clone()
+    }
+
+    pub(crate) fn pending_replies(&self) -> Arc<crate::progress::PendingReplies> {
+        Arc::clone(&self.state.pending_replies)
     }
 
     pub(crate) async fn shutdown(&self) {

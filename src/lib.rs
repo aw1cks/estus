@@ -327,16 +327,16 @@ async fn run_session(
     terminate: &mut tokio::signal::unix::Signal,
 ) -> ExitCode {
     let shutdown = application.shutdown_token();
-    let overload = CancellationToken::new();
+    let pending = application.pending_replies();
+    let overload = pending.overload_token();
     let (input, output) = rmcp::transport::stdio();
     let input = EofStdin {
         inner: input,
         shutdown: shutdown.clone(),
     };
-    let transport = progress::BoundedTransport::with_control(
+    let transport = progress::BoundedTransport::with_pending(
         rmcp::transport::async_rw::AsyncRwTransport::<rmcp::RoleServer, _, _>::new(input, output),
-        shutdown.clone(),
-        overload.clone(),
+        pending,
     );
     let service = tokio::select! {
         biased;

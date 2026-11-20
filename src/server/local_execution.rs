@@ -183,6 +183,7 @@ impl Estus {
         let revision = binding.revision.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
+            let _credit = crate::progress::HandlerCredit::from_context(&context);
             let _permits = (operation, runtime);
             let metadata = Metadata {
                 request_id: &context.id,
@@ -451,6 +452,7 @@ impl Estus {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
             // Receiver cancellation cannot drop admission, files, or child ownership.
+            let _credit = crate::progress::HandlerCredit::from_context(&context);
             let permit = permit;
             let metadata = state.controller_metadata(id, &context.id);
             let audit = Audit::start(metadata, started);

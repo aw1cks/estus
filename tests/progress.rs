@@ -539,10 +539,12 @@ limits = {{ timeout_secs = {seconds}, max_output_bytes = {limit} }}
         );
         controller_clean(&root).await?;
         // Let slow_controller's ~2 MiB frame enter BoundedTransport::send and block on the OS pipe.
-        // Request 5 (cancelled earlier) already retains 1 credit, plus 300 (1) + 13 tools/list + 301 (1) = 16.
+        // Request 5 (cancelled earlier) reclaimed its credit after cleanup.
+        // Fill 300 (1) + 14 tools/list = 15, cancel 301 in slot 16 and verify reclamation,
+        // then refill slot 16 (tools/list 1099) and trip overload on 302 (17th).
         sleep(Duration::from_millis(50)).await;
         timeout(WAIT, async {
-            for index in 0..13_u64 {
+            for index in 0..14_u64 {
                 server
                     .send(json!({"jsonrpc":"2.0","id":1000 + index,
                     "method":"tools/list","params":{}}))
@@ -563,6 +565,9 @@ limits = {{ timeout_secs = {seconds}, max_output_bytes = {limit} }}
             "cancel before overload failed owned cleanup: {audit}"
         );
         controller_clean(&root).await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":1099,"method":"tools/list","params":{}}))
+            .await?;
         call(&mut server, 302, "overload_controller", json!({}), None).await?;
         Ok::<_, anyhow::Error>(())
     }
@@ -625,7 +630,7 @@ limits = {{ timeout_secs = {seconds}, max_output_bytes = {limit} }}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking, Nix OpenSSH and a non-root local account"]
-async fn sequential_cancelled_requests_trigger_overload_without_blocking_stdout() -> Result<()> {
+async fn sequential_cancelled_requests_reclaim_credits_without_session_overload() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))?;
     let root = temp.path().join("controller-private");
@@ -643,8 +648,8 @@ async fn sequential_cancelled_requests_trigger_overload_without_blocking_stdout(
         r#"
 set -eu
 case "$MCP_MODE" in
-  overload)
-    printf ran > {observations}/overload-ran
+  verify)
+    printf ran > {observations}/verify-ran
     exit 0 ;;
   interrupt)
     printf ready > {observations}/interrupt-ready
@@ -666,12 +671,12 @@ esac
         Ok(toml::Value::String(text(path)?.to_owned()).to_string())
     };
     let mut configuration = format!(
-        "capabilities = {{ named = true }}\nenabled_tools = [\"cancel_controller\", \"overload_controller\"]\n[controller]\nworkspace_root = {}\n",
+        "capabilities = {{ named = true }}\nenabled_tools = [\"cancel_controller\", \"verify_controller\"]\n[controller]\nworkspace_root = {}\n",
         string(&root)?
     );
     for (name, mode) in [
         ("cancel_controller", "interrupt"),
-        ("overload_controller", "overload"),
+        ("verify_controller", "verify"),
     ] {
         configuration.push_str(&format!(
             "\n[tools.{name}]\ndescription = \"Cancel credit test\"\nrevision = \"cancel-1\"\nauthority = \"controller\"\neffects = [\"read\"]\nexecution = {{ kind = \"controller_script\", source = {{ path = {}, content_sha256 = \"{digest}\", max_bytes = 65536 }}, interpreter = {{ program = {}, argv = [] }}, environment = {{ MCP_MODE = \"{mode}\" }} }}\ninput_schema = {{ type = \"object\", additionalProperties = false, required = [], properties = {{}} }}\nresult = {{ kind = \"controller_command\" }}\n",
@@ -684,7 +689,7 @@ esac
     let ready = observations.join("interrupt-ready");
     let scenario = async {
         server.initialize().await?;
-        for id in 2..=17_u64 {
+        for id in 2..=21_u64 {
             if ready.exists() {
                 fs::remove_file(&ready)?;
             }
@@ -698,26 +703,19 @@ esac
             ensure!(audit["owned_group_cleanup"] == "signalled_and_reaped");
             controller_clean(&root).await?;
         }
-        call(&mut server, 18, "overload_controller", json!({}), None).await
+        call(&mut server, 22, "verify_controller", json!({}), None).await?;
+        let frame = response(&mut server, 22, None).await?;
+        let result = envelope(&frame)?;
+        ensure!(result["error"].is_null() && result["data"]["exit_code"] == 0);
+        ensure!(observations.join("verify-ran").exists());
+        Ok::<_, anyhow::Error>(())
     }
     .await;
     let release = fs::write(observations.join("release"), b"release");
-    let exited = server.wait_exit().await;
+    let stopped = server.stop(None).await;
     scenario?;
     release?;
-    let (status, _frames, log) = exited?;
-    ensure!(
-        !status.success(),
-        "overloaded session exited cleanly: {status}"
-    );
-    ensure!(
-        log.final_records()?
-            .iter()
-            .any(|record| record["event"] == "error" && record["code"] == "mcp_session_overloaded"),
-        "missing mcp_session_overloaded audit record: {}",
-        log.text()
-    );
-    ensure!(!observations.join("overload-ran").exists());
+    stopped?;
     controller_clean(&root).await
 }
 

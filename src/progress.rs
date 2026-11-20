@@ -1,6 +1,6 @@
 //! Advisory request-scoped observations; never part of execution or cleanup ownership.
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
@@ -310,27 +310,39 @@ async fn publish(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreditState {
+    Dispatched,
+    InHandler { cancelled: bool },
+    CompletedAwaitingRmcp,
+    Sending,
+}
+
 struct PendingState {
-    ids: HashSet<RequestId>,
+    entries: HashMap<RequestId, CreditState>,
     overloaded: bool,
 }
 
-struct PendingReplies {
+pub(crate) struct PendingReplies {
     state: Mutex<PendingState>,
     shutdown: CancellationToken,
     overload: CancellationToken,
 }
 
 impl PendingReplies {
-    fn new(shutdown: CancellationToken, overload: CancellationToken) -> Self {
-        Self {
+    pub(crate) fn new(shutdown: CancellationToken, overload: CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
             state: Mutex::new(PendingState {
-                ids: HashSet::new(),
+                entries: HashMap::new(),
                 overloaded: false,
             }),
             shutdown,
             overload,
-        }
+        })
+    }
+
+    pub(crate) fn overload_token(&self) -> CancellationToken {
+        self.overload.clone()
     }
 
     fn is_overloaded(&self) -> bool {
@@ -340,10 +352,14 @@ impl PendingReplies {
     fn reserve(&self, id: &RequestId) -> bool {
         let overloaded = {
             let mut state = lock(&self.state);
-            if state.overloaded || state.ids.len() >= MAX_ACTIVE || !state.ids.insert(id.clone()) {
+            if state.overloaded
+                || state.entries.len() >= MAX_ACTIVE
+                || state.entries.contains_key(id)
+            {
                 state.overloaded = true;
                 true
             } else {
+                state.entries.insert(id.clone(), CreditState::Dispatched);
                 false
             }
         };
@@ -353,6 +369,72 @@ impl PendingReplies {
             return false;
         }
         true
+    }
+
+    fn mark_sending(&self, id: &RequestId) {
+        let mut state = lock(&self.state);
+        if let Some(slot) = state.entries.get_mut(id) {
+            *slot = CreditState::Sending;
+        }
+    }
+
+    fn mark_cancelled(&self, id: &RequestId) {
+        let mut state = lock(&self.state);
+        match state.entries.get_mut(id) {
+            Some(CreditState::Dispatched | CreditState::CompletedAwaitingRmcp) => {
+                state.entries.remove(id);
+            }
+            Some(CreditState::InHandler { cancelled }) => {
+                *cancelled = true;
+            }
+            Some(CreditState::Sending) | None => {}
+        }
+    }
+
+    pub(crate) fn enter_handler(self: &Arc<Self>, id: &RequestId) -> HandlerCredit {
+        let mut state = lock(&self.state);
+        let Some(slot) = state.entries.get_mut(id) else {
+            return HandlerCredit::default();
+        };
+        if matches!(slot, CreditState::Dispatched) {
+            *slot = CreditState::InHandler { cancelled: false };
+        }
+        HandlerCredit(Some(Arc::new(CreditGuard {
+            pending: Arc::clone(self),
+            id: id.clone(),
+        })))
+    }
+}
+
+struct CreditGuard {
+    pending: Arc<PendingReplies>,
+    id: RequestId,
+}
+
+impl Drop for CreditGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.pending.state);
+        match state.entries.get_mut(&self.id) {
+            Some(CreditState::InHandler { cancelled: true }) => {
+                state.entries.remove(&self.id);
+            }
+            Some(slot @ CreditState::InHandler { cancelled: false }) => {
+                *slot = CreditState::CompletedAwaitingRmcp;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct HandlerCredit(#[allow(dead_code)] Option<Arc<CreditGuard>>);
+impl HandlerCredit {
+    pub(crate) fn from_context(context: &RequestContext<RoleServer>) -> Self {
+        context
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -364,7 +446,7 @@ struct ReplyCredit {
 impl Drop for ReplyCredit {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
-            lock(&self.pending.state).ids.remove(&id);
+            lock(&self.pending.state).entries.remove(&id);
         }
     }
 }
@@ -381,15 +463,20 @@ impl<T> BoundedTransport<T> {
         Self::with_control(inner, CancellationToken::new(), CancellationToken::new())
     }
 
+    #[cfg(test)]
     pub(crate) fn with_control(
         inner: T,
         shutdown: CancellationToken,
         overload: CancellationToken,
     ) -> Self {
+        Self::with_pending(inner, PendingReplies::new(shutdown, overload))
+    }
+
+    pub(crate) fn with_pending(inner: T, pending: Arc<PendingReplies>) -> Self {
         Self {
             inner,
             writer: Arc::new(tokio::sync::Mutex::new(())),
-            pending: Arc::new(PendingReplies::new(shutdown, overload)),
+            pending,
         }
     }
 }
@@ -426,9 +513,12 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
             .as_ref()
             .map(|_| self.writer.clone().try_lock_owned().ok());
         let writer = self.writer.clone();
-        let credit = release_id.map(|id| ReplyCredit {
-            pending: Arc::clone(&self.pending),
-            id: Some(id),
+        let credit = release_id.map(|id| {
+            self.pending.mark_sending(&id);
+            ReplyCredit {
+                pending: Arc::clone(&self.pending),
+                id: Some(id),
+            }
         });
         let send = fits.then(|| self.inner.send(message));
         async move {
@@ -454,10 +544,21 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
             return None;
         }
         let message = self.inner.receive().await?;
-        if let ClientJsonRpcMessage::Request(request) = &message
-            && !self.pending.reserve(&request.id)
-        {
-            return None;
+        match &message {
+            ClientJsonRpcMessage::Request(request) => {
+                if !self.pending.reserve(&request.id) {
+                    return None;
+                }
+            }
+            ClientJsonRpcMessage::Notification(notif) => {
+                if let rmcp::model::ClientNotification::CancelledNotification(cancelled) =
+                    &notif.notification
+                    && let Some(id) = &cancelled.params.request_id
+                {
+                    self.pending.mark_cancelled(id);
+                }
+            }
+            _ => {}
         }
         Some(message)
     }
@@ -467,7 +568,7 @@ impl<T: Transport<RoleServer, Error = io::Error>> Transport<RoleServer> for Boun
         let close = self.inner.close();
         async move {
             let result = close.await;
-            lock(&pending.state).ids.clear();
+            lock(&pending.state).entries.clear();
             result
         }
     }
@@ -624,31 +725,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelled_requests_retain_credits_until_session_shutdown() {
+    async fn cancelled_requests_hold_credits_while_active_and_reclaim_after_cleanup() {
         use rmcp::{
             ErrorData,
             handler::server::ServerHandler,
             model::{
-                CallToolRequestParams, CallToolResponse, InitializeResult, ServerCapabilities,
+                CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult,
+                ServerCapabilities,
             },
             service::ServiceExt,
         };
         use tokio::io::AsyncWriteExt;
 
-        struct HoldUntilCancel {
+        struct HoldUntilRelease {
+            pending: Arc<PendingReplies>,
             started: Arc<tokio::sync::Mutex<Vec<RequestId>>>,
+            cleanup_gate: CancellationToken,
         }
-        impl ServerHandler for HoldUntilCancel {
+        impl ServerHandler for HoldUntilRelease {
             fn get_info(&self) -> InitializeResult {
                 InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             }
             async fn call_tool(
                 &self,
-                _request: CallToolRequestParams,
+                request: CallToolRequestParams,
                 context: RequestContext<RoleServer>,
             ) -> Result<CallToolResponse, ErrorData> {
+                let _call_credit = self.pending.enter_handler(&context.id);
+                let cleanup_credit = _call_credit.clone();
                 self.started.lock().await.push(context.id.clone());
+                if request.name == "echo" {
+                    return Ok(CallToolResult::structured(serde_json::json!({"ok": true})).into());
+                }
+                let gate = self.cleanup_gate.clone();
+                // Simulate detached cleanup task retaining HandlerCredit after handler cancel.
+                let cleanup = tokio::spawn(async move {
+                    let _credit = cleanup_credit;
+                    gate.cancelled().await;
+                });
                 context.ct.cancelled().await;
+                let _ = cleanup.await;
                 Err(ErrorData::internal_error("cancelled", None))
             }
         }
@@ -658,16 +774,19 @@ mod tests {
             let (client_out, server_out) = tokio::io::duplex(4096);
             let shutdown = CancellationToken::new();
             let overload = CancellationToken::new();
-            let transport = BoundedTransport::with_control(
+            let pending = PendingReplies::new(shutdown.clone(), overload.clone());
+            let transport = BoundedTransport::with_pending(
                 rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
                     server_in, server_out,
                 ),
-                shutdown.clone(),
-                overload.clone(),
+                Arc::clone(&pending),
             );
             let started = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-            let handler = HoldUntilCancel {
+            let cleanup_gate = CancellationToken::new();
+            let handler = HoldUntilRelease {
+                pending: Arc::clone(&pending),
                 started: Arc::clone(&started),
+                cleanup_gate: cleanup_gate.clone(),
             };
             let server_task = tokio::spawn(async move {
                 let service = handler.serve(transport).await.unwrap();
@@ -690,7 +809,9 @@ mod tests {
                 .unwrap();
             client_in.write_all(b"\n").await.unwrap();
 
-            for id in 2..=17_u64 {
+            // Release cleanup immediately and cancel 20 sequential requests (> MAX_ACTIVE = 16).
+            cleanup_gate.cancel();
+            for id in 2..=21_u64 {
                 let call = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -722,29 +843,37 @@ mod tests {
                     .await
                     .unwrap();
                 client_in.write_all(b"\n").await.unwrap();
+                // Wait until CreditGuard releases the cancelled slot.
+                while lock(&pending.state)
+                    .entries
+                    .contains_key(&RequestId::Number(id as i64))
+                {
+                    tokio::task::yield_now().await;
+                }
             }
             assert!(!overload.is_cancelled());
-            let seventeenth = serde_json::json!({
+            assert!(!shutdown.is_cancelled());
+
+            // 21st tool call succeeds cleanly without session overload.
+            let verify = serde_json::json!({
                 "jsonrpc": "2.0",
-                "id": 18,
+                "id": 99,
                 "method": "tools/call",
-                "params": {"name": "noop", "arguments": {}}
+                "params": {"name": "echo", "arguments": {}}
             });
             client_in
-                .write_all(&serde_json::to_vec(&seventeenth).unwrap())
+                .write_all(&serde_json::to_vec(&verify).unwrap())
                 .await
                 .unwrap();
             client_in.write_all(b"\n").await.unwrap();
-            overload.cancelled().await;
-            assert!(shutdown.is_cancelled());
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"id\":99"), "unexpected reply: {line}");
+            drop(client_in);
             server_task.await.unwrap();
-            assert!(
-                !started.lock().await.contains(&RequestId::Number(18)),
-                "17th request after 16 cancelled requests must not dispatch"
-            );
         })
         .await
-        .expect("sequential cancel overload test stalled");
+        .expect("sequential cancel reclamation test stalled");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

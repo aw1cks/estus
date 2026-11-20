@@ -746,6 +746,8 @@ impl ServerHandler for Estus {
         request: rmcp::model::CallToolRequestParams,
         mut context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
+        let _request_credit = self.state.pending_replies.enter_handler(&context.id);
+        context.extensions.insert(_request_credit.clone());
         if !self.tool_router.has_route(&request.name) {
             let sudo = request.name == self.state.sudo_name;
             Metadata {
