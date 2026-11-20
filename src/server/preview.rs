@@ -4,12 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-
-use serde_json::json;
-
-use crate::config::{AutomationAgent, ResolvedAutomation};
 
 pub(crate) const MAX_ENTRIES: usize = 256;
 pub(crate) const TTL: Duration = Duration::from_secs(300);
@@ -27,10 +23,16 @@ pub(crate) fn is_qualified_module(module: &str) -> bool {
     QUALIFIED_MODULES.contains(&module)
 }
 
+/// Key of a recorded preview.
+///
+/// Deliberately excludes transport identity (`SSH_AUTH_SOCK`, ssh config,
+/// executable, local python): a preview authorizes *what* will be changed, on
+/// which target, under which authority role — not which socket happened to
+/// carry it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewKey {
     pub(crate) target: String,
-    pub(crate) authority_identity: [u8; 32],
+    pub(crate) authority: crate::config::IdentityRole,
     pub(crate) domain: &'static str,
     pub(crate) intent_digest: [u8; 32],
     pub(crate) pre_state_digest: [u8; 32],
@@ -43,6 +45,7 @@ pub(crate) struct PreviewSpec {
     pub(crate) prestate_args: Value,
     pub(crate) intent_digest: [u8; 32],
 }
+
 pub(crate) struct PreviewStore {
     entries: Mutex<VecDeque<(PreviewKey, Instant)>>,
 }
@@ -122,29 +125,6 @@ pub(crate) fn canonical_json_sha256(value: &Value) -> Result<[u8; 32], &'static 
     Ok(Sha256::digest(&bytes).into())
 }
 
-pub(crate) fn authority_identity_digest(
-    authority_label: &str,
-    target: &ResolvedAutomation<'_>,
-) -> Result<[u8; 32], &'static str> {
-    let agent = match target.agent {
-        AutomationAgent::Inherit => {
-            std::env::var_os("SSH_AUTH_SOCK").map(|socket| socket.to_string_lossy().into_owned())
-        }
-        AutomationAgent::Disabled => None,
-        AutomationAgent::Fixed(socket) => Some(socket.to_string_lossy().into_owned()),
-    };
-    let identity = serde_json::json!({
-        "authority": authority_label,
-        "destination": target.target.destination,
-        "python": target.target.python,
-        "ssh_config": target.ssh_config,
-        "ssh_executable": target.ssh_executable,
-        "become": target.r#become,
-        "agent": agent,
-    });
-    canonical_json_sha256(&identity)
-}
-
 fn scalar_string(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(s) => Some(s.clone()),
@@ -190,23 +170,150 @@ fn canonical_package_state(raw: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The single description of what a change will do.
+///
+/// Every entry point lowers its own argument spelling into this one type, so a
+/// preview and the change it authorizes cannot disagree about intent: there is
+/// only one place that decides what the digest covers.
+#[derive(Clone, Debug)]
+enum Change {
+    Sysctl {
+        key: String,
+        value: Option<String>,
+        file: Value,
+        set: bool,
+        reload: bool,
+        state: &'static str,
+    },
+    Systemd {
+        unit: String,
+        scope: String,
+        state: Option<&'static str>,
+        enabled: Option<bool>,
+        masked: Option<bool>,
+        daemon_reload: bool,
+    },
+    Package {
+        module: &'static str,
+        names: Vec<String>,
+        state: &'static str,
+        version: Option<String>,
+        options: Map<String, Value>,
+    },
+    KernelModule {
+        name: String,
+    },
+}
+
+impl Change {
+    fn intent(&self) -> Value {
+        match self {
+            Self::Sysctl {
+                key,
+                value,
+                file,
+                set,
+                reload,
+                state,
+            } => json!({
+                "key": key,
+                "value": value,
+                "sysctl_file": file,
+                "sysctl_set": set,
+                "reload": reload,
+                "state": state,
+            }),
+            Self::Systemd {
+                unit,
+                scope,
+                state,
+                enabled,
+                masked,
+                daemon_reload,
+            } => json!({
+                "unit": unit,
+                "scope": scope,
+                "state": state,
+                "enabled": enabled,
+                "masked": masked,
+                "daemon_reload": daemon_reload,
+            }),
+            Self::Package {
+                module,
+                names,
+                state,
+                version,
+                options,
+            } => json!({
+                "module": module,
+                "names": names,
+                "state": state,
+                "version": version,
+                "options": options,
+            }),
+            Self::KernelModule { name } => json!({
+                "name": name,
+                "parameters": {},
+            }),
+        }
+    }
+
+    fn domain(&self) -> &'static str {
+        match self {
+            Self::Sysctl { .. } => "ansible.posix.sysctl",
+            Self::Systemd { .. } => "ansible.builtin.systemd_service",
+            Self::Package { .. } => "estus.packages",
+            Self::KernelModule { .. } => "estus.kernel_module",
+        }
+    }
+
+    fn prestate(&self) -> (&'static str, Value) {
+        match self {
+            Self::Sysctl { key, file, .. } => (
+                "ansible.posix.sysctl",
+                json!({"name": key, "sysctl_file": file}),
+            ),
+            Self::Systemd { unit, scope, .. } => (
+                "ansible.builtin.systemd_service",
+                json!({"name": unit, "scope": scope}),
+            ),
+            Self::Package { module, names, .. } => {
+                let prestate_module = match *module {
+                    "ansible.builtin.apt" => "ansible.builtin.apt",
+                    "ansible.builtin.dnf" | "ansible.builtin.dnf5" => "ansible.builtin.dnf",
+                    _ => "estus.packages",
+                };
+                (prestate_module, json!({"name": names}))
+            }
+            Self::KernelModule { name } => ("estus.kernel_module", json!({"name": name})),
+        }
+    }
+}
+
 impl PreviewSpec {
+    fn from_change(change: Change) -> Option<Self> {
+        let (prestate_module, prestate_args) = change.prestate();
+        Some(Self {
+            domain: change.domain(),
+            prestate_module,
+            prestate_args,
+            intent_digest: canonical_json_sha256(&change.intent()).ok()?,
+        })
+    }
+
+    /// Lower an Ansible module invocation. Argument names are the only
+    /// protocol-specific part; intent, pre-state and digest come from `Change`.
     pub(crate) fn for_ansible(module: &str, args: &Value) -> Option<Self> {
-        match module {
+        let change = match module {
             "ansible.posix.sysctl" => {
                 let key = args.get("name").and_then(Value::as_str)?;
-                let state = args
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("present");
-                let value = scalar_string(args.get("value"));
                 let sysctl_set = args
                     .get("sysctl_set")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 // Bind the same file the native executors pin, so one preview
                 // authorizes the config and runtime payloads alike.
-                let sysctl_file = match args.get("sysctl_file").and_then(Value::as_str) {
+                let file = match args.get("sysctl_file").and_then(Value::as_str) {
                     Some(explicit) => Value::String(explicit.to_owned()),
                     // `change_sysctl_runtime` never reads or writes
                     // `/etc/sysctl.conf`, so a runtime preview binds a null file.
@@ -216,55 +323,46 @@ impl PreviewSpec {
                         sysctl_config_slug(key)
                     )),
                 };
-                // The catalog fixes reload=false for preview; defaulting to true
-                // would make a bare preview digest unmatchable.
-                let reload = args.get("reload").and_then(Value::as_bool).unwrap_or(false);
-                let intent = json!({
-                    "key": key,
-                    "value": value,
-                    "sysctl_file": sysctl_file.clone(),
-                    "sysctl_set": sysctl_set,
-                    "reload": reload,
-                    "state": state,
-                });
-                Some(Self {
-                    domain: "ansible.posix.sysctl",
-                    prestate_module: "ansible.posix.sysctl",
-                    prestate_args: json!({"name": key, "sysctl_file": sysctl_file}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                })
+                Change::Sysctl {
+                    key: key.to_owned(),
+                    value: scalar_string(args.get("value")),
+                    file,
+                    set: sysctl_set,
+                    // The catalog fixes reload=false for preview; defaulting to
+                    // true would make a bare preview digest unmatchable.
+                    reload: args.get("reload").and_then(Value::as_bool).unwrap_or(false),
+                    state: match args
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .unwrap_or("present")
+                    {
+                        "absent" => "absent",
+                        _ => "present",
+                    },
+                }
             }
-            "ansible.builtin.systemd_service" => {
-                let unit = args.get("name").and_then(Value::as_str)?;
-                let scope = args
+            "ansible.builtin.systemd_service" => Change::Systemd {
+                unit: args.get("name").and_then(Value::as_str)?.to_owned(),
+                scope: args
                     .get("scope")
                     .and_then(Value::as_str)
-                    .unwrap_or("system");
-                let intent = json!({
-                    "unit": unit,
-                    "scope": scope,
-                    "state": args.get("state").and_then(Value::as_str),
-                    "enabled": args.get("enabled").and_then(Value::as_bool),
-                    "masked": args.get("masked").and_then(Value::as_bool),
-                    "daemon_reload": args.get("daemon_reload").and_then(Value::as_bool).unwrap_or(false),
-                });
-                Some(Self {
-                    domain: "ansible.builtin.systemd_service",
-                    prestate_module: "ansible.builtin.systemd_service",
-                    prestate_args: json!({"name": unit, "scope": scope}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                })
-            }
+                    .unwrap_or("system")
+                    .to_owned(),
+                state: args
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .and_then(systemd_state),
+                enabled: args.get("enabled").and_then(Value::as_bool),
+                masked: args.get("masked").and_then(Value::as_bool),
+                daemon_reload: args
+                    .get("daemon_reload")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
             "ansible.builtin.package"
             | "ansible.builtin.apt"
             | "ansible.builtin.dnf"
             | "ansible.builtin.dnf5" => {
-                let names = sorted_names(args.get("name"))?;
-                let state = canonical_package_state(args.get("state").and_then(Value::as_str))?;
-                let version = args
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .filter(|v| !v.is_empty());
                 let mut options = args.as_object()?.clone();
                 options.remove("name");
                 options.remove("state");
@@ -279,100 +377,64 @@ impl PreviewSpec {
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
                 options.insert("update_cache".into(), Value::Bool(update_cache));
-                let intent = json!({
-                    "module": module,
-                    "names": names,
-                    "state": state,
-                    "version": version,
-                    "options": options,
-                });
-                let prestate_module = match module {
-                    "ansible.builtin.apt" => "ansible.builtin.apt",
-                    "ansible.builtin.dnf" | "ansible.builtin.dnf5" => "ansible.builtin.dnf",
-                    _ => "estus.packages",
-                };
-                Some(Self {
-                    domain: "estus.packages",
-                    prestate_module,
-                    prestate_args: json!({"name": names}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                })
+                Change::Package {
+                    module: match module {
+                        "ansible.builtin.apt" => "ansible.builtin.apt",
+                        "ansible.builtin.dnf" => "ansible.builtin.dnf",
+                        "ansible.builtin.dnf5" => "ansible.builtin.dnf5",
+                        _ => "ansible.builtin.package",
+                    },
+                    names: sorted_names(args.get("name"))?,
+                    state: canonical_package_state(args.get("state").and_then(Value::as_str))?,
+                    version: args
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty())
+                        .map(ToOwned::to_owned),
+                    options,
+                }
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        Self::from_change(change)
     }
 
+    /// Lower a native binding invocation. The binding name fixes the action, so
+    /// only its arguments spell out the target; the digest is shared with
+    /// `for_ansible`.
     pub(crate) fn for_payload(binding_name: &str, is_preview: bool, args: &Value) -> Option<Self> {
-        if is_preview {
-            if binding_name == "preview_kernel_module_load" || args.get("name").is_some() {
-                let name = args.get("name").and_then(Value::as_str)?;
-                let canonical_name = name.replace('-', "_");
-                let intent = json!({
-                    "name": canonical_name,
-                    "parameters": {},
-                });
-                return Some(Self {
-                    domain: "estus.kernel_module",
-                    prestate_module: "estus.kernel_module",
-                    prestate_args: json!({"name": canonical_name}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                });
+        let change = match binding_name {
+            "preview_kernel_module_load" | "change_kernel_module_load" => {
+                let parameters = args.get("parameters").and_then(Value::as_object);
+                // A parameterised load is not authorized by a bare preview.
+                if !is_preview && parameters.is_some_and(|params| !params.is_empty()) {
+                    return None;
+                }
+                Change::KernelModule {
+                    name: args.get("name").and_then(Value::as_str)?.replace('-', "_"),
+                }
             }
-            return None;
-        }
-        if binding_name == "change_kernel_module_load"
-            || (binding_name.starts_with("change_")
-                && args.get("name").is_some()
-                && args.get("parameters").is_some())
-        {
-            let name = args.get("name").and_then(Value::as_str)?;
-            let params = args.get("parameters").and_then(Value::as_object)?;
-            if !params.is_empty() {
-                return None;
-            }
-            let canonical_name = name.replace('-', "_");
-            let intent = json!({
-                "name": canonical_name,
-                "parameters": {},
-            });
-            return Some(Self {
-                domain: "estus.kernel_module",
-                prestate_module: "estus.kernel_module",
-                prestate_args: json!({"name": canonical_name}),
-                intent_digest: canonical_json_sha256(&intent).ok()?,
-            });
-        }
-        match binding_name {
             "change_sysctl_config" | "change_sysctl_runtime" => {
                 let key = args.get("key").and_then(Value::as_str)?;
-                let value = scalar_string(args.get("value"))?;
-                let (sysctl_file, sysctl_set) = if binding_name == "change_sysctl_config" {
-                    (
+                let runtime = binding_name == "change_sysctl_runtime";
+                Change::Sysctl {
+                    key: key.to_owned(),
+                    value: scalar_string(args.get("value")),
+                    file: if runtime {
+                        // The runtime payload rewrites the live kernel value and
+                        // never touches `/etc/sysctl.conf`; a null file keeps both
+                        // sides equal.
+                        Value::Null
+                    } else {
                         Value::String(format!(
                             "/etc/sysctl.d/90-estus-catalog-{}.conf",
                             sysctl_config_slug(key)
-                        )),
-                        false,
-                    )
-                } else {
-                    // The runtime payload rewrites the live kernel value and never
-                    // touches `/etc/sysctl.conf`; a null file keeps both sides equal.
-                    (Value::Null, true)
-                };
-                let intent = json!({
-                    "key": key,
-                    "value": value,
-                    "sysctl_file": sysctl_file.clone(),
-                    "sysctl_set": sysctl_set,
-                    "reload": false,
-                    "state": "present",
-                });
-                Some(Self {
-                    domain: "ansible.posix.sysctl",
-                    prestate_module: "ansible.posix.sysctl",
-                    prestate_args: json!({"name": key, "sysctl_file": sysctl_file}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                })
+                        ))
+                    },
+                    set: runtime,
+                    reload: false,
+                    state: "present",
+                }
             }
             "change_systemd_start"
             | "change_systemd_stop"
@@ -381,48 +443,48 @@ impl PreviewSpec {
             | "change_systemd_enable"
             | "change_systemd_disable"
             | "change_systemd_mask"
-            | "change_systemd_unmask" => {
-                let unit = args.get("unit").and_then(Value::as_str)?;
-                let scope = args
+            | "change_systemd_unmask" => Change::Systemd {
+                unit: args.get("unit").and_then(Value::as_str)?.to_owned(),
+                scope: args
                     .get("manager_scope")
                     .and_then(Value::as_str)
-                    .unwrap_or("system");
-                let state = match binding_name {
+                    .unwrap_or("system")
+                    .to_owned(),
+                state: match binding_name {
                     "change_systemd_start" => Some("started"),
                     "change_systemd_stop" => Some("stopped"),
                     "change_systemd_restart" => Some("restarted"),
                     "change_systemd_reload" => Some("reloaded"),
                     _ => None,
-                };
-                let enabled = match binding_name {
+                },
+                enabled: match binding_name {
                     "change_systemd_enable" => Some(true),
                     "change_systemd_disable" => Some(false),
                     _ => None,
-                };
-                let masked = match binding_name {
+                },
+                masked: match binding_name {
                     "change_systemd_mask" => Some(true),
                     "change_systemd_unmask" => Some(false),
                     _ => None,
-                };
-                let intent = json!({
-                    "unit": unit,
-                    "scope": scope,
-                    "state": state,
-                    "enabled": enabled,
-                    "masked": masked,
-                    "daemon_reload": false,
-                });
-                Some(Self {
-                    domain: "ansible.builtin.systemd_service",
-                    prestate_module: "ansible.builtin.systemd_service",
-                    prestate_args: json!({"name": unit, "scope": scope}),
-                    intent_digest: canonical_json_sha256(&intent).ok()?,
-                })
-            }
-            _ => None,
-        }
+                },
+                daemon_reload: false,
+            },
+            _ => return None,
+        };
+        Self::from_change(change)
     }
 }
+
+fn systemd_state(raw: &str) -> Option<&'static str> {
+    match raw {
+        "started" => Some("started"),
+        "stopped" => Some("stopped"),
+        "restarted" => Some("restarted"),
+        "reloaded" => Some("reloaded"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,7 +492,7 @@ mod tests {
     fn key(tag: u8) -> PreviewKey {
         PreviewKey {
             target: "server".into(),
-            authority_identity: [1; 32],
+            authority: crate::config::IdentityRole::Automation,
             domain: "ansible.posix.sysctl",
             intent_digest: [3; 32],
             pre_state_digest: [tag; 32],
@@ -463,7 +525,7 @@ mod tests {
         assert!(!store.consume_at(&alt, t0));
 
         let mut alt = base.clone();
-        alt.authority_identity = [99; 32];
+        alt.authority = crate::config::IdentityRole::Ordinary;
         assert!(!store.consume_at(&alt, t0));
 
         let mut alt = base.clone();
@@ -514,6 +576,7 @@ mod tests {
         .unwrap();
         assert_eq!(ansible_systemd.domain, native_systemd.domain);
         assert_eq!(ansible_systemd.intent_digest, native_systemd.intent_digest);
+        assert_eq!(ansible_systemd.prestate_args, native_systemd.prestate_args);
 
         let preview_pkg = PreviewSpec::for_ansible(
             "ansible.builtin.package",
@@ -751,5 +814,37 @@ mod tests {
             json!({"name": key, "sysctl_file": null})
         );
         assert_ne!(runtime_preview.intent_digest, config.intent_digest);
+    }
+
+    #[test]
+    fn authorized_preview_key_is_derived_from_the_same_spec_for_change() {
+        // The four require_preview semantics rest on this: a preview records the
+        // key its own pre-state observation produced, and the matching change
+        // derives an identical `(domain, intent)` pair.
+        let preview = PreviewSpec::for_payload(
+            "preview_kernel_module_load",
+            true,
+            &json!({"name": "dummy"}),
+        )
+        .unwrap();
+        let change = PreviewSpec::for_payload(
+            "change_kernel_module_load",
+            false,
+            &json!({"name": "dummy", "parameters": {}}),
+        )
+        .unwrap();
+        assert_eq!(preview.domain, change.domain);
+        assert_eq!(preview.intent_digest, change.intent_digest);
+        assert_eq!(preview.prestate_module, change.prestate_module);
+        assert_eq!(preview.prestate_args, change.prestate_args);
+
+        // A different target refuses: intent differs, so the key differs.
+        let other = PreviewSpec::for_payload(
+            "change_kernel_module_load",
+            false,
+            &json!({"name": "tun", "parameters": {}}),
+        )
+        .unwrap();
+        assert_ne!(preview.intent_digest, other.intent_digest);
     }
 }

@@ -61,10 +61,10 @@ impl Estus {
                 false,
             ));
         }
-        let target_check = match self.state.config.automation_target(id, &request.host) {
-            Ok(target) => target,
-            Err(error) => return reject(error),
-        };
+        // Authorize the target up front; the resolved value is re-read at each use.
+        if let Err(error) = self.state.config.automation_target(id, &request.host) {
+            return reject(error);
+        }
         let prepared = match binding.prepare_activated_automation(
             &activated,
             &request,
@@ -85,14 +85,6 @@ impl Estus {
             )
             && self.state.config.requires_preview(&request.host);
         let preview_meta = if is_preview || requires_preview {
-            let Ok(authority_identity) =
-                super::preview::authority_identity_digest(&authority_label, &target_check)
-            else {
-                return reject(ToolError::preview_required(
-                    "Invalid preview authority identity",
-                    false,
-                ));
-            };
             if requires_preview && !super::preview::is_qualified_module(&activated.module) {
                 return reject(ToolError::preview_required(
                     "Operation has no qualified preview path under require_preview policy",
@@ -107,7 +99,7 @@ impl Estus {
                     false,
                 ));
             };
-            Some((spec, authority_identity))
+            Some(spec)
         } else {
             None
         };
@@ -174,7 +166,7 @@ impl Estus {
                 .automation_target(id, &request.host)
                 .expect("automation target already authorized");
             if requires_preview {
-                let (spec, authority_identity) = preview_meta
+                let spec = preview_meta
                     .as_ref()
                     .expect("preview spec checked before spawn");
                 let pre_state_digest = match state
@@ -212,7 +204,7 @@ impl Estus {
                 };
                 let key = super::preview::PreviewKey {
                     target: request.host.clone(),
-                    authority_identity: *authority_identity,
+                    authority: authority_role,
                     domain: spec.domain,
                     intent_digest: spec.intent_digest,
                     pre_state_digest,
@@ -261,18 +253,17 @@ impl Estus {
                             && d.tasks.skipped == 0
                     });
                 if valid_observation {
-                    if let Some((spec, authority_identity)) = preview_meta {
-                        let resolved = state
-                            .config
-                            .automation_target(id, &request.host)
-                            .expect("automation target already authorized");
-                        if let Ok(pre_state_digest) = state
+                    if let Some(spec) = preview_meta
+                        && let Ok(pre_state_digest) = state
                             .payload
                             .observe_preview_prestate(
                                 crate::native_payload::PreviewPrestateRequest {
                                     host: &request.host,
                                     authority: &authority_label,
-                                    target: &resolved,
+                                    target: &state
+                                        .config
+                                        .automation_target(id, &request.host)
+                                        .expect("automation target already authorized"),
                                     module: spec.prestate_module,
                                     arguments: &spec.prestate_args,
                                     connect_timeout: Duration::from_secs(
@@ -283,15 +274,15 @@ impl Estus {
                                 },
                             )
                             .await
-                        {
-                            state.previews.insert(super::preview::PreviewKey {
-                                target: request.host.clone(),
-                                authority_identity,
-                                domain: spec.domain,
-                                intent_digest: spec.intent_digest,
-                                pre_state_digest,
-                            });
-                        }
+                    {
+                        // Record the key from the preview's own pre-state observation.
+                        state.previews.insert(super::preview::PreviewKey {
+                            target: request.host.clone(),
+                            authority: authority_role,
+                            domain: spec.domain,
+                            intent_digest: spec.intent_digest,
+                            pre_state_digest,
+                        });
                     }
                 } else if reply.error().is_none()
                     && reply.data().is_some_and(|d| d.tasks.skipped > 0)

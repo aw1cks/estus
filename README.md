@@ -806,10 +806,13 @@ The catalog contains 112 controller-owned native Python payloads and 8
 `ansible_module` entries that require a bundle. Native
 `payloads/<tool>/collector.py` bytes are approved together with a typed contract,
 fixed policy, argument adapter, requirements and authority. Delivery uses
-interpreter stdin, not a target source installation or cache. Positive discovery
-is process/config/SSH-generation/authority scoped; explicit interpreter failure
-never falls back. Target capability fingerprints are advisory, not immutable
-attestation.
+interpreter stdin, not a target source installation or cache. Declared
+requirements are checked on the target in the same round trip that runs the
+collector, immediately before `exec`: interpreter floor, importable modules and
+resolvable executables. Nothing is cached and no fingerprints are compared, so
+the answer always describes the target as it is right now. An explicit
+interpreter failure never falls back to another one. These checks are a
+pre-dispatch refusal, not immutable attestation.
 
 Native revisions have the `_native1` suffix. Domain data remains at
 `data.projection.value`; `runner_rc` now carries the actual collector exit code
@@ -838,15 +841,16 @@ preserves wide counters as exact decimal strings, and omits the identity-guard
 serial from published telemetry. The MD RAID observer instead reads existing
 [kernel sysfs attributes](https://docs.kernel.org/admin-guide/md.html) under
 ordinary authority: it requires neither `mdadm` nor raw block-device access.
-Do not add changing array attributes or controller counters to discovery
-fingerprints; observations must remain fresh within an active MCP session.
+Do not add changing array attributes or controller counters to requirement
+checks; observations must remain fresh within an active MCP session.
 
-A missing utility fails before payload dispatch. A changed executable fingerprint
-rejects that invocation and invalidates its discovery entry; only a later explicit
-request may rediscover. This does not attest modprobe hooks, configuration or all
-target dependencies. Parameter-setting keeps its explicit unsupported/no-write
-receipt when the approved sysfs parameter is absent; it does not require that
-optional parameter path during discovery.
+A missing utility fails before payload dispatch with `resource_unavailable` and
+`remote_state_unknown=false`. Because nothing is cached, a utility replaced
+between requests is observed by the very next one: there is no stale entry to
+invalidate and no rediscovery step. This does not attest modprobe hooks,
+configuration or all target dependencies. Parameter-setting keeps its explicit
+unsupported/no-write receipt when the approved sysfs parameter is absent; it does
+not require that optional parameter path during the requirement check.
 
 Collectors are plain Python modules with no third-party imports beyond the
 standard library their manifests declare. Migration to the native path does not
@@ -1146,10 +1150,11 @@ replace/ensure-state calls. A same-value parameter write remains a write attempt
 not an inferred no-op.
 
 The persistent-session prerequisite scenario removes and replaces the real `ip`
-executable, checks cold discovery failure and warm fingerprint rejection before
-mutation, and observes exactly one mutation/readback after a later explicit
-request. The wrapper delegates to the actual utility; it does not simulate network
-state. Select it with:
+executable, checks that the missing utility is refused before mutation, and
+observes exactly one mutation/readback per accepted request. A later request with
+the utility swapped re-resolves it, since each call re-checks requirements. The
+wrapper delegates to the actual utility; it does not simulate network state.
+Select it with:
 
 ```sh
 nix run .#catalog-acceptance-msrv -- \
@@ -1177,11 +1182,11 @@ observations perform no write; rejected, unapplied and partially applied writes
 remain failed receipts without replay or rollback. Completed failure with
 `changed=null` does not establish unchanged device state.
 
-The persistent EEE session also removes and replaces `ethtool`, requiring cold
-prerequisite rejection and warm fingerprint rejection before any setter callback.
-A later explicit request can rediscover; an already-current request must not
-invoke the setter. This uses the actual utility and kernel callbacks, not a
-simulated command result:
+The persistent EEE session also removes and replaces `ethtool`, requiring
+prerequisite rejection before any setter callback, on every request. A later
+explicit request re-resolves the utility; a rejected request must not invoke the
+setter. This uses the actual utility and kernel callbacks, not a simulated
+command result:
 
 ```sh
 nix run .#catalog-acceptance-msrv -- \

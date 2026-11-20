@@ -54,7 +54,7 @@ const GUIDE_PREVIEW: &str = "\
 # Estus Runbook: Preview Before Change
 
 1. Run the matching `preview_*` tool first whenever the target policy sets `require_preview`; an unauthorized change returns `preview_required`.
-2. A preview binds one exact intent digest (target, authority, domain, arguments, and observed pre-state). It is consumed once and expires after five minutes; re-preview after any intervening change.
+2. A preview binds one exact intent digest (target, authority role, domain, arguments, and observed pre-state). It is consumed once and expires after five minutes; re-preview after any intervening change.
 3. sysctl: `preview_sysctl(name, value, state)`. Omitting `sysctl_file` authorizes `change_sysctl_*` for the catalog file: the preview maps to `/etc/sysctl.d/90-estus-catalog-<key>.conf` and matches `change_sysctl_config`. Pass `sysctl_set=true` to bind `/etc/sysctl.conf` and match `change_sysctl_runtime`. An explicit `sysctl_file` binds that exact path, which no catalog payload rewrites, so it authorizes only a matching explicit-file change.
 4. Packages: `preview_package`/`preview_apt`/`preview_dnf` share the `estus.packages` domain and preview the requested names and canonical state. Pass the same `name` list and `state` (`present`, `absent`, `latest`) as the change; any extra module option changes the digest and invalidates the preview.
 5. Reusing a preview for a different host, authority, value, or path fails with `preview_required`; never assume a preview from another target carries over.";
