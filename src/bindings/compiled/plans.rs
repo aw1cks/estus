@@ -85,14 +85,6 @@ pub(crate) struct ActivatedAutomation {
     pub(crate) projection: Option<Arc<crate::contracts::projection::Plan>>,
 }
 
-impl ActivatedAutomation {
-    pub(crate) fn reviewed_module(
-        &self,
-    ) -> Option<&crate::contracts::schema_import::ReviewedModule> {
-        self.plan.reviewed_module()
-    }
-}
-
 impl AnsibleState {
     pub(super) fn source(&self) -> &AnsibleSource {
         match self {

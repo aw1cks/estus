@@ -491,10 +491,6 @@ impl Config {
         &self.bindings
     }
 
-    pub(crate) fn catalog_version(&self) -> Option<&str> {
-        self.catalog_version.as_deref()
-    }
-
     pub(crate) fn requires_preview(&self, host: &str) -> bool {
         rules::requires_preview(&self.rules, host)
     }

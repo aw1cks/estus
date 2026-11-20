@@ -7878,3 +7878,314 @@ result = {{ kind = "capability_projection", fields = {{ ok = ["mcp_result", "ok"
     scenario?;
     cleanup
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires loopback networking, Nix OpenSSH/coreutils, python3, and a non-root local account"]
+async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
+    let python = support::find_program("python3")?;
+    let fixture = Fixture::start().await?;
+    let scenario = async {
+        let applied_marker = fixture.root.path().join("applied_kmod");
+        let preview_src = "import json\nprint(json.dumps({'ok': True}))\n";
+        let apply_src = format!(
+            "import json, pathlib\npathlib.Path({:?}).write_text('applied')\nprint(json.dumps({{'ok': True, 'outcome': 'verified'}}))\n",
+            applied_marker
+        );
+        let preview_py = fixture.root.path().join("preview_kmod.py");
+        let apply_py = fixture.root.path().join("apply_kmod.py");
+        fs::write(&preview_py, preview_src)?;
+        fs::write(&apply_py, &apply_src)?;
+
+        #[derive(serde::Serialize)]
+        struct Requirements {
+            python_min: [u16; 2],
+            interpreters: Vec<String>,
+            modules: Vec<String>,
+            executables: Vec<String>,
+            paths: Vec<String>,
+        }
+        #[derive(serde::Serialize)]
+        struct Approval {
+            overlay: Value,
+            result: Value,
+            authority: &'static str,
+            no_log: bool,
+            revision: &'static str,
+        }
+        let write_kmod_manifest = |snap_name: &str,
+                                   src: &str,
+                                   policy: &'static str,
+                                   revision: &'static str,
+                                   with_params: bool|
+         -> Result<(PathBuf, Value, Value, Value)> {
+            let snap = fixture.root.path().join(snap_name);
+            let source_sha256 = hex::encode(Sha256::digest(src.as_bytes()));
+            let (input_schema, contract, input_map) = if with_params {
+                (
+                    json!({
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name", "parameters"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                            "parameters": {"type": "object", "additionalProperties": false, "required": [], "properties": {}}
+                        }
+                    }),
+                    json!({
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["target_python", "name", "parameters"],
+                            "properties": {
+                                "target_python": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                                "parameters": {"type": "object", "additionalProperties": false, "required": [], "properties": {}}
+                            }
+                        },
+                        "aliases": {
+                            "aliases": {},
+                            "properties": {
+                                "target_python": {"aliases": {}, "properties": {}},
+                                "name": {"aliases": {}, "properties": {}},
+                                "parameters": {"aliases": {}, "properties": {}}
+                            }
+                        },
+                        "defaults": {},
+                        "review_required": []
+                    }),
+                    json!({"name": "name", "parameters": "parameters"}),
+                )
+            } else {
+                (
+                    json!({
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 64}
+                        }
+                    }),
+                    json!({
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["target_python", "name"],
+                            "properties": {
+                                "target_python": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                "name": {"type": "string", "minLength": 1, "maxLength": 64}
+                            }
+                        },
+                        "aliases": {
+                            "aliases": {},
+                            "properties": {
+                                "target_python": {"aliases": {}, "properties": {}},
+                                "name": {"aliases": {}, "properties": {}}
+                            }
+                        },
+                        "defaults": {},
+                        "review_required": []
+                    }),
+                    json!({"name": "name"}),
+                )
+            };
+            let overlay = json!({
+                "input_schema": input_schema,
+                "fixed_args": {"target_python": python.to_string_lossy()},
+                "input_map": input_map
+            });
+            let result = json!({
+                "kind": "capability_projection",
+                "fields": {"ok": ["mcp_result", "ok"]},
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["ok"],
+                    "properties": {"ok": {"type": "boolean"}}
+                },
+                "max_bytes": 1024,
+                "max_items": 16,
+                "max_depth": 3
+            });
+            let argv: Vec<Value> = Vec::new();
+            let requirements = Requirements {
+                python_min: [3, 8],
+                interpreters: Vec::new(),
+                modules: vec!["json".to_owned()],
+                executables: Vec::new(),
+                paths: Vec::new(),
+            };
+            let approval = Approval {
+                overlay: overlay.clone(),
+                result: result.clone(),
+                authority: "automation",
+                no_log: false,
+                revision,
+            };
+            let digest_bytes = serde_json::to_vec(&(
+                true,
+                1u32,
+                1u32,
+                1u32,
+                policy,
+                &source_sha256,
+                1_048_576usize,
+                &argv,
+                &requirements,
+                &contract,
+                &approval,
+            ))?;
+            let manifest_sha256 = hex::encode(Sha256::digest(&digest_bytes));
+            fs::write(
+                &snap,
+                serde_json::to_vec_pretty(&json!({
+                    "approved": true,
+                    "manifest_sha256": manifest_sha256,
+                    "schema": 1,
+                    "protocol": 1,
+                    "adapter_version": 1,
+                    "change_policy": policy,
+                    "source_sha256": source_sha256,
+                    "max_source_bytes": 1_048_576usize,
+                    "argv": argv,
+                    "requirements": requirements,
+                    "contract": contract,
+                    "approval": approval
+                }))?,
+            )?;
+            Ok((
+                snap,
+                overlay["input_schema"].clone(),
+                overlay["input_map"].clone(),
+                result,
+            ))
+        };
+
+        let (preview_snap, preview_schema, preview_map, preview_res) = write_kmod_manifest(
+            "preview_kmod.json",
+            preview_src,
+            "read_only",
+            "preview_v2",
+            false,
+        )?;
+        let (apply_snap, apply_schema, apply_map, apply_res) = write_kmod_manifest(
+            "apply_kmod.json",
+            &apply_src,
+            "mutation_success",
+            "apply_v1",
+            true,
+        )?;
+        let config_doc = json!({
+            "mode": "headless",
+            "capabilities": {"named": true},
+            "enabled_tools": ["preview_kernel_module_load", "change_kernel_module_load"],
+            "ssh": {"config_file": fixture.ssh_config},
+            "targets": {"plain": {"ssh_host": "plain"}},
+            "rules": {"plain": {"require_preview": true}},
+            "automation": {"targets": {"plain": {"destination": "plain", "python": python.to_string_lossy()}}},
+            "tools": {
+                "preview_kernel_module_load": {
+                    "description": "Preview kernel module load",
+                    "revision": "preview_v2",
+                    "targets": ["plain"],
+                    "authority": "automation",
+                    "effects": ["read"],
+                    "execution": {"kind": "native_payload", "snapshot": preview_snap, "source": preview_py, "no_log": false},
+                    "fixed_args": {"target_python": python.to_string_lossy()},
+                    "input_map": preview_map,
+                    "input_schema": preview_schema,
+                    "result": preview_res
+                },
+                "change_kernel_module_load": {
+                    "description": "Apply kernel module load",
+                    "revision": "apply_v1",
+                    "targets": ["plain"],
+                    "authority": "automation",
+                    "effects": ["runtime_write"],
+                    "execution": {"kind": "native_payload", "snapshot": apply_snap, "source": apply_py, "no_log": false},
+                    "fixed_args": {"target_python": python.to_string_lossy()},
+                    "input_map": apply_map,
+                    "input_schema": apply_schema,
+                    "result": apply_res
+                }
+            }
+        });
+        let config_path = fixture.root.path().join("operator-preview.toml");
+        fs::write(&config_path, toml::to_string(&toml::Value::try_from(config_doc)?)?)?;
+        let mut server = WireServer::start(&config_path)?;
+        let cases = async {
+            server.initialize().await?;
+            let before = script_wire_call(
+                &mut server,
+                2,
+                "change_kernel_module_load",
+                json!({"host": "plain", "inputs": {"name": "dummy", "parameters": {}}}),
+            )
+            .await?;
+            ensure!(
+                before["error"]["code"] == "preview_required",
+                "apply without preview did not reject: {before}"
+            );
+            ensure!(!applied_marker.exists());
+
+            let preview = script_wire_call(
+                &mut server,
+                3,
+                "preview_kernel_module_load",
+                json!({"host": "plain", "inputs": {"name": "dummy"}}),
+            )
+            .await?;
+            ensure!(preview["error"].is_null(), "preview failed: {preview}");
+
+            let mismatch = script_wire_call(
+                &mut server,
+                4,
+                "change_kernel_module_load",
+                json!({"host": "plain", "inputs": {"name": "tun", "parameters": {}}}),
+            )
+            .await?;
+            ensure!(
+                mismatch["error"]["code"] == "preview_required",
+                "mismatched module bypassed require_preview: {mismatch}"
+            );
+            ensure!(!applied_marker.exists());
+
+            let applied = script_wire_call(
+                &mut server,
+                5,
+                "change_kernel_module_load",
+                json!({"host": "plain", "inputs": {"name": "dummy", "parameters": {}}}),
+            )
+            .await?;
+            ensure!(
+                applied["error"].is_null() && applied_marker.exists(),
+                "matching cross-revision native preview failed to unlock apply: {applied}"
+            );
+
+            let replay = script_wire_call(
+                &mut server,
+                6,
+                "change_kernel_module_load",
+                json!({"host": "plain", "inputs": {"name": "dummy", "parameters": {}}}),
+            )
+            .await?;
+            ensure!(
+                replay["error"]["code"] == "preview_required",
+                "consumed native preview was reused: {replay}"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let log = server.log.clone();
+        let owned = masters(&log);
+        let stopped = server.stop(None).await;
+        if let Err(err) = cases {
+            anyhow::bail!("{err}; stderr: {}", log.text());
+        }
+        let _ = stopped?;
+        assert_masters_gone(&owned?).await
+    }
+    .await;
+    let cleanup = fixture.stop().await;
+    scenario?;
+    cleanup
+}

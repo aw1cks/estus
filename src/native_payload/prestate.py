@@ -154,7 +154,8 @@ def observe_apt(args):
         query_rc = proc.returncode
         query_out = proc.stdout
     return {
-        "module": "ansible.builtin.apt",
+        "module": "estus.packages",
+        "backend": "apt",
         "names": names,
         "dpkg_status": dpkg_status,
         "query_rc": query_rc,
@@ -186,11 +187,52 @@ def observe_dnf(args):
         query_rc = proc.returncode
         query_out = proc.stdout
     return {
-        "module": "ansible.builtin.dnf",
+        "module": "estus.packages",
+        "backend": "dnf",
         "names": names,
         "rpmdb": rpmdb,
         "query_rc": query_rc,
         "query_out": query_out,
+    }
+
+
+def observe_packages(args):
+    if os.path.exists("/var/lib/dpkg/status"):
+        return observe_apt(args)
+    for candidate in ("/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages"):
+        if os.path.exists(candidate):
+            return observe_dnf(args)
+    raise RuntimeError("no supported package database")
+
+
+def observe_kernel_module(args):
+    name = args.get("name")
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 64
+        or not all(ch.isalnum() or ch in "_-" for ch in name)
+    ):
+        raise ValueError("invalid module name")
+    canonical_target = name.replace("-", "_")
+    fd = os.open("/proc/modules", os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        raw_modules = os.read(fd, 262145)
+    finally:
+        os.close(fd)
+    if len(raw_modules) > 262144:
+        raise ValueError("/proc/modules exceeds bound")
+    matched = None
+    for line in raw_modules.decode("ascii", "replace").splitlines():
+        parts = line.split()
+        if parts and parts[0].replace("-", "_") == canonical_target:
+            matched = {"name": parts[0], "state": parts[4] if len(parts) > 4 else "unknown"}
+            break
+    return {
+        "module": "estus.kernel_module",
+        "name": canonical_target,
+        "loaded": matched,
+        "tainted": canonical_file("/proc/sys/kernel/tainted", 4096),
     }
 
 
@@ -211,6 +253,10 @@ def main():
         snapshot = observe_apt(args)
     elif module == "ansible.builtin.dnf":
         snapshot = observe_dnf(args)
+    elif module == "estus.packages":
+        snapshot = observe_packages(args)
+    elif module == "estus.kernel_module":
+        snapshot = observe_kernel_module(args)
     else:
         raise ValueError("unqualified module")
     encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True)

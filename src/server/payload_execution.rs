@@ -64,19 +64,42 @@ impl Estus {
             Ok(deadline) => deadline,
             Err(error) => return reject(error),
         };
-        if let Err(error) = self.state.config.automation_target(id, &request.host) {
-            return reject(error);
-        }
-        if matches!(
-            crate::config::risk_tier_for_binding(binding),
+        let target_check = match self.state.config.automation_target(id, &request.host) {
+            Ok(target) => target,
+            Err(error) => return reject(error),
+        };
+        let risk_tier = crate::config::risk_tier_for_binding(binding);
+        let is_preview = risk_tier == crate::config::RiskTier::Preview;
+        let requires_preview = matches!(
+            risk_tier,
             crate::config::RiskTier::Change | crate::config::RiskTier::Exec
-        ) && self.state.config.requires_preview(&request.host)
-        {
-            return reject(ToolError::preview_required(
-                "Operation has no qualified preview path under require_preview policy",
-                false,
-            ));
-        }
+        ) && self.state.config.requires_preview(&request.host);
+        let preview_meta = if is_preview || requires_preview {
+            let Ok(authority_identity) =
+                super::preview::authority_identity_digest(&authority, &target_check)
+            else {
+                return reject(ToolError::preview_required(
+                    "Invalid preview authority identity",
+                    false,
+                ));
+            };
+            match super::preview::PreviewSpec::for_payload(
+                &binding.name,
+                is_preview,
+                &prepared.merged_args,
+            ) {
+                Some(spec) => Some((spec, authority_identity)),
+                None if requires_preview => {
+                    return reject(ToolError::preview_required(
+                        "Operation has no qualified preview path under require_preview policy",
+                        false,
+                    ));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let admission_mode = if binding.is_shared_read() {
             super::admission::AdmissionMode::SharedRead
         } else if binding.is_probe_only() {
@@ -103,6 +126,7 @@ impl Estus {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.state.local_tasks.spawn(async move {
             // Dropping an MCP handler never relinquishes execution/admission ownership.
+            let _credit = crate::progress::HandlerCredit::from_context(&context);
             let _permits = (operation, runtime);
             let metadata = Metadata {
                 request_id: &context.id,
@@ -137,6 +161,60 @@ impl Estus {
                 .config
                 .automation_target(id, &request.host)
                 .expect("payload target already authorized");
+            if requires_preview {
+                let (spec, authority_identity) = preview_meta
+                    .as_ref()
+                    .expect("preview spec checked before spawn");
+                let pre_state_digest = match state
+                    .payload
+                    .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
+                        host: &request.host,
+                        authority: &authority,
+                        target: &target,
+                        module: spec.prestate_module,
+                        arguments: &spec.prestate_args,
+                        connect_timeout: Duration::from_secs(
+                            state.config.limits().connect_timeout_secs,
+                        ),
+                        deadline,
+                        ct: &context.ct,
+                    })
+                    .await
+                {
+                    Ok(digest) => digest,
+                    Err(error) => {
+                        let error = if matches!(error.code(), "cancelled" | "timeout") {
+                            error
+                        } else {
+                            ToolError::preview_required(
+                                "Independent pre-state digest could not be obtained",
+                                false,
+                            )
+                        };
+                        target_lease.finish(false, error.code());
+                        metadata.reject(started, &error);
+                        let _ = sender.send(ToolReply::failure(error));
+                        return;
+                    }
+                };
+                let key = super::preview::PreviewKey {
+                    target: request.host.clone(),
+                    authority_identity: *authority_identity,
+                    domain: spec.domain,
+                    intent_digest: spec.intent_digest,
+                    pre_state_digest,
+                };
+                if !state.previews.consume(&key) {
+                    let error = ToolError::preview_required(
+                        "A matching non-expired preview is required before apply",
+                        false,
+                    );
+                    target_lease.finish(false, error.code());
+                    metadata.reject(started, &error);
+                    let _ = sender.send(ToolReply::failure(error));
+                    return;
+                }
+            }
             let audit = Audit::start(metadata, started);
             target_lease.mark_dispatched(request.host.clone(), authority.clone(), "native_payload");
             let reply = state
@@ -156,6 +234,42 @@ impl Estus {
                     started,
                 })
                 .await;
+            if is_preview
+                && reply.error().is_none()
+                && reply.data().is_some_and(|d| {
+                    d.complete && d.status == crate::reply::AutomationStatus::Successful
+                })
+                && let Some((spec, authority_identity)) = preview_meta
+            {
+                let resolved = state
+                    .config
+                    .automation_target(id, &request.host)
+                    .expect("payload target already authorized");
+                if let Ok(pre_state_digest) = state
+                    .payload
+                    .observe_preview_prestate(crate::native_payload::PreviewPrestateRequest {
+                        host: &request.host,
+                        authority: &authority,
+                        target: &resolved,
+                        module: spec.prestate_module,
+                        arguments: &spec.prestate_args,
+                        connect_timeout: Duration::from_secs(
+                            state.config.limits().connect_timeout_secs,
+                        ),
+                        deadline,
+                        ct: &context.ct,
+                    })
+                    .await
+                {
+                    state.previews.insert(super::preview::PreviewKey {
+                        target: request.host.clone(),
+                        authority_identity,
+                        domain: spec.domain,
+                        intent_digest: spec.intent_digest,
+                        pre_state_digest,
+                    });
+                }
+            }
             target_lease.finish(
                 reply.error().is_some_and(|e| e.remote_state_unknown),
                 reply.error().map_or("unknown", ToolError::code),

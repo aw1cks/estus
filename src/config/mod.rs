@@ -317,7 +317,6 @@ pub(crate) struct Config {
     rules: Vec<HostRule>,
     bindings: Bindings,
     automation: Automation,
-    catalog_version: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -421,11 +421,15 @@ impl PayloadPlan {
             projection: approval.projection.clone(),
         })
     }
-    pub(crate) fn arguments(&self, inputs: &Value) -> Result<Vec<String>, ToolError> {
+    pub(crate) fn arguments_with_merged(
+        &self,
+        inputs: &Value,
+    ) -> Result<(Vec<String>, Value), ToolError> {
         let args = self.binding.prepare(inputs).map_err(|_| {
             ToolError::invalid_argument("Payload inputs violate reviewed contract", false)
         })?;
-        adapt(&self.manifest.argv, &args)
+        let argv = adapt(&self.manifest.argv, &args)?;
+        Ok((argv, args))
     }
 }
 fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<String>, ToolError> {

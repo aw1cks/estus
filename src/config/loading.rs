@@ -143,7 +143,7 @@ fn resolve_catalog_selection(
     document: &mut Document,
     base: &Path,
     env: &impl Fn(&str) -> Option<OsString>,
-) -> Result<Option<String>, ConfigError> {
+) -> Result<(), ConfigError> {
     let definitions: BTreeSet<&str> = document.tools.keys().map(String::as_str).collect();
     let unknown = |names: &[String]| names.iter().any(|n| !definitions.contains(n.as_str()));
     let target_needs_catalog = document.targets.iter().flat_map(|t| t.values()).any(|t| {
@@ -196,11 +196,6 @@ fn resolve_catalog_selection(
         ));
     }
     let manifest = catalog.as_ref().map(|c| c.manifest());
-    let resolved_catalog_version = document
-        .catalog
-        .version
-        .clone()
-        .or_else(|| manifest.map(|m| m.version.clone()));
     let selected = crate::catalog::selection::expand(
         &definitions,
         manifest,
@@ -278,7 +273,7 @@ fn resolve_catalog_selection(
             })
         })
         .collect();
-    Ok(resolved_catalog_version)
+    Ok(())
 }
 
 #[derive(Default, Deserialize)]
@@ -387,7 +382,7 @@ impl Config {
         if let Some(root) = catalog_root {
             document.catalog.root = Some(root);
         }
-        let mut catalog_version = resolve_catalog_selection(&mut document, &base, &env)?;
+        resolve_catalog_selection(&mut document, &base, &env)?;
         let ssh_override = cli
             .ssh_config
             .or_else(|| env("ESTUS_SSH_CONFIG").map(PathBuf::from));
@@ -514,9 +509,6 @@ impl Config {
             if let Some(path) = catalog_source {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
                     .map_err(|reason| invalid("catalog", reason))?;
-                if catalog_version.is_none() {
-                    catalog_version = Some(catalog.manifest().version.clone());
-                }
                 for name in crate::catalog::assets::pinned_dynamic_payload_names() {
                     if document.disabled_tools.iter().any(|d| d == name)
                         || bindings.entries().any(|(_, b)| b.name == name)
@@ -565,7 +557,6 @@ impl Config {
             rules,
             bindings,
             automation: document.automation,
-            catalog_version,
         })
     }
 

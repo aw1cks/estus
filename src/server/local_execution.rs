@@ -123,10 +123,9 @@ impl Estus {
             }
         };
         let preview_meta = if is_preview || requires_preview {
-            let (Some(module_name), Some(args), Some(reviewed), Some(authority_identity)) = (
+            let (Some(module_name), Some(args), Some(authority_identity)) = (
                 prepared.module_name.take(),
                 prepared.arguments.take(),
-                activated.reviewed_module(),
                 authority_identity,
             ) else {
                 return reject(ToolError::preview_required(
@@ -134,29 +133,13 @@ impl Estus {
                     false,
                 ));
             };
-            let Ok(catalog_revision) = super::preview::catalog_revision_digest(
-                self.state.config.catalog_version(),
-                reviewed,
-            ) else {
+            let Some(spec) = super::preview::PreviewSpec::for_ansible(&module_name, &args) else {
                 return reject(ToolError::preview_required(
-                    "Invalid preview catalog revision",
+                    "Operation has no qualified preview path under require_preview policy",
                     false,
                 ));
             };
-            let Ok(canonical_arguments) = super::preview::canonical_json_sha256(&args) else {
-                return reject(ToolError::preview_required(
-                    "Invalid preview arguments",
-                    false,
-                ));
-            };
-            Some((
-                module_name,
-                args,
-                authority_identity,
-                catalog_revision,
-                binding.revision.clone(),
-                canonical_arguments,
-            ))
+            Some((spec, authority_identity))
         } else {
             None
         };
@@ -215,15 +198,7 @@ impl Estus {
                 }
             };
             if requires_preview {
-                let Some((
-                    ref module_name,
-                    ref args,
-                    authority_identity,
-                    catalog_revision,
-                    ref binding_revision,
-                    canonical_arguments,
-                )) = preview_meta
-                else {
+                let Some((spec, authority_identity)) = &preview_meta else {
                     let error = ToolError::preview_required(
                         "Operation has no qualified preview path under require_preview policy",
                         false,
@@ -242,8 +217,8 @@ impl Estus {
                         host: &request.host,
                         authority: &authority_label,
                         target: &resolved,
-                        module: module_name,
-                        arguments: args,
+                        module: spec.prestate_module,
+                        arguments: &spec.prestate_args,
                         connect_timeout: std::time::Duration::from_secs(
                             state.config.limits().connect_timeout_secs,
                         ),
@@ -270,10 +245,9 @@ impl Estus {
                 };
                 let key = super::preview::PreviewKey {
                     target: request.host.clone(),
-                    authority_identity,
-                    catalog_revision,
-                    binding_revision: binding_revision.clone(),
-                    canonical_arguments,
+                    authority_identity: *authority_identity,
+                    domain: spec.domain,
+                    intent_digest: spec.intent_digest,
                     pre_state_digest,
                 };
                 if !state.previews.consume(&key) {
@@ -311,15 +285,7 @@ impl Estus {
                             && d.tasks.skipped == 0
                     });
                 if valid_observation {
-                    if let Some((
-                        module_name,
-                        args,
-                        authority_identity,
-                        catalog_revision,
-                        binding_revision,
-                        canonical_arguments,
-                    )) = preview_meta
-                    {
+                    if let Some((spec, authority_identity)) = preview_meta {
                         let resolved = state
                             .config
                             .automation_target(id, &request.host)
@@ -331,8 +297,8 @@ impl Estus {
                                     host: &request.host,
                                     authority: &authority_label,
                                     target: &resolved,
-                                    module: &module_name,
-                                    arguments: &args,
+                                    module: spec.prestate_module,
+                                    arguments: &spec.prestate_args,
                                     connect_timeout: std::time::Duration::from_secs(
                                         state.config.limits().connect_timeout_secs,
                                     ),
@@ -345,9 +311,8 @@ impl Estus {
                             state.previews.insert(super::preview::PreviewKey {
                                 target: request.host.clone(),
                                 authority_identity,
-                                catalog_revision,
-                                binding_revision,
-                                canonical_arguments,
+                                domain: spec.domain,
+                                intent_digest: spec.intent_digest,
                                 pre_state_digest,
                             });
                         }

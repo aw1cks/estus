@@ -47,6 +47,7 @@ impl PayloadState {
 
 pub(crate) struct PreparedPayload {
     pub(crate) argv: Vec<String>,
+    pub(crate) merged_args: Value,
     pub(crate) duration: Duration,
     pub(crate) output_limit: usize,
 }
@@ -259,8 +260,10 @@ impl CompiledBinding {
             .max_output_bytes
             .unwrap_or(limits.max_output_bytes)
             .min(16_777_216);
+        let (argv, merged_args) = activated.plan.arguments_with_merged(&request.inputs)?;
         Ok(PreparedPayload {
-            argv: activated.plan.arguments(&request.inputs)?,
+            argv,
+            merged_args,
             duration: Duration::from_secs(timeout),
             output_limit: usize::try_from(output_limit)
                 .map_err(|_| bound("Invalid payload output ceiling"))?,
