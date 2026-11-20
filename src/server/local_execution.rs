@@ -204,7 +204,7 @@ impl Estus {
                                     false,
                                 )
                             };
-                        target_lease.finish(false, error.code().as_str());
+                        target_lease.finish(false, Some(error.code()));
                         metadata.reject(started, &error);
                         let _ = sender.send(ToolReply::failure(error));
                         return;
@@ -222,7 +222,7 @@ impl Estus {
                         "A matching non-expired preview is required before apply",
                         false,
                     );
-                    target_lease.finish(false, error.code().as_str());
+                    target_lease.finish(false, Some(error.code()));
                     metadata.reject(started, &error);
                     let _ = sender.send(ToolReply::failure(error));
                     return;
@@ -304,9 +304,7 @@ impl Estus {
             }
             target_lease.finish(
                 reply.error().is_some_and(|e| e.remote_state_unknown),
-                reply
-                    .error()
-                    .map_or("unknown", |error| error.code().as_str()),
+                reply.error().map(|error| error.code()),
             );
             audit.finish_automation(&reply);
             let _ = sender.send(reply);

@@ -264,10 +264,7 @@ impl Estus {
                         .await;
                         target_lease.finish(
                             outcome.lost_ack,
-                            outcome
-                                .reply
-                                .error()
-                                .map_or("ok", |error| error.code().as_str()),
+                            outcome.reply.error().map(|error| error.code()),
                         );
                         State::finish_sftp(audit, lease, outcome).await
                     }
@@ -315,10 +312,7 @@ impl Estus {
                         .await;
                         target_lease.finish(
                             outcome.lost_ack,
-                            outcome
-                                .reply
-                                .error()
-                                .map_or("ok", |error| error.code().as_str()),
+                            outcome.reply.error().map(|error| error.code()),
                         );
                         State::finish_sftp(audit, lease, outcome).await
                     }
@@ -374,7 +368,7 @@ impl Estus {
                         .await;
                         target_lease.finish(
                             outcome.lost_ack,
-                            outcome.reply.error().map_or("ok", |error| error.code().as_str()),
+                            outcome.reply.error().map(|error| error.code()),
                         );
                         State::finish_sftp(audit, lease, outcome).await
                     }
@@ -422,10 +416,7 @@ impl Estus {
                         .await;
                         target_lease.finish(
                             outcome.lost_ack,
-                            outcome
-                                .reply
-                                .error()
-                                .map_or("ok", |error| error.code().as_str()),
+                            outcome.reply.error().map(|error| error.code()),
                         );
                         State::finish_sftp(audit, lease, outcome).await
                     }
@@ -473,10 +464,7 @@ impl Estus {
                         .await;
                         target_lease.finish(
                             outcome.lost_ack,
-                            outcome
-                                .reply
-                                .error()
-                                .map_or("ok", |error| error.code().as_str()),
+                            outcome.reply.error().map(|error| error.code()),
                         );
                         State::finish_sftp(audit, lease, outcome).await
                     }
@@ -532,10 +520,7 @@ impl Estus {
                         .await;
                         target_lease.finish(
                             outcome.lost_ack,
-                            outcome
-                                .reply
-                                .error()
-                                .map_or("ok", |error| error.code().as_str()),
+                            outcome.reply.error().map(|error| error.code()),
                         );
                         State::finish_sftp(audit, lease, outcome).await
                     }

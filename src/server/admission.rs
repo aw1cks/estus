@@ -25,7 +25,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{audit, config::ConfigError, reply::ToolError, strict_json};
+use crate::{
+    audit,
+    config::ConfigError,
+    reply::{ErrorCode, ToolError},
+    strict_json,
+};
 
 const READ_SLOTS: usize = 4;
 const MAX_DYNAMIC_GATES: usize = 256;
@@ -42,40 +47,153 @@ const KNOWN_EXECUTORS: &[&str] = &[
     "unknown",
 ];
 
-const KNOWN_CAUSES: &[&str] = &[
-    "already_exists",
-    "automation_failed",
-    "cancelled",
-    "checksum_mismatch",
-    "cleanup_incomplete",
-    "command_failed",
-    "connection_lost",
-    "controller_resource_limit",
-    "discovery_failed",
-    "invalid_argument",
-    "invalid_encoding",
-    "invalid_projection",
-    "invalid_result",
-    "io_error",
-    "not_found",
-    "payload_failed",
-    "payload_rejected",
-    "permission_denied",
-    "policy_denied",
-    "preview_required",
-    "resource_limit",
-    "resource_unavailable",
-    "shutdown",
-    "spawn_failed",
-    "ssh_connect_failed",
-    "ssh_spawn_failed",
-    "target_quarantined",
-    "timeout",
-    "unsupported",
-    "unsupported_workspace_entry",
-    "worker_lost",
-    "unknown",
-];
+/// Closed set of quarantine causes; persisted and audited by wire string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum QuarantineCause {
+    AlreadyExists,
+    AutomationFailed,
+    Cancelled,
+    ChecksumMismatch,
+    CleanupIncomplete,
+    CommandFailed,
+    ConnectionLost,
+    ControllerResourceLimit,
+    DiscoveryFailed,
+    InvalidArgument,
+    InvalidEncoding,
+    InvalidProjection,
+    InvalidResult,
+    IoError,
+    NotFound,
+    PayloadFailed,
+    PayloadRejected,
+    PermissionDenied,
+    PolicyDenied,
+    PreviewRequired,
+    ResourceLimit,
+    ResourceUnavailable,
+    Shutdown,
+    SpawnFailed,
+    SshConnectFailed,
+    SshSpawnFailed,
+    TargetQuarantined,
+    Timeout,
+    Unsupported,
+    UnsupportedWorkspaceEntry,
+    WorkerLost,
+}
+
+impl QuarantineCause {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyExists => "already_exists",
+            Self::AutomationFailed => "automation_failed",
+            Self::Cancelled => "cancelled",
+            Self::ChecksumMismatch => "checksum_mismatch",
+            Self::CleanupIncomplete => "cleanup_incomplete",
+            Self::CommandFailed => "command_failed",
+            Self::ConnectionLost => "connection_lost",
+            Self::ControllerResourceLimit => "controller_resource_limit",
+            Self::DiscoveryFailed => "discovery_failed",
+            Self::InvalidArgument => "invalid_argument",
+            Self::InvalidEncoding => "invalid_encoding",
+            Self::InvalidProjection => "invalid_projection",
+            Self::InvalidResult => "invalid_result",
+            Self::IoError => "io_error",
+            Self::NotFound => "not_found",
+            Self::PayloadFailed => "payload_failed",
+            Self::PayloadRejected => "payload_rejected",
+            Self::PermissionDenied => "permission_denied",
+            Self::PolicyDenied => "policy_denied",
+            Self::PreviewRequired => "preview_required",
+            Self::ResourceLimit => "resource_limit",
+            Self::ResourceUnavailable => "resource_unavailable",
+            Self::Shutdown => "shutdown",
+            Self::SpawnFailed => "spawn_failed",
+            Self::SshConnectFailed => "ssh_connect_failed",
+            Self::SshSpawnFailed => "ssh_spawn_failed",
+            Self::TargetQuarantined => "target_quarantined",
+            Self::Timeout => "timeout",
+            Self::Unsupported => "unsupported",
+            Self::UnsupportedWorkspaceEntry => "unsupported_workspace_entry",
+            Self::WorkerLost => "worker_lost",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "already_exists" => Some(Self::AlreadyExists),
+            "automation_failed" => Some(Self::AutomationFailed),
+            "cancelled" => Some(Self::Cancelled),
+            "checksum_mismatch" => Some(Self::ChecksumMismatch),
+            "cleanup_incomplete" => Some(Self::CleanupIncomplete),
+            "command_failed" => Some(Self::CommandFailed),
+            "connection_lost" => Some(Self::ConnectionLost),
+            "controller_resource_limit" => Some(Self::ControllerResourceLimit),
+            "discovery_failed" => Some(Self::DiscoveryFailed),
+            "invalid_argument" => Some(Self::InvalidArgument),
+            "invalid_encoding" => Some(Self::InvalidEncoding),
+            "invalid_projection" => Some(Self::InvalidProjection),
+            "invalid_result" => Some(Self::InvalidResult),
+            "io_error" => Some(Self::IoError),
+            "not_found" => Some(Self::NotFound),
+            "payload_failed" => Some(Self::PayloadFailed),
+            "payload_rejected" => Some(Self::PayloadRejected),
+            "permission_denied" => Some(Self::PermissionDenied),
+            "policy_denied" => Some(Self::PolicyDenied),
+            "preview_required" => Some(Self::PreviewRequired),
+            "resource_limit" => Some(Self::ResourceLimit),
+            "resource_unavailable" => Some(Self::ResourceUnavailable),
+            "shutdown" => Some(Self::Shutdown),
+            "spawn_failed" => Some(Self::SpawnFailed),
+            "ssh_connect_failed" => Some(Self::SshConnectFailed),
+            "ssh_spawn_failed" => Some(Self::SshSpawnFailed),
+            "target_quarantined" => Some(Self::TargetQuarantined),
+            "timeout" => Some(Self::Timeout),
+            "unsupported" => Some(Self::Unsupported),
+            "unsupported_workspace_entry" => Some(Self::UnsupportedWorkspaceEntry),
+            "worker_lost" => Some(Self::WorkerLost),
+            _ => None,
+        }
+    }
+
+    fn from_error_code(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::AlreadyExists => Self::AlreadyExists,
+            ErrorCode::AutomationFailed => Self::AutomationFailed,
+            ErrorCode::Cancelled => Self::Cancelled,
+            ErrorCode::ChecksumMismatch => Self::ChecksumMismatch,
+            ErrorCode::CleanupIncomplete => Self::CleanupIncomplete,
+            ErrorCode::CommandFailed => Self::CommandFailed,
+            ErrorCode::ConnectionLost => Self::ConnectionLost,
+            ErrorCode::ControllerResourceLimit => Self::ControllerResourceLimit,
+            ErrorCode::DiscoveryFailed => Self::DiscoveryFailed,
+            ErrorCode::InvalidArgument => Self::InvalidArgument,
+            ErrorCode::InvalidEncoding => Self::InvalidEncoding,
+            ErrorCode::InvalidProjection => Self::InvalidProjection,
+            ErrorCode::InvalidResult => Self::InvalidResult,
+            ErrorCode::IoError => Self::IoError,
+            ErrorCode::NotFound => Self::NotFound,
+            ErrorCode::PayloadFailed => Self::PayloadFailed,
+            ErrorCode::PayloadRejected => Self::PayloadRejected,
+            ErrorCode::PermissionDenied => Self::PermissionDenied,
+            ErrorCode::PolicyDenied => Self::PolicyDenied,
+            ErrorCode::PreviewRequired => Self::PreviewRequired,
+            ErrorCode::ResourceLimit => Self::ResourceLimit,
+            ErrorCode::ResourceUnavailable => Self::ResourceUnavailable,
+            ErrorCode::Shutdown => Self::Shutdown,
+            ErrorCode::SpawnFailed => Self::SpawnFailed,
+            ErrorCode::SshConnectFailed => Self::SshConnectFailed,
+            ErrorCode::SshSpawnFailed => Self::SshSpawnFailed,
+            ErrorCode::TargetQuarantined => Self::TargetQuarantined,
+            ErrorCode::Timeout => Self::Timeout,
+            ErrorCode::Unsupported => Self::Unsupported,
+            #[cfg(test)]
+            // Test-only code; controller errors never quarantine targets.
+            ErrorCode::ControllerTimeout => Self::CommandFailed,
+        }
+    }
+}
 
 fn intern_known(table: &[&'static str], value: &str) -> Option<&'static str> {
     table.iter().copied().find(|candidate| *candidate == value)
@@ -97,7 +215,7 @@ pub(crate) enum AdmissionMode {
 struct QuarantineState {
     authority: String,
     executor: &'static str,
-    cause: &'static str,
+    cause: QuarantineCause,
 }
 
 pub(super) struct ClearedQuarantine {
@@ -215,7 +333,7 @@ impl Persistence {
             }
             let executor = intern_known(KNOWN_EXECUTORS, &record.executor)
                 .ok_or_else(|| invalid("unknown executor in quarantine state record"))?;
-            let cause = intern_known(KNOWN_CAUSES, &record.cause)
+            let cause = QuarantineCause::from_str(&record.cause)
                 .ok_or_else(|| invalid("unknown cause in quarantine state record"))?;
             restored.insert(
                 record.host,
@@ -241,7 +359,7 @@ impl Persistence {
             host: host.to_owned(),
             authority: state.authority.clone(),
             executor: state.executor.to_owned(),
-            cause: state.cause.to_owned(),
+            cause: state.cause.as_str().to_owned(),
         })
         .map_err(std::io::Error::other)?;
         let mut file = File::from(
@@ -310,7 +428,7 @@ impl TargetGate {
         host: &str,
         authority: String,
         executor: &'static str,
-        cause: &'static str,
+        cause: QuarantineCause,
     ) {
         let state = QuarantineState {
             authority: authority.clone(),
@@ -331,7 +449,13 @@ impl TargetGate {
         }
         *guard = Some(state);
         drop(guard);
-        audit::target_quarantine("quarantined", host, Some(&authority), Some(executor), cause);
+        audit::target_quarantine(
+            "quarantined",
+            host,
+            Some(&authority),
+            Some(executor),
+            cause.as_str(),
+        );
     }
 
     fn is_quarantined(&self) -> bool {
@@ -365,7 +489,7 @@ impl TargetGate {
         Ok(Some(ClearedQuarantine {
             authority: previous.authority,
             executor: previous.executor,
-            cause: previous.cause,
+            cause: previous.cause.as_str(),
         }))
     }
 }
@@ -461,7 +585,7 @@ impl TargetAdmission {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         q.as_ref()
-            .map(|item| (item.authority.clone(), item.executor, item.cause))
+            .map(|item| (item.authority.clone(), item.executor, item.cause.as_str()))
     }
 
     pub(super) async fn acquire(
@@ -705,11 +829,11 @@ impl ExecLease {
         });
     }
 
-    fn finish(&mut self, quarantine_target: bool, cause: &'static str) {
+    fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         if let Some(ctx) = self.dispatched.take()
             && quarantine_target
+            && let Some(cause) = cause.map(QuarantineCause::from_error_code)
         {
-            let cause = intern_known(KNOWN_CAUSES, cause).unwrap_or("unknown");
             self.gate.set_quarantine(
                 self.persistence.as_deref(),
                 &ctx.host,
@@ -729,7 +853,7 @@ impl Drop for ExecLease {
                 &ctx.host,
                 ctx.authority,
                 ctx.executor,
-                "worker_lost",
+                QuarantineCause::WorkerLost,
             );
         }
     }
@@ -756,11 +880,11 @@ impl WriteLease {
         });
     }
 
-    pub(super) fn finish(&mut self, quarantine_target: bool, cause: &'static str) {
+    pub(super) fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         if let Some(ctx) = self.dispatched.take()
             && quarantine_target
+            && let Some(cause) = cause.map(QuarantineCause::from_error_code)
         {
-            let cause = intern_known(KNOWN_CAUSES, cause).unwrap_or("unknown");
             self.gate.set_quarantine(
                 self.persistence.as_deref(),
                 &ctx.host,
@@ -780,7 +904,7 @@ impl Drop for WriteLease {
                 &ctx.host,
                 ctx.authority,
                 ctx.executor,
-                "worker_lost",
+                QuarantineCause::WorkerLost,
             );
         }
     }
@@ -807,7 +931,7 @@ impl TargetLease {
         }
     }
 
-    pub(super) fn finish(&mut self, quarantine_target: bool, cause: &'static str) {
+    pub(super) fn finish(&mut self, quarantine_target: bool, cause: Option<ErrorCode>) {
         match self {
             Self::Read(_) | Self::Probe(_) => {}
             Self::Exec(lease) => lease.finish(quarantine_target, cause),
@@ -886,7 +1010,7 @@ mod tests {
                 .await
                 .unwrap();
             write_flag.store(1, Ordering::Release);
-            w.finish(false, "ok");
+            w.finish(false, None);
         });
 
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -972,7 +1096,7 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::Cancelled);
         assert!(!err.remote_state_unknown);
 
-        w.finish(false, "ok");
+        w.finish(false, None);
         drop(w);
 
         // All 4 read slots remain available after cancelled waits.
@@ -1006,7 +1130,7 @@ mod tests {
             .await
             .unwrap();
         w1.mark_dispatched("alpha".into(), "ordinary".into(), "native_payload");
-        w1.finish(true, "timeout");
+        w1.finish(true, Some(ErrorCode::Timeout));
         drop(w1);
 
         let blocked = admission
@@ -1036,7 +1160,7 @@ mod tests {
             .await
             .unwrap();
         p.mark_dispatched("alpha".into(), "ordinary".into(), "native_payload");
-        p.finish(true, "timeout");
+        p.finish(true, Some(ErrorCode::Timeout));
         drop(p);
 
         // Multiplexed exec is blocked while quarantined.
@@ -1082,8 +1206,8 @@ mod tests {
             .unwrap();
         e1.mark_dispatched("alpha".into(), "ordinary".into(), "native_shell");
         e2.mark_dispatched("alpha".into(), "ordinary".into(), "native_shell");
-        e1.finish(false, "ok");
-        e2.finish(true, "timeout");
+        e1.finish(false, None);
+        e2.finish(true, Some(ErrorCode::Timeout));
         drop((e1, e2));
         assert_eq!(
             admission
@@ -1150,7 +1274,7 @@ mod tests {
             .await
             .unwrap();
         w0.mark_dispatched("host-000".into(), "ordinary".into(), "native_payload");
-        w0.finish(true, "timeout");
+        w0.finish(true, Some(ErrorCode::Timeout));
 
         // host-000 is idle but quarantined: 257th host still cannot evict it while 255 others remain active.
         let blocked_evict = admission
@@ -1206,7 +1330,7 @@ mod tests {
                 .await
                 .unwrap();
             w.mark_dispatched("alpha".into(), "ordinary".into(), "native_sftp");
-            w.finish(true, "timeout");
+            w.finish(true, Some(ErrorCode::Timeout));
         }
         let adm2 =
             TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
