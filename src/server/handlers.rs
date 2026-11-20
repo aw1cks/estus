@@ -499,7 +499,7 @@ impl Estus {
 
     #[tool(
         name = "change_target_quarantine_clear",
-        description = "Clear this session's write quarantine for one logical target after independently confirming remote state. Requires acknowledge_remote_state_reconciled=true; that assertion confirms reconciliation, not that remote work stopped.",
+        description = "Clear the write quarantine for one logical target after independently confirming remote state; a persisted record is unlinked first. Requires acknowledge_remote_state_reconciled=true, which asserts reconciliation, not that remote work stopped.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false),
         input_schema = schema_for_type::<ClearTargetQuarantineRequest>(),
         output_schema = schema_for_type::<ToolReply<ClearTargetQuarantineData>>()

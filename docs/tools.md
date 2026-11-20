@@ -118,16 +118,20 @@ acknowledgement or owner was lost: server refusal, timeout, cleanup failure or
 cancellation after the mutating request. It never means "succeeded" or "failed
 cleanly", and channel closure never proves rollback.
 
-An uncertain mutation quarantines writes on that logical host for the rest of the
-server session. Subsequent write calls fail with `target_quarantined`; read,
-observe, inspect and preview tools stay open so the real state can be examined
-(`observe_stat`, `inspect_file`, `observe_systemd_unit`, `inspect_journal`).
+An uncertain mutation quarantines writes on that logical host. Subsequent write
+calls fail with `target_quarantined`; read, observe, inspect and preview tools stay
+open so the real state can be examined (`observe_stat`, `inspect_file`,
+`observe_systemd_unit`, `inspect_journal`). With `[quarantine].state_dir` the record
+is written, `fsync`ed and atomically renamed into place before the reporting reply
+is returned, and reloaded on the next start, so the quarantine outlives the process;
+without it the gate lasts only for the session.
 
 `change_target_quarantine_clear` requires `host` and
 `acknowledge_remote_state_reconciled=true`; the flag is an operator assertion of
-independent reconciliation, not proof that remote work stopped. The gate is
-in-memory only — `estus doctor` is a separate process and cannot clear it — and
-clearing an unknown or non-quarantined target returns a bounded no-change result
+independent reconciliation, not proof that remote work stopped. Only a running
+server clears its own gate, so `estus doctor` — a separate process — cannot; a
+durable record it cannot unlink makes the clear fail rather than report success.
+Clearing an unknown or non-quarantined target returns a bounded no-change result
 without probing.
 
 ## Guidance surfaces

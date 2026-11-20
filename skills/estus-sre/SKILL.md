@@ -14,7 +14,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 
 ## 2. Uncertainty, Quarantine & No Replay
 - Estus **never** retries or replays interrupted or timed-out operations, and channel closure never proves rollback.
-- Any mutating call whose acknowledgement or owner is lost after dispatch sets `remote_state_unknown=true` and quarantines writes on that logical host (`target_quarantined`) for the rest of the session.
+- Any mutating call whose acknowledgement or owner is lost after dispatch sets `remote_state_unknown=true` and quarantines writes on that logical host (`target_quarantined`). With `[quarantine].state_dir` the record is durable and reloaded on restart; otherwise it lasts for this session only.
 - Read/observe/inspect/preview tools stay open while quarantined. Inspect actual remote state first (`observe_stat`, `inspect_file`, `observe_systemd_unit`, `inspect_journal`), reconcile independently, and only then call `change_target_quarantine_clear` with `acknowledge_remote_state_reconciled=true` — that flag is your assertion of reconciliation, not proof that remote work stopped.
 
 ## 3. Continuation & Output Handles

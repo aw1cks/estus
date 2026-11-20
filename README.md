@@ -6,7 +6,7 @@ inspection, previews, single-purpose changes, generic command execution, and an
 opt-in catalog of reviewed collectors and Ansible modules. It is **not** a
 sandbox, an SSH credential store, a bastion, or a policy engine for arbitrary
 shell work: the Rust process owns MCP framing, SSH transport, limits, cleanup and
-the in-memory write quarantine, while remote SSH identities, the remote OS and
+the write quarantine, while remote SSH identities, the remote OS and
 the operator's `sudoers` remain authoritative. A client that can execute as the
 service account can bypass Estus entirely. See
 [docs/threat-model.md](docs/threat-model.md).
@@ -91,9 +91,11 @@ allow/ask lists for the full published inventory (15 builtins plus the 104
 bundled catalog tools).
 
 Per-target narrowing is separate from the tier: `max_tier` denies every builtin
-above a ceiling, `selection` names the tools that host keeps, and
-`require_preview` (global, with a per-target override) demands a fresh matching
-preview for `change`/`exec` work.
+above a ceiling, and `selection` names the tools that host keeps. `require_preview`
+(global, with a per-target override) applies only to named `change`/`exec` bindings
+that have a qualified preview pairing: such a call needs a fresh matching preview,
+and a named binding with no pairing — including every generic tool — is refused
+with `preview_required`. Builtin `change_*` and `exec_*` tools are not gated by it.
 
 ## Layout
 
@@ -118,7 +120,3 @@ Configuration ceilings are enforced before connecting: escaped command 65536
 bytes, per-request reply budget 16 MiB, `max_output_bytes` and `max_file_bytes`
 1 MiB by default, `max_timeout_secs` 600. Server-wide concurrency is 64 requests;
 the session reports `mcp_session_overloaded` rather than buffering more.
-
-## Licence
-
-See [Cargo.toml](Cargo.toml).

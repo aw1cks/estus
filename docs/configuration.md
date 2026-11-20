@@ -42,7 +42,7 @@ Catalog and bundle additionally read `ESTUS_CATALOG_ROOT` and
 
 ```toml
 mode = "headless"          # headless (default) | workstation
-require_preview = false    # global preview gate for change/exec work
+require_preview = false    # requires a matching preview for preview-paired named tools
 disclose_sudo_policy = false
 ```
 
@@ -50,8 +50,12 @@ disclose_sudo_policy = false
   may only restate a declared `mode = "workstation"`; it never upgrades a file.
   With no file at all, `--workstation` is required to get anything beyond the
   read-only inspection builtins.
-- `require_preview` applies to `change` and `exec` tier work; a target may
-  override it.
+- `require_preview` applies to named bindings whose tier is `change` or `exec`; a
+  target may override it. It never gates the builtin `change_*`/`exec_*` tools. It
+  does not simply delay `exec` work for approval: a named `exec` binding with no
+  qualified preview pairing is refused with `preview_required`. Bindings that do
+  have a pairing (the qualified `preview_*`/change pairs) must present a fresh
+  matching preview, consumed once and expiring after five minutes.
 - `disclose_sudo_policy` includes declared sudo users/programs in target
   discovery output.
 
@@ -123,8 +127,13 @@ ttl_secs = 300               # 1 … 3600
 state_dir = "/var/lib/estus/quarantine"
 ```
 
-Optional private directory for state the server persists; omitted means in-memory
-only.
+Directory for durable quarantine records. When set, a new quarantine is written and
+`fsync`ed — via a temporary name and atomic rename — before the reply that reports
+it is returned, and a clear unlinks the record before the gate opens. Records are
+restored on the next start, so a quarantine survives a restart of the server
+process. The directory must be owned by the current UID with mode 0700 and hold
+only owned regular records; anything else fails startup. When omitted, quarantine
+is in-memory only for the life of the process.
 
 ## `[targets.<name>]`
 

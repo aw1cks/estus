@@ -176,7 +176,10 @@ because setup does not provide the boot UUID, raw CPU tick counters/two-sample
 deltas, or exact byte gauges with the selected VM counters.
 
 Under `require_preview = true`, a qualified preview must precede the matching
-change with the same inputs. `preview_sysctl` with `{name, value, state:
+change with the same inputs. The gate covers only named `change`/`exec` bindings
+that declare such a pairing; builtin `change_*`/`exec_*` tools are not gated, and a
+named binding with no pairing is refused rather than delayed.
+`preview_sysctl` with `{name, value, state:
 "present"}` pairs with `change_sysctl_config` (a dedicated sysctl.d file plus
 exact-file apply and readback); adding `sysctl_set = true` pairs with
 `change_sysctl_runtime` (single-key runtime write, no persistence). Packages:

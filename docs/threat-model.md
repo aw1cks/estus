@@ -39,12 +39,18 @@ who can rewrite the configuration, the catalog, the bundle or the binary.
 - **Sudo is a fixed policy.** `exec_sudo` needs an operator-declared user and
   program allowlist on that target, runs `sudo -H -n -k` with no PTY, no password
   prompt, and no caller-selected user, program or executable.
-- **Preview gating.** Under `require_preview`, a change call needs a prior
-  `preview_*` matching target, authority, domain and arguments; the preview is
-  single-use and expires.
+- **Preview gating.** Under `require_preview`, a named `change`/`exec` binding that
+  has a qualified preview pairing needs a prior `preview_*` matching target,
+  authority, domain, arguments and independently observed pre-state; the preview is
+  single-use and expires. A named binding with no pairing is refused outright, and
+  the builtin `change_*`/`exec_*` tools are not gated at all.
 - **Write quarantine.** Any mutation whose acknowledgement is lost sets
   `remote_state_unknown=true` and blocks further writes on that logical target
   until an operator asserts reconciliation via `change_target_quarantine_clear`.
+  With `[quarantine].state_dir` set the record is `fsync`ed before that reply is
+  returned and reloaded on restart, so the block outlives one process lifetime. It
+  is a gate, not an isolation boundary: whoever can remove the record or start the
+  server against an empty directory regains write access.
 - **No replay, no rollback.** Interrupted work is never retried, undone or
   inferred complete.
 - **Metadata honesty.** Every catalog tool publishes its executor, authority,
