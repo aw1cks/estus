@@ -9,8 +9,7 @@
     {
       "kind": "argument",
       "name": "device",
-      "format": "scalar",
-      "omit_if_absent": false
+      "format": "scalar"
     }
   ],
   "requirements": {

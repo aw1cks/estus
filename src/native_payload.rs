@@ -67,8 +67,6 @@ pub(crate) enum Arg {
             skip_serializing_if = "Option::is_none"
         )]
         default: Option<Value>,
-        #[serde(default)]
-        omit_if_absent: bool,
     },
     Object {
         fields: std::collections::BTreeMap<String, ArgumentValue>,
@@ -454,15 +452,8 @@ fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
                 name,
                 format,
                 default,
-                omit_if_absent,
             } => {
-                let Some(value) = args.get(name).or(default.as_ref()) else {
-                    if *omit_if_absent {
-                        continue;
-                    } else {
-                        return Err(invalid());
-                    }
-                };
+                let value = args.get(name).or(default.as_ref()).ok_or_else(invalid)?;
                 match format {
                     // Already a JSON value: parsed by the collector from typed input.
                     Format::Json => value.clone(),
@@ -488,6 +479,72 @@ fn adapt(adapter: &[Arg], args: &Value) -> Result<Vec<Value>, ToolError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Smallest value satisfying a reviewed schema fragment, for exercising
+    /// prepare() with caller-required fields.
+    fn sample(schema: &Value) -> Value {
+        if let Some(value) = schema.get("const") {
+            return value.clone();
+        }
+        if let Some(value) = schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .and_then(|v| v.first())
+        {
+            return value.clone();
+        }
+        match schema.get("type").and_then(Value::as_str) {
+            Some("string") => {
+                // Honour the declared floor; several contracts pin exact lengths
+                // (a 36-character boot id, a cursor) rather than just a pattern.
+                let floor = schema
+                    .get("minLength")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1) as usize;
+                json!("x".repeat(floor))
+            }
+            Some("integer") | Some("number") => {
+                schema.get("minimum").cloned().unwrap_or_else(|| json!(0))
+            }
+            Some("boolean") => json!(false),
+            Some("array") => json!([]),
+            Some("object") => {
+                // Populate required children, and honour minProperties by adding
+                // the first declared optional property for closed policy objects.
+                let mut object = serde_json::Map::new();
+                if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                    let required = schema
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    for (key, child) in properties {
+                        if required.iter().any(|name| name.as_str() == Some(key)) {
+                            object.insert(key.clone(), sample(child));
+                        }
+                    }
+                    let floor = schema
+                        .get("minProperties")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    while object.len() < floor {
+                        let Some((key, child)) = properties
+                            .iter()
+                            .find(|(key, _)| !object.contains_key(*key))
+                        else {
+                            break;
+                        };
+                        object.insert(key.clone(), sample(child));
+                    }
+                }
+                Value::Object(object)
+            }
+            Some("null") => Value::Null,
+            _ => json!("x"),
+        }
+    }
+
     #[test]
     fn rejects_ambiguous_output() {
         for bytes in [
@@ -502,10 +559,120 @@ mod tests {
     }
     #[test]
     fn structured_literal_adapter() {
-        let adapter:Vec<Arg>=serde_json::from_value(json!([{"kind":"argument","name":"x","format":"json"},{"kind":"argument","name":"optional","format":"scalar","default":""},{"kind":"argument","name":"gone","format":"scalar","omit_if_absent":true}])).unwrap();
+        let adapter:Vec<Arg>=serde_json::from_value(json!([{"kind":"argument","name":"x","format":"json"},{"kind":"argument","name":"optional","format":"scalar","default":""},{"kind":"argument","name":"gone","format":"json","default":null}])).unwrap();
         assert_eq!(
             adapt(&adapter, &json!({"x":{"literal":"{{ x }};\n☃"}})).unwrap(),
-            vec![json!({"literal":"{{ x }};\n☃"}), json!("")]
+            vec![json!({"literal":"{{ x }};\n☃"}), json!(""), json!(null)]
+        );
+    }
+
+    /// The adapter is evaluated against every shipped manifest's own reviewed
+    /// defaults, so a format/schema mismatch fails here instead of on a target.
+    #[test]
+    fn shipped_manifest_adapters_accept_their_own_defaults() {
+        use crate::contracts::module_schema::compile_binding;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog/payloads");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let manifest_path = entry.unwrap().path().join("manifest.json");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let manifest: Manifest =
+                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            let overlay = &manifest.approval.overlay;
+            let binding = compile_binding(&manifest.contract, overlay).unwrap();
+            // Scalar format means "a bare string", so the reviewed schema must
+            // agree and every default must already be a string.
+            let properties = overlay
+                .get("input_schema")
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object);
+            let input_map = overlay.get("input_map").and_then(Value::as_object);
+            for arg in &manifest.argv {
+                let Arg::Argument {
+                    name,
+                    format,
+                    default,
+                } = arg
+                else {
+                    continue;
+                };
+                if let Format::Scalar = format {
+                    // Scalar means "a bare string", so the reviewed contract must
+                    // type the backend field as a string whether the value comes
+                    // from the caller (input_map) or operator policy (fixed_args).
+                    let declared = manifest
+                        .contract
+                        .get("schema")
+                        .and_then(|schema| schema.get("properties"))
+                        .and_then(|properties| properties.get(name))
+                        .and_then(|schema| schema.get("type"))
+                        .and_then(Value::as_str);
+                    assert_eq!(
+                        declared,
+                        Some("string"),
+                        "{}: scalar adapter {name} is typed {declared:?} in the reviewed contract",
+                        manifest_path.display()
+                    );
+                    if let Some(default) = default {
+                        assert!(
+                            default.is_string(),
+                            "{}: scalar adapter {name} has non-string default {default}",
+                            manifest_path.display()
+                        );
+                    }
+                    if let Some(fixed) = overlay.get("fixed_args").and_then(|fixed| fixed.get(name))
+                    {
+                        assert!(
+                            fixed.is_string(),
+                            "{}: scalar adapter {name} has non-string fixed_arg {fixed}",
+                            manifest_path.display()
+                        );
+                    }
+                    let _ = (&properties, &input_map);
+                }
+            }
+            // Every adapter input must resolve: fixed_args, then the argument
+            // default. Caller-required fields come from the input_map so the
+            // real prepare() path is exercised, not reimplemented here.
+            let mut inputs = serde_json::Map::new();
+            if let Some(map) = overlay.get("input_map").and_then(Value::as_object) {
+                for (backend, public) in map {
+                    let Some(public) = public.as_str() else {
+                        continue;
+                    };
+                    let Some(schema) = overlay
+                        .get("input_schema")
+                        .and_then(|schema| schema.get("properties"))
+                        .and_then(|properties| properties.get(public))
+                    else {
+                        continue;
+                    };
+                    if overlay
+                        .get("input_schema")
+                        .and_then(|schema| schema.get("required"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|required| {
+                            required.iter().any(|field| field.as_str() == Some(public))
+                        })
+                    {
+                        inputs.insert(public.to_owned(), sample(schema));
+                    }
+                    let _ = backend;
+                }
+            }
+            let inputs = Value::Object(inputs);
+            let prepared = binding
+                .prepare(&inputs)
+                .unwrap_or_else(|code| panic!("{}: {code}", manifest_path.display()));
+            adapt(&manifest.argv, &prepared)
+                .unwrap_or_else(|error| panic!("{}: {error:?}", manifest_path.display()));
+            checked += 1;
+        }
+        assert!(
+            checked >= 112,
+            "expected every shipped manifest, saw {checked}"
         );
     }
 

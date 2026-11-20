@@ -34,8 +34,7 @@
     {
       "kind": "argument",
       "name": "operator_policy",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {

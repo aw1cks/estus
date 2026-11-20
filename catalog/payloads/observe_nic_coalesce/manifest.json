@@ -9,8 +9,7 @@
     {
       "kind": "argument",
       "name": "interface",
-      "format": "scalar",
-      "omit_if_absent": false
+      "format": "scalar"
     }
   ],
   "requirements": {

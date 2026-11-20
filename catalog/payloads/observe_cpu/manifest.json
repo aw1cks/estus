@@ -10,15 +10,13 @@
       "kind": "argument",
       "name": "limit",
       "default": 8,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "sample_ms",
       "default": 0,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {

@@ -9,8 +9,7 @@
     {
       "kind": "argument",
       "name": "limit",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {

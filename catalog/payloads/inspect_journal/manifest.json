@@ -10,64 +10,55 @@
       "kind": "argument",
       "name": "unit",
       "default": null,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "boot_id",
       "default": "current",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "since",
       "default": 0,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "journal_until",
       "default": 4102444800,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "priority",
       "default": 7,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "cursor",
       "default": "",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "limit",
       "default": 100,
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "contains",
       "default": "",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "direction",
       "default": "backward",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {

@@ -9,20 +9,17 @@
     {
       "kind": "argument",
       "name": "key",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "value",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "approved_keys",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {

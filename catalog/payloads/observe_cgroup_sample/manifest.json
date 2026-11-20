@@ -9,20 +9,17 @@
     {
       "kind": "argument",
       "name": "approved_root",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "duration_ms",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     },
     {
       "kind": "argument",
       "name": "samples",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {

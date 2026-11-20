@@ -9,15 +9,13 @@
     {
       "kind": "argument",
       "name": "interface",
-      "format": "scalar",
-      "omit_if_absent": false
+      "format": "scalar"
     },
     {
       "kind": "argument",
       "name": "filter",
       "default": "",
-      "format": "json",
-      "omit_if_absent": false
+      "format": "json"
     }
   ],
   "requirements": {
