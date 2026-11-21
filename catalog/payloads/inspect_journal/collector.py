@@ -89,6 +89,13 @@ def select_journal_records(
         if skip_cursor and r.get('__CURSOR') == skip_cursor:
             continue
         item, full_msg = build_journal_item(r, boot)
+        # With a cursor journalctl cannot also take --since, so the lower bound
+        # is enforced here: older records end a backward page, and are skipped
+        # when paging forward.
+        if item['realtime_usec'] < since * 1000000:
+            if direction == 'backward':
+                break
+            continue
         if contains and contains not in full_msg:
             continue
         if len(result) >= limit:
@@ -201,15 +208,18 @@ def main():
                 query += ['--since=@' + str(p['since'])]
         else:
             query += [
-                '--since=@' + str(p['since']),
                 '--until=@' + str(p['until']),
                 '--reverse',
                 '--lines=' + str(fetch_limit),
             ]
             # Journald pages backwards directly from the retained cursor: one fixed
-            # utility invocation, no separate seek probe.
+            # utility invocation, no separate seek probe. journalctl accepts only
+            # one of --since/--cursor/--after-cursor; the lower time bound is then
+            # applied when records are selected.
             if raw_cursor:
                 query += ['--after-cursor=' + raw_cursor]
+            else:
+                query += ['--since=@' + str(p['since'])]
         if unit:
             query += ['_SYSTEMD_UNIT=' + unit]
         try:

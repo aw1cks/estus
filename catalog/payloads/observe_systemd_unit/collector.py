@@ -48,11 +48,16 @@ def show(scope, unit):
     if result['returncode'] != 0:
         raise ValueError('systemctl failed with exit ' + str(result['returncode']))
     properties = {}
+    seen = set()
     for line in result['stdout'].splitlines():
         key, separator, value = line.partition('=')
-        if not separator or key not in PROPERTIES or key in properties:
+        if not separator or key not in PROPERTIES or key in seen:
             raise ValueError('unexpected selected property')
-        properties[key] = estus_runtime.check_text(value, maximum=4096)
+        seen.add(key)
+        # An empty value (e.g. InvocationID of an inactive unit) is absence,
+        # reported under `unavailable` rather than as a fabricated value.
+        if value:
+            properties[key] = estus_runtime.check_text(value, maximum=4096)
     return properties
 
 
