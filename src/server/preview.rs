@@ -11,8 +11,6 @@ pub(crate) const MAX_ENTRIES: usize = 256;
 pub(crate) const TTL: Duration = Duration::from_secs(300);
 
 const QUALIFIED_MODULES: &[&str] = &[
-    "ansible.builtin.systemd_service",
-    "ansible.posix.sysctl",
     "ansible.builtin.apt",
     "ansible.builtin.dnf",
     "ansible.builtin.dnf5",
@@ -260,8 +258,8 @@ impl Change {
 
     fn domain(&self) -> &'static str {
         match self {
-            Self::Sysctl { .. } => "ansible.posix.sysctl",
-            Self::Systemd { .. } => "ansible.builtin.systemd_service",
+            Self::Sysctl { .. } => "estus.sysctl",
+            Self::Systemd { .. } => "estus.systemd_service",
             Self::Package { .. } => "estus.packages",
             Self::KernelModule { .. } => "estus.kernel_module",
         }
@@ -305,60 +303,6 @@ impl PreviewSpec {
     /// protocol-specific part; intent, pre-state and digest come from `Change`.
     pub(crate) fn for_ansible(module: &str, args: &Value) -> Option<Self> {
         let change = match module {
-            "ansible.posix.sysctl" => {
-                let key = args.get("name").and_then(Value::as_str)?;
-                let sysctl_set = args
-                    .get("sysctl_set")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                // Bind the same file the native executors pin, so one preview
-                // authorizes the config and runtime payloads alike.
-                let file = match args.get("sysctl_file").and_then(Value::as_str) {
-                    Some(explicit) => Value::String(explicit.to_owned()),
-                    // `change_sysctl_runtime` never reads or writes
-                    // `/etc/sysctl.conf`, so a runtime preview binds a null file.
-                    None if sysctl_set => Value::Null,
-                    None => Value::String(format!(
-                        "/etc/sysctl.d/90-estus-catalog-{}.conf",
-                        sysctl_config_slug(key)
-                    )),
-                };
-                Change::Sysctl {
-                    key: key.to_owned(),
-                    value: scalar_string(args.get("value")),
-                    file,
-                    set: sysctl_set,
-                    // The catalog fixes reload=false for preview; defaulting to
-                    // true would make a bare preview digest unmatchable.
-                    reload: args.get("reload").and_then(Value::as_bool).unwrap_or(false),
-                    state: match args
-                        .get("state")
-                        .and_then(Value::as_str)
-                        .unwrap_or("present")
-                    {
-                        "absent" => "absent",
-                        _ => "present",
-                    },
-                }
-            }
-            "ansible.builtin.systemd_service" => Change::Systemd {
-                unit: args.get("name").and_then(Value::as_str)?.to_owned(),
-                scope: args
-                    .get("scope")
-                    .and_then(Value::as_str)
-                    .unwrap_or("system")
-                    .to_owned(),
-                state: args
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .and_then(systemd_state),
-                enabled: args.get("enabled").and_then(Value::as_bool),
-                masked: args.get("masked").and_then(Value::as_bool),
-                daemon_reload: args
-                    .get("daemon_reload")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            },
             "ansible.builtin.package"
             | "ansible.builtin.apt"
             | "ansible.builtin.dnf"
@@ -414,16 +358,17 @@ impl PreviewSpec {
                     name: args.get("name").and_then(Value::as_str)?.replace('-', "_"),
                 }
             }
-            "change_sysctl_config" | "change_sysctl_runtime" => {
+            "preview_sysctl" => {
                 let key = args.get("key").and_then(Value::as_str)?;
-                let runtime = binding_name == "change_sysctl_runtime";
+                let runtime = match args.get("mode").and_then(Value::as_str)? {
+                    "config" => false,
+                    "runtime" => true,
+                    _ => return None,
+                };
                 Change::Sysctl {
                     key: key.to_owned(),
                     value: scalar_string(args.get("value")),
                     file: if runtime {
-                        // The runtime payload rewrites the live kernel value and
-                        // never touches `/etc/sysctl.conf`; a null file keeps both
-                        // sides equal.
                         Value::Null
                     } else {
                         Value::String(format!(
@@ -436,10 +381,26 @@ impl PreviewSpec {
                     state: "present",
                 }
             }
-            // The merged systemd tools carry the operation as data, so the
-            // fields it sets — and therefore the digest the preview records —
-            // depend on the argument, not only on the binding name.
-            "change_systemd_unit" | "change_systemd_unit_file" => {
+            "change_sysctl_config" | "change_sysctl_runtime" => {
+                let key = args.get("key").and_then(Value::as_str)?;
+                let runtime = binding_name == "change_sysctl_runtime";
+                Change::Sysctl {
+                    key: key.to_owned(),
+                    value: scalar_string(args.get("value")),
+                    file: if runtime {
+                        Value::Null
+                    } else {
+                        Value::String(format!(
+                            "/etc/sysctl.d/90-estus-catalog-{}.conf",
+                            sysctl_config_slug(key)
+                        ))
+                    },
+                    set: runtime,
+                    reload: false,
+                    state: "present",
+                }
+            }
+            "preview_systemd_service" | "change_systemd_unit" | "change_systemd_unit_file" => {
                 let operation = args.get("operation").and_then(Value::as_str)?;
                 // `try_restart` and `reset_failed` have no field in the shared
                 // systemd intent, so they would collide with one another. As
@@ -490,16 +451,6 @@ impl PreviewSpec {
     }
 }
 
-fn systemd_state(raw: &str) -> Option<&'static str> {
-    match raw {
-        "started" => Some("started"),
-        "stopped" => Some("stopped"),
-        "restarted" => Some("restarted"),
-        "reloaded" => Some("reloaded"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,7 +459,7 @@ mod tests {
         PreviewKey {
             target: "server".into(),
             authority: crate::config::IdentityRole::Automation,
-            domain: "ansible.posix.sysctl",
+            domain: "estus.sysctl",
             intent_digest: [3; 32],
             pre_state_digest: [tag; 32],
         }
@@ -577,10 +528,11 @@ mod tests {
     }
 
     #[test]
-    fn preview_specs_match_across_ansible_and_native_executors() {
-        let ansible_systemd = PreviewSpec::for_ansible(
-            "ansible.builtin.systemd_service",
-            &json!({"name": "sshd.service", "state": "restarted", "daemon_reload": false}),
+    fn preview_specs_match_across_native_and_package_executors() {
+        let preview_systemd = PreviewSpec::for_payload(
+            "preview_systemd_service",
+            true,
+            &json!({"unit": "sshd.service", "operation": "restart", "manager_scope": "system"}),
         )
         .unwrap();
         let native_systemd = PreviewSpec::for_payload(
@@ -589,11 +541,11 @@ mod tests {
             &json!({"unit": "sshd.service", "operation": "restart", "manager_scope": "system"}),
         )
         .unwrap();
-        assert_eq!(ansible_systemd.domain, native_systemd.domain);
-        assert_eq!(ansible_systemd.intent_digest, native_systemd.intent_digest);
-        assert_eq!(ansible_systemd.prestate_args, native_systemd.prestate_args);
+        assert_eq!(preview_systemd.domain, "estus.systemd_service");
+        assert_eq!(preview_systemd.domain, native_systemd.domain);
+        assert_eq!(preview_systemd.intent_digest, native_systemd.intent_digest);
+        assert_eq!(preview_systemd.prestate_args, native_systemd.prestate_args);
 
-        // A different operation on the same unit is a different intent.
         let native_stop = PreviewSpec::for_payload(
             "change_systemd_unit",
             false,
@@ -602,11 +554,10 @@ mod tests {
         .unwrap();
         assert_ne!(native_stop.intent_digest, native_systemd.intent_digest);
 
-        // The unit-file tool shares the preview lowering: enable derives the
-        // same intent as the Ansible form with `enabled: true`.
-        let ansible_enabled = PreviewSpec::for_ansible(
-            "ansible.builtin.systemd_service",
-            &json!({"name": "sshd.service", "enabled": true, "daemon_reload": false}),
+        let preview_enabled = PreviewSpec::for_payload(
+            "preview_systemd_service",
+            true,
+            &json!({"unit": "sshd.service", "operation": "enable", "manager_scope": "system"}),
         )
         .unwrap();
         let native_enabled = PreviewSpec::for_payload(
@@ -615,9 +566,8 @@ mod tests {
             &json!({"unit": "sshd.service", "operation": "enable", "manager_scope": "system"}),
         )
         .unwrap();
-        assert_eq!(ansible_enabled.intent_digest, native_enabled.intent_digest);
+        assert_eq!(preview_enabled.intent_digest, native_enabled.intent_digest);
 
-        // Operations with no field in the shared intent cannot be previewed.
         for operation in ["try_restart", "reset_failed"] {
             assert!(
                 PreviewSpec::for_payload(
@@ -665,11 +615,12 @@ mod tests {
     }
 
     #[test]
-    fn preview_sysctl_default_file_authorizes_change_sysctl_config() {
+    fn preview_sysctl_config_mode_authorizes_change_sysctl_config() {
         let key = "kernel.printk_ratelimit";
-        let preview = PreviewSpec::for_ansible(
-            "ansible.posix.sysctl",
-            &json!({"name": key, "value": "10", "state": "present"}),
+        let preview = PreviewSpec::for_payload(
+            "preview_sysctl",
+            true,
+            &json!({"key": key, "value": 10, "mode": "config"}),
         )
         .unwrap();
         let change = PreviewSpec::for_payload(
@@ -679,7 +630,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(preview.domain, "ansible.posix.sysctl");
+        assert_eq!(preview.domain, "estus.sysctl");
         assert_eq!(preview.domain, change.domain);
         assert_eq!(preview.prestate_module, change.prestate_module);
         assert_eq!(
@@ -694,16 +645,12 @@ mod tests {
     }
 
     #[test]
-    fn preview_sysctl_runtime_flag_authorizes_change_sysctl_runtime() {
+    fn preview_sysctl_runtime_mode_authorizes_change_sysctl_runtime() {
         let key = "kernel.printk_ratelimit";
-        let preview = PreviewSpec::for_ansible(
-            "ansible.posix.sysctl",
-            &json!({
-                "name": key,
-                "value": "10",
-                "state": "present",
-                "sysctl_set": true,
-            }),
+        let preview = PreviewSpec::for_payload(
+            "preview_sysctl",
+            true,
+            &json!({"key": key, "value": 10, "mode": "runtime"}),
         )
         .unwrap();
         let runtime = PreviewSpec::for_payload(
@@ -719,7 +666,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(preview.domain, "ansible.posix.sysctl");
+        assert_eq!(preview.domain, "estus.sysctl");
         assert_eq!(preview.domain, runtime.domain);
         assert_eq!(
             preview.prestate_args,
@@ -727,40 +674,16 @@ mod tests {
         );
         assert_eq!(preview.prestate_args, runtime.prestate_args);
         assert_eq!(preview.intent_digest, runtime.intent_digest);
-        // One preview must not authorize both the runtime and persistent payloads.
         assert_ne!(preview.intent_digest, config.intent_digest);
     }
 
     #[test]
-    fn explicit_sysctl_file_still_binds_that_exact_path() {
-        let explicit = PreviewSpec::for_ansible(
-            "ansible.posix.sysctl",
-            &json!({
-                "name": "kernel.printk_ratelimit",
-                "value": "10",
-                "state": "present",
-                "sysctl_file": "/etc/sysctl.d/99-site.conf",
-                "reload": true,
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            explicit.prestate_args,
-            json!({"name": "kernel.printk_ratelimit", "sysctl_file": "/etc/sysctl.d/99-site.conf"})
-        );
-        let config = PreviewSpec::for_payload(
-            "change_sysctl_config",
-            false,
-            &json!({"key": "kernel.printk_ratelimit", "value": 10}),
-        )
-        .unwrap();
-        assert_ne!(explicit.intent_digest, config.intent_digest);
+    fn sysctl_config_slug_is_injective() {
         assert_eq!(
             sysctl_config_slug("kernel.printk_ratelimit"),
             "kernel_printk__ratelimit"
         );
         assert_eq!(sysctl_config_slug("vm.swappiness"), "vm_swappiness");
-        // The encoding must never collapse distinct keys onto one file.
         assert_ne!(
             sysctl_config_slug("net.ipv4.conf.br_0.forwarding"),
             sysctl_config_slug("net.ipv4.conf.br-0.forwarding")
@@ -834,9 +757,10 @@ mod tests {
     #[test]
     fn preview_sysctl_authorizes_both_native_executors_without_a_runtime_file() {
         let key = "net.ipv4.conf.br_0.forwarding";
-        let preview = PreviewSpec::for_ansible(
-            "ansible.posix.sysctl",
-            &json!({"name": key, "value": "1", "state": "present"}),
+        let preview = PreviewSpec::for_payload(
+            "preview_sysctl",
+            true,
+            &json!({"key": key, "value": 1, "mode": "config"}),
         )
         .unwrap();
         let config = PreviewSpec::for_payload(
@@ -848,9 +772,10 @@ mod tests {
         assert_eq!(preview.intent_digest, config.intent_digest);
         assert_eq!(preview.prestate_args, config.prestate_args);
 
-        let runtime_preview = PreviewSpec::for_ansible(
-            "ansible.posix.sysctl",
-            &json!({"name": key, "value": "1", "state": "present", "sysctl_set": true}),
+        let runtime_preview = PreviewSpec::for_payload(
+            "preview_sysctl",
+            true,
+            &json!({"key": key, "value": 1, "mode": "runtime"}),
         )
         .unwrap();
         let runtime = PreviewSpec::for_payload(

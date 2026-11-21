@@ -143,6 +143,17 @@ pub(super) fn register(config: &Config) -> Result<Registration, ConfigError> {
             .meta
             .get_or_insert_with(rmcp::model::MetaObject::default);
         meta.insert("risk_tier".into(), serde_json::json!(tier));
+        if matches!(
+            *id,
+            ToolId::Exec
+                | ToolId::Run
+                | ToolId::Sudo
+                | ToolId::ReadFile
+                | ToolId::ListDirectory
+                | ToolId::ReadOutput
+        ) {
+            meta.insert("untrusted_remote_output".into(), serde_json::json!(true));
+        }
         if *id == ToolId::Targets {
             continue;
         }

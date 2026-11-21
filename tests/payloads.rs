@@ -840,3 +840,108 @@ with mock.patch('os.path.isfile', side_effect=fake_isfile):
     }
     Ok(())
 }
+
+#[test]
+fn host_runnable_native_preview_collector_contracts() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let python = std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let payloads = root.join("catalog/payloads");
+    let stubs = tempfile::tempdir()?;
+    let stub_systemctl = stubs.path().join("systemctl");
+    std::fs::write(
+        &stub_systemctl,
+        "#!/bin/sh\nprintf 'Id=estus-fixture.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=disabled\\nMainPID=0\\nResult=success\\n'\n",
+    )?;
+    std::fs::set_permissions(&stub_systemctl, std::fs::Permissions::from_mode(0o755))?;
+
+    let run_collector = |tool: &str,
+                         request_json: &str,
+                         env_vars: &[(&str, &std::path::Path)]|
+     -> Result<Value> {
+        let collector = payloads.join(tool).join("collector.py");
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(payloads.join(tool).join("manifest.json"))?)?;
+        let toml_text = std::fs::read_to_string(root.join("catalog").join(format!("{tool}.toml")))?;
+        let toml_doc: toml::Value = toml::from_str(&toml_text)?;
+        let schema = serde_json::to_value(&toml_doc["tools"][tool]["result"]["schema"])?;
+        let validator = jsonschema::draft202012::new(&schema)
+            .map_err(|e| anyhow::anyhow!("{tool}: invalid result schema: {e}"))?;
+        let _ = &manifest["source_sha256"];
+        let runner = r#"import importlib.util, json, subprocess, sys, types
+rt = types.ModuleType('estus_runtime')
+payload = json.loads(sys.argv[2])
+rt.request = lambda: payload
+rt.allowed = lambda value, allow: isinstance(allow, list) and bool(allow) and ('*' in allow or value in allow)
+def check_text(value, maximum=4096):
+    if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
+        raise ValueError('invalid text')
+    return value
+def run_bounded(argv, timeout=20, max_bytes=262144):
+    p = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    return {'returncode': p.returncode, 'timed_out': False, 'stdout': p.stdout[:max_bytes].decode('utf-8', 'strict'), 'stderr': p.stderr[:max_bytes].decode('utf-8', 'replace')}
+rt.check_text = check_text
+rt.run_bounded = run_bounded
+sys.modules['estus_runtime'] = rt
+spec = importlib.util.spec_from_file_location('collector', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.main()
+"#;
+        let mut cmd = std::process::Command::new(&python);
+        cmd.args(["-I", "-B", "-c", runner])
+            .arg(&collector)
+            .arg(request_json);
+        for (k, v) in env_vars {
+            cmd.env(k, v);
+        }
+        let out = cmd.output()?;
+        ensure!(
+            out.status.success(),
+            "{tool} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let parsed: Value = estus::internal::strict_json::parse(&out.stdout)?;
+        ensure!(
+            validator.is_valid(&parsed),
+            "{tool} output failed result.schema validation: {parsed}"
+        );
+        Ok(parsed)
+    };
+
+    let start_prev = run_collector(
+        "preview_systemd_service",
+        r#"[{"target_python":"/usr/bin/python3","manager_scope":"system","allowed_units":["estus-fixture.service"],"unit":"estus-fixture.service","operation":"start"}]"#,
+        &[("ESTUS_EXEC_SYSTEMCTL", &stub_systemctl)],
+    )?;
+    ensure!(start_prev["changed"] == true && start_prev["operation"] == "start");
+    let stop_prev = run_collector(
+        "preview_systemd_service",
+        r#"[{"target_python":"/usr/bin/python3","manager_scope":"system","allowed_units":["estus-fixture.service"],"unit":"estus-fixture.service","operation":"stop"}]"#,
+        &[("ESTUS_EXEC_SYSTEMCTL", &stub_systemctl)],
+    )?;
+    ensure!(stop_prev["changed"] == false);
+
+    if std::path::Path::new("/proc/sys/kernel/printk_ratelimit").is_file()
+        && std::path::Path::new("/etc/sysctl.d").is_dir()
+    {
+        let cfg_prev = run_collector(
+            "preview_sysctl",
+            r#"["kernel.printk_ratelimit", 10, "config", ["kernel.printk_ratelimit"]]"#,
+            &[],
+        )?;
+        ensure!(
+            cfg_prev["config_path"]
+                == "/etc/sysctl.d/90-estus-catalog-kernel_printk__ratelimit.conf"
+                && cfg_prev["persistent"] == true
+                && cfg_prev["after_config"] == "kernel.printk_ratelimit = 10\n"
+        );
+        let rt_prev = run_collector(
+            "preview_sysctl",
+            r#"["kernel.printk_ratelimit", 10, "runtime", ["kernel.printk_ratelimit"]]"#,
+            &[],
+        )?;
+        ensure!(rt_prev["config_path"] == "" && rt_prev["persistent"] == false);
+    }
+    Ok(())
+}

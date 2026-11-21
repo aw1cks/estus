@@ -12,7 +12,6 @@ pub(super) fn automation_output_schema(
 ) -> Arc<JsonObject> {
     let schema = schemars::generate::SchemaSettings::draft2020_12()
         .for_serialize()
-        .with(|settings| settings.inline_subschemas = true)
         .into_generator()
         .into_root_schema_for::<ToolReply<crate::reply::AutomationData>>();
     let mut schema = serde_json::to_value(schema).expect("generated reply schema serializes");

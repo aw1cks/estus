@@ -35,9 +35,9 @@ estus --help
 
 The wheel contains a private Rust executable and a Python console launcher that
 replaces itself with it. It needs Python only for bootstrap and trusts that
-environment; it does not embed CPython or host MCP in Python. Metadata pins
-`requires-python = ">=3.14,<3.15"` and `cp314-cp314` tags. PEP 660/editable
-installs are not supported — an editable install builds the executable but does
+environment; it does not embed CPython or host MCP in Python. Metadata declares
+`requires-python = ">=3.10"` and builds `py3-none-<platform>` wheels (while the
+optional `[ansible]` extra requires `python_version >= '3.12'`). PEP 660/editable
 not map generated catalog assets, so offline discovery fails.
 
 Source archives select catalog definitions, roles and payloads through the

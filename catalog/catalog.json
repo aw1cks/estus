@@ -29,6 +29,27 @@
       "inspect_journal",
       "inspect_kernel_log",
       "inspect_journal_record"
+    ],
+    "sre-core": [
+      "observe_host_summary",
+      "observe_cpu",
+      "observe_memory",
+      "observe_pressure",
+      "observe_filesystem_usage",
+      "observe_systemd_units",
+      "observe_systemd_unit",
+      "observe_network",
+      "observe_network_routes",
+      "observe_nic",
+      "observe_storage_devices",
+      "observe_storage_mounts",
+      "observe_time_sync",
+      "observe_kernel_state",
+      "observe_packages",
+      "inspect_processes",
+      "inspect_sockets",
+      "inspect_journal",
+      "inspect_journal_record"
     ]
   },
   "tools": {
@@ -1653,12 +1674,11 @@
       "policy_required": true,
       "requires": [
         "linux",
-        "python3",
-        "sysctl"
+        "python3"
       ],
       "executor": {
-        "kind": "ansible_module",
-        "module": "ansible.posix.sysctl"
+        "kind": "native_payload",
+        "path": "payloads/preview_sysctl"
       }
     },
     "preview_systemd_service": {
@@ -1671,8 +1691,8 @@
         "systemd"
       ],
       "executor": {
-        "kind": "ansible_module",
-        "module": "ansible.builtin.systemd_service"
+        "kind": "native_payload",
+        "path": "payloads/preview_systemd_service"
       }
     }
   }

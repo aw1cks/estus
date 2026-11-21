@@ -21,8 +21,6 @@ import tempfile
 import zipfile
 
 DEFAULT_MODULES = [
-    "ansible.builtin.systemd_service",
-    "ansible.posix.sysctl",
     "ansible.builtin.apt",
     "ansible.builtin.dnf",
     "ansible.builtin.dnf5",

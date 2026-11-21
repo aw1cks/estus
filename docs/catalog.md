@@ -199,10 +199,11 @@ Under `require_preview = true`, a qualified preview must precede the matching
 change with the same inputs. The gate covers only named `change`/`exec` bindings
 that declare such a pairing; builtin `change_*`/`exec_*` tools are not gated, and a
 named binding with no pairing is refused rather than delayed.
-`preview_sysctl` with `{name, value, state:
-"present"}` pairs with `change_sysctl_config` (a dedicated sysctl.d file plus
-exact-file apply and readback); adding `sysctl_set = true` pairs with
-`change_sysctl_runtime` (single-key runtime write, no persistence). Packages:
+`preview_sysctl` is a native payload taking `{key, value, mode}`: `mode = "config"`
+diffs `/etc/sysctl.d/90-estus-catalog-<slug>.conf` and pairs with `change_sysctl_config`;
+`mode = "runtime"` previews `/proc/sys` only and pairs with `change_sysctl_runtime`.
+`preview_systemd_service` is a native payload taking `{unit, operation}` and pairs with
+`change_systemd_unit` and `change_systemd_unit_file`. Packages:
 `preview_package`/`preview_apt`/`preview_dnf` share the `estus.packages` domain
 and bind the requested names and canonical state, so a preview never authorizes a
 different module or extra option. A preview is single-use, expires after five

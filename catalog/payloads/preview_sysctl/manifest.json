@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "adapter_version": 1,
+  "change_policy": "read_only",
+  "source_sha256": "64d68b4198a548e99859bb0fa76c6b05dd0c9402fb33a81242e2e6f0d847b019",
+  "max_source_bytes": 1048576,
+  "argv": [
+    {
+      "kind": "argument",
+      "name": "key",
+      "format": "json"
+    },
+    {
+      "kind": "argument",
+      "name": "value",
+      "format": "json"
+    },
+    {
+      "kind": "argument",
+      "name": "mode",
+      "format": "json"
+    },
+    {
+      "kind": "argument",
+      "name": "approved_keys",
+      "format": "json"
+    }
+  ],
+  "requirements": {
+    "python_min": [
+      3,
+      8
+    ],
+    "modules": [
+      "json",
+      "os",
+      "re",
+      "stat"
+    ],
+    "executables": [],
+    "paths": [],
+    "executable_candidates": {}
+  },
+  "contract": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "target_python": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "integer"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "config",
+            "runtime"
+          ]
+        },
+        "approved_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "target_python",
+        "key",
+        "value",
+        "mode",
+        "approved_keys"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "aliases": {},
+      "properties": {
+        "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "key": {
+          "aliases": {},
+          "properties": {}
+        },
+        "value": {
+          "aliases": {},
+          "properties": {}
+        },
+        "mode": {
+          "aliases": {},
+          "properties": {}
+        },
+        "approved_keys": {
+          "aliases": {},
+          "properties": {},
+          "items": {
+            "aliases": {},
+            "properties": {}
+          }
+        }
+      }
+    },
+    "defaults": {},
+    "review_required": [
+      "Read-only native sysctl preview matching change_sysctl_config (/etc/sysctl.d/90-estus-catalog-<slug>.conf) and change_sysctl_runtime (/proc/sys only)."
+    ]
+  }
+}

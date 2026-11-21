@@ -1,19 +1,17 @@
 [tools.preview_systemd_service]
-description = "Preview a systemd unit state, enablement or mask transition without changing anything. A change then needs the same fields to be authorized."
-revision = "1"
+description = "Preview a systemd unit transition (start, stop, restart, reload, enable, disable, mask, unmask) without mutating unit state; authorizes the matching change_systemd_unit or change_systemd_unit_file operation."
+revision = "2_native1"
 authority = "automation:catalog"
 effects = ["read"]
-execution = { kind = "ansible_module", module = "ansible.builtin.systemd_service", no_log = false, check_mode = true, diff = false }
-fixed_args = { scope = "system", daemon_reload = false }
-
-input_map = { name = "name", state = "state", enabled = "enabled", masked = "masked" }
+execution = { kind = "native_payload", source = "/etc/estus/payloads/preview_systemd_service/collector.py", no_log = false }
+fixed_args = { target_python = "/usr/bin/python3", manager_scope = "system" }
+input_map = { unit = "unit", operation = "operation" }
 limits = { timeout_secs = 30 }
-input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 128 }, state = { type = "string", enum = ["started", "stopped", "restarted", "reloaded"] }, enabled = { type = "boolean" }, masked = { type = "boolean" } }, required = ["name"], additionalProperties = false }
-
+input_schema = { type = "object", properties = { unit = { type = "string", minLength = 1, maxLength = 128 }, operation = { type = "string", enum = ["start", "stop", "restart", "reload", "enable", "disable", "mask", "unmask"] } }, required = ["unit", "operation"], additionalProperties = false }
 [tools.preview_systemd_service.result]
-kind = "ansible_projection"
-fields = { changed = ["changed"] }
+kind = "capability_projection"
+fields = { scope = ["mcp_result", "scope"], unit = ["mcp_result", "unit"], operation = ["mcp_result", "operation"], changed = ["mcp_result", "changed"], current_properties = ["mcp_result", "current_properties"] }
 max_bytes = 4096
-max_items = 64
-max_depth = 4
-schema = { type = "object", properties = { changed = { type = "boolean" } }, required = ["changed"], additionalProperties = false }
+max_items = 256
+max_depth = 6
+schema = { type = "object", properties = { scope = { type = "string", enum = ["system", "user"], maxLength = 6 }, unit = { type = "string", maxLength = 128 }, operation = { type = "string", enum = ["start", "stop", "restart", "reload", "enable", "disable", "mask", "unmask"], maxLength = 16 }, changed = { type = "boolean" }, current_properties = { type = "object", properties = { Id = { type = "string", maxLength = 4096 }, LoadState = { type = "string", maxLength = 4096 }, ActiveState = { type = "string", maxLength = 4096 }, SubState = { type = "string", maxLength = 4096 }, UnitFileState = { type = "string", maxLength = 4096 }, MainPID = { type = "string", maxLength = 4096 }, Result = { type = "string", maxLength = 4096 } }, required = [], additionalProperties = false } }, required = ["scope", "unit", "operation", "changed", "current_properties"], additionalProperties = false }

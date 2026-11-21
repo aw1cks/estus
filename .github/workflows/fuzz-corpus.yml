@@ -41,6 +41,7 @@ jobs:
       shell: bash
     timeout-minutes: 30
   mutate:
+    if: github.event_name != 'pull_request'
     name: ${{ matrix.target }}
     permissions:
       actions: write
@@ -93,6 +94,12 @@ jobs:
     timeout-minutes: 45
 name: Fuzz corpus
 'on':
+  pull_request:
+    paths:
+    - src/**
+    - fuzz/**
+    - Cargo.toml
+    - Cargo.lock
   schedule:
   - cron: 17 4 * * 1
   workflow_dispatch: {}

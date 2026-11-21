@@ -151,6 +151,12 @@
         "fuzz-corpus.yml" = {
           name = "Fuzz corpus";
           on = {
+            pull_request.paths = [
+              "src/**"
+              "fuzz/**"
+              "Cargo.toml"
+              "Cargo.lock"
+            ];
             schedule = [
               { cron = "17 4 * * 1"; }
             ];
@@ -214,6 +220,7 @@
           # The -runs=0 replay above stays the committed-corpus gate.
           jobs.mutate = {
             name = "\${{ matrix.target }}";
+            "if" = "github.event_name != 'pull_request'";
             runs-on = "ubuntu-26.04";
             timeout-minutes = 45;
             strategy = {
