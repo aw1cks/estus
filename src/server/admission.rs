@@ -87,7 +87,9 @@ pub(crate) enum AdmissionMode {
     SharedRead,
     /// Exclusive non-mutating probe; allowed while quarantined; never quarantines target.
     ExclusiveProbe,
-    /// Multiplexed channel execution; blocked while quarantined; quarantines target on lost ack/owner.
+    /// Multiplexed channel execution holding shared read gate; overlaps with other execs
+    /// while excluding ExclusiveWrite/ExclusiveProbe; blocked while quarantined; quarantines
+    /// target on lost ack/owner.
     MultiplexedExec,
     /// Exclusive target mutation; blocked while quarantined; quarantines target on lost ack/owner.
     ExclusiveWrite,
@@ -98,6 +100,7 @@ struct QuarantineState {
     authority: String,
     executor: &'static str,
     cause: QuarantineCause,
+    persisted: bool,
 }
 
 pub(super) struct ClearedQuarantine {
@@ -226,6 +229,7 @@ impl Persistence {
                     authority: record.authority,
                     executor,
                     cause,
+                    persisted: true,
                 },
             );
         }
@@ -359,6 +363,7 @@ impl TargetGate {
             authority: authority.clone(),
             executor,
             cause,
+            persisted: true,
         };
         self.flip_quarantine(state.clone(), host, &authority, executor, cause);
         let Some(persistence) = self.persistence.clone() else {
@@ -369,6 +374,7 @@ impl TargetGate {
             .await
             .is_ok_and(|result| result.is_ok());
         if !saved {
+            self.mark_persistence_degraded();
             audit::emit(&serde_json::json!({
                 "event": "quarantine_persist_failed",
                 "target": host,
@@ -388,12 +394,14 @@ impl TargetGate {
             authority: authority.clone(),
             executor,
             cause,
+            persisted: true,
         };
         self.flip_quarantine(state.clone(), host, &authority, executor, cause);
         let Some(persistence) = &self.persistence else {
             return;
         };
         if persistence.save(host, &state).is_err() {
+            self.mark_persistence_degraded();
             audit::emit(&serde_json::json!({
                 "event": "quarantine_persist_failed",
                 "target": host,
@@ -463,6 +471,49 @@ impl TargetGate {
         );
     }
 
+    fn mark_persistence_degraded(&self) {
+        let mut guard = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = guard.as_mut() {
+            state.persisted = false;
+        }
+    }
+
+    async fn check_quarantined_and_retry(&self, host: &str) -> bool {
+        let retry_state = {
+            let guard = self
+                .quarantine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(state) = guard.as_ref() else {
+                return false;
+            };
+            (!state.persisted).then(|| state.clone())
+        };
+        if let (Some(state), Some(persistence)) = (retry_state, self.persistence.clone()) {
+            let owned = host.to_owned();
+            let saved = tokio::task::spawn_blocking(move || persistence.save(&owned, &state))
+                .await
+                .is_ok_and(|result| result.is_ok());
+            if saved {
+                let mut guard = self
+                    .quarantine
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(current) = guard.as_mut() {
+                    current.persisted = true;
+                }
+                drop(guard);
+                audit::emit(&serde_json::json!({
+                    "event": "quarantine_persist_recovered",
+                    "target": host,
+                }));
+            }
+        }
+        true
+    }
     fn is_quarantined(&self) -> bool {
         self.quarantine
             .lock()
@@ -551,10 +602,7 @@ impl TargetAdmission {
         state.gates.contains_key(host)
     }
 
-    pub(super) fn quarantine_info(
-        &self,
-        host: &str,
-    ) -> Option<(String, &'static str, &'static str)> {
+    pub(super) fn quarantine_info(&self, host: &str) -> Option<crate::config::QuarantineStatus> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let gate = state.gates.get(host)?;
         let q = gate
@@ -562,8 +610,12 @@ impl TargetAdmission {
             .quarantine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        q.as_ref()
-            .map(|item| (item.authority.clone(), item.executor, item.cause.as_str()))
+        q.as_ref().map(|item| crate::config::QuarantineStatus {
+            authority: item.authority.clone(),
+            executor: item.executor,
+            cause: item.cause.as_str(),
+            persistence_degraded: !item.persisted,
+        })
     }
 
     pub(super) async fn acquire(
@@ -585,6 +637,7 @@ impl TargetAdmission {
                 .map(TargetLease::Probe),
             AdmissionMode::MultiplexedExec => self
                 .acquire_exec(host, deadline, ct, shutdown)
+                .await
                 .map(TargetLease::Exec),
             AdmissionMode::ExclusiveWrite => self
                 .acquire_write(host, deadline, ct, shutdown)
@@ -634,33 +687,21 @@ impl TargetAdmission {
         Ok(ProbeLease { _guard: guard })
     }
 
-    fn acquire_exec(
+    async fn acquire_exec(
         &self,
         host: &str,
         deadline: Instant,
         ct: &CancellationToken,
         shutdown: &CancellationToken,
     ) -> Result<ExecLease, ToolError> {
-        if ct.is_cancelled() || shutdown.is_cancelled() {
-            return Err(ToolError::new(
-                ErrorCode::Cancelled,
-                "Request cancelled before dispatch",
-                false,
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(ToolError::new(
-                ErrorCode::Timeout,
-                "Operation deadline expired waiting for target gate",
-                false,
-            ));
-        }
         let gate = self.gate(host)?;
-        if gate.is_quarantined() {
+        let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).read_owned()).await?;
+        if gate.check_quarantined_and_retry(host).await {
             return Err(quarantined_error());
         }
         Ok(ExecLease {
             gate,
+            _guard: guard,
             dispatched: None,
         })
     }
@@ -674,7 +715,7 @@ impl TargetAdmission {
     ) -> Result<WriteLease, ToolError> {
         let gate = self.gate(host)?;
         let guard = wait_for(deadline, ct, shutdown, Arc::clone(&gate.rw).write_owned()).await?;
-        if gate.is_quarantined() {
+        if gate.check_quarantined_and_retry(host).await {
             return Err(quarantined_error());
         }
         Ok(WriteLease {
@@ -805,6 +846,7 @@ pub(super) struct ProbeLease {
 
 pub(super) struct ExecLease {
     gate: Arc<TargetGate>,
+    _guard: OwnedRwLockReadGuard<()>,
     dispatched: Option<DispatchContext>,
 }
 
@@ -1323,7 +1365,12 @@ mod tests {
             TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
         assert_eq!(
             adm2.quarantine_info("alpha"),
-            Some(("ordinary".into(), "native_sftp", "timeout"))
+            Some(crate::config::QuarantineStatus {
+                authority: "ordinary".into(),
+                executor: "native_sftp",
+                cause: "timeout",
+                persistence_degraded: false,
+            })
         );
         let blocked = adm2
             .acquire_write("alpha", deadline, &ct, &shutdown)
@@ -1339,5 +1386,160 @@ mod tests {
         let adm3 =
             TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
         assert!(adm3.quarantine_info("alpha").is_none());
+    }
+
+    #[tokio::test]
+    async fn multiplexed_exec_excludes_write_and_probe_while_overlapping_exec() {
+        let hosts = ["alpha".to_owned()];
+        let admission = TargetAdmission::new(hosts.iter(), false);
+        let ct = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let short = || Instant::now() + Duration::from_millis(60);
+
+        let e1 = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+        let e2 = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+
+        let write_blocked = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::ExclusiveWrite,
+                short(),
+                &ct,
+                &shutdown,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(write_blocked.code(), ErrorCode::Timeout);
+        let probe_blocked = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::ExclusiveProbe,
+                short(),
+                &ct,
+                &shutdown,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(probe_blocked.code(), ErrorCode::Timeout);
+        drop((e1, e2));
+
+        let w = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::ExclusiveWrite,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+        let exec_blocked = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                short(),
+                &ct,
+                &shutdown,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(exec_blocked.code(), ErrorCode::Timeout);
+        drop(w);
+
+        let p = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::ExclusiveProbe,
+                deadline,
+                &ct,
+                &shutdown,
+            )
+            .await
+            .unwrap();
+        let exec_blocked_by_probe = admission
+            .acquire(
+                "alpha",
+                AdmissionMode::MultiplexedExec,
+                short(),
+                &ct,
+                &shutdown,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(exec_blocked_by_probe.code(), ErrorCode::Timeout);
+        drop(p);
+    }
+
+    #[tokio::test]
+    async fn quarantine_persistence_failure_marks_degraded_and_retries_on_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("quarantine");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let hosts = ["alpha".to_owned()];
+        let adm =
+            TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
+        let ct = CancellationToken::new();
+        let shutdown = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        {
+            let mut w = adm
+                .acquire_write("alpha", deadline, &ct, &shutdown)
+                .await
+                .unwrap();
+            w.mark_dispatched("alpha".into(), "ordinary".into(), "native_sftp");
+            w.finish(true, Some(ErrorCode::Timeout)).await;
+        }
+        let info = adm.quarantine_info("alpha").unwrap();
+        assert!(info.persistence_degraded);
+
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let blocked = adm
+            .acquire_write("alpha", deadline, &ct, &shutdown)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(blocked.code(), ErrorCode::TargetQuarantined);
+        let info = adm.quarantine_info("alpha").unwrap();
+        assert!(!info.persistence_degraded);
+
+        drop(adm);
+        let adm2 =
+            TargetAdmission::new_with_persistence(hosts.iter(), false, Some(&state_dir)).unwrap();
+        assert_eq!(
+            adm2.quarantine_info("alpha"),
+            Some(crate::config::QuarantineStatus {
+                authority: "ordinary".into(),
+                executor: "native_sftp",
+                cause: "timeout",
+                persistence_degraded: false,
+            })
+        );
     }
 }

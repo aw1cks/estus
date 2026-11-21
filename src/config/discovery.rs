@@ -189,7 +189,7 @@ impl Config {
         &self,
         host: &str,
         tools: &ToolCatalog,
-        quarantine: Option<(String, &'static str, &'static str)>,
+        quarantine: Option<super::QuarantineStatus>,
     ) -> Option<serde_json::Value> {
         let target = match self.targets.as_ref() {
             Some(targets) => Some(targets.get(host)?),
@@ -234,12 +234,20 @@ impl Config {
             "sudo_mode": sudo_mode,
             "permitted_operations": permitted,
             "quarantine": match quarantine {
-                Some((authority, executor, cause)) => serde_json::json!({
-                    "quarantined": true,
-                    "authority": authority,
-                    "executor": executor,
-                    "cause": cause,
-                }),
+                Some(status) => {
+                    let mut obj = serde_json::json!({
+                        "quarantined": true,
+                        "authority": status.authority,
+                        "executor": status.executor,
+                        "cause": status.cause,
+                    });
+                    if status.persistence_degraded
+                        && let Some(map) = obj.as_object_mut()
+                    {
+                        map.insert("persistence_degraded".into(), serde_json::json!(true));
+                    }
+                    obj
+                }
                 None => serde_json::json!({"quarantined": false}),
             }
         });

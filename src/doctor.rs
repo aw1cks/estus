@@ -255,6 +255,9 @@ async fn effective_ssh_policy(
     ) {
         warnings.push("strict_host_key_checking_disabled");
     }
+    if config.is_none() {
+        warnings.push("ambient_ssh_config_in_use");
+    }
     Some(SshEffectivePolicy {
         strict_host_key_checking,
         update_host_keys,

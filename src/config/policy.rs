@@ -865,6 +865,35 @@ impl Config {
         }
         Ok(std::time::Duration::from_secs(seconds))
     }
+
+    pub(crate) fn startup_warnings(&self) -> Vec<&'static str> {
+        let mut warnings = Vec::new();
+        let has_mutating_binding = self.bindings.entries().any(|(id, binding)| {
+            self.binding_enabled(id)
+                && matches!(
+                    risk_tier_for_binding(binding),
+                    RiskTier::Change | RiskTier::Exec
+                )
+        });
+        let can_mutate = self.capabilities.file_write
+            || self.capabilities.exec
+            || (self.capabilities.sudo && self.has_sudo())
+            || has_mutating_binding;
+        if self.mode == Mode::Headless && can_mutate && self.quarantine_state_dir.is_none() {
+            warnings.push("headless_ephemeral_quarantine");
+        }
+        let preview_blocks_exec = self.capabilities.exec
+            && match &self.targets {
+                None => self.require_preview,
+                Some(targets) => targets.iter().any(|(name, target)| {
+                    self.requires_preview(name) && target.permits_tier(RiskTier::Exec)
+                }),
+            };
+        if preview_blocks_exec {
+            warnings.push("require_preview_blocks_exec");
+        }
+        warnings
+    }
 }
 
 fn inspect_automation_authority(config: &Path, socket: Option<&Path>) -> Result<(), ConfigError> {

@@ -164,6 +164,14 @@ impl Capabilities {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QuarantineStatus {
+    pub(crate) authority: String,
+    pub(crate) executor: &'static str,
+    pub(crate) cause: &'static str,
+    pub(crate) persistence_degraded: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct ToolEntry {
     pub(crate) id: ToolKey,

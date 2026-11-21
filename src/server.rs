@@ -85,6 +85,12 @@ impl Estus {
             config.allows_dynamic_hosts(),
             config.quarantine_state_dir(),
         )?;
+        for warning in config.startup_warnings() {
+            crate::audit::emit(&serde_json::json!({
+                "event": "config_warning",
+                "code": warning,
+            }));
+        }
         Ok(Self {
             tool_router,
             state: Arc::new(State {

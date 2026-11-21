@@ -883,3 +883,34 @@ async fn doctor_reports_ssh_executable_and_effective_policy_warnings() -> Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn doctor_warns_when_using_ambient_ssh_config() -> Result<()> {
+    let Some(ssh) = support::find_program("ssh").ok() else {
+        return Ok(());
+    };
+    let directory = tempfile::tempdir()?;
+    let config = directory.path().join("estus.toml");
+    fs::write(
+        &config,
+        format!(
+            "capabilities = {{ named = true }}\n[ssh]\nexecutable = {}\n[targets.ambient]\nssh_host = '127.0.0.1'\n",
+            serde_json::to_string(&ssh.to_string_lossy())?,
+        ),
+    )?;
+    let output = Doctor::start(command(
+        &config,
+        &["--target", "ambient", "--timeout-secs", "2"],
+    )?)?
+    .finish()
+    .await?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    let policy = &value["targets"][0]["effective_ssh_policy"];
+    ensure!(
+        policy["warnings"]
+            .as_array()
+            .is_some_and(|w| w.contains(&json!("ambient_ssh_config_in_use"))),
+        "{value}"
+    );
+    Ok(())
+}

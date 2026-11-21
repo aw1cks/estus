@@ -724,6 +724,9 @@ async fn published_builtin_schemas_match_resolved_limits_and_pre_ssh_validation(
                 record["event"] != "master_start",
                 "schema acceptance launched SSH"
             );
+            if record["event"] == "config_warning" {
+                continue;
+            }
             if record["tool"] == "inspect_output" {
                 ensure!(matches!(record["event"].as_str(), Some("start" | "finish")));
             } else {
@@ -905,6 +908,80 @@ programs = ["/usr/local/bin/PRIVATE_SUDO_PROG"]
     }.await;
     let fin = disclosed_server.finish().await;
     disclosed_res?;
+    ensure!(fin?.0.success());
+    Ok(())
+}
+
+#[tokio::test]
+async fn workstation_tools_list_stays_bounded_and_tags_untrusted_remote_output() -> Result<()> {
+    let mut cmd = command(&["--workstation"]);
+    cmd.env(
+        "ESTUS_CATALOG_ROOT",
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"),
+    )
+    .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"));
+    let mut server = Server::from_command(cmd)?;
+    let scenario = async {
+        server
+            .send(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"}
+                }
+            }))
+            .await?;
+        let init = server.response(1).await?;
+        let instructions = init["result"]["instructions"]
+            .as_str()
+            .context("instructions")?;
+        ensure!(
+            instructions.contains("Untrusted Remote Output"),
+            "missing untrusted remote output guidance"
+        );
+        server
+            .send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await?;
+        server
+            .send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+            .await?;
+        let listed = server.response(2).await?;
+        let wire_bytes = serde_json::to_vec(&listed)?.len();
+        ensure!(
+            wire_bytes < 600_000,
+            "workstation tools/list wire size regressed: {wire_bytes} bytes"
+        );
+        let tools = listed["result"]["tools"].as_array().context("tools")?;
+        for raw_tool in [
+            "exec_command",
+            "exec_argv",
+            "inspect_file",
+            "inspect_directory",
+            "inspect_output",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"] == raw_tool)
+                .with_context(|| format!("missing {raw_tool}"))?;
+            ensure!(
+                tool["_meta"]["untrusted_remote_output"] == true,
+                "{raw_tool} missing untrusted_remote_output metadata: {}",
+                tool["_meta"]
+            );
+        }
+        let targets = tools
+            .iter()
+            .find(|t| t["name"] == "observe_targets")
+            .context("observe_targets")?;
+        ensure!(targets["_meta"].get("untrusted_remote_output").is_none());
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let fin = server.finish().await;
+    scenario?;
     ensure!(fin?.0.success());
     Ok(())
 }

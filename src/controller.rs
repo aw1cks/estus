@@ -237,8 +237,20 @@ impl PendingCleanup {
         if !reaped && let Some(reservation) = slot.as_mut() {
             reservation.enter_child_reap();
         }
+        let mut backoff = POLL;
+        let mut total_wait = Duration::ZERO;
+        let mut warned = false;
         while !reaped {
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(backoff).await;
+            total_wait = total_wait.saturating_add(backoff);
+            if !warned && total_wait >= Duration::from_secs(2) {
+                warned = true;
+                crate::audit::emit(&serde_json::json!({
+                    "event": "controller_reap_delayed",
+                    "elapsed_ms": u64::try_from(total_wait.as_millis()).unwrap_or(u64::MAX),
+                }));
+            }
+            backoff = (backoff * 2).min(GRACE);
             reaped = self.children.reap();
         }
         while self.workspace.is_some() {
@@ -449,58 +461,62 @@ fn prepare_workspace(plan: Arc<ControllerPlan>, input: Vec<u8>) -> Setup {
     }
 }
 
-fn spawn_script(
-    owner: &mut Children,
+fn spawn_script_blocking(
     plan: &ControllerPlan,
     workspace: &Path,
-) -> io::Result<(ChildStdout, ChildStderr)> {
-    let group = owner.start_anchor()?;
-    let group = i32::try_from(group).map_err(|_| io::Error::other("controller spawn failed"))?;
-    let mut command = Command::new(&plan.interpreter);
-    command
-        .args(&plan.interpreter_argv)
-        .arg(workspace.join("source"))
-        .arg(workspace.join("input.json"))
-        .current_dir(plan.cwd.as_deref().unwrap_or(workspace))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("TZ", "UTC")
-        .envs(&plan.environment)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(group);
-    for name in [
-        "HOME",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-    ] {
-        command.env(name, workspace);
-    }
-    owner.install_script(command.spawn()?);
-    let child = owner
-        .script
-        .as_mut()
-        .ok_or_else(|| io::Error::other("controller spawn failed"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("controller pipe failed"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("controller pipe failed"))?;
-    Ok((
-        ChildStdout::from_std(stdout)?,
-        ChildStderr::from_std(stderr)?,
-    ))
+) -> (
+    Children,
+    io::Result<(std::process::ChildStdout, std::process::ChildStderr)>,
+) {
+    let mut owner = Children::default();
+    let result = (|| {
+        let group = owner.start_anchor()?;
+        let group =
+            i32::try_from(group).map_err(|_| io::Error::other("controller spawn failed"))?;
+        let mut command = Command::new(&plan.interpreter);
+        command
+            .args(&plan.interpreter_argv)
+            .arg(workspace.join("source"))
+            .arg(workspace.join("input.json"))
+            .current_dir(plan.cwd.as_deref().unwrap_or(workspace))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
+            .envs(&plan.environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(group);
+        for name in [
+            "HOME",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            command.env(name, workspace);
+        }
+        owner.install_script(command.spawn()?);
+        let child = owner
+            .script
+            .as_mut()
+            .ok_or_else(|| io::Error::other("controller spawn failed"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("controller pipe failed"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("controller pipe failed"))?;
+        Ok((stdout, stderr))
+    })();
+    (owner, result)
 }
 
 enum Outcome {
@@ -622,10 +638,20 @@ pub(crate) async fn run(
         if tokio::time::Instant::now() >= context.deadline {
             return Outcome::Timeout;
         }
-        let Some(workspace) = owner.workspace.as_ref() else {
+        let Some(workspace) = owner.workspace.clone() else {
             return Outcome::Setup;
         };
-        match spawn_script(&mut owner.children, &plan, workspace) {
+        let spawn_plan = Arc::clone(&plan);
+        let Ok((children, spawned)) =
+            tokio::task::spawn_blocking(move || spawn_script_blocking(&spawn_plan, &workspace))
+                .await
+        else {
+            return Outcome::Spawn;
+        };
+        owner.children = children;
+        match spawned
+            .and_then(|(out, err)| Ok((ChildStdout::from_std(out)?, ChildStderr::from_std(err)?)))
+        {
             Ok((out, err)) => {
                 stdout = Some(out);
                 stderr = Some(err);
