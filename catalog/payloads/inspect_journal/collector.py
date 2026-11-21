@@ -196,6 +196,17 @@ def main():
 
     status = 'available'
     raw_records = []
+    if raw_cursor:
+        # journalctl seeks to the nearest entry for a cursor it no longer holds
+        # and pages on silently; confirm the exact entry still exists first.
+        try:
+            probe = fetch_records(base + ['--cursor=' + raw_cursor, '--lines=+1'], 1)
+        except estus_runtime.CommandFailed as error:
+            if 'Failed to seek to cursor' not in str(error):
+                raise
+            probe = []
+        if not probe or probe[0].get('__CURSOR') != raw_cursor:
+            status = 'cursor_unavailable'
     if status == 'available':
         fetch_limit = 2000 if contains else p['limit'] + 1
 
@@ -212,10 +223,8 @@ def main():
                 '--reverse',
                 '--lines=' + str(fetch_limit),
             ]
-            # Journald pages backwards directly from the retained cursor: one fixed
-            # utility invocation, no separate seek probe. journalctl accepts only
-            # one of --since/--cursor/--after-cursor; the lower time bound is then
-            # applied when records are selected.
+            # journalctl accepts only one of --since/--cursor/--after-cursor;
+            # with a cursor the lower time bound is applied at selection.
             if raw_cursor:
                 query += ['--after-cursor=' + raw_cursor]
             else:
