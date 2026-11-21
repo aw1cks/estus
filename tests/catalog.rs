@@ -138,5 +138,6 @@ mod tools {
     mod observe_systemd_units;
     mod observe_time_sync;
     mod preview_kernel_module_load;
+    mod preview_package;
     mod workflows;
 }

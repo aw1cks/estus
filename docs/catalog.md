@@ -256,6 +256,9 @@ escape hatches for manager-specific options. Target prerequisites
 `auto_install_module_deps = false` means a missing binding fails as
 `dependency_unavailable`.
 
+Bundled module execution omits the removed Ansible string-conversion setting,
+which allows previews to run with current ansible-core releases.
+
 ## What is not in the catalog
 
 Roles and playbooks are not execution kinds, and the binding schema accepts only

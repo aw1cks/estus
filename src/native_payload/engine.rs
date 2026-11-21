@@ -489,7 +489,6 @@ impl Engine {
                     "_ansible_selinux_special_fs".into(),
                     json!(["fuse", "nfs", "vboxsf", "ramfs", "9p", "vfat"]),
                 );
-                module_args.insert("_ansible_string_conversion_action".into(), json!("warn"));
                 module_args.insert("_ansible_socket".into(), Value::Null);
                 module_args.insert("_ansible_keep_remote_files".into(), Value::Bool(false));
                 module_args.insert("_ansible_remote_tmp".into(), json!("/tmp"));
