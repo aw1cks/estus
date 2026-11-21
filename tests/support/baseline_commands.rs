@@ -903,6 +903,22 @@ async fn ssh_packaged_channel_loss_preserves_healthy_master() -> Result<()> {
                 &support::envelope(result)?,
                 &format!("{}{transport}", "alive\n".repeat(30)),
             )?;
+            // The lost channel's uncertain outcome quarantines the target; new
+            // work waits for explicit reconciliation, then the same master serves it.
+            let blocked = client
+                .call(
+                    "exec_command",
+                    json!({"host":"plain","command":"printf BLOCKED"}),
+                )
+                .await?;
+            ensure!(blocked["error"]["code"] == "target_quarantined");
+            let cleared = client
+                .call(
+                    "change_target_quarantine_clear",
+                    json!({"host":"plain","acknowledge_remote_state_reconciled":true}),
+                )
+                .await?;
+            ensure!(cleared["error"].is_null() && cleared["data"]["cleared"] == true);
             command_succeeded(
                 &client
                     .call(

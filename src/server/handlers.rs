@@ -532,7 +532,8 @@ impl Estus {
             tool: self.state.tool_name(ToolId::ClearTargetQuarantine),
             host: host_known.then_some(request.host.as_str()),
             identity_role: IdentityRole::Ordinary,
-            sudo_mode: None,
+            // Same audit shape as every other hostful tool.
+            sudo_mode: host_known.then(|| self.state.config.sudo_mode(&request.host)),
             user: None,
             program: None,
             binding_revision: None,

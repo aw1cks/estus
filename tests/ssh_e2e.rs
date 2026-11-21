@@ -401,6 +401,16 @@ async fn isolated_write_fault(fault: WriteFault) -> Result<()> {
             // Remove the intentional bandwidth fault so new channel traffic is
             // not queued behind old encrypted bytes. This is not a replay.
             relay.throttled.store(false, Ordering::Relaxed);
+            // The uncertain write quarantines the target; reconcile explicitly,
+            // then the healthy shared master must serve new work unchanged.
+            let blocked = client.call("exec_command", json!({
+                "host":"slowwrite", "command":"/usr/bin/printf BLOCKED"
+            })).await?;
+            ensure!(blocked["error"]["code"] == "target_quarantined", "uncertain write did not quarantine: {blocked}");
+            let cleared = client.call("change_target_quarantine_clear", json!({
+                "host":"slowwrite", "acknowledge_remote_state_reconciled":true
+            })).await?;
+            ensure!(cleared["error"].is_null() && cleared["data"]["cleared"] == true, "quarantine clear failed: {cleared}");
             let healthy = client.call("exec_command", json!({
                 "host":"slowwrite", "command":"/usr/bin/printf '%s' \"$SSH_CONNECTION\""
             })).await?;
@@ -1122,7 +1132,7 @@ async fn ssh_sudo_bound_actions() -> Result<()> {
                 indoc::indoc! {r#"
                     [targets.locked]
                     ssh_host = "same"
-                    capabilities = { file_read = true }
+                    selection = { allow = [] }
                     [targets.locked.sudo]
                     mode = "same-account"
                     users = ["root"]
