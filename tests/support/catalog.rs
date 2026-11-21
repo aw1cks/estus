@@ -438,13 +438,11 @@ impl Binding {
             .prefix("estus-workflow-")
             .tempdir()?;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
-        let export = root.path().join("export");
-        let mut command = workflow_command()?;
-        command
-            .args(["export", "--tool", name, "--output"])
-            .arg(&export);
-        let exported = std::fs::read_to_string(export.join("tools.toml"))?;
-        let definitions: toml::Value = toml::from_str(&exported)?;
+        // The installed definition (what `catalog export` would copy) decides
+        // authority and timeout; the recipe contributes policy only.
+        let definitions: toml::Value = toml::from_str(&fs::read_to_string(
+            catalog_assets().join(format!("{name}.toml")),
+        )?)?;
         let tool = &definitions["tools"][name];
         ensure!(
             tool["authority"].as_str() == Some(authority.as_str()),
@@ -715,45 +713,12 @@ impl Binding {
     }
 }
 
-/// Deliberately no global --config: catalog export is an offline operation.
-fn workflow_command() -> Result<Command> {
-    let binary = std::env::var_os("ESTUS_TEST_BINARY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(option_env!("ESTUS_TEST_BINARY").unwrap_or(env!("CARGO_BIN_EXE_estus")))
-        });
-    let mut command = Command::new(support::executable(&binary)?);
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("ESTUS_") {
-            command.env_remove(name);
-        }
-    }
-    let assets = catalog_assets();
-    command
-        .arg("catalog")
-        .arg("--root")
-        .arg(assets)
-        .kill_on_drop(true);
-    Ok(command)
-}
-
 /// The catalog the acceptance package ships (`ESTUS_TEST_CATALOG_ASSETS`), or
 /// the checkout for a source build; the build directory does not exist at run time.
 fn catalog_assets() -> PathBuf {
     std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog"))
-}
-
-async fn workflow_output(command: &mut Command) -> Result<Value> {
-    let output = support::run_authoring(command).await?;
-    ensure!(
-        output.status.success(),
-        "workflow public CLI failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).context("workflow CLI JSON")
 }
 
 pub fn projection(envelope: &Value) -> Result<&Value> {
