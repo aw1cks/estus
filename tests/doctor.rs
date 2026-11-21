@@ -188,6 +188,21 @@ fn private(output: &Output, secrets: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// The report's `ssh_executable` is the operator's own setting and may sit
+/// under the fixture root; scan everything else for private data.
+fn without_executable(output: &Output, value: &Value) -> Result<Output> {
+    let mut value = value.clone();
+    value
+        .as_object_mut()
+        .context("report object")?
+        .remove("ssh_executable");
+    Ok(Output {
+        status: output.status,
+        stdout: serde_json::to_vec(&value)?,
+        stderr: output.stderr.clone(),
+    })
+}
+
 fn config_error(output: &Output, code: &str) -> Result<()> {
     ensure!(output.status.code() == Some(2));
     ensure!(
@@ -555,9 +570,14 @@ async fn doctor_native_selected_ssh_executable_is_shared_with_native_tools() -> 
         let value = report(&output, 0)?;
         ensure!(value["targets"][0]["ssh"] == json!({"status":"passed"}));
         ensure!(value["targets"][0]["sftp"] == json!({"status":"passed"}));
-        ensure!(fs::read_to_string(&launches)? == "selected\n");
+        // Both doctor launches use the selected executable: the master and the
+        // local `ssh -G` effective-policy query.
+        ensure!(fs::read_to_string(&launches)? == "selected\nselected\n");
         ensure!(cleaned(&output).await? == 1);
-        native_privacy(&output, &fixture)?;
+        // The report names the executable it used; nothing else may disclose
+        // fixture paths.
+        ensure!(value["ssh_executable"] == json!(wrapper.to_string_lossy()));
+        native_privacy(&without_executable(&output, &value)?, &fixture)?;
 
         let mut native = support::server_command(&fixture.config)?;
         native.env("PATH", &empty_path);
@@ -579,7 +599,7 @@ async fn doctor_native_selected_ssh_executable_is_shared_with_native_tools() -> 
                 "native exec failed: {reply}"
             );
             ensure!(result["data"]["stdout"] == "selected-native");
-            ensure!(fs::read_to_string(&launches)? == "selected\nselected\n");
+            ensure!(fs::read_to_string(&launches)? == "selected\nselected\nselected\n");
             fixture.await_authentications(auth + 2).await?;
             Ok::<_, anyhow::Error>(())
         }
@@ -640,7 +660,22 @@ async fn doctor_native_restrictive_profiles_are_ordinary_read_only_and_do_not_lo
             let logs: Vec<_> = fixture.listeners.iter().map(|listener| listener.log.text()).collect();
             let auth = fixture.authentications();
             let output = Doctor::start(command(&fixture.config, &["--target", "gamma", "--target", "alpha", "--target", "beta"])?)?.finish().await?;
-            let value = report(&output, 0)?;
+            let mut value = report(&output, 0)?;
+            for target in value["targets"].as_array_mut().context("targets")? {
+                // The configured trust is reported as configured, not changed.
+                let policy = target
+                    .as_object_mut()
+                    .context("target object")?
+                    .remove("effective_ssh_policy")
+                    .context("effective SSH policy")?;
+                // `ssh -G` spells enabled booleans as "yes" or "true" by version.
+                ensure!(
+                    matches!(policy["update_host_keys"].as_str(), Some("yes" | "true"))
+                        && policy.get("warnings").is_none(),
+                    "unexpected effective SSH policy: {policy}"
+                );
+            }
+            value.as_object_mut().context("report object")?.remove("ssh_executable");
             let targets: Vec<_> = ["alpha", "beta", "gamma"].into_iter().map(|target| json!({"target":target,"ssh":{"status":"passed"},"sftp":{"status":"passed"},"sudo":{"status":"not_tested"}})).collect();
             ensure!(value == json!({"ok":true,"targets":targets}));
             ensure!(cleaned(&output).await? == 3);

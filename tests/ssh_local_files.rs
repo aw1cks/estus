@@ -1903,7 +1903,9 @@ async fn ssh_named_bindings() -> Result<()> {
         let printf = binding_program("printf")?;
         let id = binding_program("id")?;
         let sleeper = binding_program("sleep")?;
-        let identity = support::run(&mut Command::new(&id)).await?;
+        // `id -u`: the full `id` line lists every supplementary group and can
+        // exceed this config's 1024-byte output limit on directory-joined hosts.
+        let identity = support::run(Command::new(&id).arg("-u")).await?;
         ensure!(identity.status.success() && identity.stderr.is_empty());
         let identity = String::from_utf8(identity.stdout)?;
         let config = fixture.root.path().join("named-bindings.toml");
@@ -1947,7 +1949,7 @@ async fn ssh_named_bindings() -> Result<()> {
             targets = ["plain"]
             authority = "ordinary"
             effects = ["read"]
-            execution = {{kind="native_argv",program={id_path},argv=["--"]}}
+            execution = {{kind="native_argv",program={id_path},argv=["-u"]}}
             input_schema = {{type="object",additionalProperties=false,required=[],properties={{}}}}
             result = {{kind="command"}}
             [tools.missing_account]
@@ -2064,7 +2066,8 @@ async fn ssh_named_bindings() -> Result<()> {
                 ensure!(!injected.exists(), "input interpolated into remote shell syntax");
             }
             let reply = client.call("ordinary_identity",json!({"host":"plain"})).await?;
-            ensure!(succeeded(&reply)?["stdout"] == identity, "binding changed account identity");
+            let observed = succeeded(&reply)?["stdout"].as_str().context("identity stdout")?.to_owned();
+            ensure!(observed == identity, "binding changed account identity: local {identity:?}, remote {observed:?}");
             let reply = client.call("missing_account",json!({"host":"plain"})).await?;
             failed(&reply,"command_failed")?;
             ensure!(reply["data"]["stdout"] == "" && reply["data"]["exit_code"] == 1);
