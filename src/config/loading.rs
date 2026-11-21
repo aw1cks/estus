@@ -155,7 +155,14 @@ fn resolve_selection(
         .into_iter()
         .map(|tool| tool.wire_name())
         .collect();
-    let defined: BTreeSet<String> = document.tools.keys().cloned().collect();
+    // Only a complete definition (one with `execution`) is local; a table
+    // without it is site policy for a catalog template and must load the catalog.
+    let defined: BTreeSet<String> = document
+        .tools
+        .iter()
+        .filter(|(_, value)| value.get("execution").is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
     let unknown = |names: &[String]| {
         names
             .iter()
@@ -1473,5 +1480,43 @@ selection = {{ deny = ["observe"] }}
         // Without a pin the installed inventory is used as-is.
         assert!(load(&text.replace(&pin, "")).is_ok());
         assert!(load(&text.replace("linux-health", "unknown-preset")).is_err());
+    }
+
+    #[test]
+    fn a_site_overlay_alone_selects_the_catalog_template() {
+        // A `[tools.<name>]` table without `execution` is site policy, not a
+        // local definition: naming the tool must still load the catalog and
+        // materialise the installed definition with the overlay merged in.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+        let config = load(&format!(
+            "capabilities = {{ named = true }}\n[selection]\nallow=['observe_cpu']\n[catalog]\nroot={root:?}\n[targets.one]\nssh_host='one'\n[automation.targets.one]\ndestination='one'\npython='/usr/bin/python3'\n[tools.observe_cpu]\nlimits = {{ timeout_secs = 30 }}\n"
+        ))
+        .unwrap();
+        let (id, binding) = config.bindings.entries().next().unwrap();
+        assert_eq!(binding.name, "observe_cpu");
+        assert!(config.binding_enabled(id));
+        // Without a pinned root the environment's catalog root is used.
+        let text = "capabilities = { named = true }\n[selection]\nallow=['observe_cpu']\n[targets.one]\nssh_host='one'\n[automation.targets.one]\ndestination='one'\npython='/usr/bin/python3'\n[tools.observe_cpu]\nlimits = { timeout_secs = 30 }\n";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("site.toml");
+        std::fs::write(&path, text).unwrap();
+        let config = Config::load_with(
+            Cli {
+                config: Some(path),
+                ssh_config: None,
+                ssh: Some(std::env::current_exe().unwrap()),
+                command: None,
+                workstation: false,
+            },
+            directory.path(),
+            |key| (key == "ESTUS_CATALOG_ROOT").then(|| root.as_os_str().to_owned()),
+        )
+        .unwrap();
+        assert!(
+            config
+                .bindings
+                .entries()
+                .any(|(id, b)| b.name == "observe_cpu" && config.binding_enabled(id))
+        );
     }
 }
