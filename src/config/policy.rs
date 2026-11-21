@@ -43,7 +43,7 @@ pub(crate) fn risk_tier_for_binding(binding: &crate::bindings::CompiledBinding) 
 }
 
 impl Capabilities {
-    pub(super) fn permits(self, tool: ToolId) -> bool {
+    pub(crate) fn permits(self, tool: ToolId) -> bool {
         // Keep every ID classified explicitly so a new binding requires a policy decision.
         match tool {
             ToolId::Targets | ToolId::ReadOutput => true,
@@ -147,6 +147,27 @@ impl Sudo {
             name: host,
             destination,
             role,
+        })
+    }
+
+    fn resolve_same_account<'a>(
+        &self,
+        host: &'a str,
+        ordinary: &'a str,
+        user: &str,
+        program: &str,
+    ) -> Result<ResolvedTarget<'a>, ToolError> {
+        if !matches!(self, Self::SameAccount { .. }) || !self.permits(user, program) {
+            return Err(ToolError::new(
+                ErrorCode::PolicyDenied,
+                "Elevated target, user, or program is not authorized",
+                false,
+            ));
+        }
+        Ok(ResolvedTarget {
+            name: host,
+            destination: ordinary,
+            role: IdentityRole::Ordinary,
         })
     }
 
@@ -400,6 +421,74 @@ impl Config {
         self.targets.is_none()
     }
 
+    pub(crate) fn is_yolo(&self) -> bool {
+        self.yolo
+    }
+
+    pub(crate) fn global_capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    pub(crate) fn global_builtins(&self) -> &BTreeSet<String> {
+        &self.builtins
+    }
+
+    pub(crate) fn has_configured_targets(&self) -> bool {
+        self.targets.is_some()
+    }
+
+    pub(crate) fn target_ssh_host(&self, host: &str) -> Option<&str> {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .map(|target| target.ssh_host.as_str())
+    }
+
+    pub(crate) fn target_max_tier(&self, host: &str) -> Option<RiskTier> {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .and_then(|target| target.max_tier)
+    }
+
+    pub(crate) fn target_permits_tool_name(&self, host: &str, name: &str) -> bool {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .is_none_or(|target| target.permits(name))
+    }
+
+    pub(crate) fn target_permits_workstation_sudo(&self, host: &str) -> bool {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .is_some_and(Target::permits_workstation_sudo)
+    }
+
+    pub(crate) fn target_sudo_permits_programs(&self, host: &str) -> bool {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .is_some_and(|target| target.sudo.permits_programs())
+    }
+
+    pub(crate) fn has_named_automation_authority(&self, authority: &str, host: &str) -> bool {
+        self.automation
+            .authorities
+            .get(authority)
+            .is_some_and(|auth| auth.targets.contains_key(host))
+    }
+
+    pub(crate) fn evaluate_host_policy(&self, host: &str) -> profiles::EffectivePolicy {
+        let target = self.targets.as_ref().and_then(|targets| targets.get(host));
+        self.policy.evaluate(
+            host,
+            target,
+            &self.ssh_executable,
+            self.ssh_config.as_deref(),
+        )
+    }
+
     pub(crate) fn automation_target(
         &self,
         id: BindingId,
@@ -414,6 +503,18 @@ impl Config {
         };
         let binding = self.bindings.get(id).ok_or_else(denied)?;
         if !self.binding_enabled(id) || binding.automation_authority().is_none() {
+            return Err(denied());
+        }
+        let effective = self.evaluate_host_policy(host);
+        let needs_sudo = matches!(
+            binding.automation_authority(),
+            Some(AutomationAuthority::Named(_))
+        );
+        if !effective.permits_binding_name(
+            &binding.name,
+            risk_tier_for_binding(binding),
+            needs_sudo,
+        ) {
             return Err(denied());
         }
         let ssh_executable = self.ssh_executable();
@@ -439,7 +540,6 @@ impl Config {
             {
                 return Err(denied());
             }
-            // Same elevation program native `exec_sudo` runs: `sudo` resolved by
             // the remote login PATH, so wrapped installs (NixOS
             // `/run/wrappers/bin/sudo`) work without a second setting.
             static WORKSTATION_SUDO: std::sync::LazyLock<AutomationBecome> =
@@ -467,13 +567,19 @@ impl Config {
                             dynamic_python: mapped.python.is_empty(),
                         });
                     }
-                    // Workstation sudo fallback: the per-target policy must grant
-                    // unrestricted root elevation. Dynamic payloads run Python
-                    // scripts, not an allowlisted native program, so a pinned
-                    // program list would otherwise be silently bypassed. An open
-                    // destination policy has no target, hence no grant.
-                    let target = target.ok_or_else(denied)?;
-                    if !self.capabilities.sudo || !target.permits_workstation_sudo() {
+                    // Workstation sudo fallback: either the per-target policy grants
+                    // unrestricted root elevation, or an active profile (such as `lab`
+                    // or `--yolo`) grants same-account root elevation for this host.
+                    let target_allows = target.is_some_and(Target::permits_workstation_sudo);
+                    let policy_allows = effective.permits_open_sudo()
+                        && matches!(
+                            effective.sudo,
+                            Sudo::SameAccount {
+                                ref users,
+                                programs: None
+                            } if users.iter().any(|u| u == "root")
+                        );
+                    if !self.capabilities.sudo || !(target_allows || policy_allows) {
                         return Err(denied());
                     }
                     Some(&*WORKSTATION_SUDO)
@@ -579,11 +685,14 @@ impl Config {
     /// A target's own flag overrides the global one; an unknown host (raw
     /// destination mode) uses the global default.
     pub(crate) fn requires_preview(&self, host: &str) -> bool {
+        let effective = self.evaluate_host_policy(host);
+        let default_preview =
+            self.require_preview || (effective.active && effective.require_preview);
         self.targets
             .as_ref()
             .and_then(|targets| targets.get(host))
-            .map_or(self.require_preview, |target| {
-                target.requires_preview(self.require_preview)
+            .map_or(default_preview, |target| {
+                target.requires_preview(default_preview)
             })
     }
 
@@ -605,19 +714,29 @@ impl Config {
     }
 
     /// A dynamic workstation binding is exposed only when a configured target
-    /// would actually authorize it; an empty `[targets]` table exposes none, and
-    /// an open destination policy never exposes privileged bindings because it
-    /// carries no per-target sudo grant to check.
+    /// or active profile would actually authorize it; an empty `[targets]` table
+    /// exposes none, and an open destination policy without a sudo-granting
+    /// profile (e.g. `lab` or `--yolo`) never exposes privileged bindings.
     fn dynamic_workstation_enabled(&self, binding: &crate::bindings::CompiledBinding) -> bool {
         let Some(targets) = &self.targets else {
-            return !matches!(
-                binding.automation_authority(),
-                Some(AutomationAuthority::Named(_))
-            );
+            return match binding.automation_authority() {
+                Some(AutomationAuthority::Ordinary) => true,
+                Some(AutomationAuthority::Named(_)) => {
+                    self.capabilities.sudo && self.policy.has_open_sudo_route()
+                }
+                None => false,
+            };
         };
         let authority = binding.automation_authority();
         targets.iter().any(|(host_name, target)| {
+            let effective = self.evaluate_host_policy(host_name);
+            let needs_sudo = matches!(authority, Some(AutomationAuthority::Named(_)));
             target.permits_binding(binding)
+                && effective.permits_binding_name(
+                    &binding.name,
+                    risk_tier_for_binding(binding),
+                    needs_sudo,
+                )
                 && match authority {
                     Some(AutomationAuthority::Ordinary) => true,
                     Some(AutomationAuthority::Named(name)) => {
@@ -625,7 +744,9 @@ impl Config {
                             .authorities
                             .get(name)
                             .is_some_and(|authority| authority.targets.contains_key(host_name))
-                            || (self.capabilities.sudo && target.permits_workstation_sudo())
+                            || (self.capabilities.sudo
+                                && (target.permits_workstation_sudo()
+                                    || effective.permits_open_sudo()))
                     }
                     None => false,
                 }
@@ -664,7 +785,14 @@ impl Config {
             .as_ref()
             .and_then(|targets| targets.get(host))
             .ok_or_else(denied)?;
-        if !target.permits_binding(binding) {
+        let effective = self.evaluate_host_policy(host);
+        if !target.permits_binding(binding)
+            || !effective.permits_binding_name(
+                &binding.name,
+                risk_tier_for_binding(binding),
+                binding.sudo().is_some(),
+            )
+        {
             return Err(denied());
         }
         let resolved = match binding.sudo() {
@@ -696,14 +824,19 @@ impl Config {
             targets
                 .values()
                 .any(|target| !matches!(target.sudo, Sudo::Disabled))
-        })
+        }) || (self.capabilities.sudo && self.policy.has_open_sudo_route())
     }
 
     pub(crate) fn sudo_mode(&self, host: &str) -> SudoMode {
-        self.targets
+        let target_mode = self
+            .targets
             .as_ref()
             .and_then(|targets| targets.get(host))
-            .map_or(SudoMode::Disabled, |target| target.sudo.mode())
+            .map_or(SudoMode::Disabled, |target| target.sudo.mode());
+        if target_mode != SudoMode::Disabled {
+            return target_mode;
+        }
+        self.evaluate_host_policy(host).sudo_mode()
     }
 
     pub(crate) fn resolve<'a>(
@@ -735,6 +868,10 @@ impl Config {
             | ToolId::ListDirectory => {}
         }
         if !self.capabilities.permits(tool) || !self.builtins.contains(tool.wire_name()) {
+            return Err(denied());
+        }
+        let effective = self.evaluate_host_policy(host);
+        if !effective.permits_builtin(tool) {
             return Err(denied());
         }
         if self
@@ -833,17 +970,42 @@ impl Config {
         if !self.capabilities.permits(ToolId::Sudo) || !self.builtins.contains("exec_sudo") {
             return Err(denied());
         }
-        let target = self
-            .targets
-            .as_ref()
-            .and_then(|targets| targets.get(host))
-            .ok_or_else(denied)?;
-        if !target.permits(ToolId::Sudo.wire_name())
-            || !target.permits_tier(risk_tier_for_builtin(ToolId::Sudo))
-        {
+        let effective = self.evaluate_host_policy(host);
+        if !effective.permits_builtin(ToolId::Sudo) {
             return Err(denied());
         }
-        let resolved = target.sudo.resolve(host, &target.ssh_host, user, program)?;
+        let resolved = match &self.targets {
+            Some(targets) => {
+                let target = targets.get(host).ok_or_else(denied)?;
+                if !target.permits(ToolId::Sudo.wire_name())
+                    || !target.permits_tier(risk_tier_for_builtin(ToolId::Sudo))
+                {
+                    return Err(denied());
+                }
+                if matches!(target.sudo, Sudo::Disabled) && effective.permits_open_sudo() {
+                    effective
+                        .sudo
+                        .resolve_same_account(host, &target.ssh_host, user, program)?
+                } else {
+                    target.sudo.resolve(host, &target.ssh_host, user, program)?
+                }
+            }
+            None => {
+                destination(host, "host").map_err(|_| {
+                    ToolError::new(
+                        ErrorCode::InvalidArgument,
+                        "Host must be a safe nonempty SSH destination",
+                        false,
+                    )
+                })?;
+                if !effective.permits_open_sudo() {
+                    return Err(denied());
+                }
+                effective
+                    .sudo
+                    .resolve_same_account(host, host, user, program)?
+            }
+        };
         if self.requires_preview(host) {
             return Err(ToolError::new(
                 ErrorCode::PreviewRequired,
@@ -868,6 +1030,9 @@ impl Config {
 
     pub(crate) fn startup_warnings(&self) -> Vec<&'static str> {
         let mut warnings = Vec::new();
+        if self.yolo {
+            warnings.push("yolo_mode_active");
+        }
         let has_mutating_binding = self.bindings.entries().any(|(id, binding)| {
             self.binding_enabled(id)
                 && matches!(

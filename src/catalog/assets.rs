@@ -826,6 +826,100 @@ impl Catalog {
         }
     }
 
+    /// Tools published under `--yolo`: every reviewed workstation tool plus
+    /// wildcard-synthesizable operational templates. `laboratory_only` templates
+    /// remain hidden unless `include_lab` is also passed.
+    pub(crate) fn yolo_tool_names(&self, include_lab: bool) -> impl Iterator<Item = &str> {
+        self.manifest
+            .tools
+            .iter()
+            .filter_map(move |(name, template)| {
+                if matches!(template.qualification, Qualification::LaboratoryOnly) && !include_lab {
+                    return None;
+                }
+                // Collectors requiring site-specific alias maps with no wildcard form.
+                if matches!(name.as_str(), "observe_device_attributes") {
+                    return None;
+                }
+                Some(name.as_str())
+            })
+    }
+
+    /// Build a `--yolo` entry: reuses the reviewed `workstation` block when
+    /// present, otherwise loads the shipped definition and synthesizes wildcard
+    /// policy arguments (`["*"]`, `allow_runtime_tuning = true`, etc.) for
+    /// collectors whose `manifest.json` expects an operator policy input.
+    pub(crate) fn load_yolo_entry(
+        &self,
+        name: &str,
+        include_lab: bool,
+    ) -> Result<WorkstationEntry, CatalogError> {
+        let template = self
+            .manifest
+            .tools
+            .get(name)
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
+        if matches!(template.qualification, Qualification::LaboratoryOnly) && !include_lab {
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
+        }
+        if template.workstation.is_some()
+            && !matches!(template.qualification, Qualification::LaboratoryOnly)
+        {
+            return self.load_workstation_entry(name);
+        }
+        let mut table = Self::validate_definition(&self.directory, name, &template.definition)?;
+        let mut tools = table
+            .remove("tools")
+            .and_then(|v| v.try_into::<toml::Table>().ok())
+            .ok_or_else(|| CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            })?;
+        let mut definition = tools
+            .remove(name)
+            .ok_or_else(|| CatalogError::UnknownTool {
+                tool: name.to_owned(),
+            })?;
+        if !tools.is_empty() {
+            return Err(CatalogError::InvalidDefinition {
+                tool: name.to_owned(),
+            });
+        }
+        let def_table =
+            definition
+                .as_table_mut()
+                .ok_or_else(|| CatalogError::InvalidDefinition {
+                    tool: name.to_owned(),
+                })?;
+        def_table.remove("constraints");
+        match &template.executor {
+            Executor::AnsibleModule { .. } => Ok(WorkstationEntry::Module { definition }),
+            Executor::NativePayload { .. } => {
+                let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
+                let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
+                let source_bytes = bounded_read(
+                    open_child(&tool_dir, Path::new("collector.py"), false)?,
+                    &format!("payloads/{name}/collector.py"),
+                    1_048_576,
+                )?;
+                let manifest_raw = bounded_read(
+                    open_child(&tool_dir, Path::new("manifest.json"), false)?,
+                    &format!("payloads/{name}/manifest.json"),
+                    262_144,
+                )?;
+                inject_yolo_fixed_args(name, def_table, &manifest_raw);
+                Ok(WorkstationEntry::Payload {
+                    definition,
+                    source: source_bytes,
+                    manifest: manifest_raw,
+                })
+            }
+        }
+    }
+
     pub fn copy_assets(&self, name: &str, destination: &Path) -> Result<(), CatalogError> {
         let template = self
             .manifest
@@ -932,6 +1026,138 @@ impl Catalog {
             let _ = fs::remove_dir_all(destination);
         }
         result
+    }
+}
+
+fn inject_yolo_fixed_args(name: &str, def_table: &mut toml::Table, manifest_raw: &[u8]) {
+    let Ok(manifest_json) = serde_json::from_slice::<serde_json::Value>(manifest_raw) else {
+        return;
+    };
+    let mut needed = BTreeSet::new();
+    if let Some(argv) = manifest_json
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+    {
+        for item in argv {
+            if let Some(arg_name) = item.get("name").and_then(serde_json::Value::as_str) {
+                needed.insert(arg_name.to_owned());
+            }
+            if let Some(fields) = item.get("fields").and_then(serde_json::Value::as_object) {
+                for field in fields.values() {
+                    if let Some(arg_name) = field.get("name").and_then(serde_json::Value::as_str) {
+                        needed.insert(arg_name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mapped: BTreeSet<String> = def_table
+        .get("input_map")
+        .and_then(toml::Value::as_table)
+        .map(|table| {
+            table
+                .values()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let fixed = def_table
+        .entry("fixed_args")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let Some(fixed_table) = fixed.as_table_mut() else {
+        return;
+    };
+    let wildcard_list = || toml::Value::Array(vec![toml::Value::String("*".to_owned())]);
+    for key in ["allowed_units", "allowed_entries", "approved_keys"] {
+        if needed.contains(key) && !mapped.contains(key) && !fixed_table.contains_key(key) {
+            fixed_table.insert(key.to_owned(), wildcard_list());
+        }
+    }
+    if needed.contains("approved_root")
+        && !mapped.contains("approved_root")
+        && !fixed_table.contains_key("approved_root")
+    {
+        fixed_table.insert(
+            "approved_root".to_owned(),
+            toml::Value::String("/system.slice".to_owned()),
+        );
+    }
+    if needed.contains("configured_paths")
+        && !mapped.contains("configured_paths")
+        && !fixed_table.contains_key("configured_paths")
+    {
+        let mut paths = toml::Table::new();
+        paths.insert("root".into(), toml::Value::String("/".into()));
+        paths.insert("var".into(), toml::Value::String("/var".into()));
+        paths.insert("tmp".into(), toml::Value::String("/tmp".into()));
+        paths.insert("home".into(), toml::Value::String("/home".into()));
+        fixed_table.insert("configured_paths".to_owned(), toml::Value::Table(paths));
+    }
+    if needed.contains("operator_policy")
+        && !mapped.contains("operator_policy")
+        && !fixed_table.contains_key("operator_policy")
+    {
+        let mut policy = toml::Table::new();
+        if let Some(props) = manifest_json
+            .pointer("/contract/schema/properties/operator_policy/properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (field, schema) in props {
+                let field_type = schema.get("type").and_then(serde_json::Value::as_str);
+                match field_type {
+                    Some("string") => {
+                        let value = schema
+                            .get("enum")
+                            .and_then(serde_json::Value::as_array)
+                            .and_then(|values| values.first())
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("*");
+                        policy.insert(field.clone(), toml::Value::String(value.to_owned()));
+                    }
+                    Some("boolean") => {
+                        policy.insert(field.clone(), toml::Value::Boolean(true));
+                    }
+                    Some("array") => {
+                        let item_type = schema
+                            .pointer("/items/type")
+                            .and_then(serde_json::Value::as_str);
+                        match item_type {
+                            Some("string") => {
+                                let values = schema
+                                    .pointer("/items/enum")
+                                    .and_then(serde_json::Value::as_array)
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(serde_json::Value::as_str)
+                                            .map(|s| toml::Value::String(s.to_owned()))
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .filter(|v| !v.is_empty())
+                                    .map_or_else(wildcard_list, toml::Value::Array);
+                                policy.insert(field.clone(), values);
+                            }
+                            Some("integer") => {
+                                policy.insert(
+                                    field.clone(),
+                                    toml::Value::Array(
+                                        [22, 53, 80, 443, 8080, 8443]
+                                            .into_iter()
+                                            .map(toml::Value::Integer)
+                                            .collect(),
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let _ = name;
+        fixed_table.insert("operator_policy".to_owned(), toml::Value::Table(policy));
     }
 }
 
@@ -1117,6 +1343,68 @@ mod workstation_tests {
     use super::*;
     use crate::bindings::Bindings;
     use crate::config::Limits;
+
+    #[test]
+    fn yolo_catalog_entries_activate_with_and_without_lab() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog");
+        let catalog = Catalog::load(Some(&root)).expect("load catalog");
+        let limits = Limits::default();
+        for include_lab in [false, true] {
+            let mut bindings = Bindings::compile_with_mode(
+                BTreeMap::new(),
+                &[],
+                &limits,
+                |_| false,
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+            let mut count = 0usize;
+            let mut failures = Vec::new();
+            for name in catalog.yolo_tool_names(include_lab) {
+                count += 1;
+                let result = match catalog
+                    .load_yolo_entry(name, include_lab)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.reason()))
+                {
+                    WorkstationEntry::Payload {
+                        definition,
+                        source,
+                        manifest,
+                    } => bindings.push_dynamic_payload(
+                        name.to_owned(),
+                        definition,
+                        source,
+                        &manifest,
+                        &limits,
+                    ),
+                    WorkstationEntry::Module { definition } => {
+                        bindings.push_dynamic_ansible_module(name.to_owned(), definition, &limits)
+                    }
+                };
+                if let Err(error) = result {
+                    failures.push(format!("{name}: {error:?}"));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "include_lab={include_lab}:\n{}",
+                failures.join("\n")
+            );
+            if include_lab {
+                assert!(
+                    count > 95,
+                    "expected almost full catalog under --yolo --include-lab, got {count}"
+                );
+            } else {
+                assert!(
+                    count > 80,
+                    "expected broad non-lab catalog under --yolo, got {count}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn eligible_workstation_payloads_activate() {

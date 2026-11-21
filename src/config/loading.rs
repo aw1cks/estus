@@ -27,6 +27,14 @@ pub(crate) struct Cli {
     /// environment variable must never widen authority.
     #[arg(long, global = true)]
     pub(super) workstation: bool,
+    /// Unrestricted workstation escape hatch: open destinations, full capabilities,
+    /// same-account root sudo, and all non-lab catalog tools. Deliberately flag-only
+    /// and cannot be combined with a configuration file.
+    #[arg(long, global = true)]
+    pub(super) yolo: bool,
+    /// With --yolo, also publish laboratory_only hardware/kernel templates.
+    #[arg(long, global = true)]
+    pub(super) include_lab: bool,
     #[command(subcommand)]
     pub(crate) command: Option<CliCommand>,
 }
@@ -35,12 +43,41 @@ pub(crate) struct Cli {
 pub(crate) enum CliCommand {
     /// Check runtime health or configured targets without executing automation or commands.
     Doctor(DoctorArgs),
+    /// Explain effective policy and check per-host tool authorization offline.
+    Auth(AuthArgs),
     /// Build or inspect offline Ansible module bundle packs.
     Bundle(crate::bundle::BundleArgs),
     /// Discover the bundled catalog and export selected definitions offline.
     Catalog(crate::catalog::cli::CatalogArgs),
 }
 
+#[derive(Args)]
+pub(crate) struct AuthArgs {
+    #[command(subcommand)]
+    pub command: AuthCommand,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AuthCommand {
+    /// Explain which groups/profiles match a host and the resulting effective policy.
+    Explain {
+        /// Target name (configured mode) or SSH destination (open mode).
+        host: String,
+        /// Emit structured JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check whether a specific tool is authorized on a host (exit 0 = yes, 1 = no).
+    CanI {
+        /// Published tool name (e.g. change_systemd_unit, exec_command, inspect_file).
+        tool: String,
+        /// Target name (configured mode) or SSH destination (open mode).
+        host: String,
+        /// Emit structured JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RuntimeKind {
@@ -66,7 +103,7 @@ pub(crate) struct DoctorArgs {
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct RawCapabilities {
+pub(super) struct RawCapabilities {
     named: Option<bool>,
     file_read: Option<bool>,
     file_write: Option<bool>,
@@ -76,6 +113,10 @@ struct RawCapabilities {
 
 impl RawCapabilities {
     fn resolve(self, defaults: Capabilities) -> Capabilities {
+        self.resolve_ref(defaults)
+    }
+
+    pub(super) fn resolve_ref(&self, defaults: Capabilities) -> Capabilities {
         Capabilities {
             named: self.named.unwrap_or(defaults.named),
             file_read: self.file_read.unwrap_or(defaults.file_read),
@@ -93,6 +134,9 @@ struct Document {
     capabilities: Option<RawCapabilities>,
     disclose_sudo_policy: bool,
     require_preview: bool,
+    default_profile: Option<String>,
+    profiles: BTreeMap<String, profiles::RawProfile>,
+    groups: Vec<profiles::RawGroup>,
     ssh: Ssh,
     limits: Limits,
     output: crate::output::Limits,
@@ -112,6 +156,9 @@ impl Default for Document {
             capabilities: None,
             disclose_sudo_policy: false,
             require_preview: false,
+            default_profile: None,
+            profiles: BTreeMap::new(),
+            groups: Vec::new(),
             ssh: Ssh::default(),
             limits: Limits::default(),
             output: crate::output::Limits::default(),
@@ -143,10 +190,10 @@ struct QuarantineSettings {
 fn resolve_selection(
     document: &mut Document,
     capabilities: Capabilities,
+    yolo: bool,
     base: &Path,
     env: &impl Fn(&str) -> Option<OsString>,
-) -> Result<(), ConfigError> {
-    // A locally defined name never consults the catalog; a selected name with
+) -> Result<profiles::PolicyEngine, ConfigError> {
     // no local definition is a catalog template, which is what pulls the
     // installed inventory in at all. Presets are always catalog data.
     // Builtin wire names are always definable, so naming one never means "load
@@ -177,9 +224,15 @@ fn resolve_selection(
         .flat_map(|t| t.values())
         .filter_map(|t| t.selection.as_ref())
         .any(&selection_needs_catalog);
+    let profile_needs_catalog = document
+        .profiles
+        .values()
+        .filter_map(|p| p.selection.as_ref())
+        .any(&selection_needs_catalog);
     // A name that has no local definition is enabled from the installed catalog.
     let needs_catalog = selection_needs_catalog(&document.selection)
         || target_needs_catalog
+        || profile_needs_catalog
         || document.catalog.version.is_some()
         || document.catalog.root.is_some();
     let catalog = if needs_catalog {
@@ -281,6 +334,17 @@ fn resolve_selection(
             target.selected_bindings = Some(names);
         }
     }
+    let policy_engine = profiles::PolicyEngine::compile(
+        yolo,
+        document.default_profile.take(),
+        std::mem::take(&mut document.profiles),
+        std::mem::take(&mut document.groups),
+        document.targets.as_ref(),
+        &definable,
+        manifest,
+        &global,
+        &permitted_builtins,
+    )?;
     // Builtins are published by the capability ceiling; only named tools are
     // compiled, so the compiler sees the difference.
     document.selection.builtins = global.intersection(&permitted_builtins).cloned().collect();
@@ -316,7 +380,7 @@ fn resolve_selection(
         .collect();
     document.selection.presets.clear();
     document.selection.deny.clear();
-    Ok(())
+    Ok(policy_engine)
 }
 
 /// Replace selected catalog names with the installed definition, applying site
@@ -387,6 +451,17 @@ impl Config {
             .config
             .or_else(|| env("ESTUS_CONFIG").map(PathBuf::from));
         let workstation_opt_in = cli.workstation;
+        let yolo = cli.yolo;
+        let include_lab = cli.include_lab;
+        if include_lab && !yolo {
+            return Err(invalid("mode", "include-lab requires --yolo"));
+        }
+        if yolo && config_path.is_some() {
+            return Err(invalid(
+                "mode",
+                "yolo opt-in cannot be combined with a configuration file",
+            ));
+        }
         let (mut document, base) = if let Some(path) = config_path {
             let path = resolve_path(path, cwd, "config")?;
             let mut file = std::fs::OpenOptions::new()
@@ -419,8 +494,8 @@ impl Config {
             }
             let base = path.parent().unwrap_or(cwd).to_path_buf();
             (document, base)
-        } else if workstation_opt_in {
-            // Workstation mode is an explicit opt-in, never a silent default:
+        } else if yolo || workstation_opt_in {
+            // Workstation / --yolo mode is an explicit opt-in, never a silent default:
             // no configuration file has to state that it trusts the caller.
             let document = Document {
                 mode: Mode::Workstation,
@@ -433,7 +508,6 @@ impl Config {
             // sudo, file-write or catalog exposure.
             (Document::default(), cwd.to_path_buf())
         };
-
         let capabilities = match (document.mode, document.capabilities.take()) {
             (Mode::Workstation, None) => Capabilities::all(),
             (Mode::Workstation, Some(raw)) => raw.resolve(Capabilities::all()),
@@ -454,7 +528,7 @@ impl Config {
             document.targets = Some(BTreeMap::new());
         }
 
-        resolve_selection(&mut document, capabilities, &base, &env)?;
+        let policy = resolve_selection(&mut document, capabilities, yolo, &base, &env)?;
         let ssh_override = cli
             .ssh_config
             .or_else(|| env("ESTUS_SSH_CONFIG").map(PathBuf::from));
@@ -576,14 +650,31 @@ impl Config {
             if let Some(path) = catalog_source {
                 let catalog = crate::catalog::assets::Catalog::load(Some(&path))
                     .map_err(|e| invalid("catalog", e.reason()))?;
-                for name in catalog.workstation_tool_names() {
+                let names: Vec<String> = if yolo {
+                    catalog
+                        .yolo_tool_names(include_lab)
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    catalog
+                        .workstation_tool_names()
+                        .map(str::to_owned)
+                        .collect()
+                };
+                for name in names {
                     if bindings.entries().any(|(_, b)| b.name == name) {
                         continue;
                     }
-                    match catalog
-                        .load_workstation_entry(name)
-                        .map_err(|e| invalid("catalog", e.reason()))?
-                    {
+                    let entry = if yolo {
+                        catalog
+                            .load_yolo_entry(&name, include_lab)
+                            .map_err(|e| invalid("catalog", e.reason()))?
+                    } else {
+                        catalog
+                            .load_workstation_entry(&name)
+                            .map_err(|e| invalid("catalog", e.reason()))?
+                    };
+                    match entry {
                         crate::catalog::assets::WorkstationEntry::Payload {
                             definition,
                             source,
@@ -597,7 +688,7 @@ impl Config {
                                 continue;
                             }
                             bindings.push_dynamic_payload(
-                                name.to_owned(),
+                                name,
                                 definition,
                                 source,
                                 &manifest,
@@ -613,7 +704,7 @@ impl Config {
                                 continue;
                             }
                             bindings.push_dynamic_ansible_module(
-                                name.to_owned(),
+                                name,
                                 definition,
                                 &document.limits,
                             )?;
@@ -651,6 +742,8 @@ impl Config {
             require_preview: document.require_preview,
             bindings,
             automation: document.automation,
+            policy,
+            yolo,
         })
     }
 }
@@ -1050,6 +1143,8 @@ mod tests {
                 ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
                 workstation: false,
+                yolo: false,
+                include_lab: false,
             },
             cwd,
             |key| match key {
@@ -1073,6 +1168,8 @@ mod tests {
                     ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
                     workstation: false,
+                    yolo: false,
+                    include_lab: false,
                 },
                 dir.path(),
                 |_| None
@@ -1087,6 +1184,8 @@ mod tests {
                     ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
                     workstation: false,
+                    yolo: false,
+                    include_lab: false,
                 },
                 dir.path(),
                 |_| None
@@ -1101,6 +1200,8 @@ mod tests {
                     ssh: Some(std::env::current_exe().unwrap()),
                     command: None,
                     workstation: false,
+                    yolo: false,
+                    include_lab: false,
                 },
                 dir.path(),
                 |_| None
@@ -1343,6 +1444,8 @@ result = {{ kind = "command" }}
                 ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
                 workstation: false,
+                yolo: false,
+                include_lab: false,
             },
             directory.path(),
             |_| None,
@@ -1507,6 +1610,8 @@ selection = {{ deny = ["observe"] }}
                 ssh: Some(std::env::current_exe().unwrap()),
                 command: None,
                 workstation: false,
+                yolo: false,
+                include_lab: false,
             },
             directory.path(),
             |key| (key == "ESTUS_CATALOG_ROOT").then(|| root.as_os_str().to_owned()),

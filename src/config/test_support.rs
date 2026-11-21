@@ -90,6 +90,8 @@ pub(super) fn cli() -> Cli {
         ssh: Some(std::env::current_exe().unwrap()),
         command: None,
         workstation: false,
+        yolo: false,
+        include_lab: false,
     }
 }
 
@@ -148,6 +150,8 @@ pub(super) fn load_text(text: &str, vars: &[(&str, &str)]) -> Result<Config, Con
             ssh: Some(std::env::current_exe().unwrap()),
             command: None,
             workstation: false,
+            yolo: false,
+            include_lab: false,
         },
         dir.path(),
         |key| {

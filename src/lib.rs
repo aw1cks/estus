@@ -1,4 +1,5 @@
 mod audit;
+mod auth;
 mod bindings;
 mod bundle;
 mod capture;
@@ -147,15 +148,20 @@ pub fn run_cli() -> ExitCode {
         Err(error) => return cli_error(error),
     };
     drop(matches);
+    let mut auth_args = None;
     let command = match cli.command.take() {
         Some(config::CliCommand::Catalog(args)) => {
             return standalone_catalog(args, cli, explicit_config, explicit_ssh);
+        }
+        Some(config::CliCommand::Auth(args)) => {
+            auth_args = Some(args);
+            None
         }
         Some(config::CliCommand::Doctor(args)) => Some(Diagnostic::Doctor(args)),
         Some(config::CliCommand::Bundle(args)) => Some(Diagnostic::Bundle(args)),
         None => None,
     };
-    let diagnostic = command.is_some();
+    let diagnostic = command.is_some() || auth_args.is_some();
     let config = match config::Config::load(cli) {
         Ok(config) => config,
         Err(error) => {
@@ -167,6 +173,9 @@ pub fn run_cli() -> ExitCode {
             };
         }
     };
+    if let Some(args) = auth_args {
+        return auth::run(&config, args);
+    }
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

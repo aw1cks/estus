@@ -614,7 +614,7 @@ async fn invalid_startup_profiles_fail_before_mcp_without_secrets() -> Result<()
     let path = directory.path().join("private-profile-config.toml");
     for (target, value, field) in [
         (false, "'private-profile-secret'", "config"),
-        (true, "'private-profile-secret'", "config"),
+        (true, "'private-profile-secret'", "targets.*.profile"),
     ] {
         let text = if target {
             format!(

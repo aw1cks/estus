@@ -42,6 +42,7 @@ inherited environment cannot widen authority.
 
 ```toml
 mode = "headless"          # headless (default) | workstation
+default_profile = "prod"   # optional: deny | prod | prod-change | dev | lab | <custom>
 require_preview = false    # requires a matching preview for preview-paired named tools
 disclose_sudo_policy = false
 ```
@@ -50,19 +51,27 @@ disclose_sudo_policy = false
   may only restate a declared `mode = "workstation"`; it never upgrades a file.
   With no file at all, `--workstation` is required to get anything beyond the
   read-only inspection builtins.
-- `require_preview` applies to named bindings whose tier is `change` or `exec`; a
-  target may override it. It never gates the builtin `change_*`/`exec_*` tools. It
-  does not simply delay `exec` work for approval: a named `exec` binding with no
-  qualified preview pairing is refused with `preview_required`. Bindings that do
-  have a pairing (the qualified `preview_*`/change pairs) must present a fresh
-  matching preview, consumed once and expiring after five minutes.
+- `--yolo` (flag-only, no environment variable, cannot be combined with
+  `--config` or `ESTUS_CONFIG`) is the unrestricted workstation escape hatch:
+  open destinations, all five capabilities, same-account root sudo, and all
+  non-lab catalog templates with synthesized wildcard policy allowlists. Pass
+  `--include-lab` alongside `--yolo` to include `laboratory_only` hardware
+  templates. Write quarantine, stdin-framed digests, 16 MiB wire budgets, and
+  `untrusted_remote_output` framing remain active, and startup emits a
+  `yolo_mode_active` warning.
+- `default_profile` applies whenever `[profiles]`/`[[groups]]` policy is active
+  and no group matches a host. When `[[groups]]` is declared without
+  `default_profile`, unmatched hosts fail closed.
+- `require_preview` applies to `change` and `exec` tools; a target may override
+  it. Named bindings with a qualified preview pairing require a fresh matching
+  preview (consumed once, 5-minute TTL); unqualified `change`/`exec` tools are
+  refused with `preview_required`.
 - `disclose_sudo_policy` includes declared sudo users/programs in target
   discovery output.
 
 ## `[capabilities]`
 
 Five independent exposure ceilings. Explicit configuration defaults to
-`actions_only` (only `named`); zero-config workstation mode defaults to all five.
 
 ```toml
 capabilities = { named = true, file_read = true, file_write = false, exec = false, sudo = false }
@@ -149,6 +158,7 @@ description = "web front end"       # ≤ 1024 bytes
 labels = { env = "prod", role = "web" }   # ≤ 16 labels, key ≤ 64, value ≤ 256
 max_tier = "inspect"                # observe | inspect | preview | change | exec
 require_preview = true              # overrides the global flag
+profile = "prod"                    # optional built-in or custom profile
 selection = { allow = ["observe_cpu", "observe_memory"] }
 
 [targets.server.sudo]
@@ -168,6 +178,62 @@ programs = ["/usr/bin/systemctl"]   # optional absolute executable allowlist
   inherits the global set.
 - Sudo policy is per-target and never inherited by catalog bindings, which
   declare `automation` or `automation:<authority>` authority instead.
+
+## `[profiles.<name>]` and `[[groups]]`
+
+Built-in profiles provide reusable policy defaults that compile down to
+`max_tier`, `require_preview`, `capabilities`, `sudo`, and optional `selection`:
+
+| Profile | `max_tier` | `require_preview` | Capabilities | `sudo` | `allow_ip_literals` |
+| --- | --- | --- | --- | --- | --- |
+| `deny` | *(none)* | `true` | none | `disabled` | `false` |
+| `prod` | `inspect` | `true` | `named`, `file_read` | `disabled` | `false` |
+| `prod-change` | `change` | `true` | `named`, `file_read` | `disabled` | `false` |
+| `dev` | `exec` | `false` | `named`, `file_read`, `file_write`, `exec` | `disabled` | `false` |
+| `lab` | `exec` | `false` | all five | `same-account` (`root`) | `true` |
+
+Custom profiles live under `[profiles.<name>]` and may `extends` any built-in or
+other custom profile (built-in names cannot be redefined). Groups under
+`[[groups]]` match hosts by `match_hosts` (case-insensitive `*`/`?` globs) and/or
+`match_labels` (exact matches on `[targets.<name>].labels`). When `profile` is
+omitted on a group, it defaults to the group's own `name` (`name = "prod"` maps
+directly to profile `"prod"`):
+
+```toml
+mode = "workstation"
+default_profile = "prod"
+
+[profiles.prod-db]
+extends = "prod"
+max_tier = "observe"
+
+[[groups]]
+name = "lab"
+match_hosts = ["*.lab.internal", "lab-*"]
+
+[[groups]]
+name = "dev"
+match_hosts = ["*.dev.internal", "dev-*", "stg-*"]
+
+[[groups]]
+name = "prod"
+match_hosts = ["*.prod.internal", "prod-*", "*-prd-*"]
+```
+
+Evaluation rules:
+- **Strictest-wins lattice (order-independent):** when a host matches multiple
+  groups (or a group plus a target `profile`), `max_tier` takes the minimum,
+  `require_preview` takes logical OR, `capabilities` takes bitwise AND, `sudo`
+  intersects, and `selection` intersects. TOML ordering can never weaken policy.
+- **SSH alias protection:** in open mode, `match_hosts` evaluates both the
+  caller-supplied host string and the canonical `hostname` from `ssh -G` so an
+  OpenSSH alias pointing to `db1.prod.internal` still inherits `prod`.
+- **IP-literal guard:** raw IPv4/IPv6 literals (including aliases resolving via
+  `ssh -G` to an IP) cannot enter groups whose profile has
+  `allow_ip_literals = false` (`prod`, `prod-change`, `dev`).
+- **Offline policy inspection:** use `estus auth explain <host> [--json]` and
+  `estus auth can-i <tool> <host> [--json]` (exit `0` = allowed, `1` = denied)
+  to verify which groups matched and why without opening any SSH connection.
 
 ## `[selection]`
 

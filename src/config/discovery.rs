@@ -34,6 +34,7 @@ struct TargetSummary<'a> {
 // Select only public fields as each row is serialized. In particular, do not
 // allocate a summary Vec before the shared response-budget guard is applied.
 struct TargetSummaries<'a> {
+    config: &'a Config,
     targets: Option<&'a BTreeMap<String, Target>>,
     tools: &'a ToolCatalog,
     capabilities: Capabilities,
@@ -44,20 +45,29 @@ struct TargetSummaries<'a> {
 impl Serialize for TargetSummaries<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(self.targets.iter().flat_map(|targets| targets.iter()).map(
-            |(name, target)| TargetSummary {
-                name,
-                sudo_mode: target.sudo.mode(),
-                description: target.description.as_deref(),
-                labels: &target.labels,
-                permitted_operations: PermittedOperations {
-                    tools: self.tools,
-                    bindings: self.bindings,
-                    target_name: name,
-                    capabilities: self.capabilities,
-                    builtins: self.builtins,
-                    target: Some(target),
-                },
-                observed_capabilities: ObservedCapabilities::Unknown,
+            |(name, target)| {
+                let effective = self.config.evaluate_host_policy(name);
+                let sudo_mode = if target.sudo.mode() != SudoMode::Disabled {
+                    target.sudo.mode()
+                } else {
+                    effective.sudo_mode()
+                };
+                TargetSummary {
+                    name,
+                    sudo_mode,
+                    description: target.description.as_deref(),
+                    labels: &target.labels,
+                    permitted_operations: PermittedOperations {
+                        tools: self.tools,
+                        bindings: self.bindings,
+                        target_name: name,
+                        capabilities: self.capabilities,
+                        builtins: self.builtins,
+                        target: Some(target),
+                        effective,
+                    },
+                    observed_capabilities: ObservedCapabilities::Unknown,
+                }
             },
         ))
     }
@@ -76,6 +86,7 @@ struct PermittedOperations<'a> {
     /// `None` is raw-destination mode: no configured target, hence no sudo
     /// grant and no selection or tier narrowing.
     target: Option<&'a Target>,
+    effective: profiles::EffectivePolicy,
 }
 
 impl Serialize for PermittedOperations<'_> {
@@ -90,13 +101,16 @@ impl Serialize for PermittedOperations<'_> {
                         // rather than by published name.
                         let callable = self.capabilities.permits(id)
                             && self.builtins.contains(id.wire_name())
+                            && self.effective.permits_builtin(id)
                             && match id {
                                 ToolId::Targets
                                 | ToolId::ReadOutput
                                 | ToolId::ClearTargetQuarantine => false,
-                                ToolId::Sudo => self
-                                    .target
-                                    .is_some_and(|target| target.sudo.permits_programs()),
+                                ToolId::Sudo => {
+                                    self.target
+                                        .is_some_and(|target| target.sudo.permits_programs())
+                                        || self.effective.permits_open_sudo()
+                                }
                                 _ => true,
                             };
                         callable
@@ -106,10 +120,20 @@ impl Serialize for PermittedOperations<'_> {
                             })
                     }
                     ToolKey::Binding(id) => self.bindings.get(id).is_some_and(|binding| {
+                        let needs_sudo = binding.sudo().is_some()
+                            || matches!(
+                                binding.automation_authority(),
+                                Some(crate::bindings::AutomationAuthority::Named(_))
+                            );
                         self.capabilities.permits_bindings()
                             && binding.enabled()
                             && !binding.is_controller()
                             && binding.permits_host(self.target_name)
+                            && self.effective.permits_binding_name(
+                                &binding.name,
+                                super::policy::risk_tier_for_binding(binding),
+                                needs_sudo,
+                            )
                             && self.target.is_none_or(|target| {
                                 target.permits_binding(binding)
                                     && binding.sudo().is_none_or(|(user, program)| {
@@ -153,6 +177,7 @@ impl Config {
                 TargetMode::Open
             },
             targets: TargetSummaries {
+                config: self,
                 targets: self.targets.as_ref(),
                 tools,
                 capabilities: self.capabilities,
@@ -206,6 +231,11 @@ impl Config {
             None => (false, None, &EMPTY_LABELS),
         };
         let sudo_ref = target.map(|target| &target.sudo);
+        let effective = self.evaluate_host_policy(host);
+        let sudo_mode = match sudo_ref.map_or(SudoMode::Disabled, Sudo::mode) {
+            SudoMode::Disabled => effective.sudo_mode(),
+            mode => mode,
+        };
         let permitted = PermittedOperations {
             tools,
             bindings: &self.bindings,
@@ -213,9 +243,9 @@ impl Config {
             capabilities: self.capabilities,
             builtins: &self.builtins,
             target,
+            effective,
         };
         let capabilities = self.capabilities;
-        let sudo_mode = sudo_ref.map_or(SudoMode::Disabled, Sudo::mode);
         let mut summary = serde_json::json!({
             "host": host,
             "mode": self.mode,

@@ -17,10 +17,11 @@ use crate::{
 mod discovery;
 mod loading;
 mod policy;
+pub(crate) mod profiles;
 mod validation;
 
 pub(crate) use discovery::{CleanupDiagnostics, TargetDiscovery};
-pub(crate) use loading::{Cli, CliCommand, DoctorArgs, RuntimeKind};
+pub(crate) use loading::{AuthArgs, AuthCommand, Cli, CliCommand, DoctorArgs, RuntimeKind};
 pub(crate) use policy::{risk_tier_for_binding, risk_tier_for_builtin};
 pub(crate) use validation::{account_name, destination};
 #[cfg(test)]
@@ -322,6 +323,8 @@ pub(crate) struct Config {
     require_preview: bool,
     bindings: Bindings,
     automation: Automation,
+    policy: profiles::PolicyEngine,
+    yolo: bool,
 }
 
 #[derive(Deserialize)]
@@ -434,11 +437,14 @@ struct Target {
     /// Overrides the global `require_preview` for this target.
     #[serde(default)]
     require_preview: Option<bool>,
+    /// Optional named profile (built-in or declared under `[profiles.<name>]`).
+    #[serde(default)]
+    profile: Option<String>,
     #[serde(skip)]
     selected_bindings: Option<BTreeSet<String>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 enum Sudo {
     #[default]
     Disabled,

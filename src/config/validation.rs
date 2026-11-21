@@ -151,54 +151,81 @@ pub(super) fn validate_targets(targets: &BTreeMap<String, Target>) -> Result<(),
                 .checked_sub(bytes)
                 .ok_or_else(|| invalid("targets", "exceeds aggregate metadata UTF-8 byte limit"))?;
         }
-        let (users, programs) = match &target.sudo {
-            Sudo::Disabled => continue,
-            Sudo::SameAccount { users, programs } => (users, programs),
-            Sudo::SeparateIdentity {
+        validate_sudo_policy_with_ordinary(&target.sudo, &ordinary, "targets.*.sudo")?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_sudo_policy(
+    sudo: &Sudo,
+    field_prefix: &'static str,
+) -> Result<(), ConfigError> {
+    validate_sudo_policy_with_ordinary(sudo, &BTreeSet::new(), field_prefix)
+}
+
+fn validate_sudo_policy_with_ordinary(
+    sudo: &Sudo,
+    ordinary: &BTreeSet<&str>,
+    field_prefix: &'static str,
+) -> Result<(), ConfigError> {
+    let (users, programs) = match sudo {
+        Sudo::Disabled => return Ok(()),
+        Sudo::SameAccount { users, programs } => (users, programs),
+        Sudo::SeparateIdentity {
+            ssh_host,
+            users,
+            programs,
+        } => {
+            destination(
                 ssh_host,
-                users,
-                programs,
-            } => {
-                destination(ssh_host, "targets.*.sudo.ssh_host")?;
-                if ordinary.contains(ssh_host.as_str()) {
-                    return Err(invalid(
-                        "targets.*.sudo.ssh_host",
-                        "privileged alias must not be any configured ordinary alias",
-                    ));
-                }
-                (users, programs)
-            }
-        };
-        if users.is_empty() {
-            return Err(invalid(
-                "targets.*.sudo.users",
-                "must contain at least one user",
-            ));
-        }
-        let mut seen = BTreeSet::new();
-        for user in users {
-            if !account_name(user) {
+                if field_prefix == "targets.*.sudo" {
+                    "targets.*.sudo.ssh_host"
+                } else {
+                    "profiles.*.sudo.ssh_host"
+                },
+            )?;
+            if ordinary.contains(ssh_host.as_str()) {
                 return Err(invalid(
-                    "targets.*.sudo.users",
-                    "must contain valid account names",
+                    "targets.*.sudo.ssh_host",
+                    "privileged alias must not be any configured ordinary alias",
                 ));
             }
-            if !seen.insert(user) {
-                return Err(invalid("targets.*.sudo.users", "duplicate policy entry"));
-            }
+            (users, programs)
         }
-        if let Some(programs) = programs {
-            let mut seen = BTreeSet::new();
-            for program in programs {
-                if !program.starts_with('/') || program.ends_with('/') || program.contains('\0') {
-                    return Err(invalid(
-                        "targets.*.sudo.programs",
-                        "must contain absolute executable paths without NUL or a trailing slash",
-                    ));
-                }
-                if !seen.insert(program) {
-                    return Err(invalid("targets.*.sudo.programs", "duplicate policy entry"));
-                }
+    };
+    let users_field = if field_prefix == "targets.*.sudo" {
+        "targets.*.sudo.users"
+    } else {
+        "profiles.*.sudo.users"
+    };
+    let programs_field = if field_prefix == "targets.*.sudo" {
+        "targets.*.sudo.programs"
+    } else {
+        "profiles.*.sudo.programs"
+    };
+    if users.is_empty() {
+        return Err(invalid(users_field, "must contain at least one user"));
+    }
+    let mut seen = BTreeSet::new();
+    for user in users {
+        if !account_name(user) {
+            return Err(invalid(users_field, "must contain valid account names"));
+        }
+        if !seen.insert(user) {
+            return Err(invalid(users_field, "duplicate policy entry"));
+        }
+    }
+    if let Some(programs) = programs {
+        let mut seen = BTreeSet::new();
+        for program in programs {
+            if !program.starts_with('/') || program.ends_with('/') || program.contains('\0') {
+                return Err(invalid(
+                    programs_field,
+                    "must contain absolute executable paths without NUL or a trailing slash",
+                ));
+            }
+            if !seen.insert(program) {
+                return Err(invalid(programs_field, "duplicate policy entry"));
             }
         }
     }
@@ -658,7 +685,7 @@ mod tests {
             ("profile='baseline'".to_owned(), "config"),
             (
                 "[targets.secret_target]\nssh_host='secret_alias'\nprofile='baseline'".to_owned(),
-                "config",
+                "targets.*.profile",
             ),
             ("mode='secret_payload'".to_owned(), "config"),
             ("mode=42".to_owned(), "config"),

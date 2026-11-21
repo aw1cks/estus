@@ -56,7 +56,10 @@ a no-config start is headless: `named` only, no exec, sudo, file-write or
 catalog exposure.
 
 ```sh
-estus --workstation                       # zero-config development
+estus --workstation                       # zero-config development (ordinary reads + builtins)
+estus --yolo                              # unrestricted escape hatch (all non-lab tools + open sudo)
+estus --config operator.toml auth explain db1              # explain matched groups/profiles offline
+estus --config operator.toml auth can-i exec_command db1   # exit 0 = yes, 1 = no
 nix run --no-write-lock-file .#dev-mcp    # same, with the Nix-built module bundle
 ```
 
