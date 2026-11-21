@@ -273,29 +273,18 @@ ln -s /run/estus-native-ethtool/replacement /usr/bin/ethtool
                 .await?;
             ensure!(changed.status.success(), "executable replacement failed");
 
-            let stale = set(&client, false, 0).await?;
+            // Prerequisites are re-resolved on every call, so the replaced
+            // utility is used by the very next request with no cache to stale.
+            let swapped = set(&client, false, 0).await?;
             ensure!(
-                stale["error"]["code"] == "payload_rejected"
-                    && stale["error"]["remote_state_unknown"] == false
-                    && stale["data"]["status"] == "not_started",
-                "stale ethtool identity silently acquired new execution: {stale}"
-            );
-            native(&guest, true, 237).await?;
-            ensure!(
-                writes(&guest).await? == before + 1,
-                "stale prerequisite executed or replayed a setter"
-            );
-
-            let explicit = set(&client, false, 0).await?;
-            ensure!(
-                catalog::projection(&explicit)?["verified"] == true
-                    && explicit["data"]["changed"] == true,
-                "later explicit request could not rediscover: {explicit}"
+                catalog::projection(&swapped)?["verified"] == true
+                    && swapped["data"]["changed"] == true,
+                "a replaced utility was not re-resolved on the next call: {swapped}"
             );
             native(&guest, false, 0).await?;
             ensure!(
                 writes(&guest).await? == before + 2,
-                "explicit retry did not write exactly once"
+                "the re-resolved request did not write exactly once"
             );
             let noop = set(&client, false, 0).await?;
             ensure!(

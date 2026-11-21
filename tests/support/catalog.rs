@@ -283,7 +283,9 @@ const FIXTURE_UNITS: [&str; 9] = [
 /// sets and device inventories belong to the site, so these guests restate them
 /// as site `fixed_args` exactly as an operator would. Caller overrides win.
 fn fixture_fixed_args(name: &str) -> Value {
-    let units = json!(FIXTURE_UNITS);
+    // Unit and sysctl-key allowlists are stated as `constraints` (see
+    // `fixture_constraints`), which narrows the caller schema and the
+    // collector's fixed argument together.
     let network = json!({
         "interface": "catalog0",
         "interfaces": ["lo", "catalog0"],
@@ -308,29 +310,13 @@ fn fixture_fixed_args(name: &str) -> Value {
         "change_boot_default" | "change_boot_oneshot" | "inspect_boot_entry" => {
             json!({"allowed_entries": ["estus-current.conf", "estus-alternate.conf"]})
         }
-        "change_sysctl_config" | "change_sysctl_runtime" => {
-            json!({"approved_keys": ["kernel.printk_ratelimit"]})
-        }
         "observe_sysctl" => {
             json!({"approved_keys": ["vm.swappiness", "net.ipv4.ip_forward", "kernel.pid_max"]})
         }
-        "change_systemd_unit" => json!({
-            "allowed_units": units,
-            "allowed_operations": ["start", "stop", "restart", "try_restart", "reload", "reset_failed"]
-        }),
-        "change_systemd_unit_file" => json!({
-            "allowed_units": units,
-            "allowed_operations": ["enable", "disable", "mask", "unmask"]
-        }),
-        "change_systemd_runtime_limits"
-        | "change_systemd_signal"
-        | "inspect_systemd_unit_config"
-        | "observe_systemd_unit"
-        | "observe_systemd_unit_dependencies" => json!({"allowed_units": units}),
         "inspect_cgroup_processes"
         | "observe_cgroup_sample"
         | "observe_cgroup_stats"
-        | "observe_cgroup_tree" => json!({"approved_root": "/system.slice"}),
+        | "observe_cgroup_tree" => json!({"approved_root": "/system.slice/estus-fixture.service"}),
         "observe_filesystem_usage" => {
             json!({"configured_paths": {"data": "/var/lib/estus-catalog"}})
         }
@@ -381,6 +367,52 @@ fn fixture_fixed_args(name: &str) -> Value {
             json!({"operator_policy": nic("pause0", "52:54:00:12:34:58", "e1000e", false)})
         }
         _ => json!({}),
+    }
+}
+
+/// Site `constraints`: the documented way to allowlist units and sysctl keys.
+/// The server derives both the caller enum and the collector argument from it.
+fn fixture_constraints(name: &str) -> Value {
+    match name {
+        "change_systemd_unit"
+        | "change_systemd_unit_file"
+        | "change_systemd_runtime_limits"
+        | "change_systemd_signal"
+        | "inspect_systemd_unit_config"
+        | "observe_systemd_unit"
+        | "observe_systemd_unit_dependencies" => json!({"allowed_units": FIXTURE_UNITS}),
+        "change_sysctl_config" | "change_sysctl_runtime" => {
+            json!({"allowed_keys": ["kernel.printk_ratelimit"]})
+        }
+        _ => json!({}),
+    }
+}
+
+/// Caller-input allowlists a site states by narrowing the shipped schema; the
+/// server then refuses anything else before opening SSH. The collector's
+/// `operator_policy` check stays as the target-side backstop.
+fn fixture_input_enums(name: &str) -> &'static [(&'static str, &'static [&'static str])] {
+    const INTERFACE: (&str, &[&str]) = ("interface", &["catalog0"]);
+    const LOOPBACK: (&str, &[&str]) = ("destination", &["127.0.0.1"]);
+    const JOURNAL_UNIT: (&str, &[&str]) = ("unit", &FIXTURE_UNITS);
+    match name {
+        "change_network_link_down" | "change_network_link_up" => &[INTERFACE],
+        "change_network_address_add" | "change_network_address_remove" => {
+            &[INTERFACE, ("address", &["192.0.2.9/24"])]
+        }
+        "change_network_neighbor_remove" => &[INTERFACE, ("destination", &["192.0.2.2"])],
+        "change_network_route_add" | "change_network_route_remove" => {
+            &[INTERFACE, ("destination", &["198.51.100.0/24"])]
+        }
+        "inspect_boot_entry" => &[("entry_id", &["estus-current.conf", "estus-alternate.conf"])],
+        "inspect_dns_lookup" => &[("name", &["catalog.test"]), ("resolver", &["127.0.0.1"])],
+        "inspect_journal" => &[JOURNAL_UNIT],
+        "inspect_tcp_connect_probe" => &[LOOPBACK],
+        "observe_network_route_lookup" => &[
+            ("destination", &["127.0.0.1", "192.0.2.2"]),
+            ("source", &["127.0.0.1", "192.0.2.1"]),
+        ],
+        _ => &[],
     }
 }
 
@@ -641,6 +673,22 @@ impl Binding {
         }
         let mut policy = toml::Table::new();
         policy.insert("fixed_args".into(), toml::Value::Table(fixed));
+        if let Some(constraints) = fixture_constraints(name).as_object()
+            && !constraints.is_empty()
+        {
+            policy.insert("constraints".into(), toml::Value::try_from(constraints)?);
+        }
+        let enums = fixture_input_enums(name);
+        if !enums.is_empty() {
+            let mut schema = tool["input_schema"].clone();
+            for (property, values) in enums {
+                schema["properties"][*property]
+                    .as_table_mut()
+                    .context("narrowed input property")?
+                    .insert("enum".into(), toml::Value::try_from(values)?);
+            }
+            policy.insert("input_schema".into(), schema);
+        }
         site.insert(
             "tools".into(),
             toml::Value::Table(toml::Table::from_iter([(
