@@ -103,7 +103,10 @@ enums, fixed policy and allowlists together.
 Shipped definitions are tool tables only: they name no targets and no
 allowlists. Targets default to every configured destination (and per-target
 permission is still checked separately); a `policy_required` template must be
-given `fixed_args` or `constraints` by the site before it can be materialised.
+given `fixed_args`, `constraints` or `input_schema` (for tools whose caller enum
+is the allowlist, such as kernel modules or devices) before it can be
+materialised. Templates with nothing site-specific are not `policy_required`
+and are enabled by name alone.
 Policy arguments — `allowed_units`, `allowed_keys`, `allowed_entries`,
 `approved_keys`, `approved_root`, `allowed_packages`, `operator_policy`,
 `configured_paths`, `reviewed_devices` — are therefore absent from the catalog,

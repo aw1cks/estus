@@ -578,8 +578,9 @@ impl Catalog {
     /// `targets` and `constraints` never survive from the catalog, and shipped
     /// definitions carry no site policy at all: a collector that needs an
     /// allowlist fails closed until the site supplies one. A `policy_required`
-    /// template must restate policy in `fixed_args` or `constraints` before it
-    /// is materialised.
+    /// template must restate policy in `fixed_args`, `constraints` or
+    /// `input_schema` (the caller enum is the allowlist for tools such as
+    /// kernel-module or device selectors) before it is materialised.
     pub(crate) fn site_definition(
         &self,
         name: &str,
@@ -613,10 +614,13 @@ impl Catalog {
         }
         // Shipped definitions carry no site policy, so a policy-required
         // template is materialised only when the site states its own fixed
-        // arguments or constraints. A schema alone names no allowlist.
+        // arguments, constraints or caller schema (the enum several tools use
+        // as their allowlist).
         if template.policy_required
             && overrides.is_none_or(|table| {
-                !(table.contains_key("fixed_args") || table.contains_key("constraints"))
+                !["fixed_args", "constraints", "input_schema"]
+                    .iter()
+                    .any(|key| table.contains_key(*key))
             })
         {
             return Err(CatalogError::SitePolicyRequired {
@@ -1067,13 +1071,24 @@ mod site_overlay_tests {
             missing.is_empty(),
             "policy-required without site policy: {missing:?}"
         );
-        let bare = toml::Table::from_iter([(
+        // A caller enum is the allowlist for selector tools, so a site schema
+        // alone is site policy; collectors still fail closed on missing lists.
+        let schema_only = toml::Table::from_iter([(
             "input_schema".to_owned(),
             toml::Value::Table(toml::Table::new()),
         )]);
+        assert!(
+            catalog
+                .site_definition(
+                    "observe_kernel_module",
+                    Some(&schema_only),
+                    &["host".to_owned()]
+                )
+                .is_ok()
+        );
         assert!(matches!(
             catalog
-                .site_definition("observe_systemd_unit", Some(&bare), &["host".to_owned()])
+                .site_definition("observe_kernel_module", None, &["host".to_owned()])
                 .unwrap_err(),
             CatalogError::SitePolicyRequired { .. }
         ));

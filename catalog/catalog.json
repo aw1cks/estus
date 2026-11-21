@@ -49,7 +49,7 @@
     "change_boot_clear_oneshot": {
       "definition": "change_boot_clear_oneshot.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -111,7 +111,7 @@
     "change_host_reboot": {
       "definition": "change_host_reboot.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -424,7 +424,7 @@
     "change_systemd_manager_reload": {
       "definition": "change_systemd_manager_reload.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -536,7 +536,7 @@
     "inspect_hardware_identifiers": {
       "definition": "inspect_hardware_identifiers.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -563,7 +563,7 @@
     "inspect_journal": {
       "definition": "inspect_journal.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -577,7 +577,7 @@
     "inspect_journal_record": {
       "definition": "inspect_journal_record.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -592,7 +592,7 @@
     "inspect_kernel_log": {
       "definition": "inspect_kernel_log.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -620,7 +620,7 @@
     "inspect_process": {
       "definition": "inspect_process.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -633,7 +633,7 @@
     "inspect_process_fds": {
       "definition": "inspect_process_fds.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -735,7 +735,7 @@
     "observe_boot_entries": {
       "definition": "observe_boot_entries.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -751,7 +751,7 @@
     "observe_boot_status": {
       "definition": "observe_boot_status.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -870,7 +870,7 @@
     "observe_hardware_memory": {
       "definition": "observe_hardware_memory.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -884,7 +884,7 @@
     "observe_hardware_slots": {
       "definition": "observe_hardware_slots.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -898,7 +898,7 @@
     "observe_hardware_system": {
       "definition": "observe_hardware_system.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -911,7 +911,7 @@
     "observe_host_summary": {
       "definition": "observe_host_summary.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -924,7 +924,7 @@
     "observe_journal_boots": {
       "definition": "observe_journal_boots.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -938,7 +938,7 @@
     "observe_journal_usage": {
       "definition": "observe_journal_usage.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1078,7 +1078,7 @@
     "observe_network_device": {
       "definition": "observe_network_device.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1148,7 +1148,7 @@
     "observe_nic": {
       "definition": "observe_nic.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1177,7 +1177,7 @@
     "observe_nic_features": {
       "definition": "observe_nic_features.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1220,7 +1220,7 @@
     "observe_nic_rss": {
       "definition": "observe_nic_rss.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1234,7 +1234,7 @@
     "observe_nic_stats": {
       "definition": "observe_nic_stats.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
@@ -1263,7 +1263,7 @@
     "observe_packages": {
       "definition": "observe_packages.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1276,7 +1276,7 @@
     "observe_pci": {
       "definition": "observe_pci.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1364,7 +1364,7 @@
     "observe_storage_device": {
       "definition": "observe_storage_device.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1392,7 +1392,7 @@
     "observe_storage_devices": {
       "definition": "observe_storage_devices.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1405,7 +1405,7 @@
     "observe_storage_mounts": {
       "definition": "observe_storage_mounts.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3"
@@ -1554,7 +1554,7 @@
     "observe_systemd_units": {
       "definition": "observe_systemd_units.toml",
       "qualification": "site_policy_template",
-      "policy_required": true,
+      "policy_required": false,
       "requires": [
         "linux",
         "python3",
