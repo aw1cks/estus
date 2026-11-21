@@ -26,6 +26,8 @@ struct ExplainReport {
     mode: &'static str,
     yolo: bool,
     configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_source_file: Option<String>,
     ssh_host: Option<String>,
     resolved_ssh_hostname: Option<String>,
     is_ip_literal: bool,
@@ -122,6 +124,7 @@ fn run_can_i(config: &Config, tool: &str, host: &str, json: bool) -> ExitCode {
 
 fn build_explain(config: &Config, host: &str) -> ExplainReport {
     let configured = config.target_ssh_host(host).is_some();
+    let target_source_file = config.target_source_file(host).map(str::to_owned);
     let ssh_host = config.target_ssh_host(host).map(str::to_owned);
     let effective = config.evaluate_host_policy(host);
 
@@ -207,6 +210,7 @@ fn build_explain(config: &Config, host: &str) -> ExplainReport {
         },
         yolo: config.is_yolo(),
         configured,
+        target_source_file,
         ssh_host,
         resolved_ssh_hostname: effective.resolved_ssh_hostname.clone(),
         is_ip_literal: effective.is_ip_literal,
@@ -743,6 +747,9 @@ fn print_explain_text(report: &ExplainReport) {
     if report.yolo {
         target_meta.push("--yolo".to_owned());
     }
+    if let Some(source) = &report.target_source_file {
+        target_meta.push(format!("from {source}"));
+    }
     if let Some(ssh_host) = &report.ssh_host
         && ssh_host != &report.host
     {
@@ -764,10 +771,15 @@ fn print_explain_text(report: &ExplainReport) {
     } else {
         println!("Matched groups:");
         for entry in &report.matched {
-            println!(
-                "  - {} -> profile \"{}\" ({})",
-                entry.source, entry.profile, entry.reason
-            );
+            let src = match &entry.source_file {
+                Some(file) => format!("{} ({file})", entry.source),
+                None => entry.source.clone(),
+            };
+            let prof = match &entry.profile_source_file {
+                Some(file) => format!("\"{}\" ({file})", entry.profile),
+                None => format!("\"{}\"", entry.profile),
+            };
+            println!("  - {src} -> profile {prof} ({})", entry.reason);
         }
     }
     if !report.skipped_ip_groups.is_empty() {

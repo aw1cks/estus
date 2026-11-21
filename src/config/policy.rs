@@ -444,6 +444,12 @@ impl Config {
             .map(|target| target.ssh_host.as_str())
     }
 
+    pub(crate) fn target_source_file(&self, host: &str) -> Option<&str> {
+        self.targets
+            .as_ref()
+            .and_then(|targets| targets.get(host))
+            .and_then(|target| target.source_file.as_deref())
+    }
     pub(crate) fn target_max_tier(&self, host: &str) -> Option<RiskTier> {
         self.targets
             .as_ref()

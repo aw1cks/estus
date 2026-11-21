@@ -441,9 +441,10 @@ struct Target {
     #[serde(default)]
     profile: Option<String>,
     #[serde(skip)]
+    source_file: Option<String>,
+    #[serde(skip)]
     selected_bindings: Option<BTreeSet<String>>,
 }
-
 #[derive(Clone, Debug, Default)]
 enum Sudo {
     #[default]

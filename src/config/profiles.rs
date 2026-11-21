@@ -68,6 +68,7 @@ impl BuiltInProfile {
                 sudo: Sudo::Disabled,
                 allow_ip_literals: false,
                 selection: None,
+                source_file: None,
             },
             Self::Prod => CompiledProfile {
                 name: self.as_str().to_owned(),
@@ -84,6 +85,7 @@ impl BuiltInProfile {
                 sudo: Sudo::Disabled,
                 allow_ip_literals: false,
                 selection: None,
+                source_file: None,
             },
             Self::ProdChange => CompiledProfile {
                 name: self.as_str().to_owned(),
@@ -100,6 +102,7 @@ impl BuiltInProfile {
                 sudo: Sudo::Disabled,
                 allow_ip_literals: false,
                 selection: None,
+                source_file: None,
             },
             Self::Dev => CompiledProfile {
                 name: self.as_str().to_owned(),
@@ -116,6 +119,7 @@ impl BuiltInProfile {
                 sudo: Sudo::Disabled,
                 allow_ip_literals: false,
                 selection: None,
+                source_file: None,
             },
             Self::Lab => CompiledProfile {
                 name: self.as_str().to_owned(),
@@ -129,6 +133,7 @@ impl BuiltInProfile {
                 },
                 allow_ip_literals: true,
                 selection: None,
+                source_file: None,
             },
         }
     }
@@ -144,6 +149,8 @@ pub(super) struct RawProfile {
     pub(super) selection: Option<Selection>,
     pub(super) sudo: Option<Sudo>,
     pub(super) allow_ip_literals: Option<bool>,
+    #[serde(skip)]
+    pub(super) source_file: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -156,6 +163,8 @@ pub(super) struct RawGroup {
     pub(super) match_hosts: Vec<String>,
     #[serde(default)]
     pub(super) match_labels: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub(super) source_file: Option<String>,
 }
 
 #[derive(Clone)]
@@ -168,6 +177,7 @@ pub(crate) struct CompiledProfile {
     pub(super) sudo: Sudo,
     pub(crate) allow_ip_literals: bool,
     pub(crate) selection: Option<BTreeSet<String>>,
+    pub(crate) source_file: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,15 +186,19 @@ pub(crate) struct CompiledGroup {
     pub(crate) profile: String,
     pub(crate) match_hosts: Vec<String>,
     pub(crate) match_labels: BTreeMap<String, String>,
+    pub(crate) source_file: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PolicyMatch {
     pub(crate) source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_file: Option<String>,
     pub(crate) profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) profile_source_file: Option<String>,
     pub(crate) reason: String,
 }
-
 #[derive(Clone, Debug)]
 pub(crate) struct EffectivePolicy {
     pub(crate) active: bool,
@@ -418,6 +432,7 @@ impl PolicyEngine {
                 profile,
                 match_hosts: group.match_hosts,
                 match_labels: group.match_labels,
+                source_file: group.source_file,
             });
         }
 
@@ -529,7 +544,9 @@ impl PolicyEngine {
             matched_entries.push((
                 PolicyMatch {
                     source: format!("group \"{}\"", group.name),
+                    source_file: group.source_file.clone(),
                     profile: group.profile.clone(),
+                    profile_source_file: profile.source_file.clone(),
                     reason,
                 },
                 profile,
@@ -543,7 +560,9 @@ impl PolicyEngine {
             matched_entries.push((
                 PolicyMatch {
                     source: format!("target \"{host}\""),
+                    source_file: target_ref.source_file.clone(),
                     profile: profile_name.clone(),
+                    profile_source_file: profile.source_file.clone(),
                     reason: "explicit target profile".to_owned(),
                 },
                 profile,
@@ -556,7 +575,9 @@ impl PolicyEngine {
                     matched_entries.push((
                         PolicyMatch {
                             source: "--yolo".to_owned(),
+                            source_file: None,
                             profile: "lab".to_owned(),
+                            profile_source_file: None,
                             reason: "unrestricted workstation escape hatch".to_owned(),
                         },
                         profile,
@@ -576,7 +597,9 @@ impl PolicyEngine {
                 matched_entries.push((
                     PolicyMatch {
                         source: "default_profile".to_owned(),
+                        source_file: None,
                         profile: default_name.clone(),
+                        profile_source_file: profile.source_file.clone(),
                         reason,
                     },
                     profile,
@@ -899,6 +922,7 @@ fn resolve_profile(
     };
 
     base.name = name.to_owned();
+    base.source_file = raw.source_file.clone();
     if let Some(tier) = raw.max_tier {
         base.max_tier = tier;
     }

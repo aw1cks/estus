@@ -43,6 +43,9 @@ inherited environment cannot widen authority.
 ```toml
 mode = "headless"          # headless (default) | workstation
 default_profile = "prod"   # optional: deny | prod | prod-change | dev | lab | <custom>
+profiles_dir = "profiles"  # optional explicit drop-in dir (relative to this TOML file)
+groups_dir = "groups"      # optional explicit drop-in dir
+targets_dir = "targets"    # optional explicit drop-in dir (closes open mode even when empty)
 require_preview = false    # requires a matching preview for preview-paired named tools
 disclose_sudo_policy = false
 ```
@@ -234,6 +237,27 @@ Evaluation rules:
 - **Offline policy inspection:** use `estus auth explain <host> [--json]` and
   `estus auth can-i <tool> <host> [--json]` (exit `0` = allowed, `1` = denied)
   to verify which groups matched and why without opening any SSH connection.
+
+### Explicit drop-in directories (`profiles_dir`, `groups_dir`, `targets_dir`)
+
+Estus never discovers ambient `$XDG_CONFIG_HOME` files automatically, but an
+explicit configuration file may opt into non-recursive drop-in directories for
+profiles, groups, and targets (useful with Nix / Home Manager / Ansible
+modules). Paths resolve literally relative to the root TOML file and must exist
+and be readable directories at startup:
+
+- Each `*.toml` regular file (including Nix store symlinks to regular files;
+  non-`.toml` files ignored; max 64 files / 1 MiB each) may declare either a
+  single entry whose name defaults to the filename stem (`profiles/prod-db.toml`,
+  `groups/prod.toml`, `targets/eu-db-01.toml`) or a multi-entry table
+  (`[profiles.*]`, `[[groups]]`, `[targets.*]`).
+- Drop-ins cannot set top-level `mode`, `capabilities`, `ssh`,
+  `default_profile`, `limits`, or `automation`; duplicate names across root and
+  drop-in files fail closed at startup.
+- Declaring `targets_dir` closes destination policy to configured targets even
+  when the directory is empty.
+- `estus auth explain` prints the source drop-in filename beside each matched
+  target, group, and custom profile.
 
 ## `[selection]`
 

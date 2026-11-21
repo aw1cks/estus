@@ -47,28 +47,33 @@ pub(super) fn validate_schema(value: &toml::Value) -> Result<(), ConfigError> {
     }
     if let Some(targets) = value.get("targets").and_then(toml::Value::as_table) {
         for target in targets.values().filter_map(toml::Value::as_table) {
-            for key in [
-                "enabled_tools",
-                "tool_presets",
-                "disabled_tools",
-                "capabilities",
-            ] {
-                if target.get(key).is_some() {
-                    return Err(invalid(
-                        "targets.*.selection",
-                        "replaces per-target enabled_tools, tool_presets and disabled_tools; per-target capabilities moved to selection, max_tier and sudo",
-                    ));
-                }
-            }
-            if let Some(tools) = target.get("tools").and_then(toml::Value::as_table) {
-                for tool in tools.values().filter_map(toml::Value::as_table) {
-                    if tool.get("constraints").is_some() {
-                        return Err(invalid(
-                            "targets.*.selection",
-                            "does not accept per-host constraints; restrict the domain site-wide in [tools.<name>].constraints",
-                        ));
-                    }
-                }
+            validate_target_table(target)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_target_table(target: &toml::Table) -> Result<(), ConfigError> {
+    for key in [
+        "enabled_tools",
+        "tool_presets",
+        "disabled_tools",
+        "capabilities",
+    ] {
+        if target.get(key).is_some() {
+            return Err(invalid(
+                "targets.*.selection",
+                "replaces per-target enabled_tools, tool_presets and disabled_tools; per-target capabilities moved to selection, max_tier and sudo",
+            ));
+        }
+    }
+    if let Some(tools) = target.get("tools").and_then(toml::Value::as_table) {
+        for tool in tools.values().filter_map(toml::Value::as_table) {
+            if tool.get("constraints").is_some() {
+                return Err(invalid(
+                    "targets.*.selection",
+                    "does not accept per-host constraints; restrict the domain site-wide in [tools.<name>].constraints",
+                ));
             }
         }
     }

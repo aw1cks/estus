@@ -135,6 +135,9 @@ struct Document {
     disclose_sudo_policy: bool,
     require_preview: bool,
     default_profile: Option<String>,
+    profiles_dir: Option<PathBuf>,
+    groups_dir: Option<PathBuf>,
+    targets_dir: Option<PathBuf>,
     profiles: BTreeMap<String, profiles::RawProfile>,
     groups: Vec<profiles::RawGroup>,
     ssh: Ssh,
@@ -157,6 +160,9 @@ impl Default for Document {
             disclose_sudo_policy: false,
             require_preview: false,
             default_profile: None,
+            profiles_dir: None,
+            groups_dir: None,
+            targets_dir: None,
             profiles: BTreeMap::new(),
             groups: Vec::new(),
             ssh: Ssh::default(),
@@ -508,6 +514,7 @@ impl Config {
             // sudo, file-write or catalog exposure.
             (Document::default(), cwd.to_path_buf())
         };
+        load_dropins(&mut document, &base)?;
         let capabilities = match (document.mode, document.capabilities.take()) {
             (Mode::Workstation, None) => Capabilities::all(),
             (Mode::Workstation, Some(raw)) => raw.resolve(Capabilities::all()),
@@ -522,12 +529,12 @@ impl Config {
         };
 
         // Destination policy is structural, not a second switch: a `[targets]`
-        // table (even an empty one) closes the server to the names it lists,
-        // and its absence leaves the caller naming a raw SSH destination.
+        // table (even an empty one, or an explicit `targets_dir`) closes the
+        // server to the names it lists, and its absence leaves the caller naming
+        // a raw SSH destination.
         if document.targets.is_none() && document.mode != Mode::Workstation {
             document.targets = Some(BTreeMap::new());
         }
-
         let policy = resolve_selection(&mut document, capabilities, yolo, &base, &env)?;
         let ssh_override = cli
             .ssh_config
@@ -757,6 +764,217 @@ fn resolve_path(path: PathBuf, base: &Path, field: &'static str) -> Result<PathB
     } else {
         base.join(path)
     })
+}
+
+const MAX_DROPIN_FILES: usize = 64;
+const MAX_DROPIN_FILE_BYTES: u64 = 1_048_576;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfilesDropInMulti {
+    profiles: BTreeMap<String, profiles::RawProfile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupsDropInMulti {
+    groups: Vec<profiles::RawGroup>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupDropInSingle {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    match_hosts: Vec<String>,
+    #[serde(default)]
+    match_labels: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetsDropInMulti {
+    targets: BTreeMap<String, Target>,
+}
+
+struct DropInFile {
+    stem: String,
+    label: String,
+    text: String,
+    value: toml::Value,
+}
+
+fn read_dropin_dir(
+    raw_dir: PathBuf,
+    base: &Path,
+    field: &'static str,
+) -> Result<Vec<DropInFile>, ConfigError> {
+    let dir = resolve_path(raw_dir, base, field)?;
+    let dir_meta = std::fs::metadata(&dir).map_err(|_| {
+        invalid(
+            field,
+            "cannot inspect explicitly configured drop-in directory",
+        )
+    })?;
+    if !dir_meta.is_dir() {
+        return Err(invalid(field, "drop-in path must be a readable directory"));
+    }
+    let dir_label = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(field)
+        .to_owned();
+    let read_dir = std::fs::read_dir(&dir)
+        .map_err(|_| invalid(field, "cannot read explicitly configured drop-in directory"))?;
+    let mut paths: Vec<(String, String, PathBuf)> = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|_| invalid(field, "cannot enumerate drop-in directory"))?;
+        let file_name = entry.file_name();
+        let Some(name_str) = file_name.to_str() else {
+            continue;
+        };
+        let Some(stem) = name_str.strip_suffix(".toml") else {
+            continue;
+        };
+        if stem.is_empty() {
+            return Err(invalid(field, "drop-in filename stem must not be empty"));
+        }
+        paths.push((stem.to_owned(), name_str.to_owned(), entry.path()));
+    }
+    paths.sort_by(|a, b| a.1.cmp(&b.1));
+    if paths.len() > MAX_DROPIN_FILES {
+        return Err(invalid(
+            field,
+            "drop-in directory exceeds maximum file count",
+        ));
+    }
+    let mut out = Vec::with_capacity(paths.len());
+    for (stem, name_str, path) in paths {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(&path)
+            .map_err(|_| invalid(field, "cannot read drop-in TOML file"))?;
+        if !file
+            .metadata()
+            .map_err(|_| invalid(field, "cannot inspect drop-in TOML file"))?
+            .is_file()
+        {
+            return Err(invalid(field, "drop-in TOML entry must be a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_DROPIN_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid(field, "cannot read drop-in TOML file"))?;
+        if bytes.len() as u64 > MAX_DROPIN_FILE_BYTES {
+            return Err(invalid(field, "drop-in TOML file exceeds maximum size"));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| invalid(field, "drop-in TOML file must be valid UTF-8"))?;
+        let value: toml::Value =
+            toml::from_str(&text).map_err(|error| ConfigError::toml_syntax(&text, &error))?;
+        out.push(DropInFile {
+            stem,
+            label: format!("{dir_label}/{name_str}"),
+            text,
+            value,
+        });
+    }
+    Ok(out)
+}
+
+fn load_dropins(document: &mut Document, base: &Path) -> Result<(), ConfigError> {
+    if let Some(dir) = document.profiles_dir.take() {
+        for file in read_dropin_dir(dir, base, "profiles_dir")? {
+            let is_multi = file.value.as_table().is_some_and(|t| {
+                t.len() == 1 && t.get("profiles").is_some_and(toml::Value::is_table)
+            });
+            if is_multi {
+                let parsed = toml::from_str::<ProfilesDropInMulti>(&file.text)
+                    .map_err(|error| ConfigError::toml_structure(&file.text, &error))?;
+                for (name, mut profile) in parsed.profiles {
+                    profile.source_file = Some(file.label.clone());
+                    if document.profiles.insert(name, profile).is_some() {
+                        return Err(invalid("profiles_dir", "duplicate profile declaration"));
+                    }
+                }
+            } else {
+                let mut profile = toml::from_str::<profiles::RawProfile>(&file.text)
+                    .map_err(|error| ConfigError::toml_structure(&file.text, &error))?;
+                profile.source_file = Some(file.label);
+                if document.profiles.insert(file.stem, profile).is_some() {
+                    return Err(invalid("profiles_dir", "duplicate profile declaration"));
+                }
+            }
+        }
+    }
+
+    if let Some(dir) = document.groups_dir.take() {
+        for file in read_dropin_dir(dir, base, "groups_dir")? {
+            let is_multi = file.value.as_table().is_some_and(|t| {
+                t.len() == 1 && t.get("groups").is_some_and(toml::Value::is_array)
+            });
+            if is_multi {
+                let parsed = toml::from_str::<GroupsDropInMulti>(&file.text)
+                    .map_err(|error| ConfigError::toml_structure(&file.text, &error))?;
+                for mut group in parsed.groups {
+                    group.source_file = Some(file.label.clone());
+                    document.groups.push(group);
+                }
+            } else {
+                let parsed = toml::from_str::<GroupDropInSingle>(&file.text)
+                    .map_err(|error| ConfigError::toml_structure(&file.text, &error))?;
+                document.groups.push(profiles::RawGroup {
+                    name: parsed.name.unwrap_or(file.stem),
+                    profile: parsed.profile,
+                    match_hosts: parsed.match_hosts,
+                    match_labels: parsed.match_labels,
+                    source_file: Some(file.label),
+                });
+            }
+        }
+    }
+
+    if let Some(dir) = document.targets_dir.take() {
+        // Declaring `targets_dir` closes destination policy to configured targets,
+        // matching an explicit `[targets]` table even when the directory is empty.
+        let targets = document.targets.get_or_insert_with(BTreeMap::new);
+        for file in read_dropin_dir(dir, base, "targets_dir")? {
+            let is_multi = file.value.as_table().is_some_and(|t| {
+                t.len() == 1 && t.get("targets").is_some_and(toml::Value::is_table)
+            });
+            if is_multi {
+                if let Some(table) = file.value.get("targets").and_then(toml::Value::as_table) {
+                    for target in table.values().filter_map(toml::Value::as_table) {
+                        validation::validate_target_table(target)?;
+                    }
+                }
+                let parsed = toml::from_str::<TargetsDropInMulti>(&file.text)
+                    .map_err(|error| ConfigError::toml_structure(&file.text, &error))?;
+                for (name, mut target) in parsed.targets {
+                    target.source_file = Some(file.label.clone());
+                    if targets.insert(name, target).is_some() {
+                        return Err(invalid("targets_dir", "duplicate target declaration"));
+                    }
+                }
+            } else {
+                if let Some(table) = file.value.as_table() {
+                    validation::validate_target_table(table)?;
+                }
+                let mut target = toml::from_str::<Target>(&file.text)
+                    .map_err(|error| ConfigError::toml_structure(&file.text, &error))?;
+                target.source_file = Some(file.label);
+                if targets.insert(file.stem, target).is_some() {
+                    return Err(invalid("targets_dir", "duplicate target declaration"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_ssh_executable(

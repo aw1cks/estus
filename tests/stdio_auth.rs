@@ -247,3 +247,221 @@ fn yolo_mode_authorizes_all_non_lab_tools_and_blocks_config_combination() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn dropin_directories_load_profiles_groups_targets_with_provenance_and_reject_duplicates()
+-> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let profiles_dir = dir.path().join("profiles");
+    let groups_dir = dir.path().join("groups");
+    let targets_dir = dir.path().join("targets");
+    std::fs::create_dir_all(&profiles_dir)?;
+    std::fs::create_dir_all(&groups_dir)?;
+    std::fs::create_dir_all(&targets_dir)?;
+
+    // Single-entry profile drop-in: filename stem "prod-db" becomes profile name.
+    std::fs::write(
+        profiles_dir.join("prod-db.toml"),
+        "extends = \"prod\"\nmax_tier = \"observe\"\n",
+    )?;
+    // Multi-entry profile drop-in also supported.
+    std::fs::write(
+        profiles_dir.join("extra.toml"),
+        "[profiles.dev-safe]\nextends = \"dev\"\nrequire_preview = true\n",
+    )?;
+    // Single-entry group drop-in with filename-stem -> name -> profile sugar (`prod.toml`).
+    std::fs::write(
+        groups_dir.join("prod.toml"),
+        "match_hosts = [\"*.prod.internal\"]\n",
+    )?;
+    // Single-entry group drop-in matching labels -> custom profile `prod-db`.
+    std::fs::write(
+        groups_dir.join("prod-databases.toml"),
+        "profile = \"prod-db\"\nmatch_labels = { env = \"prod\", role = \"db\" }\n",
+    )?;
+    // Single-entry target drop-in: filename stem "eu-db-01" becomes logical target name.
+    std::fs::write(
+        targets_dir.join("eu-db-01.toml"),
+        "ssh_host = \"eu-db-01.prod.internal\"\nlabels = { env = \"prod\", role = \"db\" }\n",
+    )?;
+    // Multi-entry target drop-in + non-toml file ignored cleanly.
+    std::fs::write(
+        targets_dir.join("dev.toml"),
+        "[targets.dev-app-01]\nssh_host = \"dev-app-01.dev.internal\"\nprofile = \"dev-safe\"\n",
+    )?;
+    std::fs::write(targets_dir.join("README.txt"), "ignored\n")?;
+
+    // Symlinked drop-in (Nix / Home Manager style) must work cleanly.
+    let nix_target = dir.path().join("nix-store-lab.toml");
+    std::fs::write(
+        &nix_target,
+        "ssh_host = \"lab-01.lab.internal\"\nprofile = \"lab\"\n",
+    )?;
+    std::os::unix::fs::symlink(&nix_target, targets_dir.join("lab-01.toml"))?;
+
+    let config_path = dir.path().join("estus.toml");
+    std::fs::write(
+        &config_path,
+        "\
+mode = \"workstation\"
+default_profile = \"deny\"
+profiles_dir = \"profiles\"
+groups_dir = \"groups\"
+targets_dir = \"targets\"
+",
+    )?;
+
+    // 1. eu-db-01 matches BOTH prod.toml (max_tier=inspect) and prod-databases.toml -> prod-db.toml (max_tier=observe).
+    //    Strictest-wins yields observe + provenance for target, groups, and custom profile.
+    let explain = Command::new(estus_binary())
+        .env("ESTUS_CATALOG_ROOT", catalog_root())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "explain",
+            "eu-db-01",
+            "--json",
+        ])
+        .output()?;
+    ensure!(
+        explain.status.success(),
+        "auth explain eu-db-01 failed: {}",
+        String::from_utf8_lossy(&explain.stderr)
+    );
+    let json: Value = serde_json::from_slice(&explain.stdout)?;
+    ensure!(json["allowed"] == true);
+    ensure!(json["mode"] == "configured");
+    ensure!(json["target_source_file"] == "targets/eu-db-01.toml");
+    ensure!(json["effective"]["max_tier"] == "observe");
+    let matched = json["matched"].as_array().context("matched array")?;
+    ensure!(matched.len() == 2, "expected 2 matched groups: {json}");
+    ensure!(
+        matched
+            .iter()
+            .any(|m| m["source_file"] == "groups/prod.toml" && m["profile"] == "prod")
+    );
+    ensure!(matched.iter().any(|m| {
+        m["source_file"] == "groups/prod-databases.toml"
+            && m["profile"] == "prod-db"
+            && m["profile_source_file"] == "profiles/prod-db.toml"
+    }));
+
+    // 2. Human-readable output surfaces source file provenance cleanly.
+    let explain_text = Command::new(estus_binary())
+        .env("ESTUS_CATALOG_ROOT", catalog_root())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "explain",
+            "eu-db-01",
+        ])
+        .output()?;
+    ensure!(explain_text.status.success());
+    let text = String::from_utf8(explain_text.stdout)?;
+    ensure!(
+        text.contains("from targets/eu-db-01.toml")
+            && text.contains("groups/prod-databases.toml")
+            && text.contains("profiles/prod-db.toml"),
+        "missing provenance in text output:\n{text}"
+    );
+
+    // 3. Symlinked target drop-in lab-01 works and grants lab sudo.
+    let lab_sudo = Command::new(estus_binary())
+        .env("ESTUS_CATALOG_ROOT", catalog_root())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "can-i",
+            "exec_sudo",
+            "lab-01",
+        ])
+        .output()?;
+    ensure!(lab_sudo.status.success());
+
+    // 4. Unlisted host is denied because targets_dir closes open mode.
+    let unlisted = Command::new(estus_binary())
+        .env("ESTUS_CATALOG_ROOT", catalog_root())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "can-i",
+            "observe_stat",
+            "unlisted.lab.internal",
+        ])
+        .output()?;
+    ensure!(!unlisted.status.success());
+
+    // 5. Duplicate profile across drop-ins fails closed (exit 2).
+    std::fs::write(
+        profiles_dir.join("dup.toml"),
+        "[profiles.prod-db]\nextends = \"dev\"\n",
+    )?;
+    let dup_err = Command::new(estus_binary())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "explain",
+            "eu-db-01",
+        ])
+        .output()?;
+    ensure!(dup_err.status.code() == Some(2));
+    std::fs::remove_file(profiles_dir.join("dup.toml"))?;
+
+    // 6. Drop-in attempting to set top-level `mode` or `capabilities` fails closed (exit 2).
+    std::fs::write(groups_dir.join("bad.toml"), "mode = \"workstation\"\n")?;
+    let bad_err = Command::new(estus_binary())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "explain",
+            "eu-db-01",
+        ])
+        .output()?;
+    ensure!(bad_err.status.code() == Some(2));
+    std::fs::remove_file(groups_dir.join("bad.toml"))?;
+
+    // 7. Missing declared drop-in directory fails startup (never silently skipped).
+    let missing_cfg = dir.path().join("missing.toml");
+    std::fs::write(
+        &missing_cfg,
+        "mode = \"workstation\"\ngroups_dir = \"nope\"\n",
+    )?;
+    let missing_err = Command::new(estus_binary())
+        .args([
+            "--config",
+            missing_cfg.to_str().context("missing path")?,
+            "auth",
+            "explain",
+            "anyhost",
+        ])
+        .output()?;
+    ensure!(missing_err.status.code() == Some(2));
+
+    // 8. Empty targets_dir still closes open mode in workstation config.
+    let empty_targets = dir.path().join("empty_targets");
+    std::fs::create_dir_all(&empty_targets)?;
+    let empty_cfg = dir.path().join("empty_targets.toml");
+    std::fs::write(
+        &empty_cfg,
+        "mode = \"workstation\"\ntargets_dir = \"empty_targets\"\n",
+    )?;
+    let empty_check = Command::new(estus_binary())
+        .args([
+            "--config",
+            empty_cfg.to_str().context("empty cfg")?,
+            "auth",
+            "can-i",
+            "observe_stat",
+            "anyhost",
+        ])
+        .output()?;
+    ensure!(!empty_check.status.success());
+
+    Ok(())
+}
