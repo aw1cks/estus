@@ -64,7 +64,11 @@ async fn systemd_unit_file_operations_real_acceptance() -> Result<()> {
             "unit-file operation implicitly reloaded unrelated manager configuration"
         );
 
-        // disable
+        // disable must not stop a running unit, so start it first
+        let prep = guest
+            .shell("systemctl start estus-fixture-idle.service")
+            .await?;
+        ensure!(prep.status.success(), "disable preparation failed");
         let reply = binding
             .call(json!({"unit":"estus-fixture-idle.service","operation":"disable"}))
             .await?;

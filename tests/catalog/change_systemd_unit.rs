@@ -63,14 +63,24 @@ async fn systemd_unit_runtime_operations_real_acceptance() -> Result<()> {
             "restart did not replace the MainPID"
         );
 
-        // try_restart leaves an inactive unit inactive
+        // try_restart leaves an inactive unit inactive (the start step above
+        // left it active, so stop it first).
+        let prep = guest
+            .shell("systemctl stop estus-fixture-idle.service")
+            .await?;
+        ensure!(prep.status.success(), "try_restart preparation failed");
         let reply = binding
             .call(json!({"unit":"estus-fixture-idle.service","operation":"try_restart"}))
             .await?;
-        let value = catalog::projection(&reply)?;
         ensure!(
-            value["operation"] == "try_restart"
-                && value["properties"]["ActiveState"] == "inactive",
+            catalog::projection(&reply)?["operation"] == "try_restart",
+            "try_restart reported the wrong operation"
+        );
+        let oracle = guest
+            .shell("systemctl is-active estus-fixture-idle.service")
+            .await?;
+        ensure!(
+            oracle.stdout == b"inactive\n",
             "try-restart started an inactive service"
         );
 

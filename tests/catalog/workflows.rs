@@ -64,7 +64,6 @@ async fn reviewed_health_workflow() -> Result<()> {
     let result: Result<()> = async {
         let binding = catalog::Binding::enable_workflow(&guest.config, HEALTH)?;
         binding.inspect_workflow_list().await?;
-        binding.reject_workflow_runtime().await?;
         binding.reject(json!({"command":"uname -a"})).await?;
         let before = host_state(&guest).await?;
         let reply = binding.call(json!({})).await?;

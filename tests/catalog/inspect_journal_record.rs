@@ -13,19 +13,21 @@ async fn journal_record_real_guest_acceptance() -> Result<()> {
             "ESTUS_RECORD_LINE1\n{}\nESTUS_RECORD_END",
             "x".repeat(8192)
         );
+        // The native journal protocol keeps one multi-line MESSAGE (a stream
+        // writer such as systemd-cat would split it), and needs no extra tool.
         let logged = guest
             .shell(
-                "/usr/bin/python3 -c 'import subprocess; msg=(\"ESTUS_RECORD_LINE1\\n\"+\"x\"*8192+\"\\nESTUS_RECORD_END\").encode(); subprocess.run([\"/usr/bin/systemd-cat\",\"-t\",\"estus-record-test\"], input=msg, check=True)'",
+                "/usr/bin/python3 -c 'import socket, struct; msg=(\"ESTUS_RECORD_LINE1\\n\"+\"x\"*8192+\"\\nESTUS_RECORD_END\").encode(); s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.sendto(b\"SYSLOG_IDENTIFIER=estus-record-test\\nMESSAGE\\n\"+struct.pack(\"<Q\", len(msg))+msg+b\"\\n\", \"/run/systemd/journal/socket\")'",
             )
             .await?;
         ensure!(
             logged.status.success(),
-            "systemd-cat failed: {}",
+            "native journal write failed: {}",
             String::from_utf8_lossy(&logged.stderr)
         );
         ensure!(guest.shell("/usr/bin/journalctl --sync").await?.status.success());
         let oracle = guest
-            .shell("/usr/bin/journalctl -b --no-pager -o json SYSLOG_IDENTIFIER=estus-record-test")
+            .shell("/usr/bin/journalctl -b --no-pager --all -o json SYSLOG_IDENTIFIER=estus-record-test")
             .await?;
         ensure!(oracle.status.success(), "oracle journalctl failed");
         let marker: Value = String::from_utf8(oracle.stdout)?

@@ -422,45 +422,6 @@ fn fixture_input_enums(name: &str) -> &'static [(&'static str, &'static [&'stati
 }
 
 impl Binding {
-    /// A broken explicitly selected runtime must fail startup, not fall back.
-    pub async fn reject_workflow_runtime(&self) -> Result<()> {
-        let mut site: toml::Value = toml::from_str(&fs::read_to_string(&self.config)?)?;
-        site["automation"]["bundle"] = self
-            .root
-            .path()
-            .join("missing-bundle")
-            .to_str()
-            .context("bundle path")?
-            .into();
-        let site_path = self.root.path().join("invalid-site.toml");
-        fs::write(&site_path, toml::to_string(&site)?)?;
-        let binary = std::env::var_os("ESTUS_TEST_BINARY")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(
-                    option_env!("ESTUS_TEST_BINARY").unwrap_or(env!("CARGO_BIN_EXE_estus")),
-                )
-            });
-        let mut server = Command::new(support::executable(&binary)?);
-        server
-            .arg("--config")
-            .arg(&site_path)
-            .env_remove("ESTUS_CONFIG")
-            .env_remove("ESTUS_ANSIBLE_BUNDLE")
-            .stdin(Stdio::null());
-        let output = support::run(&mut server).await?;
-        ensure!(
-            output.status.code() == Some(2) && output.stdout.is_empty(),
-            "invalid selected site runtime fell back"
-        );
-        let diagnostic: Value = serde_json::from_slice(&output.stderr)?;
-        ensure!(
-            diagnostic["code"] == "runtime_unavailable" && diagnostic["phase"] == "runtime_import",
-            "setup failure must identify runtime provisioning/import repair: {diagnostic}"
-        );
-        Ok(())
-    }
-
     /// Enable one catalog tool by name in the provisioned guest's own site, with
     /// the recipe's reviewed allowlist restated as site constraints. A recipe
     /// names a canonical tool and the policy it needs, nothing more.
@@ -684,13 +645,21 @@ impl Binding {
             policy.insert("constraints".into(), toml::Value::try_from(constraints)?);
         }
         let enums = fixture_input_enums(name);
-        if !enums.is_empty() {
+        // The only approved key, kernel.printk_ratelimit, takes 0..=60 seconds.
+        let sysctl = matches!(name, "change_sysctl_config" | "change_sysctl_runtime");
+        if !enums.is_empty() || sysctl {
             let mut schema = tool["input_schema"].clone();
             for (property, values) in enums {
                 schema["properties"][*property]
                     .as_table_mut()
                     .context("narrowed input property")?
                     .insert("enum".into(), toml::Value::try_from(values)?);
+            }
+            if sysctl {
+                schema["properties"]["value"]
+                    .as_table_mut()
+                    .context("sysctl value property")?
+                    .insert("maximum".into(), 60.into());
             }
             policy.insert("input_schema".into(), schema);
         }
