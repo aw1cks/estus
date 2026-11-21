@@ -8,7 +8,7 @@ fixed_args = { "target_python" = "/usr/bin/python3" }
 
 limits = { timeout_secs = 30 }
 input_map = { "aspect" = "aspect", "interface" = "interface", "family" = "family", "scope" = "scope", "limit" = "limit" }
-input_schema = { "type" = "object", "properties" = { "aspect" = { "type" = "string", "enum" = ["links", "addresses", "neighbors", "stats"] }, "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "family" = { "type" = "string", "enum" = ["inet", "inet6"] }, "scope" = { "type" = "string", "enum" = ["host", "link", "global"] }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = ["aspect"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "aspect" = { "type" = "string", "enum" = ["links", "addresses", "neighbors", "stats"] }, "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "family" = { "type" = "string", "enum" = ["inet", "inet6"] }, "scope" = { "type" = "string", "enum" = ["host", "link", "global"] }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 16 } }, "required" = ["aspect"], "additionalProperties" = false, "if" = { "properties" = { "aspect" = { "const" = "stats" } }, "required" = ["aspect"] }, "then" = { "required" = ["interface"] } }
 [tools.observe_network.result]
 kind = "capability_projection"
 fields = { "aspect" = ["mcp_result", "aspect"], "links" = ["mcp_result", "links"], "addresses" = ["mcp_result", "addresses"], "neighbors" = ["mcp_result", "neighbors"], "stats" = ["mcp_result", "stats"] }

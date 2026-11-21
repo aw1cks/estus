@@ -41,18 +41,14 @@ def read_value(base, attribute):
 
 
 def read_list(base, attribute):
-    data = estus_runtime.read_bytes(base + '/' + attribute, maximum=8192, optional=True)
-    if data is None:
+    # sysfs `holders` and `slaves` are directories of device links, not files.
+    try:
+        entries = sorted(os.listdir(base + '/' + attribute))
+    except FileNotFoundError:
         return None
-    entries = []
-    for entry in data.decode('utf-8', 'strict').splitlines():
-        entry = entry.strip()
-        if not entry:
-            continue
-        entries.append(estus_runtime.check_text(entry, maximum=4096))
-        if len(entries) > 256:
-            raise ValueError('entry bound')
-    return entries
+    if len(entries) > 256:
+        raise ValueError('entry bound')
+    return [estus_runtime.check_text(entry, maximum=4096) for entry in entries]
 
 
 def describe(base, name, unavailable, with_partitions):

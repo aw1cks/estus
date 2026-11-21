@@ -43,7 +43,8 @@ def unescape_octal(value):
 
 
 def main():
-    data = estus_runtime.read_bytes('/proc/mounts', maximum=262144, optional=True)
+    # /proc/mounts is a symlink and the runtime reads with O_NOFOLLOW.
+    data = estus_runtime.read_bytes('/proc/self/mounts', maximum=262144, optional=True)
     if data is None:
         print(json.dumps({'estus_error': {'code': 'unsupported_platform'}}))
         sys.exit(1)

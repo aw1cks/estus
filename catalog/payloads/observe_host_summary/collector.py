@@ -1,4 +1,5 @@
 import datetime
+import errno
 import json
 import os
 import platform
@@ -43,7 +44,18 @@ def meaningful(value):
 def os_release():
     distribution = None
     version = None
-    data = estus_runtime.read_bytes('/etc/os-release', maximum=8192, optional=True)
+    # os-release(5): /etc first, then /usr/lib. /etc/os-release is usually a
+    # symlink to the latter, which the O_NOFOLLOW runtime read refuses.
+    data = None
+    for path in ('/etc/os-release', '/usr/lib/os-release'):
+        try:
+            data = estus_runtime.read_bytes(path, maximum=8192, optional=True)
+        except OSError as error:
+            if error.errno != errno.ELOOP:
+                raise
+            continue
+        if data is not None:
+            break
     if data is None:
         return distribution, version
     values = {}
