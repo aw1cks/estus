@@ -3,7 +3,7 @@ def main():
     import json, os, ipaddress, socket, struct
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
-    for field in ('dns_names'):
+    for field in ('dns_names',):
         value = policy.get(field)
         if not (isinstance(value, list) and value):
             raise ValueError('operator policy requires an explicit ' + field + ' allowlist')

@@ -77,6 +77,9 @@
                     for kw in node.keywords:
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
                             raise SystemExit(f"forbidden shell=True in {path}")
+                # `for f in ('x')` walks characters; a one-field tuple needs a comma.
+                if isinstance(node, (ast.For, ast.comprehension)) and isinstance(node.iter, ast.Constant) and isinstance(node.iter.value, str):
+                    raise SystemExit(f"iteration over a string literal in {path}:{getattr(node, 'lineno', node.iter.lineno)}")
         ast.parse((src / "src/native_payload/bootstrap.py").read_text(encoding="utf-8"))
         collectors = sorted((src / "catalog/payloads").glob("*/collector.py"))
         if not collectors:

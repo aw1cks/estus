@@ -4,7 +4,7 @@ def main():
     ASPECTS = ('links', 'addresses', 'neighbors', 'stats')
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
-    for field in ('interfaces'):
+    for field in ('interfaces',):
         value = policy.get(field)
         if not (isinstance(value, list) and value):
             raise ValueError('operator policy requires an explicit ' + field + ' allowlist')
