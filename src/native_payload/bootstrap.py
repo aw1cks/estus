@@ -75,9 +75,10 @@ def _make_runtime(request_values):
         # both streams bounded, strict UTF-8 stdout, classified failures.
         if not isinstance(argv, (list, tuple)) or not argv:
             raise ValueError('invalid argv')
-        for value in argv:
-            if not isinstance(value, str) or not value or '\x00' in value:
-                raise ValueError('invalid argv entry')
+        # Only the program must be non-empty; an empty later argument is a real
+        # value (`bootctl set-oneshot ""` clears the override).
+        if not argv[0] or any(not isinstance(value, str) or '\x00' in value for value in argv):
+            raise ValueError('invalid argv entry')
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 600:
             raise ValueError('invalid timeout')
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 0 < max_bytes <= 16777216:

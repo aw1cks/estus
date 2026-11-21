@@ -400,6 +400,8 @@ class Execution(unittest.TestCase):
             b"    'bad_utf8': code(lambda: estus_runtime.run_bounded([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b\"\\\\xff\")'])),\n"
             b"    'empty_argv': code(lambda: estus_runtime.run_bounded([])),\n"
             b"    'nul_argv': code(lambda: estus_runtime.run_bounded(['/bin/sh', 'a' + chr(0) + 'b'])),\n"
+            b"    'empty_program': code(lambda: estus_runtime.run_bounded(['', 'x'])),\n"
+            b"    'empty_arg': estus_runtime.run_bounded([sys.executable, '-c', 'import sys; print(repr(sys.argv[1]))', ''])['stdout'].strip(),\n"
             b"}))\n"
         )
         exit_code, evidence = self.execute(source, timeout=10)
@@ -414,6 +416,8 @@ class Execution(unittest.TestCase):
         self.assertEqual(out['bad_utf8'], 'UnicodeDecodeError')
         self.assertEqual(out['empty_argv'], 'ValueError')
         self.assertEqual(out['nul_argv'], 'ValueError')
+        self.assertEqual(out['empty_program'], 'ValueError')
+        self.assertEqual(out['empty_arg'], "''")
 
     def test_run_or_exit_publishes_classified_error_document(self):
         source = (
