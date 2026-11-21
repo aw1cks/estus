@@ -542,6 +542,41 @@ impl Pool {
                     continue;
                 }
             };
+            // A reused master can die between supervision polls (an external
+            // `ssh -O exit`, a killed process). A channel opened on it would fail
+            // as a lost connection with unknown remote state although nothing was
+            // ever sent, so confirm liveness with a local control-socket check
+            // first and relaunch instead. An unresponsive check does not prove
+            // loss; the request then proceeds and the supervisor decides.
+            if !launch {
+                let alive = tokio::select! {
+                    biased;
+                    _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                    _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                    _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                    _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                    checked = timeout_at(Instant::now() + CLEANUP, session.check()) => {
+                        !matches!(checked, Ok(Err(_)))
+                    }
+                };
+                if !alive {
+                    entry.stop.cancel();
+                    let done = entry.done.clone();
+                    drop(session);
+                    drop(permit);
+                    drop(interest);
+                    drop(entry);
+                    tokio::select! {
+                        biased;
+                        _ = ct.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.shutdown.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = self.stopping.cancelled() => return Err(Failure::Cancelled.error()),
+                        _ = sleep_until(deadline) => return Err(Failure::Timeout.error()),
+                        _ = done.cancelled() => {}
+                    }
+                    continue;
+                }
+            }
             return Ok(Lease {
                 session,
                 _permit: permit,
@@ -1464,6 +1499,58 @@ mod tests {
             .err()
             .expect("fresh launch fails on nonexistent ssh");
         assert_eq!(err.code(), ErrorCode::SshSpawnFailed);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acquire_relaunches_instead_of_leasing_a_dead_master() {
+        // A ready entry whose control master already exited (as after an
+        // external `ssh -O exit`) before its supervisor noticed.
+        let pool = Pool::new(
+            PathBuf::from("/nonexistent-ssh"),
+            None,
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        let key = (
+            "stale-target".to_owned(),
+            "stale-target".to_owned(),
+            IdentityRole::Ordinary,
+        );
+        let gone = tempfile::tempdir().unwrap();
+        let old = test_entry(0, Instant::now());
+        lock(&old.state).session = Some(Arc::new(Session::resume_mux(
+            gone.path().join("c").into_boxed_path(),
+            None,
+        )));
+        old.ready.cancel();
+        lock(&pool.entries).insert(key.clone(), Arc::clone(&old));
+        // Stand-in supervisor: tear the entry down once acquire retires it.
+        let pool_clone = Arc::clone(&pool);
+        let old_clone = Arc::clone(&old);
+        let key_clone = key.clone();
+        tokio::spawn(async move {
+            old_clone.stop.cancelled().await;
+            lock(&old_clone.state).session.take();
+            lock(&pool_clone.entries).remove(&key_clone);
+            old_clone.done.cancel();
+        });
+
+        let err = pool
+            .acquire(
+                "stale-target",
+                "stale-target",
+                IdentityRole::Ordinary,
+                Instant::now() + Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("fresh launch fails on nonexistent ssh");
+        // Never a lease on the dead master (which would surface as a lost
+        // connection with unknown remote state): it is retired and relaunched.
+        assert_eq!(err.code(), ErrorCode::SshSpawnFailed);
+        assert!(old.stop.is_cancelled());
         pool.shutdown().await;
     }
 
