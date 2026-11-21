@@ -569,7 +569,7 @@ impl Binding {
         // The installed definition decides the executor, timeout and authority;
         // the site contributes policy only.
         let definitions: toml::Value = toml::from_str(&fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("catalog/{name}.toml")),
+            catalog_assets().join(format!("{name}.toml")),
         )?)?;
         let tool = &definitions["tools"][name];
         let native = tool["execution"]["kind"].as_str() == Some("native_payload");
@@ -728,15 +728,21 @@ fn workflow_command() -> Result<Command> {
             command.env_remove(name);
         }
     }
-    let assets = std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog"));
+    let assets = catalog_assets();
     command
         .arg("catalog")
         .arg("--root")
         .arg(assets)
         .kill_on_drop(true);
     Ok(command)
+}
+
+/// The catalog the acceptance package ships (`ESTUS_TEST_CATALOG_ASSETS`), or
+/// the checkout for a source build; the build directory does not exist at run time.
+fn catalog_assets() -> PathBuf {
+    std::env::var_os("ESTUS_TEST_CATALOG_ASSETS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog"))
 }
 
 async fn workflow_output(command: &mut Command) -> Result<Value> {

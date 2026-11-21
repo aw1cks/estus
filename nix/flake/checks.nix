@@ -26,8 +26,12 @@
       checks.bootstrap-tests = pkgs.runCommand "estus-bootstrap-tests" {
         nativeBuildInputs = [ pkgs.python3 ];
       } ''
-        cp -r ${commonArgs.src}/src/native_payload native_payload
-        python3 -I -m unittest discover -s native_payload -p 'test_bootstrap.py' -v
+        # Keep the repository layout: the allowlist regression imports a shipped
+        # collector from catalog/payloads relative to src/native_payload.
+        mkdir -p src
+        cp -r ${commonArgs.src}/src/native_payload src/native_payload
+        cp -r ${commonArgs.src}/catalog catalog
+        python3 -I -m unittest discover -s src/native_payload -p 'test_bootstrap.py' -v
         touch "$out"
       '';
       checks.python-min-version = pkgs.runCommand "estus-python-min-version" {

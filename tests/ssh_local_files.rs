@@ -1013,14 +1013,13 @@ async fn ssh_startup_file_profiles() -> Result<()> {
             config_file = {ssh_config}
             [targets.allowed]
             ssh_host = 'plain'
-            capabilities = {{ named = true, file_read = true, file_write = true, exec = true, sudo = true }}
             [targets.allowed.sudo]
             mode = 'same-account'
             users = ['root']
             programs = ['/usr/bin/true']
             [targets.locked]
             ssh_host = 'plain'
-            capabilities = {{ file_read = true }}
+            max_tier = 'inspect'
         "},
         )?;
         let directory = fixture.root.path().join("profile-owned-files");
@@ -1532,9 +1531,7 @@ async fn ssh_mkdir() -> Result<()> {
     let fixture = Fixture::start().await?;
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
-        config.push_str(
-            "\n[targets.mkdir-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
-        );
+        config.push_str("\n[targets.mkdir-locked]\nssh_host = 'plain'\nmax_tier = 'inspect'\n");
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("mkdir-private");
         fs::create_dir(&directory)?;
@@ -1934,7 +1931,7 @@ async fn ssh_named_bindings() -> Result<()> {
             ssh_host = "must-never-connect"
             [targets.locked]
             ssh_host = "must-never-connect"
-            capabilities = {{ file_read = true }}
+            selection = {{ allow = [] }}
             [tools.literal_values]
             description = "Emit bounded literal data with a fixed format."
             revision = "literal-r1"
@@ -2178,7 +2175,7 @@ async fn ssh_rename_moves_and_validation() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.rename-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
+            "\n[targets.rename-locked]\nssh_host = 'plain'\nmax_tier = 'inspect'\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("rename-private");
@@ -2678,7 +2675,7 @@ async fn ssh_remove_file_entries_and_validation() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.remove-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
+            "\n[targets.remove-locked]\nssh_host = 'plain'\nmax_tier = 'inspect'\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("remove-private");
@@ -3056,7 +3053,7 @@ async fn ssh_remove_directory_entries_and_validation() -> Result<()> {
     let scenario = async {
         let mut config = fs::read_to_string(&fixture.config)?;
         config.push_str(
-            "\n[targets.rmdir-locked]\nssh_host = 'plain'\ncapabilities = { file_read = true }\n",
+            "\n[targets.rmdir-locked]\nssh_host = 'plain'\nmax_tier = 'inspect'\n",
         );
         fs::write(&fixture.config, config)?;
         let directory = fixture.root.path().join("rmdir-private");
@@ -3747,8 +3744,7 @@ async fn ssh_replace_file_capability_and_owned_stage_failures() -> Result<()> {
                 let open = &seen.opens[0];
                 ensure!(
                     open.pflags == (0x02 | 0x08 | 0x20)
-                        && open.attr_flags == 0x04
-                        && open.permissions == 0o600
+                        && open.attr_flags == 0
                         && open.initial_mode.is_none()
                         && open.initial_len.is_none(),
                     "failed OPEN flags/attrs or fabricated HANDLE: {seen:?}"

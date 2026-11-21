@@ -47,12 +47,14 @@ pub struct StageOpen {
     path: PathBuf,
     pub pflags: u32,
     pub attr_flags: u32,
-    pub permissions: u32,
     pub initial_mode: Option<u32>,
     pub initial_len: Option<u64>,
 }
 
 impl Evidence {
+    /// The stage is created exclusively and empty; it carries no creation
+    /// attributes, so the server default mode applies until the client's
+    /// FSETSTAT 0600, which must precede every content WRITE.
     pub fn assert_private_stage_opens(&self, expected: usize) -> Result<()> {
         ensure!(self.opens.len() == expected, "stage OPEN count: {self:?}");
         for open in &self.opens {
@@ -61,12 +63,18 @@ impl Evidence {
                 "expected WRITE|CREAT|EXCL, without TRUNC: {open:?}"
             );
             ensure!(
-                open.attr_flags == 0x04 && open.permissions == 0o600,
-                "OPEN must request permissions0600: {open:?}"
+                open.attr_flags == 0,
+                "OPEN must not request creation attributes: {open:?}"
             );
             ensure!(
-                open.initial_mode == Some(0o600) && open.initial_len == Some(0),
-                "stage must already be empty/mode0600 before forwarding HANDLE: {open:?}"
+                open.initial_len == Some(0),
+                "stage must be empty before forwarding HANDLE: {open:?}"
+            );
+        }
+        if let Some(first_write) = self.requests.iter().position(|kind| *kind == 6) {
+            ensure!(
+                self.requests[..first_write].contains(&10),
+                "content WRITE before the stage FSETSTAT: {self:?}"
             );
         }
         Ok(())
@@ -105,17 +113,14 @@ fn stage_open(body: &[u8]) -> Result<StageOpen> {
     let pflags = uint32(&mut fields)?;
     let attr_flags = uint32(&mut fields)?;
     ensure!(
-        attr_flags == 0x04,
-        "expected only permissions in OPEN attrs: {attr_flags:#x}"
+        attr_flags == 0 && fields.is_empty(),
+        "unexpected stage OPEN attributes: {attr_flags:#x}"
     );
-    let permissions = uint32(&mut fields)?;
-    ensure!(fields.is_empty(), "trailing stage OPEN attributes");
     Ok(StageOpen {
         id,
         path,
         pflags,
         attr_flags,
-        permissions,
         initial_mode: None,
         initial_len: None,
     })
@@ -429,8 +434,8 @@ impl Relay {
                                 open.initial_mode = Some(metadata.mode() & 0o7777);
                                 open.initial_len = Some(metadata.len());
                                 ensure!(
-                                    open.initial_mode == Some(0o600) && open.initial_len == Some(0),
-                                    "stage exposed before chmod/write: {open:?}"
+                                    open.initial_len == Some(0),
+                                    "stage exposed data before write: {open:?}"
                                 );
                             } else {
                                 ensure!(

@@ -9,9 +9,8 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 // shipped collector harness does, so parser behaviour is identical to production.
 const BRIDGE: &str = r#"import importlib.util, json, sys, types
 sys.dont_write_bytecode = True
-runtime_spec = importlib.util.spec_from_file_location('estus_bootstrap', sys.argv[1])
-bootstrap = importlib.util.module_from_spec(runtime_spec)
-runtime_spec.loader.exec_module(bootstrap)
+bootstrap = types.ModuleType('estus_bootstrap')
+exec(compile(sys.argv[1], 'bootstrap.py', 'exec'), bootstrap.__dict__)
 def decode(value):
     if isinstance(value, dict):
         if set(value) == {'$bytes'}: return bytes(value['$bytes'])
@@ -132,10 +131,9 @@ impl Bridge {
         let mut child =
             Command::new(std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into()))
                 .args(["-I", "-B", "-c", BRIDGE])
-                .arg(
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("src/native_payload/bootstrap.py"),
-                )
+                // Embedded at build time: installed acceptance executables run
+                // where the source tree no longer exists.
+                .arg(include_str!("../../src/native_payload/bootstrap.py"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

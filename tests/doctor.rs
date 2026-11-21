@@ -626,12 +626,12 @@ async fn doctor_native_restrictive_profiles_are_ordinary_read_only_and_do_not_lo
             );
             fs::write(&fixture.ssh_config, ssh)?;
             let mut body = String::new();
-            for (name, caps) in [
-                ("alpha", "{ named = true }"),
-                ("beta", "{ file_read = true, file_write = true }"),
-                ("gamma", "{ file_read = true }"),
+            for (name, tier) in [
+                ("alpha", "observe"),
+                ("beta", "change"),
+                ("gamma", "inspect"),
             ] {
-                body.push_str(&format!("[targets.{name}]\nssh_host = 'plain'\ncapabilities = {caps}\n[targets.{name}.sudo]\nmode = 'separate-identity'\nssh_host = 'PRIVATE_ELEVATED_D01'\n"));
+                body.push_str(&format!("[targets.{name}]\nssh_host = 'plain'\nmax_tier = '{tier}'\n[targets.{name}.sudo]\nmode = 'separate-identity'\nssh_host = 'PRIVATE_ELEVATED_D01'\n"));
             }
             native_config(&fixture, &body)?;
             let config = fs::read_to_string(&fixture.config)?;
