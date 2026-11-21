@@ -62,43 +62,121 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
                 | "observe_targets"
                 | "change_file_write"
         );
-        // No ESTUS_ANSIBLE_BUNDLE is set, so exactly the payload catalog
-        // templates that explicitly declare a workstation policy may be
-        // published; nothing is eligible by name or qualification alone.
-        let catalog_text = std::fs::read_to_string(stdio::bundled_catalog_json())
-        .context("read bundled catalog.json")?;
-        let catalog: Value = serde_json::from_str(&catalog_text).context("parse catalog.json")?;
-        let catalog_tools = catalog["tools"]
-            .as_object()
-            .context("catalog.json tools object")?;
-        let expected: std::collections::BTreeSet<String> = catalog_tools
-            .iter()
-            .filter(|(_, template)| {
-                template.get("workstation").is_some()
-                    && template["qualification"] != "laboratory_only"
-                    && template["executor"]["kind"] == "native_payload"
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        ensure!(
-            !expected.is_empty() && expected.len() == 12,
-            "declared workstation tools: {expected:?}"
-        );
-        ensure!(
-            expected
-                .iter()
-                .all(|name| catalog_tools[name]["policy_required"] == false),
-            "site-policy templates must not be workstation eligible"
-        );
+        // No ESTUS_ANSIBLE_BUNDLE is set, so a catalog template is only a
+        // workstation candidate when it declares a reviewed policy; nothing is
+        // eligible by name or qualification alone. Open destinations have no
+        // per-target grant to authorize a named automation authority, so the
+        // console publishes the ordinary-identity subset only.
         let published: std::collections::BTreeSet<String> = names
             .iter()
             .filter(|name| !is_builtin(name))
             .map(|name| (*name).to_string())
             .collect();
+        ensure!(!published.is_empty(), "no-config workstation published nothing");
+        // Representative ordinary overlays, by explicit name, including ones
+        // added for host, storage, package and NIC inventory. They need no
+        // elevation, so open mode must publish every one of them.
+        for name in [
+            "inspect_journal",
+            "inspect_processes",
+            "observe_cpu",
+            "observe_host_summary",
+            "observe_hardware_system",
+            "observe_kernel_state",
+            "observe_memory",
+            "observe_network_device",
+            "observe_nic_stats",
+            "observe_packages",
+            "observe_pci",
+            "observe_pressure",
+            "observe_storage_devices",
+            "observe_storage_mounts",
+            "observe_systemd_units",
+            "observe_time_sync",
+        ] {
+            ensure!(
+                published.contains(name),
+                "open workstation mode withheld ordinary tool {name}: {published:?}"
+            );
+        }
+        // Named-authority overlays read through an identity that a target must
+        // authorize. Open mode has no such target, so publication must not
+        // silently fall back to the ordinary connection: the tool is absent.
+        for named in [
+            "inspect_hardware_identifiers",
+            "inspect_journal_record",
+            "inspect_kernel_log",
+            "inspect_process",
+            "inspect_process_fds",
+            "observe_boot_entries",
+            "observe_boot_status",
+            "observe_hardware_memory",
+            "observe_hardware_slots",
+            "observe_journal_boots",
+            "observe_journal_usage",
+        ] {
+            ensure!(
+                !published.contains(named),
+                "open workstation mode exposed named-authority tool {named}: {published:?}"
+            );
+        }
+        // Structurally, nothing policy-required, laboratory-only or
+        // non-payload may appear: those have no reviewed open-mode contract.
+        let catalog_json_path = stdio::bundled_catalog_json();
+        let catalog_dir = catalog_json_path.parent().context("catalog dir")?;
+        let catalog_text =
+            std::fs::read_to_string(&catalog_json_path).context("read bundled catalog.json")?;
+        let catalog: Value = serde_json::from_str(&catalog_text).context("parse catalog.json")?;
+        let catalog_tools = catalog["tools"]
+            .as_object()
+            .context("catalog.json tools object")?;
+        let mut expected = std::collections::BTreeSet::new();
+        for (name, template) in catalog_tools {
+            let Some(workstation) = template.get("workstation") else {
+                continue;
+            };
+            if template["policy_required"] != false
+                || template["qualification"] == "laboratory_only"
+                || template["executor"]["kind"] != "native_payload"
+            {
+                continue;
+            }
+            let effective_authority = match workstation.get("authority").and_then(Value::as_str) {
+                Some(authority) => authority.to_owned(),
+                None => {
+                    let def_name = template["definition"]
+                        .as_str()
+                        .context("definition filename")?;
+                    let def_text = std::fs::read_to_string(catalog_dir.join(def_name))
+                        .with_context(|| format!("read {def_name}"))?;
+                    let def: toml::Value = toml::from_str(&def_text)?;
+                    def["tools"][name]["authority"]
+                        .as_str()
+                        .unwrap_or("automation")
+                        .to_owned()
+                }
+            };
+            if effective_authority == "automation" {
+                expected.insert(name.clone());
+            }
+        }
         ensure!(
             published == expected,
-            "no-config workstation published {published:?}, expected {expected:?}"
+            "open workstation mode published {published:?}, expected exact ordinary-authority set {expected:?}"
         );
+        for (name, valid, invalid) in [
+            ("inspect_journal", json!({"limit": 500, "until": 4102444800_u64, "priority": 3}), json!({"limit": 501})),
+            ("observe_network_device", json!({"interface": "eth0"}), json!({"interface": ""})),
+            ("observe_systemd_units", json!({"view": "loaded", "unit_type": "service", "state": "failed", "unit_pattern": "*"}), json!({"view": "loaded", "unit_type": "service", "state": "broken", "unit_pattern": "*"})),
+            ("observe_packages", json!({"limit": 100}), json!({"limit": 101})),
+            ("observe_nic_stats", json!({"interface": "eth0"}), json!({"interface": ""})),
+        ] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).context("workstation tool")?;
+            ensure!(tool["_meta"]["authority"] == "automation", "{name} must use the ordinary SSH identity");
+            let validator = jsonschema::validator_for(&tool["inputSchema"]).context("workstation input schema")?;
+            ensure!(validator.is_valid(&json!({"host": "host", "inputs": valid})), "{name} rejects valid inputs");
+            ensure!(!validator.is_valid(&json!({"host": "host", "inputs": invalid})), "{name} accepts invalid inputs");
+        }
         for extra in &published {
             let tool = tools.iter().find(|t| t["name"] == *extra).unwrap();
             ensure!(
@@ -106,6 +184,13 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
                     == json!({"type": "string", "minLength": 1, "maxLength": 256}),
                 "workstation dynamic tool {extra} had unexpected host schema: {}",
                 tool["inputSchema"]["properties"]["host"]
+            );
+            // Every published catalog overlay is the ordinary-identity subset;
+            // a named authority would need a configured target to authorize it.
+            ensure!(
+                tool["_meta"]["authority"] == "automation",
+                "published {extra} must not claim an elevated authority: {}",
+                tool["_meta"]["authority"]
             );
         }
         // Privileged catalog templates are never published in open mode: they
@@ -116,12 +201,29 @@ async fn lifecycle_discovery_and_eof_keep_stdout_protocol_only() -> Result<()> {
             "observe_filesystem_usage",
             "observe_network",
             "inspect_sockets",
+            "change_host_reboot",
+            "change_boot_clear_oneshot",
+            "change_kernel_module_load",
+            "observe_kernel_module",
+            "observe_nic_fec",
         ] {
             ensure!(
                 !names.contains(&denied),
                 "open workstation mode exposed {denied}: {names:?}"
             );
         }
+        // The name is absent, not merely refused: a client that forgot the
+        // elevation target must not reach a named collector at all.
+        server.send(json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+            "params":{"name":"inspect_process","arguments":{"host":"DO_NOT_CONNECT.invalid",
+                "inputs":{"pid":1,"boot_id":"00000000-0000-0000-0000-000000000000",
+                    "start_ticks":0}}}})).await?;
+        let withheld = server.response(6).await?;
+        ensure!(
+            withheld["error"]["code"] == -32602,
+            "unpublished inspect_process routed: {withheld}"
+        );
+        ensure!(withheld.get("result").is_none());
         server.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_targets","arguments":{}}})).await?;
         let called = server.response(3).await?;
         let result = &called["result"];

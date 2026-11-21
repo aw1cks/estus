@@ -14,6 +14,86 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::test]
+async fn workstation_named_observations_require_target_elevation() -> Result<()> {
+    for (sudo, allowed) in [
+        ("", false),
+        (
+            "[targets.one.sudo]\nmode = 'same-account'\nprograms = ['/usr/bin/id']\n",
+            false,
+        ),
+        ("[targets.one.sudo]\nmode = 'same-account'\n", true),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("operator.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "mode = 'workstation'\ncapabilities = {{ named = true, sudo = true }}\n[targets.one]\nssh_host = 'host.invalid'\n{sudo}"
+            ),
+        )?;
+        let mut command = stdio::command(&["--config", path.to_str().context("config path")?]);
+        command.env(
+            "ESTUS_CATALOG_ROOT",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"),
+        );
+        let mut server = Server::from_command(command)?;
+        let scenario = async {
+            server.initialize().await?;
+            server
+                .send(json!({"jsonrpc":"2.0", "id":2, "method":"tools/list", "params":{}}))
+                .await?;
+            let listed = server.response(2).await?;
+            let tools = listed["result"]["tools"].as_array().context("tools list")?;
+            for name in [
+                "inspect_hardware_identifiers",
+                "inspect_journal_record",
+                "inspect_kernel_log",
+                "inspect_process",
+                "inspect_process_fds",
+                "observe_boot_entries",
+                "observe_boot_status",
+                "observe_hardware_memory",
+                "observe_hardware_slots",
+                "observe_journal_boots",
+                "observe_journal_usage",
+            ] {
+                let tool = tools.iter().find(|tool| tool["name"] == name);
+                ensure!(
+                    tool.is_some() == allowed,
+                    "{name} publication under {sudo:?}: {tool:?}"
+                );
+                if let Some(tool) = tool {
+                    ensure!(
+                        tool["_meta"]["authority"] == "automation:catalog",
+                        "unexpected authority: {tool}"
+                    );
+                }
+            }
+            if allowed {
+                server
+                    .send(json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{
+                        "name":"observe_hardware_memory", "arguments":{"host":"unlisted.invalid", "inputs":{}}
+                    }}))
+                    .await?;
+                let denied = server.response(3).await?;
+                ensure!(
+                    denied["result"]["structuredContent"]["error"]["code"] == "policy_denied",
+                    "unlisted host was not denied: {denied}"
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let finished = server.finish().await;
+        scenario?;
+        let (status, stderr) = finished?;
+        ensure!(status.success());
+        no_remote_dispatch(&stderr)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn empty_sudo_program_policy_keeps_route_but_denies_target() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("operator.toml");

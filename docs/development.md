@@ -187,6 +187,25 @@ Builds the current package if needed, then execs it with `--workstation` and no
 catalog templates that declare a reviewed `workstation` block. The wrapper clears
 inherited `ESTUS_*` selections (except pinning `ESTUS_ANSIBLE_BUNDLE` to the
 Nix-built bundle) so bundle-backed module tools work without an operator build.
+Workstation overlays come in two kinds, decided entirely by catalog data:
+
+- **Ordinary** overlays read through the ordinary SSH identity. They need no
+  per-target grant, so open workstation mode publishes them for any destination
+  the caller names. `inspect_journal` is one of these: records are limited to that
+  identity's journal permissions and may be incomplete.
+- **Named-authority** overlays keep the definition's `automation:<name>`
+  authority and are never downgraded to that ordinary connection. They are
+  published only when a configured target authorizes the named authority — either
+  through a matching `[automation.authorities.<name>]` target list or, for a
+  target with an unrestricted root sudo route, at call time. With no `[targets]`
+  table (the open case) they stay hidden, and calling one by name is rejected as
+  an unpublished tool.
+
+Site definitions under `[tools.<name>]` retain their declared authority;
+workstation overlays may explicitly select the ordinary identity, as
+`inspect_journal` does, in addition to setting fixed arguments, schema and input
+mapping.
+
 Local flakes use tracked files, so add new source files before expecting Nix to
 include them.
 

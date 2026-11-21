@@ -198,11 +198,14 @@ pub struct Template {
 }
 
 /// Literal overlay a workstation-mode binding is compiled with. These values
-/// are catalog data reviewed like any other definition; the controller never
-/// rewrites them.
+/// are catalog data reviewed like any other definition; an optional authority
+/// may only select the ordinary SSH identity.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkstationPolicy {
+    /// Optional workstation authority; only the ordinary SSH identity is supported.
+    #[serde(default)]
+    pub authority: Option<String>,
     #[serde(default)]
     pub fixed_args: toml::Table,
     #[serde(default)]
@@ -432,8 +435,14 @@ impl Catalog {
                     .iter()
                     .any(|requirement| !name_valid(requirement))
                 // A workstation policy is only meaningful where no site policy
-                // is required; site-policy templates stay out of open mode.
+                // is required; site-policy templates stay out of open mode, and
+                // an explicit workstation authority may only select ordinary SSH.
                 || template.workstation.is_some() && template.policy_required
+                || template
+                    .workstation
+                    .as_ref()
+                    .and_then(|w| w.authority.as_deref())
+                    .is_some_and(|authority| authority != "automation")
             {
                 return Err(CatalogError::InvalidDefinition { tool: name.clone() });
             }
@@ -756,6 +765,14 @@ impl Catalog {
             .ok_or_else(|| CatalogError::InvalidDefinition {
                 tool: name.to_owned(),
             })?;
+        if let Some(authority) = &policy.authority {
+            if authority != "automation" {
+                return Err(CatalogError::InvalidDefinition {
+                    tool: name.to_owned(),
+                });
+            }
+            table.insert("authority".into(), toml::Value::String(authority.clone()));
+        }
         table.remove("constraints");
         table.insert(
             "fixed_args".into(),
@@ -1137,6 +1154,55 @@ mod workstation_tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn workstation_authority_rejects_elevated_and_unknown_values_at_load() {
+        for bad_authority in ["automation:catalog", "automation:root", "sudo", ""] {
+            let temporary = tempfile::tempdir().expect("tempdir");
+            let root = temporary.path().canonicalize().expect("canonicalize");
+            let payload = root.join("payloads/observe_cpu");
+            fs::create_dir_all(&payload).expect("payload dir");
+            fs::write(
+                root.join("catalog.json"),
+                serde_json::json!({
+                    "schema": 3,
+                    "version": "1",
+                    "presets": {},
+                    "tools": {
+                        "observe_cpu": {
+                            "definition": "observe_cpu.toml",
+                            "executor": {"kind": "native_payload", "path": "payloads/observe_cpu"},
+                            "qualification": "site_policy_template",
+                            "policy_required": false,
+                            "requires": ["linux"],
+                            "workstation": {
+                                "authority": bad_authority,
+                                "fixed_args": {"target_python": "/usr/bin/python3"},
+                                "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false},
+                                "input_map": {}
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write catalog.json");
+            fs::write(
+                root.join("observe_cpu.toml"),
+                "[tools.observe_cpu]\ndescription = 'fixture'\neffects = [\"read\"]\n",
+            )
+            .expect("write definition");
+            fs::write(payload.join("collector.py"), "raise SystemExit(0)\n").expect("collector");
+            fs::write(payload.join("manifest.json"), "{}\n").expect("manifest");
+            assert!(
+                matches!(
+                    Catalog::load(Some(&root)),
+                    Err(CatalogError::InvalidDefinition { ref tool }) if tool == "observe_cpu"
+                ),
+                "Catalog::load accepted invalid workstation.authority {bad_authority:?}"
+            );
+        }
     }
 }
 

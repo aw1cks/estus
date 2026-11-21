@@ -51,6 +51,9 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
                 "observe_memory",
                 "observe_pressure",
                 "observe_kernel_state",
+                "observe_host_summary",
+                "observe_hardware_system",
+                "observe_storage_devices",
                 "inspect_processes",
             ] {
                 let tool = tools
@@ -87,6 +90,8 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
                 (5, "observe_memory", json!({})),
                 (6, "observe_pressure", json!({})),
                 (7, "observe_kernel_state", json!({})),
+                (9, "observe_host_summary", json!({})),
+                (10, "observe_hardware_system", json!({})),
                 (
                     8,
                     "inspect_processes",
@@ -105,6 +110,13 @@ async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
                     data["status"] == "successful" && data["projection"]["status"] == "complete",
                     "{name} failed: {data}"
                 );
+                if name == "observe_host_summary" {
+                    ensure!(
+                        data["projection"]["value"]["system"] == "Linux"
+                            && data["projection"]["value"]["boot_id"].is_string(),
+                        "host summary omitted the process-view identity: {data}"
+                    );
+                }
             }
             Ok::<_, anyhow::Error>(())
         }

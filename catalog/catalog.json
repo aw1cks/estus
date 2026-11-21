@@ -565,6 +565,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_hardware_identifiers"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "inspect_icmp_probe": {
@@ -593,6 +603,31 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_journal"
+      },
+      "workstation": {
+        "authority": "automation",
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "unit": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "boot_id": { "type": "string", "maxLength": 32 },
+            "since": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
+            "until": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
+            "priority": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "cursor": { "type": "string", "maxLength": 280 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+            "contains": { "type": "string", "maxLength": 128 },
+            "direction": { "type": "string", "maxLength": 16, "enum": ["backward", "forward"] }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {
+          "unit": "unit", "boot_id": "boot_id", "since": "since", "journal_until": "until",
+          "priority": "priority", "cursor": "cursor", "limit": "limit", "contains": "contains", "direction": "direction"
+        },
+        "description": "Read bounded journal records accessible to the ordinary SSH identity; visibility depends on its permissions and may be incomplete."
       }
     },
     "inspect_journal_record": {
@@ -608,6 +643,26 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_journal_record"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "boot_id": { "type": "string", "maxLength": 32 },
+            "cursor": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "offset": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 4096 }
+          },
+          "required": ["boot_id", "cursor"],
+          "additionalProperties": false
+        },
+        "input_map": {
+          "boot_id": "boot_id",
+          "cursor": "cursor",
+          "offset": "offset",
+          "max_bytes": "max_bytes"
+        }
       }
     },
     "inspect_kernel_log": {
@@ -622,6 +677,30 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_kernel_log"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "boot_id": { "type": "string", "maxLength": 32 },
+            "since": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
+            "until": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
+            "priority": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "cursor": { "type": "string", "maxLength": 256 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 4 }
+          },
+          "required": ["boot_id", "since", "until", "priority", "limit"],
+          "additionalProperties": false
+        },
+        "input_map": {
+          "boot_id": "boot_id",
+          "since": "since",
+          "journal_until": "until",
+          "priority": "priority",
+          "cursor": "cursor",
+          "limit": "limit"
+        }
       }
     },
     "inspect_network_path_probe": {
@@ -649,6 +728,20 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_process"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "pid": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+            "boot_id": { "type": "string", "maxLength": 36, "minLength": 36 },
+            "start_ticks": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          },
+          "required": ["pid", "boot_id", "start_ticks"],
+          "additionalProperties": false
+        },
+        "input_map": { "pid": "pid", "boot_id": "boot_id", "start_ticks": "start_ticks" }
       }
     },
     "inspect_process_fds": {
@@ -662,6 +755,26 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/inspect_process_fds"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "pid": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+            "boot_id": { "type": "string", "maxLength": 36, "minLength": 36 },
+            "start_ticks": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 8 }
+          },
+          "required": ["pid", "boot_id", "start_ticks", "limit"],
+          "additionalProperties": false
+        },
+        "input_map": {
+          "pid": "pid",
+          "boot_id": "boot_id",
+          "start_ticks": "start_ticks",
+          "limit": "limit"
+        }
       }
     },
     "inspect_processes": {
@@ -767,6 +880,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_boot_entries"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "offset": { "type": "integer", "minimum": 0, "maximum": 128 }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": { "offset": "offset" }
       }
     },
     "observe_boot_status": {
@@ -782,6 +907,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_boot_status"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_cgroup_sample": {
@@ -900,6 +1035,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_hardware_memory"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_hardware_slots": {
@@ -914,6 +1059,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_hardware_slots"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_hardware_system": {
@@ -927,6 +1082,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_hardware_system"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_host_summary": {
@@ -940,6 +1105,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_host_summary"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_journal_boots": {
@@ -954,6 +1129,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_journal_boots"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "limit": { "type": "integer", "minimum": 1, "maximum": 8 }
+          },
+          "required": ["limit"],
+          "additionalProperties": false
+        },
+        "input_map": { "limit": "limit" }
       }
     },
     "observe_journal_usage": {
@@ -968,6 +1155,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_journal_usage"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_kernel_module": {
@@ -1108,6 +1305,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_network_device"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": { "interface": { "type": "string", "minLength": 1, "maxLength": 15 } },
+          "required": ["interface"],
+          "additionalProperties": false
+        },
+        "input_map": { "interface": "interface" }
       }
     },
     "observe_network_namespaces": {
@@ -1178,6 +1385,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_nic"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "interface": { "type": "string", "minLength": 1, "maxLength": 15 },
+            "aspect": { "type": "string", "enum": ["channels", "coalesce", "link", "rings"] }
+          },
+          "required": ["interface", "aspect"],
+          "additionalProperties": false
+        },
+        "input_map": { "interface": "interface", "aspect": "aspect" }
       }
     },
     "observe_nic_eee": {
@@ -1207,6 +1427,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_nic_features"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "interface": { "type": "string", "minLength": 1, "maxLength": 15 }
+          },
+          "required": ["interface"],
+          "additionalProperties": false
+        },
+        "input_map": { "interface": "interface" }
       }
     },
     "observe_nic_fec": {
@@ -1250,6 +1482,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_nic_rss"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "interface": { "type": "string", "minLength": 1, "maxLength": 15 }
+          },
+          "required": ["interface"],
+          "additionalProperties": false
+        },
+        "input_map": { "interface": "interface" }
       }
     },
     "observe_nic_stats": {
@@ -1264,6 +1508,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_nic_stats"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "interface": { "type": "string", "minLength": 1, "maxLength": 15 },
+            "filter": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          "required": ["interface"],
+          "additionalProperties": false
+        },
+        "input_map": { "interface": "interface", "filter": "filter" }
       }
     },
     "observe_nic_transceiver": {
@@ -1292,6 +1549,21 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_packages"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "offset": { "type": "integer", "minimum": 0, "maximum": 65536 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "name": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": { "offset": "offset", "limit": "limit", "name": "name" },
+        "description": "List installed packages from the available apt, rpm or apk inventory without refreshing caches or installing anything."
       }
     },
     "observe_pci": {
@@ -1305,6 +1577,19 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_pci"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "address": { "type": "string", "minLength": 7, "maxLength": 16 },
+            "aspect": { "type": "string", "enum": ["identity", "driver", "iommu"] }
+          },
+          "required": ["address", "aspect"],
+          "additionalProperties": false
+        },
+        "input_map": { "address": "address", "aspect": "aspect" }
       }
     },
     "observe_pci_devices": {
@@ -1393,6 +1678,18 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_storage_device"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "device": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          "required": ["device"],
+          "additionalProperties": false
+        },
+        "input_map": { "device": "device" }
       }
     },
     "observe_storage_device_health": {
@@ -1421,6 +1718,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_storage_devices"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_storage_mounts": {
@@ -1434,6 +1741,16 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_storage_mounts"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3" },
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "input_map": {}
       }
     },
     "observe_storage_raid": {
@@ -1584,6 +1901,22 @@
       "executor": {
         "kind": "native_payload",
         "path": "payloads/observe_systemd_units"
+      },
+      "workstation": {
+        "fixed_args": { "target_python": "/usr/bin/python3", "manager_scope": "system" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "view": { "type": "string", "enum": ["loaded", "installed"] },
+            "unit_type": { "type": "string", "enum": ["service", "socket", "timer", "target", "mount", "path", "slice"] },
+            "state": { "type": "string", "enum": ["all", "active", "inactive", "failed"] },
+            "unit_pattern": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["view", "unit_type", "state", "unit_pattern"],
+          "additionalProperties": false
+        },
+        "input_map": { "view": "view", "unit_type": "unit_type", "state": "state", "unit_pattern": "unit_pattern" },
+        "description": "List loaded or installed systemd units matching unit_pattern. Use \"*\" for bounded truncation past 256 entries; narrower patterns fail closed if more than 256 units match."
       }
     },
     "observe_time_sync": {
