@@ -24,6 +24,8 @@
               || pkgs.lib.hasPrefix "${toString sourceRoot}/examples/" path
               || pkgs.lib.hasPrefix "${toString sourceRoot}/catalog/" path
               || path == "${toString sourceRoot}/skills/estus-sre/SKILL.md"
+              || path == "${toString sourceRoot}/docs/development.md"
+              || path == "${toString sourceRoot}/pyproject.toml"
               || path == "${toString sourceRoot}/python/estus/__init__.py"
               || path == "${toString sourceRoot}/setup.py"
               || pkgs.lib.hasPrefix "${toString sourceRoot}/tests/fixtures/catalog/" path);
