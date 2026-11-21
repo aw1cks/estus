@@ -1,5 +1,5 @@
 [tools.inspect_sockets]
-description = "List sockets filtered by protocol, state, address or port. No process attribution and no namespace execution."
+description = "List sockets bound to operator-approved local ports, filtered by protocol, state, address or port. No process attribution and no namespace execution."
 revision = "1_native1"
 authority = "automation"
 effects = ["read", "sensitive_read"]

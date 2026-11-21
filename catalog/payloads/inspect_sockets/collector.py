@@ -3,6 +3,11 @@ def main():
     import json, os
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    ports = policy.get('ports')
+    if not (isinstance(ports, list) and ports) or any(isinstance(port, bool) or not isinstance(port, int) for port in ports):
+        raise ValueError('operator policy requires an explicit ports allowlist')
+    if 'local_port' in p and p['local_port'] not in ports:
+        raise ValueError('local port outside operator policy')
     SCOPE = 'current_network_namespace'
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
@@ -50,6 +55,8 @@ def main():
         if p.get('state')=='established' and state!='ESTAB': continue
         if 'address' in p and la!=p['address']: continue
         if 'local_port' in p and lp!=str(p['local_port']): continue
+        # Only sockets bound to an approved local port are reported.
+        if lp=='*' or int(lp) not in ports: continue
         out.append({'protocol':proto,'state':state,'local_address':la,'local_port':0 if lp=='*' else int(lp),'peer_address':pa,'peer_port':0 if pp=='*' else int(pp),'receive_queue':int(rq),'send_queue':int(sq)})
     emit({'entries':out,'process_attribution':'not_collected'})
 

@@ -1,5 +1,5 @@
 [tools.observe_network_routes]
-description = "List the kernel routing table for one address family, optionally filtered by table or destination. Use it to see where traffic is actually sent before changing a route. Entries are capped by the operator policy and the limit."
+description = "List the kernel routing table for one address family, optionally filtered by table or destination. Use it to see where traffic is actually sent before changing a route. Routes on interfaces outside the operator policy are omitted, and entries are capped by the limit."
 revision = "1_native1"
 authority = "automation"
 effects = ["read"]

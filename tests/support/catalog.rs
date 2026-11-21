@@ -288,9 +288,11 @@ fn fixture_fixed_args(name: &str) -> Value {
     // collector's fixed argument together.
     let network = json!({
         "interface": "catalog0",
-        "interfaces": ["lo", "catalog0"],
+        // eth0 and port 22 (the guest's management path and sshd) give the
+        // policy-filtered route and socket inventories more than one entry.
+        "interfaces": ["lo", "catalog0", "eth0"],
         "destinations": ["127.0.0.1", "192.0.2.2"],
-        "ports": [18080],
+        "ports": [18080, 22],
         "addresses": ["192.0.2.9/24"],
         "routes": ["198.51.100.0/24"],
         "neighbors": ["192.0.2.2"],

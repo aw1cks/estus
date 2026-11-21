@@ -1,5 +1,5 @@
 [tools.observe_network_rules]
-description = "Read the policy-routing rules that select routing tables before a lookup. Use it when a lookup disagrees with `observe_network_routes` or traffic takes an unexpected table. Returned rules are capped by the operator policy and the limit."
+description = "Read the policy-routing rules that select routing tables before a lookup. Use it when a lookup disagrees with `observe_network_routes` or traffic takes an unexpected table. Rules selecting an interface outside the operator policy are omitted, and entries are capped by the limit."
 revision = "1_native1"
 authority = "automation"
 effects = ["read"]

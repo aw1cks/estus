@@ -3,6 +3,9 @@ def main():
     import json, os
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    interfaces = policy.get('interfaces')
+    if not (isinstance(interfaces, list) and interfaces) or any(not isinstance(entry, str) for entry in interfaces):
+        raise ValueError('operator policy requires an explicit interfaces allowlist')
     SCOPE = 'current_network_namespace'
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
@@ -42,6 +45,9 @@ def main():
     rows=ip(['-6' if p.get('family')=='inet6' else '-4','rule','show'])
     out=[]
     for r in rows:
+        # Rules selecting an unapproved input/output interface are omitted;
+        # rules without an interface selector apply to every interface.
+        if any(key in r and not estus_runtime.allowed(r[key], interfaces) for key in ('iif', 'oif')): continue
         x={}
         for src,dst in [('priority','priority'),('src','source'),('dst','destination'),('table','table'),('action','action')]:
             if src in r: x[dst]=r[src] if dst=='priority' else str(r[src])

@@ -3,6 +3,9 @@ def main():
     import json, os, ipaddress
     p = {k:v for k,v in estus_runtime.request()[0].items() if v is not None}
     policy = estus_runtime.request()[1]
+    interfaces = policy.get('interfaces')
+    if not (isinstance(interfaces, list) and interfaces) or any(not isinstance(entry, str) for entry in interfaces):
+        raise ValueError('operator policy requires an explicit interfaces allowlist')
     SCOPE = 'current_network_namespace'
     def run(argv, timeout=5, accepted=(0,)):
         result = estus_runtime.run_bounded(
@@ -42,6 +45,9 @@ def main():
     def routes(rows):
         out=[]
         for r in rows:
+            # Routes bound to an unapproved interface are omitted; routes with
+            # no device (blackhole, unreachable) apply to every interface.
+            if 'dev' in r and not estus_runtime.allowed(r['dev'], interfaces): continue
             x={}
             for src,dst in [('dst','destination'),('dev','interface'),('gateway','gateway'),('prefsrc','source'),('table','table'),('protocol','protocol'),('scope','scope'),('type','type'),('metric','metric')]:
                 if src in r: x[dst]=r[src] if dst=='metric' else str(r[src])
