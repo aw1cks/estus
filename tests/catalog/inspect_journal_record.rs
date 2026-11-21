@@ -15,10 +15,14 @@ async fn journal_record_real_guest_acceptance() -> Result<()> {
         );
         let logged = guest
             .shell(
-                "python3 -c 'import subprocess; msg=(\"ESTUS_RECORD_LINE1\\n\"+\"x\"*8192+\"\\nESTUS_RECORD_END\").encode(); subprocess.run([\"/usr/bin/systemd-cat\",\"-t\",\"estus-record-test\"], input=msg, check=True)'",
+                "/usr/bin/python3 -c 'import subprocess; msg=(\"ESTUS_RECORD_LINE1\\n\"+\"x\"*8192+\"\\nESTUS_RECORD_END\").encode(); subprocess.run([\"/usr/bin/systemd-cat\",\"-t\",\"estus-record-test\"], input=msg, check=True)'",
             )
             .await?;
-        ensure!(logged.status.success(), "systemd-cat failed");
+        ensure!(
+            logged.status.success(),
+            "systemd-cat failed: {}",
+            String::from_utf8_lossy(&logged.stderr)
+        );
         ensure!(guest.shell("/usr/bin/journalctl --sync").await?.status.success());
         let oracle = guest
             .shell("/usr/bin/journalctl -b --no-pager -o json SYSLOG_IDENTIFIER=estus-record-test")

@@ -407,6 +407,11 @@ fn fixture_input_enums(name: &str) -> &'static [(&'static str, &'static [&'stati
         "inspect_boot_entry" => &[("entry_id", &["estus-current.conf", "estus-alternate.conf"])],
         "inspect_dns_lookup" => &[("name", &["catalog.test"]), ("resolver", &["127.0.0.1"])],
         "inspect_journal" => &[JOURNAL_UNIT],
+        "observe_network" | "observe_nic" => &[("interface", &["lo", "catalog0"])],
+        "observe_network_device" | "observe_nic_stats" => {
+            &[("interface", &["eth0", "catalog0", "lo"])]
+        }
+        "observe_storage_device" => &[("device", &["vda"])],
         "inspect_tcp_connect_probe" => &[LOOPBACK],
         "observe_network_route_lookup" => &[
             ("destination", &["127.0.0.1", "192.0.2.2"]),
@@ -581,7 +586,7 @@ impl Binding {
                 .context("selected workflow publication")?;
             ensure!(
                 published["_meta"]["authority"] == self.authority.as_str()
-                    && published["_meta"]["execution_location"] == "controller_and_remote",
+                    && published["_meta"]["execution_location"] == "remote",
                 "workflow discovery authority/location differs from review: {published}"
             );
             Ok(())

@@ -13,7 +13,7 @@ async fn observe_packages() -> Result<()> {
         ensure!(sources.status.success(), "source oracle failed");
         let sources=String::from_utf8(sources.stdout)?;
         ensure!(sources.lines().filter(|line| !line.trim().is_empty()).all(|line| line.starts_with("deb [signed-by=/usr/share/keyrings/estus-catalog.gpg] file:/opt/estus-catalog/repo-")), "nonlocal or unreviewed source");
-        binding.reject(json!({"offset":0,"limit":17})).await?;
+        binding.reject(json!({"offset":0,"limit":101})).await?;
         let reply=binding.call(json!({"offset":0,"limit":16})).await?;
         let value=catalog::projection(&reply)?;
         let packages=value["packages"].as_array().context("package array")?;
