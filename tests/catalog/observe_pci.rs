@@ -13,6 +13,14 @@ async fn observe_pci_aspects() -> Result<()> {
         binding
             .reject(json!({"address": "0000:00:00.0", "aspect": "reset"}))
             .await?;
+        let absent = binding
+            .call(json!({"address": "0000:ff:1f.7", "aspect": "identity"}))
+            .await?;
+        ensure!(
+            absent["error"]["reason"] == "target_not_found"
+                && absent["error"]["remote_state_unknown"] == false,
+            "absent PCI device not reported as target_not_found: {absent}"
+        );
 
         let envelope = binding
             .call(json!({"address": "0000:00:00.0", "aspect": "identity"}))

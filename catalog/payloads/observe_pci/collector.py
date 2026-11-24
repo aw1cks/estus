@@ -1,4 +1,19 @@
 import estus_runtime
+
+PATTERN = r'[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]'
+
+
+def device_path(address, root='/sys/bus/pci/devices'):
+    """sysfs path for a PCI address: malformed is a policy error, well-formed but absent is not-found."""
+    import os, re
+    if not isinstance(address, str) or not re.fullmatch(PATTERN, address):
+        raise ValueError('PCI address invalid')
+    path = root + '/' + address
+    if not os.path.isdir(path):
+        raise FileNotFoundError('PCI device absent')
+    return path
+
+
 def main():
     import json, os, re, datetime
     ASPECTS=('identity','driver','iommu')
@@ -50,9 +65,9 @@ def main():
             result['omitted_records']+=1
         print(out)
     root='/sys/bus/pci/devices'
-    pattern=r'[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]'
+    pattern=PATTERN
     def device(address):
-        if not re.fullmatch(pattern,address) or not os.path.isdir(root+'/'+address):raise ValueError('PCI address absent or invalid')
+        device_path(address,root)
         result={'address':address}
         for k in ('vendor','device','class','subsystem_vendor','subsystem_device','revision'):
             v=read(root+'/'+address+'/'+k,32)

@@ -1,6 +1,6 @@
 [tools.observe_pci]
-description = "Read one PCI device's numeric identity, its bound driver/module, or its IOMMU group and members from sysfs. Bounded reads only; absence of a group is not isolation proof."
-revision = "1_native1"
+description = "Read one PCI device's numeric identity, its bound driver/module, or its IOMMU group and members from sysfs. Bounded reads only; a well-formed address with no device fails as target_not_found; absence of a group is not isolation proof."
+revision = "2_native1"
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_pci/collector.py", no_log = false }

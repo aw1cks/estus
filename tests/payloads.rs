@@ -503,6 +503,32 @@ fn pci_devices_pages_reach_every_device() -> Result<()> {
 }
 
 #[test]
+fn pci_absent_device_is_not_found_and_malformed_is_policy() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("0000:01:00.0"))?;
+    let root = root.path().to_str().context("utf-8 tempdir")?;
+    assert_eq!(
+        parsed("observe_pci", "device_path", json!(["0000:01:00.0", root]))?,
+        format!("{root}/0000:01:00.0")
+    );
+    rejected(
+        "observe_pci",
+        "device_path",
+        json!(["0000:ff:1f.7", root]),
+        "FileNotFoundError",
+    )?;
+    for address in [json!("bad;selector"), json!("0000:01:00.8"), json!(null)] {
+        rejected(
+            "observe_pci",
+            "device_path",
+            json!([address, root]),
+            "ValueError",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn kernel_module_pages_fill_the_budget_and_end_with_minus_one() -> Result<()> {
     let modules: Vec<Value> = (0..82)
         .map(|i| json!({"name": format!("mod_{i:02}"), "size_bytes": 24576, "references": 1, "holders": ["sr_mod"], "state": "Live"}))
