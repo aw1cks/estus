@@ -32,7 +32,7 @@ for [Ansible-backed tools](../ansible-bundles.md).
 | `observe_host_summary` | `observe` | Read OS facts, boot ID and uptime through the ordinary SSH process view. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `observe_memory` | `observe` | Read memory gauges in bytes and cumulative VM counters. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `observe_pci` | `observe` | Read one PCI device's numeric identity, its bound driver/module, or its IOMMU group and members from sysfs. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
-| `observe_pci_devices` | `observe` | List every PCI device with its numeric address and identity fields from bounded sysfs reads. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
+| `observe_pci_devices` | `observe` | List PCI devices sorted by address with their numeric identity fields from bounded sysfs reads, one bounded page per call; pass next_offset as offset until it is absent. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `observe_pci_topology` | `observe` | Read the PCI topology: root bridges, buses and the device tree beneath them. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `observe_pressure` | `observe` | Read PSI some/full averages and cumulative stall time. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `inspect_hardware_identifiers` | `inspect` | Read selected firmware serial and asset identifiers. | `read`, `sensitive_read` | `automation:catalog` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
@@ -42,7 +42,7 @@ for [Ansible-backed tools](../ansible-bundles.md).
 | Tool | Tier | Description | Effects | Authority | Qualification | Requirements | Preview pairing |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `observe_systemd_jobs` | `observe` | List pending and running systemd jobs. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux`; `systemctl`; `systemd` | — |
-| `observe_systemd_sockets` | `observe` | List socket units' listen endpoints, activation links and counters. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux`; `systemctl`; `systemd` | — |
+| `observe_systemd_sockets` | `observe` | List socket units' listen endpoints, activation links and counters, one bounded page per call; pass next_offset as offset until it is absent. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux`; `systemctl`; `systemd` | — |
 | `observe_systemd_timers` | `observe` | List timer units' last and next trigger times and their service links. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux`; `systemctl`; `systemd` | — |
 | `observe_systemd_unit` | `observe` | Read one allowed unit's non-secret status properties. | `read` | `automation` | `site_policy_template`; **policy required** | Python ≥ 3.8; `linux`; `systemctl`; `systemd` | — |
 | `observe_systemd_unit_dependencies` | `observe` | Read one unit's forward or reverse dependencies to a bounded depth. | `read` | `automation` | `site_policy_template`; **policy required** | Python ≥ 3.8; `linux`; `systemctl`; `systemd` | — |
@@ -112,7 +112,7 @@ for [Ansible-backed tools](../ansible-bundles.md).
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `observe_kernel_module` | `observe` | Read one approved module's metadata, dependencies and declared parameters. | `read` | `automation` | `laboratory_only`; **policy required** | Python ≥ 3.8; `kmod`; `linux`; `modinfo`; `reviewed_dummy_or_estus_catalog_module` | — |
 | `observe_kernel_module_parameters` | `observe` | Read the reviewed current values of one module's parameters, including whether sysfs exposes them writable. | `read` | `automation` | `laboratory_only`; **policy required** | Python ≥ 3.8; `linux`; `reviewed_dummy_or_estus_catalog_module` | — |
-| `observe_kernel_modules` | `observe` | List loaded modules with size, reference count, state and holders. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
+| `observe_kernel_modules` | `observe` | List loaded modules with size, reference count, state and holders, one bounded page per call; pass next_offset as offset until it is absent. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `observe_kernel_state` | `observe` | Read kernel taint, release, lockdown and module signature policy. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `preview_kernel_module_load` | `preview` | Preview one module's dependencies and effective modprobe hooks without loading it. | `read`, `sensitive_read` | `automation` | `laboratory_only`; **policy required** | Python ≥ 3.8; `kmod`; `linux`; `modinfo`; `modprobe`; `reviewed_dummy_or_estus_catalog_module` | `change_kernel_module_load` (no module parameters) |
 | `change_kernel_module_load` | `change` | Load one approved installed module with typed parameters and report module-set and taint deltas. | `read`, `runtime_write`, `availability` | `automation:catalog` | `laboratory_only`; **policy required** | Python ≥ 3.8; `ip`; `iproute2`; `kmod`; `linux`; `modinfo`; `modprobe`; `reviewed_dummy_or_estus_catalog_module` | `preview_kernel_module_load` (no module parameters) |
@@ -123,7 +123,7 @@ for [Ansible-backed tools](../ansible-bundles.md).
 
 | Tool | Tier | Description | Effects | Authority | Qualification | Requirements | Preview pairing |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `observe_boot_entries` | `observe` | List bootctl entries with their IDs, kernels and initrds. | `read` | `automation:catalog` | `site_policy_template` | Python ≥ 3.8; `bootctl`; `efi`; `linux`; `systemd-boot` | — |
+| `observe_boot_entries` | `observe` | List bootctl entries with their IDs, kernels and initrds, one bounded page per call; pass next_offset as offset until it is absent. | `read` | `automation:catalog` | `site_policy_template` | Python ≥ 3.8; `bootctl`; `efi`; `linux`; `systemd-boot` | — |
 | `observe_boot_status` | `observe` | Read the EFI loader identity, current/default/one-shot selections and Secure Boot state. | `read` | `automation:catalog` | `site_policy_template` | Python ≥ 3.8; `efi`; `linux`; `systemd-boot` | — |
 | `inspect_boot_entry` | `inspect` | Read one approved boot entry, including its command line and any unknown fields. | `read`, `sensitive_read` | `automation:catalog` | `site_policy_template`; **policy required** | Python ≥ 3.8; `bootctl`; `efi`; `linux`; `systemd-boot` | — |
 | `change_boot_clear_oneshot` | `change` | Clear the systemd-boot next-boot override and confirm it is gone. | `read`, `runtime_write` | `automation:catalog` | `site_policy_template` | Python ≥ 3.8; `bootctl`; `efi`; `linux`; `systemd-boot` | — |
@@ -135,7 +135,7 @@ for [Ansible-backed tools](../ansible-bundles.md).
 
 | Tool | Tier | Description | Effects | Authority | Qualification | Requirements | Preview pairing |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `observe_packages` | `observe` | List installed packages from the maintained apt inventory. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
+| `observe_packages` | `observe` | List installed packages from the target's dpkg (apt), rpm or apk database without refreshing caches or installing anything. | `read` | `automation` | `site_policy_template` | Python ≥ 3.8; `linux` | — |
 | `preview_apt` | `preview` | Preview an apt change in check mode, including a diff where apt supports one. | `read` | `automation:catalog` | `site_policy_template`; **policy required** | Python (bundle minimum); Ansible bundle: `ansible.builtin.apt`; `apt`; `linux` | `change_apt` |
 | `preview_dnf` | `preview` | Preview a dnf/dnf5 change in check mode. | `read` | `automation:catalog` | `site_policy_template`; **policy required** | Python (bundle minimum); Ansible bundle: `ansible.builtin.dnf`; `dnf`; `linux` | `change_dnf` |
 | `preview_package` | `preview` | Preview a package change in check mode via the target's package manager. | `read` | `automation:catalog` | `site_policy_template`; **policy required** | Python (bundle minimum); Ansible bundle: `ansible.builtin.package`; `linux` | `change_package` |
