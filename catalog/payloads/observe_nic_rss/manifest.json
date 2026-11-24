@@ -3,13 +3,19 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "ba328b946ecc962519053c9d53a3419ca1de09489d829d3ae9cd0d1866d322f3",
+  "source_sha256": "17592569d4cfd1d91389ef3985ead656a638943f827b8ec25d2b5a65bbfb6178",
   "max_source_bytes": 1048576,
   "argv": [
     {
       "kind": "argument",
       "name": "interface",
       "format": "scalar"
+    },
+    {
+      "kind": "argument",
+      "name": "offset",
+      "format": "json",
+      "default": 0
     }
   ],
   "requirements": {
@@ -46,6 +52,11 @@
         },
         "interface": {
           "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
         }
       },
       "required": [
@@ -62,6 +73,10 @@
           "properties": {}
         },
         "interface": {
+          "aliases": {},
+          "properties": {}
+        },
+        "offset": {
           "aliases": {},
           "properties": {}
         }

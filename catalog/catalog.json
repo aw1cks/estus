@@ -1488,12 +1488,13 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "interface": { "type": "string", "minLength": 1, "maxLength": 15 }
+            "interface": { "type": "string", "minLength": 1, "maxLength": 15 },
+            "offset": { "type": "integer", "minimum": 0, "maximum": 65535 }
           },
           "required": ["interface"],
           "additionalProperties": false
         },
-        "input_map": { "interface": "interface" }
+        "input_map": { "interface": "interface", "offset": "offset" }
       }
     },
     "observe_nic_stats": {

@@ -1,18 +1,18 @@
 [tools.observe_nic_rss]
-description = "Read an interface's RSS indirection table and hash algorithms, excluding the secret key. Missing capability is explicit."
-revision = "1_native1"
+description = "Read an interface's RSS hash algorithms, indirection table size and slots per queue, excluding the secret key; the table itself comes one bounded page per call (pass next_offset as offset). Missing capability is explicit."
+revision = "2_native1"
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_nic_rss/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 
-input_map = { "interface" = "interface" }
+input_map = { "interface" = "interface", "offset" = "offset" }
 limits = { timeout_secs = 30 }
-input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 } }, "required" = ["interface"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "interface" = { "type" = "string", "minLength" = 1, "maxLength" = 15 }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 65535 } }, "required" = ["interface"], "additionalProperties" = false }
 [tools.observe_nic_rss.result]
 kind = "capability_projection"
-fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "interface" = ["mcp_result", "interface"], "supported" = ["mcp_result", "supported"], "indirection" = ["mcp_result", "indirection"], "hash_functions" = ["mcp_result", "hash_functions"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "interface" = ["mcp_result", "interface"], "supported" = ["mcp_result", "supported"], "indirection" = ["mcp_result", "indirection"], "hash_functions" = ["mcp_result", "hash_functions"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"], "indirection_size" = ["mcp_result", "indirection_size"], "queue_entries" = ["mcp_result", "queue_entries"], "offset" = ["mcp_result", "offset"], "next_offset" = ["mcp_result", "next_offset"] }
 max_bytes = 4096
 max_items = 256
 max_depth = 8
-schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "interface" = { "type" = "string", "maxLength" = 15 }, "supported" = { "type" = "boolean" }, "indirection" = { "type" = "array", "items" = { "type" = "integer", "minimum" = 0, "maximum" = 65535 }, "maxItems" = 256 }, "hash_functions" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "enabled" = { "type" = "boolean" } }, "required" = ["name", "enabled"], "additionalProperties" = false }, "maxItems" = 32 } }, "required" = ["source", "observed_at", "unavailable", "interface", "supported", "indirection", "hash_functions"], "additionalProperties" = false }
+schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "interface" = { "type" = "string", "maxLength" = 15 }, "supported" = { "type" = "boolean" }, "indirection" = { "type" = "array", "items" = { "type" = "integer", "minimum" = 0, "maximum" = 65535 }, "maxItems" = 256 }, "indirection_size" = { "type" = "integer", "minimum" = 0, "maximum" = 65536 }, "queue_entries" = { "type" = "array", "items" = { "type" = "integer", "minimum" = 0, "maximum" = 65536 }, "maxItems" = 256 }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 65535 }, "next_offset" = { "type" = "integer", "minimum" = 1, "maximum" = 65535 }, "hash_functions" = { "type" = "array", "items" = { "type" = "object", "properties" = { "name" = { "type" = "string", "maxLength" = 64 }, "enabled" = { "type" = "boolean" } }, "required" = ["name", "enabled"], "additionalProperties" = false }, "maxItems" = 32 } }, "required" = ["source", "observed_at", "unavailable", "interface", "supported", "indirection", "hash_functions", "indirection_size", "queue_entries", "offset", "truncated", "omitted_records"], "additionalProperties" = false }

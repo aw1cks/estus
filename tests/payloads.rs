@@ -410,6 +410,60 @@ fn psi_absence_distinguishes_disabled_from_unsupported() -> Result<()> {
 }
 
 #[test]
+fn rss_large_tables_summarize_and_page_without_the_key() -> Result<()> {
+    // Shape of `ethtool -x` on an Intel X550 (ixgbe): 512 slots over 12 rings.
+    let mut text = String::from("\nRX flow hash indirection table for eth0 with 12 RX ring(s):\n");
+    for row in 0..64 {
+        let cells: Vec<String> = (0..8)
+            .map(|c| format!("{:5}", (row * 8 + c) % 12))
+            .collect();
+        text.push_str(&format!("{:5}:  {}\n", row * 8, cells.join(" ")));
+    }
+    text.push_str("RSS hash key:\nc3:ff:8c:c4\nRSS hash function:\n    toeplitz: on\n    xor: off\n    crc32: off\nRSS input transformation:\n    symmetric-xor: off\n");
+    let parsed_rss = parsed("observe_nic_rss", "parse_rss", json!([text]))?;
+    let table: Vec<u64> = (0..512).map(|i| i % 12).collect();
+    assert_eq!(parsed_rss[0], json!(table));
+    assert_eq!(
+        parsed_rss[1][0],
+        json!({"name": "toeplitz", "enabled": true})
+    );
+    assert!(!serde_json::to_string(&parsed_rss)?.contains("c3:ff"));
+
+    let base = json!({"source": "ethtool -x", "observed_at": "2026-11-24T00:00:00+00:00", "unavailable": [], "interface": "eth0", "supported": true, "hash_functions": parsed_rss[1]});
+    let mut seen = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = parsed("observe_nic_rss", "page_rss", json!([base, table, offset]))?;
+        assert!(serde_json::to_vec(&page)?.len() <= 4096);
+        assert_eq!(page["indirection_size"], 512);
+        // 512 slots over 12 queues: 8 queues get 43, 4 get 42.
+        assert_eq!(
+            page["queue_entries"],
+            json!([43, 43, 43, 43, 43, 43, 43, 43, 42, 42, 42, 42])
+        );
+        let slice = page["indirection"].as_array().context("indirection")?;
+        assert_eq!(page["omitted_records"], 512 - slice.len());
+        seen.extend(slice.iter().map(|v| v.as_u64().unwrap()));
+        match page.get("next_offset") {
+            Some(next) => offset = next.as_u64().context("next_offset")?,
+            None => break,
+        }
+    }
+    assert_eq!(seen, table);
+    for offset in [json!(-1), json!(65536), json!("0")] {
+        rejected(
+            "observe_nic_rss",
+            "page_rss",
+            json!([base, table, offset]),
+            "ValueError",
+        )?;
+    }
+    let gap = text.replace("    8:", "    9:");
+    rejected("observe_nic_rss", "parse_rss", json!([gap]), "ValueError")?;
+    Ok(())
+}
+
+#[test]
 fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
     let head = json!({"scope":"system","unit_pattern":"*","view":"loaded","unit_type":"service","state":"active"});
     let rows: Vec<Value> = (0..300)
