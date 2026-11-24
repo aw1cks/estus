@@ -1,0 +1,30 @@
+name: Feature or catalog tool request
+description: Suggest a capability or a new catalog tool
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task, not the solution. What would you ask an agent to do on a host?
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: What do you do today?
+      description: Existing tools or workarounds, and why they fall short.
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Would it read or change state?
+      options:
+        - Read-only (observe)
+        - Sensitive read or probe (inspect)
+        - Previewable change (preview and change)
+        - Not sure
+  - type: textarea
+    id: safety
+    attributes:
+      label: What could go wrong?
+      description: For anything that changes a host, how should it fail, and how would you check the result?

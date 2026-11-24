@@ -1,0 +1,42 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. For a **security vulnerability**, do not open an
+        issue; see https://github.com/aw1cks/estus/security/policy instead.
+  - type: input
+    id: version
+    attributes:
+      label: Estus version
+      description: Output of `estus --version`, and how you installed it (Nix, wheel, source).
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Where Estus runs, and the target OS
+      description: For example "macOS 15 arm64 to AlmaLinux 10", and your MCP client.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The relevant part of your TOML. Remove hostnames and anything private.
+      render: toml
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The tool called, its arguments, and the result or error code. Say what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Output of `estus --config <file> doctor --target <name>` and `estus --config <file> auth explain <name>`, if relevant.
+      render: shell
