@@ -1,4 +1,34 @@
 import estus_runtime
+
+
+def page_modules(result, observed, offset, budget=3900, max_nodes=256):
+    """Fill one name-sorted page from offset to the projection budget.
+
+    next_offset is -1 once the page reaches the end; a module that cannot fit
+    an empty page fails instead of returning a page that never advances.
+    """
+    import json
+    if type(offset) is not int or not 0 <= offset <= 512:
+        raise ValueError('invalid module page offset')
+    page = dict(result, modules=[], total_count=len(observed), next_offset=-1)
+    def nodes(v):
+        if isinstance(v, dict): return 1 + sum(nodes(x) for x in v.values())
+        if isinstance(v, list): return 1 + sum(nodes(x) for x in v)
+        return 1
+    for module in observed[offset:]:
+        page['modules'].append(module)
+        # observed_at is added after paging; the budget leaves room for it.
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) >= max_nodes:
+            page['modules'].pop()
+            if not page['modules']:
+                raise ValueError('module record exceeds projection budget')
+            break
+    end = offset + len(page['modules'])
+    if end < len(observed):
+        page['next_offset'] = end
+    return page
+
+
 def main():
     import datetime, json, platform, re
     if platform.system() != 'Linux':
@@ -37,13 +67,9 @@ def main():
         return values
 
     offset = a['offset']
-    if type(offset) is not int or not 0 <= offset <= 512:
-        raise ValueError('invalid module page offset')
     observed = sorted(modules(), key=lambda row: row['name'])
-    result['modules'] = observed[offset:offset + 8]
-    result['total_count'] = len(observed)
-    result['next_offset'] = offset + 8 if offset + 8 < len(observed) else -1
     result['scope'] = 'name-sorted live procfs pages; concurrent module changes can shift offsets'
+    result = page_modules(result, observed, offset)
 
     result['observed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z')
     encoded = json.dumps(result,separators=(',',':'),allow_nan=False)

@@ -503,6 +503,50 @@ fn pci_devices_pages_reach_every_device() -> Result<()> {
 }
 
 #[test]
+fn kernel_module_pages_fill_the_budget_and_end_with_minus_one() -> Result<()> {
+    let modules: Vec<Value> = (0..82)
+        .map(|i| json!({"name": format!("mod_{i:02}"), "size_bytes": 24576, "references": 1, "holders": ["sr_mod"], "state": "Live"}))
+        .collect();
+    let head = json!({"boot_id": "1ccac6df-3646-4eaf-a77d-bc9d57cc97b3", "source": "Linux procfs/sysfs", "unavailable": [], "scope": "name-sorted"});
+    let mut seen = Vec::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = parsed(
+            "observe_kernel_modules",
+            "page_modules",
+            json!([head, modules, offset]),
+        )?;
+        pages += 1;
+        assert!(serde_json::to_vec(&page)?.len() <= 3900);
+        assert_eq!(page["total_count"], 82);
+        seen.extend(
+            page["modules"]
+                .as_array()
+                .context("modules")?
+                .iter()
+                .cloned(),
+        );
+        match page["next_offset"].as_i64().context("next_offset")? {
+            -1 => break,
+            next => offset = next,
+        }
+    }
+    // More than the old fixed 8 per page, fewer calls than 82 / 8.
+    assert!((2..=4).contains(&pages), "{pages} pages");
+    assert_eq!(seen, modules);
+    for offset in [json!(-1), json!(513), json!(1.5)] {
+        rejected(
+            "observe_kernel_modules",
+            "page_modules",
+            json!([head, modules, offset]),
+            "ValueError",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
     let head = json!({"scope":"system","unit_pattern":"*","view":"loaded","unit_type":"service","state":"active"});
     let rows: Vec<Value> = (0..300)
