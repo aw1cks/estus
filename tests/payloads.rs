@@ -1034,34 +1034,25 @@ with mock.patch('os.path.isfile', side_effect=fake_isfile):
     Ok(())
 }
 
-#[test]
-fn host_runnable_native_preview_collector_contracts() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+/// Runs a shipped collector's `main()` on this host with a stub runtime, then
+/// validates its output against the definition's result schema.
+fn run_host_collector(
+    tool: &str,
+    request_json: &str,
+    env_vars: &[(&str, &std::path::Path)],
+) -> Result<Value> {
     let python = std::env::var_os("ESTUS_TEST_PYTHON").unwrap_or_else(|| "python3".into());
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let payloads = root.join("catalog/payloads");
-    let stubs = tempfile::tempdir()?;
-    let stub_systemctl = stubs.path().join("systemctl");
-    std::fs::write(
-        &stub_systemctl,
-        "#!/bin/sh\nprintf 'Id=estus-fixture.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=disabled\\nMainPID=0\\nResult=success\\n'\n",
-    )?;
-    std::fs::set_permissions(&stub_systemctl, std::fs::Permissions::from_mode(0o755))?;
-
-    let run_collector = |tool: &str,
-                         request_json: &str,
-                         env_vars: &[(&str, &std::path::Path)]|
-     -> Result<Value> {
-        let collector = payloads.join(tool).join("collector.py");
-        let manifest: Value =
-            serde_json::from_slice(&std::fs::read(payloads.join(tool).join("manifest.json"))?)?;
-        let toml_text = std::fs::read_to_string(root.join("catalog").join(format!("{tool}.toml")))?;
-        let toml_doc: toml::Value = toml::from_str(&toml_text)?;
-        let schema = serde_json::to_value(&toml_doc["tools"][tool]["result"]["schema"])?;
-        let validator = jsonschema::draft202012::new(&schema)
-            .map_err(|e| anyhow::anyhow!("{tool}: invalid result schema: {e}"))?;
-        let _ = &manifest["source_sha256"];
-        let runner = r#"import importlib.util, json, subprocess, sys, types
+    let collector = root
+        .join("catalog/payloads")
+        .join(tool)
+        .join("collector.py");
+    let toml_text = std::fs::read_to_string(root.join("catalog").join(format!("{tool}.toml")))?;
+    let toml_doc: toml::Value = toml::from_str(&toml_text)?;
+    let schema = serde_json::to_value(&toml_doc["tools"][tool]["result"]["schema"])?;
+    let validator = jsonschema::draft202012::new(&schema)
+        .map_err(|e| anyhow::anyhow!("{tool}: invalid result schema: {e}"))?;
+    let runner = r#"import importlib.util, json, subprocess, sys, types
 rt = types.ModuleType('estus_runtime')
 payload = json.loads(sys.argv[2])
 rt.request = lambda: payload
@@ -1070,8 +1061,10 @@ def check_text(value, maximum=4096):
     if not isinstance(value, str) or len(value) > maximum or '\x00' in value:
         raise ValueError('invalid text')
     return value
-def run_bounded(argv, timeout=20, max_bytes=262144):
-    p = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+def run_bounded(argv, timeout=20, max_bytes=262144, accepted=(0,), env=None):
+    p = subprocess.run(argv, capture_output=True, timeout=timeout, check=False, env=env)
+    if accepted is not None and p.returncode not in accepted:
+        raise RuntimeError('subprocess failed with exit ' + str(p.returncode))
     return {'returncode': p.returncode, 'timed_out': False, 'stdout': p.stdout[:max_bytes].decode('utf-8', 'strict'), 'stderr': p.stderr[:max_bytes].decode('utf-8', 'replace')}
 rt.check_text = check_text
 rt.run_bounded = run_bounded
@@ -1081,34 +1074,108 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 mod.main()
 "#;
-        let mut cmd = std::process::Command::new(&python);
-        cmd.args(["-I", "-B", "-c", runner])
-            .arg(&collector)
-            .arg(request_json);
-        for (k, v) in env_vars {
-            cmd.env(k, v);
-        }
-        let out = cmd.output()?;
-        ensure!(
-            out.status.success(),
-            "{tool} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let parsed: Value = estus::internal::strict_json::parse(&out.stdout)?;
-        ensure!(
-            validator.is_valid(&parsed),
-            "{tool} output failed result.schema validation: {parsed}"
-        );
-        Ok(parsed)
-    };
+    let mut cmd = std::process::Command::new(&python);
+    cmd.args(["-I", "-B", "-c", runner])
+        .arg(&collector)
+        .arg(request_json);
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let out = cmd.output()?;
+    ensure!(
+        out.status.success(),
+        "{tool} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: Value = estus::internal::strict_json::parse(&out.stdout)?;
+    ensure!(
+        validator.is_valid(&parsed),
+        "{tool} output failed result.schema validation: {parsed}"
+    );
+    Ok(parsed)
+}
 
-    let start_prev = run_collector(
+#[test]
+fn systemd_sockets_keep_every_listen_endpoint_and_page() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let multi = "Listen=/run/systemd/journal/socket (Datagram)\nListen=/run/systemd/journal/stdout (Stream)\nId=systemd-journald.socket\n";
+    assert_eq!(
+        parsed("observe_systemd_sockets", "parse_show", json!([multi]))?,
+        json!({"Id": "systemd-journald.socket", "Listen": ["/run/systemd/journal/socket (Datagram)", "/run/systemd/journal/stdout (Stream)"]})
+    );
+    for raw in ["Id=a\nId=b\n", "Unknown=x\n", "no separator\n"] {
+        rejected(
+            "observe_systemd_sockets",
+            "parse_show",
+            json!([raw]),
+            "ValueError",
+        )?;
+    }
+
+    let stubs = tempfile::tempdir()?;
+    let stub = stubs.path().join("systemctl");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+for a in "$@"; do last="$a"; done
+case " $* " in
+  *" list-units "*) i=0; while [ $i -lt 30 ]; do printf 'sock-%02d.socket loaded active listening Fixture socket %d\n' $i $i; i=$((i+1)); done ;;
+  *" show "*) printf 'Id=%s\nActiveState=active\nTriggers=%s\nListen=/run/%s/a (Stream)\nListen=/run/%s/b (Datagram)\nAccept=no\nNConnections=0\nNAccepted=0\n' "$last" "${last%.socket}.service" "$last" "$last" ;;
+  *) exit 1 ;;
+esac
+"#,
+    )?;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))?;
+    let mut ids = Vec::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = run_host_collector(
+            "observe_systemd_sockets",
+            &json!([{"target_python": "/usr/bin/python3", "manager_scope": "system", "offset": offset}]).to_string(),
+            &[("ESTUS_EXEC_SYSTEMCTL", &stub)],
+        )?;
+        pages += 1;
+        assert_eq!(page["source_count"], 30);
+        for socket in page["sockets"].as_array().context("sockets")? {
+            assert_eq!(socket["Listen"].as_array().context("listen")?.len(), 2);
+            ids.push(socket["Id"].as_str().context("id")?.to_owned());
+        }
+        match page.get("next_offset") {
+            Some(next) => {
+                assert_eq!(page["truncated"], true);
+                offset = next.as_u64().context("next_offset")?;
+            }
+            None => {
+                assert_eq!(page["truncated"], false);
+                break;
+            }
+        }
+    }
+    let expected: Vec<String> = (0..30).map(|i| format!("sock-{i:02}.socket")).collect();
+    assert!(pages > 1);
+    assert_eq!(ids, expected);
+    Ok(())
+}
+
+#[test]
+fn host_runnable_native_preview_collector_contracts() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let stubs = tempfile::tempdir()?;
+    let stub_systemctl = stubs.path().join("systemctl");
+    std::fs::write(
+        &stub_systemctl,
+        "#!/bin/sh\nprintf 'Id=estus-fixture.service\\nLoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=disabled\\nMainPID=0\\nResult=success\\n'\n",
+    )?;
+    std::fs::set_permissions(&stub_systemctl, std::fs::Permissions::from_mode(0o755))?;
+
+    let start_prev = run_host_collector(
         "preview_systemd_service",
         r#"[{"target_python":"/usr/bin/python3","manager_scope":"system","allowed_units":["estus-fixture.service"],"unit":"estus-fixture.service","operation":"start"}]"#,
         &[("ESTUS_EXEC_SYSTEMCTL", &stub_systemctl)],
     )?;
     ensure!(start_prev["changed"] == true && start_prev["operation"] == "start");
-    let stop_prev = run_collector(
+    let stop_prev = run_host_collector(
         "preview_systemd_service",
         r#"[{"target_python":"/usr/bin/python3","manager_scope":"system","allowed_units":["estus-fixture.service"],"unit":"estus-fixture.service","operation":"stop"}]"#,
         &[("ESTUS_EXEC_SYSTEMCTL", &stub_systemctl)],
@@ -1118,7 +1185,7 @@ mod.main()
     if std::path::Path::new("/proc/sys/kernel/printk_ratelimit").is_file()
         && std::path::Path::new("/etc/sysctl.d").is_dir()
     {
-        let cfg_prev = run_collector(
+        let cfg_prev = run_host_collector(
             "preview_sysctl",
             r#"["kernel.printk_ratelimit", 10, "config", ["kernel.printk_ratelimit"]]"#,
             &[],
@@ -1129,7 +1196,7 @@ mod.main()
                 && cfg_prev["persistent"] == true
                 && cfg_prev["after_config"] == "kernel.printk_ratelimit = 10\n"
         );
-        let rt_prev = run_collector(
+        let rt_prev = run_host_collector(
             "preview_sysctl",
             r#"["kernel.printk_ratelimit", 10, "runtime", ["kernel.printk_ratelimit"]]"#,
             &[],

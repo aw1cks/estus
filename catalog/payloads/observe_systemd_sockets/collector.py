@@ -1,4 +1,28 @@
 import estus_runtime
+
+MAX_ENTRIES = 256
+PROPERTIES = ('Id', 'ActiveState', 'Triggers', 'Listen', 'Accept', 'NConnections', 'NAccepted')
+
+
+def parse_show(raw):
+    """Parse `systemctl show` for PROPERTIES; Listen repeats once per endpoint and becomes a list."""
+    result = {'Listen': []}
+    for line in raw.splitlines():
+        key, separator, value = line.partition('=')
+        if not separator or key not in PROPERTIES or len(value) > 4096:
+            raise ValueError('unexpected selected property')
+        if key == 'Listen':
+            if value:
+                result['Listen'].append(value)
+            if len(result['Listen']) > 64:
+                raise ValueError('listen endpoint bound')
+        elif key in result:
+            raise ValueError('unexpected selected property')
+        else:
+            result[key] = value
+    return result
+
+
 def main():
     import json, os, re
     request = estus_runtime.request()[0]
@@ -12,24 +36,15 @@ def main():
     def run(args, accepted=(0,)):
         return estus_runtime.run_bounded(
             base + args, timeout=8, max_bytes=262144, accepted=accepted, env=env)['stdout']
-    def text(value, maximum=4096):
-        if not isinstance(value, str) or len(value) > maximum:
-            raise ValueError('invalid or oversized selected property')
-        return value
-    def show(unit, properties):
-        raw = run(['show', '--property=' + ','.join(properties), '--', unit])
-        result = {}
-        for line in raw.splitlines():
-            key, separator, value = line.partition('=')
-            if not separator or key not in properties or key in result:
-                raise ValueError('unexpected selected property')
-            result[key] = text(value)
-        return result
+    def show(unit):
+        return parse_show(run(['show', '--property=' + ','.join(PROPERTIES), '--', unit]))
     if 'unit' in request:
         unit = request['unit']
         if unit not in request['allowed_units'] or not re.fullmatch(r'[A-Za-z0-9_@.:-]{1,128}', unit):
             raise ValueError('unit is outside operator allowlist')
-    result = {'scope': scope}
+    offset = request['offset']
+    if type(offset) is not int or not 0 <= offset < MAX_ENTRIES:
+        raise ValueError('offset out of bounds')
     rows = []
     for line in run(['list-units', '--all', '--type=socket', '--no-legend', '--plain']).splitlines():
         if not line.strip():
@@ -37,21 +52,25 @@ def main():
         fields = line.split(None, 4)
         if len(fields) not in (4, 5):
             raise ValueError('malformed activation-unit inventory record')
-        rows.append({'unit': fields[0]})
-    if not isinstance(rows, list) or len(rows) > 64:
-        raise ValueError('activation inventory bound exceeded')
-    entries = []
-    for row in rows[:8]:
-        name = text(row['unit'], 256)
-        entries.append(show(name, ['Id', 'ActiveState', 'Triggers', 'Listen', 'Accept', 'NConnections', 'NAccepted']))
-    result['sockets'] = entries
-    result['source_count'] = len(rows)
-    result['truncated'] = len(rows) > 8
-    result['sockets'] = result['sockets'][:8]
-    while len(json.dumps(result, separators=(',', ':')).encode('utf-8')) > 3800 and result['sockets']:
-        result['sockets'].pop()
-        result['truncated'] = True
-    encoded = json.dumps(result, separators=(',', ':'), allow_nan=False)
+        if len(fields[0]) > 256:
+            raise ValueError('invalid or oversized selected property')
+        rows.append(fields[0])
+    capped = len(rows) > MAX_ENTRIES
+    rows = rows[:MAX_ENTRIES]
+    # Only this page's units are queried; the budget decides where the page ends.
+    page = {'scope': scope, 'sockets': [], 'source_count': len(rows), 'offset': offset, 'truncated': True}
+    for unit in rows[offset:]:
+        page['sockets'].append(show(unit))
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > 3800:
+            page['sockets'].pop()
+            if not page['sockets']:
+                raise ValueError('socket entry exceeds projection bound')
+            break
+    end = offset + len(page['sockets'])
+    if end < len(rows):
+        page['next_offset'] = end
+    page['truncated'] = capped or end < len(rows)
+    encoded = json.dumps(page, separators=(',', ':'), allow_nan=False)
     if len(encoded.encode('utf-8')) > 4096:
         raise ValueError('projection output bound exceeded')
     print(encoded)

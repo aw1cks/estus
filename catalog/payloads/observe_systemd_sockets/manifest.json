@@ -3,7 +3,7 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "19d58f702d45656519beafe44dbc987b7298c36e17e6725262ca2d79cba7cdeb",
+  "source_sha256": "70f8fb9a7dc4e0b7cb4d5518195a43e7ff396faecb09b9dcc7828f054db64662",
   "max_source_bytes": 1048576,
   "argv": [
     {
@@ -14,6 +14,10 @@
         },
         "manager_scope": {
           "name": "manager_scope"
+        },
+        "offset": {
+          "name": "offset",
+          "default": 0
         }
       }
     }
@@ -54,6 +58,11 @@
             "system",
             "user"
           ]
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
         }
       },
       "required": [
@@ -70,6 +79,10 @@
           "properties": {}
         },
         "manager_scope": {
+          "aliases": {},
+          "properties": {}
+        },
+        "offset": {
           "aliases": {},
           "properties": {}
         }

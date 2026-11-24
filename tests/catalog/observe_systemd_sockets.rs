@@ -11,24 +11,51 @@ async fn systemd_sockets_list_real_acceptance() -> Result<()> {
         binding.reject(json!({"flags": ["--now"]})).await?;
         let prep = guest.shell("systemctl start estus-fixture.socket").await?;
         ensure!(prep.status.success(), "socket preparation failed");
-        let reply = binding.call(json!({})).await?;
-        let socket = catalog::projection(&reply)?["sockets"]
-            .as_array()
-            .context("sockets")?
+        let mut sockets = Vec::new();
+        let mut offset = 0;
+        loop {
+            let reply = binding.call(json!({"offset": offset})).await?;
+            let page = catalog::projection(&reply)?;
+            sockets.extend(
+                page["sockets"]
+                    .as_array()
+                    .context("sockets")?
+                    .iter()
+                    .cloned(),
+            );
+            match page.get("next_offset") {
+                Some(next) => offset = next.as_u64().context("next_offset")?,
+                None => break,
+            }
+        }
+        let socket = sockets
             .iter()
             .find(|s| s["Id"] == "estus-fixture.socket")
             .context("fixture socket absent")?;
         let oracle = guest
             .shell("systemctl show estus-fixture.socket -p Listen --value")
             .await?;
+        ensure!(oracle.status.success(), "socket oracle failed");
+        let expected: Vec<String> = String::from_utf8(oracle.stdout)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
         ensure!(
-            oracle.status.success()
-                && socket["Listen"].as_str() == Some(String::from_utf8(oracle.stdout)?.trim()),
-            "socket endpoint differs from independent oracle"
+            !expected.is_empty() && socket["Listen"] == json!(expected),
+            "socket endpoints differ from independent oracle"
         );
+        let journald = sockets
+            .iter()
+            .find(|s| s["Id"] == "systemd-journald.socket")
+            .context("journald socket absent")?;
         ensure!(
-            !socket["Listen"].as_str().context("endpoint")?.is_empty(),
-            "socket endpoint is empty"
+            journald["Listen"]
+                .as_array()
+                .context("journald endpoints")?
+                .len()
+                > 1,
+            "multi-endpoint socket collapsed"
         );
         Ok(())
     }

@@ -1,18 +1,18 @@
 [tools.observe_systemd_sockets]
-description = "List socket units' listen endpoints, activation links and counters. No process attribution."
-revision = "1_native1"
+description = "List socket units' listen endpoints, activation links and counters, one bounded page per call; pass next_offset as offset until it is absent. No process attribution."
+revision = "2_native1"
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_systemd_sockets/collector.py", no_log = false }
 fixed_args = { "target_python" = "/usr/bin/python3", "manager_scope" = "system" }
 
-input_map = {  }
+input_map = { "offset" = "offset" }
 limits = { timeout_secs = 60 }
-input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 255 } }, "required" = [], "additionalProperties" = false }
 [tools.observe_systemd_sockets.result]
 kind = "capability_projection"
-fields = { "scope" = ["mcp_result", "scope"], "sockets" = ["mcp_result", "sockets"], "truncated" = ["mcp_result", "truncated"], "source_count" = ["mcp_result", "source_count"] }
+fields = { "scope" = ["mcp_result", "scope"], "sockets" = ["mcp_result", "sockets"], "truncated" = ["mcp_result", "truncated"], "source_count" = ["mcp_result", "source_count"], "offset" = ["mcp_result", "offset"], "next_offset" = ["mcp_result", "next_offset"] }
 max_bytes = 4096
 max_items = 256
 max_depth = 6
-schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "sockets" = { "type" = "array", "items" = { "type" = "object", "properties" = { "Id" = { "type" = "string", "maxLength" = 4096 }, "ActiveState" = { "type" = "string", "maxLength" = 4096 }, "Triggers" = { "type" = "string", "maxLength" = 4096 }, "Listen" = { "type" = "string", "maxLength" = 4096 }, "Accept" = { "type" = "string", "maxLength" = 4096 }, "NConnections" = { "type" = "string", "maxLength" = 4096 }, "NAccepted" = { "type" = "string", "maxLength" = 4096 } }, "required" = [], "additionalProperties" = false }, "maxItems" = 8 }, "truncated" = { "type" = "boolean" }, "source_count" = { "type" = "integer", "minimum" = 0, "maximum" = 256 } }, "required" = ["scope", "sockets", "truncated", "source_count"], "additionalProperties" = false }
+schema = { "type" = "object", "properties" = { "scope" = { "type" = "string", "enum" = ["system", "user"], "maxLength" = 6 }, "sockets" = { "type" = "array", "items" = { "type" = "object", "properties" = { "Id" = { "type" = "string", "maxLength" = 4096 }, "ActiveState" = { "type" = "string", "maxLength" = 4096 }, "Triggers" = { "type" = "string", "maxLength" = 4096 }, "Listen" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 4096 }, "maxItems" = 64 }, "Accept" = { "type" = "string", "maxLength" = 4096 }, "NConnections" = { "type" = "string", "maxLength" = 4096 }, "NAccepted" = { "type" = "string", "maxLength" = 4096 } }, "required" = ["Listen"], "additionalProperties" = false }, "maxItems" = 256 }, "truncated" = { "type" = "boolean" }, "source_count" = { "type" = "integer", "minimum" = 0, "maximum" = 256 }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 255 }, "next_offset" = { "type" = "integer", "minimum" = 1, "maximum" = 255 } }, "required" = ["scope", "sockets", "truncated", "source_count", "offset"], "additionalProperties" = false }
