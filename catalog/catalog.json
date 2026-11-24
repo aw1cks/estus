@@ -1563,8 +1563,7 @@
           "required": [],
           "additionalProperties": false
         },
-        "input_map": { "offset": "offset", "limit": "limit", "name": "name" },
-        "description": "List installed packages from the available apt, rpm or apk inventory without refreshing caches or installing anything."
+        "input_map": { "offset": "offset", "limit": "limit", "name": "name" }
       }
     },
     "observe_pci": {

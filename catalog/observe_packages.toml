@@ -1,5 +1,5 @@
 [tools.observe_packages]
-description = "List installed packages from the maintained apt inventory. It does not refresh the cache or install anything."
+description = "List installed packages from the target's dpkg (apt), rpm or apk database without refreshing caches or installing anything."
 revision = "1_native1"
 authority = "automation"
 effects = ["read"]
