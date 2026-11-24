@@ -529,7 +529,7 @@ fn pci_absent_device_is_not_found_and_malformed_is_policy() -> Result<()> {
 }
 
 #[test]
-fn kernel_module_pages_fill_the_budget_and_end_with_minus_one() -> Result<()> {
+fn kernel_module_pages_fill_the_budget_until_next_offset_is_absent() -> Result<()> {
     let modules: Vec<Value> = (0..82)
         .map(|i| json!({"name": format!("mod_{i:02}"), "size_bytes": 24576, "references": 1, "holders": ["sr_mod"], "state": "Live"}))
         .collect();
@@ -553,9 +553,9 @@ fn kernel_module_pages_fill_the_budget_and_end_with_minus_one() -> Result<()> {
                 .iter()
                 .cloned(),
         );
-        match page["next_offset"].as_i64().context("next_offset")? {
-            -1 => break,
-            next => offset = next,
+        match page.get("next_offset") {
+            Some(next) => offset = next.as_u64().context("next_offset")?,
+            None => break,
         }
     }
     // More than the old fixed 8 per page, fewer calls than 82 / 8.

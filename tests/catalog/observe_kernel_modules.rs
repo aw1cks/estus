@@ -10,7 +10,7 @@ async fn observe_kernel_modules() -> Result<()> {
         let binding = guest.binding("observe_kernel_modules", json!({})).await?;
         binding.reject(json!({"path":"/proc/modules"})).await?;
         binding.reject(json!({"offset":513})).await?;
-        let mut offset = 0_i64;
+        let mut offset = 0_u64;
         let mut rows = Vec::new();
         loop {
             let envelope = binding.call(json!({"offset":offset})).await?;
@@ -22,10 +22,10 @@ async fn observe_kernel_modules() -> Result<()> {
                     .iter()
                     .cloned(),
             );
-            let next = page["next_offset"].as_i64().context("missing next page")?;
-            if next == -1 {
+            let Some(next) = page.get("next_offset") else {
                 break;
-            }
+            };
+            let next = next.as_u64().context("non-integer next page")?;
             ensure!(next > offset && next <= 512, "invalid paging progress");
             offset = next;
         }

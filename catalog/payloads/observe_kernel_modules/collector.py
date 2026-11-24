@@ -4,13 +4,13 @@ import estus_runtime
 def page_modules(result, observed, offset, budget=3900, max_nodes=256):
     """Fill one name-sorted page from offset to the projection budget.
 
-    next_offset is -1 once the page reaches the end; a module that cannot fit
-    an empty page fails instead of returning a page that never advances.
+    next_offset is present while modules remain; a module that cannot fit an
+    empty page fails instead of returning a page that never advances.
     """
     import json
     if type(offset) is not int or not 0 <= offset <= 512:
         raise ValueError('invalid module page offset')
-    page = dict(result, modules=[], total_count=len(observed), next_offset=-1)
+    page = dict(result, modules=[], total_count=len(observed))
     def nodes(v):
         if isinstance(v, dict): return 1 + sum(nodes(x) for x in v.values())
         if isinstance(v, list): return 1 + sum(nodes(x) for x in v)
