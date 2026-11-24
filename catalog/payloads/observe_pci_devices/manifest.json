@@ -3,9 +3,16 @@
   "protocol": 1,
   "adapter_version": 1,
   "change_policy": "read_only",
-  "source_sha256": "5c60d4fed47e9ad6e2c7fb4fd04176e001a34985f71005e7724b8efcaf22d911",
+  "source_sha256": "97f4e5c3a127d60a15d9d561214f91b97e76200aeb763b00eac4551278c34825",
   "max_source_bytes": 1048576,
-  "argv": [],
+  "argv": [
+    {
+      "kind": "argument",
+      "name": "offset",
+      "format": "json",
+      "default": 0
+    }
+  ],
   "requirements": {
     "python_min": [
       3,
@@ -27,6 +34,11 @@
       "properties": {
         "target_python": {
           "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
         }
       },
       "required": [
@@ -38,6 +50,10 @@
       "aliases": {},
       "properties": {
         "target_python": {
+          "aliases": {},
+          "properties": {}
+        },
+        "offset": {
           "aliases": {},
           "properties": {}
         }

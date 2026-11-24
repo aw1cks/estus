@@ -1611,11 +1611,13 @@
         },
         "input_schema": {
           "type": "object",
-          "properties": {},
+          "properties": {
+            "offset": { "type": "integer", "minimum": 0, "maximum": 4095 }
+          },
           "required": [],
           "additionalProperties": false
         },
-        "input_map": {}
+        "input_map": { "offset": "offset" }
       }
     },
     "observe_pci_topology": {

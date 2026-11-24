@@ -464,6 +464,45 @@ fn rss_large_tables_summarize_and_page_without_the_key() -> Result<()> {
 }
 
 #[test]
+fn pci_devices_pages_reach_every_device() -> Result<()> {
+    let devices: Vec<Value> = (0..45)
+        .map(|i| json!({"address": format!("0000:{i:02x}:00.0"), "vendor": "0x8086", "device": "0x1563", "class": "0x020000", "subsystem_vendor": "0x1849", "subsystem_device": "0x1563", "revision": "0x01"}))
+        .collect();
+    let base = json!({"source": "Linux PCI sysfs numeric identities", "observed_at": "2026-11-24T00:00:00+00:00", "unavailable": []});
+    let mut seen = Vec::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = parsed(
+            "observe_pci_devices",
+            "page_devices",
+            json!([base, devices, offset]),
+        )?;
+        pages += 1;
+        assert!(serde_json::to_vec(&page)?.len() <= 4096);
+        assert_eq!(page["device_count"], 45);
+        let slice = page["devices"].as_array().context("devices")?;
+        assert_eq!(page["omitted_records"], 45 - slice.len());
+        seen.extend(slice.iter().cloned());
+        match page.get("next_offset") {
+            Some(next) => offset = next.as_u64().context("next_offset")?,
+            None => break,
+        }
+    }
+    assert!(pages > 1);
+    assert_eq!(seen, devices);
+    for offset in [json!(-1), json!(4096), json!(null)] {
+        rejected(
+            "observe_pci_devices",
+            "page_devices",
+            json!([base, devices, offset]),
+            "ValueError",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
     let head = json!({"scope":"system","unit_pattern":"*","view":"loaded","unit_type":"service","state":"active"});
     let rows: Vec<Value> = (0..300)

@@ -1,18 +1,18 @@
 [tools.observe_pci_devices]
-description = "List every PCI device with its numeric address and identity fields from bounded sysfs reads. No configuration space and no external name lookup."
-revision = "1_native1"
+description = "List PCI devices sorted by address with their numeric identity fields from bounded sysfs reads, one bounded page per call; pass next_offset as offset until it is absent. No configuration space and no external name lookup."
+revision = "2_native1"
 authority = "automation"
 effects = ["read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/observe_pci_devices/collector.py", no_log = false }
 fixed_args = { target_python = "/usr/bin/python3" }
 
-input_map = {  }
+input_map = { "offset" = "offset" }
 limits = { timeout_secs = 30 }
-input_schema = { "type" = "object", "properties" = {  }, "required" = [], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 4095 } }, "required" = [], "additionalProperties" = false }
 [tools.observe_pci_devices.result]
 kind = "capability_projection"
-fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "devices" = ["mcp_result", "devices"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"] }
+fields = { "source" = ["mcp_result", "source"], "observed_at" = ["mcp_result", "observed_at"], "unavailable" = ["mcp_result", "unavailable"], "devices" = ["mcp_result", "devices"] , truncated = ["mcp_result", "truncated"], omitted_records = ["mcp_result", "omitted_records"], "device_count" = ["mcp_result", "device_count"], "offset" = ["mcp_result", "offset"], "next_offset" = ["mcp_result", "next_offset"] }
 max_bytes = 4096
 max_items = 256
 max_depth = 8
-schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "devices" = { "type" = "array", "items" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "vendor" = { "type" = "string", "maxLength" = 10 }, "device" = { "type" = "string", "maxLength" = 10 }, "class" = { "type" = "string", "maxLength" = 10 }, "subsystem_vendor" = { "type" = "string", "maxLength" = 10 }, "subsystem_device" = { "type" = "string", "maxLength" = 10 }, "revision" = { "type" = "string", "maxLength" = 10 } }, "required" = ["address"], "additionalProperties" = false }, "maxItems" = 256 } }, "required" = ["source", "observed_at", "unavailable", "devices"], "additionalProperties" = false }
+schema = { "type" = "object", "properties" = { truncated = { type = "boolean" }, omitted_records = { type = "integer", minimum = 0, maximum = 9007199254740991 }, "source" = { "type" = "string", "maxLength" = 256 }, "observed_at" = { "type" = "string", "maxLength" = 64 }, "unavailable" = { "type" = "array", "items" = { "type" = "string", "maxLength" = 128 }, "maxItems" = 256 }, "devices" = { "type" = "array", "items" = { "type" = "object", "properties" = { "address" = { "type" = "string", "maxLength" = 12 }, "vendor" = { "type" = "string", "maxLength" = 10 }, "device" = { "type" = "string", "maxLength" = 10 }, "class" = { "type" = "string", "maxLength" = 10 }, "subsystem_vendor" = { "type" = "string", "maxLength" = 10 }, "subsystem_device" = { "type" = "string", "maxLength" = 10 }, "revision" = { "type" = "string", "maxLength" = 10 } }, "required" = ["address"], "additionalProperties" = false }, "maxItems" = 256 }, "device_count" = { "type" = "integer", "minimum" = 0, "maximum" = 4096 }, "offset" = { "type" = "integer", "minimum" = 0, "maximum" = 4095 }, "next_offset" = { "type" = "integer", "minimum" = 1, "maximum" = 4095 } }, "required" = ["source", "observed_at", "unavailable", "devices", "device_count", "offset", "truncated", "omitted_records"], "additionalProperties" = false }
