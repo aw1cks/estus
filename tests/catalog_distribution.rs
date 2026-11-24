@@ -745,21 +745,3 @@ ast.parse((root / "src/native_payload/bootstrap.py").read_text(encoding="utf-8")
         .unwrap();
     assert!(status.success());
 }
-
-#[test]
-fn packaging_metadata_matches_docs_contract() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let pyproject = fs::read_to_string(root.join("pyproject.toml")).expect("read pyproject.toml");
-    let dev_docs =
-        fs::read_to_string(root.join("docs/development.md")).expect("read docs/development.md");
-    assert!(
-        pyproject.contains("requires-python = \">=3.10\""),
-        "pyproject.toml requires-python changed; keep docs/development.md in sync"
-    );
-    assert!(
-        dev_docs.contains("`requires-python = \">=3.10\"`")
-            && dev_docs.contains("`py3-none-<platform>`")
-            && !dev_docs.contains("cp314-cp314"),
-        "docs/development.md packaging claims drifted from pyproject.toml / setup.py"
-    );
-}

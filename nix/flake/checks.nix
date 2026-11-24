@@ -47,7 +47,9 @@
             if res.returncode != 0:
                 sys.exit(res.returncode)
         check("3.8", [src / "src/native_payload/bootstrap.py", src / "src/native_payload/prestate.py"])
-        check("3.10", [src / "python/estus/__init__.py", src / "setup.py"])
+        check("3.8", [src / "python/estus/__init__.py"])
+        # setup.py only runs at build time, under the pinned setuptools.
+        check("3.10", [src / "setup.py"])
         groups = {}
         for p in sorted((src / "catalog/payloads").iterdir()):
             manifest = json.loads((p / "manifest.json").read_text())

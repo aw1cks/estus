@@ -34,7 +34,7 @@ let
       && !lib.hasPrefix "nix/result/" relative
       && !lib.hasPrefix "tests/" relative && (
         craneLib.filterCargoSources path type
-        || builtins.elem relative [ "pyproject.toml" "setup.py" "MANIFEST.in" "README.md" ]
+        || builtins.elem relative [ "pyproject.toml" "setup.py" "MANIFEST.in" "README.md" "LICENSE" ]
         || (lib.hasPrefix "catalog/" relative
           && !lib.hasInfix "/__pycache__/" relative
           && !lib.hasSuffix ".pyc" relative

@@ -5,12 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "estus"
 version = "0.1.0"
-description = "Stdio MCP server for operator-configured SSH authority"
+description = "Stdio MCP server that gives AI agents structured, policy-gated Linux operations over your own SSH"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

@@ -3,7 +3,9 @@ name = "estus"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Stdio MCP server for operator-configured SSH authority"
+description = "Stdio MCP server that gives AI agents structured, policy-gated Linux operations over your own SSH"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/aw1cks/estus"
 publish = false
 
 [lib]
