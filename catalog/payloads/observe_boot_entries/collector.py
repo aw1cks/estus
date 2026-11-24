@@ -17,8 +17,8 @@ def page_entries(result, observed, offset, budget=3900, max_nodes=256):
         return 1
     for entry in observed[offset:]:
         page['entries'].append(entry)
-        # observed_at is added after paging; the budget leaves room for it.
-        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) >= max_nodes:
+        # next_offset and observed_at are added after paging; reserve their bytes and items.
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) + 2 > max_nodes:
             page['entries'].pop()
             if not page['entries']:
                 raise ValueError('boot entry exceeds projection budget')

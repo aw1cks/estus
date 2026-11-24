@@ -3,8 +3,8 @@ import estus_runtime
 MAX_ENTRIES = 256
 
 
-def page_inventory(result, rows, offset, budget=3800):
-    """Fill one page of inventory rows starting at offset within the byte budget.
+def page_inventory(result, rows, offset, budget=3800, max_nodes=256):
+    """Fill one page of inventory rows starting at offset within the byte and item budget.
 
     Rows past MAX_ENTRIES are dropped only for the '*' pattern (truncated stays
     true on every page); narrower patterns fail closed. next_offset is present
@@ -21,9 +21,14 @@ def page_inventory(result, rows, offset, budget=3800):
         rows = rows[:MAX_ENTRIES]
         capped = True
     page = dict(result, units=[], source_count=len(rows), offset=offset, truncated=True)
+    def nodes(v):
+        if isinstance(v, dict): return 1 + sum(nodes(x) for x in v.values())
+        if isinstance(v, list): return 1 + sum(nodes(x) for x in v)
+        return 1
     for row in rows[offset:]:
         page['units'].append(row)
-        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget:
+        # next_offset is added after paging; reserve its item.
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) + 1 > max_nodes:
             page['units'].pop()
             if not page['units']:
                 raise ValueError('inventory entry exceeds projection bound')

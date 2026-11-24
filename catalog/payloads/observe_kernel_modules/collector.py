@@ -17,8 +17,8 @@ def page_modules(result, observed, offset, budget=3900, max_nodes=256):
         return 1
     for module in observed[offset:]:
         page['modules'].append(module)
-        # observed_at is added after paging; the budget leaves room for it.
-        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) >= max_nodes:
+        # next_offset and observed_at are added after paging; reserve their bytes and items.
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) + 2 > max_nodes:
             page['modules'].pop()
             if not page['modules']:
                 raise ValueError('module record exceeds projection budget')

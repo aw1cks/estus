@@ -21,6 +21,16 @@ fn rejected(role: &str, function: &str, args: Value, error: &str) -> Result<()> 
     Ok(())
 }
 
+/// Items the server's projection walk counts against `max_items`: every
+/// object, array and scalar, the root included.
+fn projection_items(value: &Value) -> usize {
+    1 + match value {
+        Value::Object(map) => map.values().map(projection_items).sum(),
+        Value::Array(items) => items.iter().map(projection_items).sum(),
+        _ => 0,
+    }
+}
+
 #[test]
 fn md_attributes_enforce_byte_encoding_and_both_bounds() -> Result<()> {
     for (input, expected) in [
@@ -545,6 +555,8 @@ fn kernel_module_pages_fill_the_budget_until_next_offset_is_absent() -> Result<(
         )?;
         pages += 1;
         assert!(serde_json::to_vec(&page)?.len() <= 3900);
+        // The collector adds observed_at after paging.
+        assert!(projection_items(&page) < 256, "page exceeds max_items");
         assert_eq!(page["total_count"], 82);
         seen.extend(
             page["modules"]
@@ -588,6 +600,8 @@ fn boot_entry_pages_fit_long_paths_and_reach_every_entry() -> Result<()> {
             json!([head, entries, offset]),
         )?;
         assert!(serde_json::to_vec(&page)?.len() <= 3900);
+        // The collector adds observed_at after paging.
+        assert!(projection_items(&page) < 256, "page exceeds max_items");
         assert_eq!(page["total_count"], 6);
         seen.extend(
             page["entries"]
@@ -629,6 +643,7 @@ fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
         )?;
         pages += 1;
         assert!(serde_json::to_vec(&page)?.len() <= 3800);
+        assert!(projection_items(&page) <= 256, "page exceeds max_items");
         assert_eq!(page["source_count"], 256);
         assert_eq!(page["offset"], offset);
         // Rows past the 256 '*' cap are unreachable, so every page stays truncated.
@@ -641,6 +656,28 @@ fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
     }
     assert!(pages > 1);
     assert_eq!(seen, rows[..256]);
+
+    // Short installed-view rows hit the 256-item limit before the byte budget.
+    let installed = json!({"scope":"system","unit_pattern":"*","view":"installed","unit_type":"service","state":"all"});
+    let short: Vec<Value> = (0..200)
+        .map(|i| json!({"unit_file": format!("u{i}.service"), "state": "static", "preset": "-"}))
+        .collect();
+    let mut seen = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = parsed(
+            "observe_systemd_units",
+            "page_inventory",
+            json!([installed, short, offset]),
+        )?;
+        assert!(projection_items(&page) <= 256, "page exceeds max_items");
+        seen.extend(page["units"].as_array().context("units")?.iter().cloned());
+        match page.get("next_offset") {
+            Some(next) => offset = next.as_u64().context("next_offset")?,
+            None => break,
+        }
+    }
+    assert_eq!(seen, short);
 
     let narrow = json!({"scope":"system","unit_pattern":"unit-*","view":"loaded","unit_type":"service","state":"active"});
     let last = parsed(

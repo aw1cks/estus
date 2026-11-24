@@ -59,9 +59,14 @@ def main():
     rows = rows[:MAX_ENTRIES]
     # Only this page's units are queried; the budget decides where the page ends.
     page = {'scope': scope, 'sockets': [], 'source_count': len(rows), 'offset': offset, 'truncated': True}
+    def nodes(v):
+        if isinstance(v, dict): return 1 + sum(nodes(x) for x in v.values())
+        if isinstance(v, list): return 1 + sum(nodes(x) for x in v)
+        return 1
     for unit in rows[offset:]:
         page['sockets'].append(show(unit))
-        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > 3800:
+        # next_offset is added after paging; reserve its item (max_items is 256).
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > 3800 or nodes(page) + 1 > 256:
             page['sockets'].pop()
             if not page['sockets']:
                 raise ValueError('socket entry exceeds projection bound')
