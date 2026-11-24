@@ -1,4 +1,40 @@
 import estus_runtime
+
+MAX_ENTRIES = 256
+
+
+def page_inventory(result, rows, offset, budget=3800):
+    """Fill one page of inventory rows starting at offset within the byte budget.
+
+    Rows past MAX_ENTRIES are dropped only for the '*' pattern (truncated stays
+    true on every page); narrower patterns fail closed. next_offset is present
+    while later rows remain, and a row that cannot fit an empty page fails
+    instead of returning a page that would never advance.
+    """
+    import json
+    if type(offset) is not int or not 0 <= offset < MAX_ENTRIES:
+        raise ValueError('offset out of bounds')
+    capped = False
+    if len(rows) > MAX_ENTRIES:
+        if result['unit_pattern'] != '*':
+            raise ValueError('inventory exceeds 256 entries')
+        rows = rows[:MAX_ENTRIES]
+        capped = True
+    page = dict(result, units=[], source_count=len(rows), offset=offset, truncated=True)
+    for row in rows[offset:]:
+        page['units'].append(row)
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget:
+            page['units'].pop()
+            if not page['units']:
+                raise ValueError('inventory entry exceeds projection bound')
+            break
+    end = offset + len(page['units'])
+    if end < len(rows):
+        page['next_offset'] = end
+    page['truncated'] = capped or end < len(rows)
+    return page
+
+
 def main():
     import json, os, re
     request = estus_runtime.request()[0]
@@ -60,21 +96,10 @@ def main():
         rows.append(dict(zip(keys, fields)))
     if not isinstance(rows, list):
         raise ValueError('invalid inventory rows')
-    capped = False
-    if len(rows) > 256:
-        if pattern == '*':
-            rows = rows[:256]
-            capped = True
-        else:
-            raise ValueError('inventory exceeds 256 entries')
     keys = ('unit', 'load', 'active', 'sub', 'description') if view == 'loaded' else ('unit_file', 'state', 'preset')
-    entries = [{key: text(row[key], 1024) for key in keys if key in row and row[key] is not None} for row in rows[:8]]
-    result.update(view=view, unit_type=kind, state=state, units=entries)
-    result['source_count'] = len(rows)
-    result['truncated'] = capped or len(rows) > 8
-    while len(json.dumps(result, separators=(',', ':')).encode('utf-8')) > 3800 and result['units']:
-        result['units'].pop()
-        result['truncated'] = True
+    entries = [{key: text(row[key], 1024) for key in keys if key in row and row[key] is not None} for row in rows]
+    result.update(view=view, unit_type=kind, state=state)
+    result = page_inventory(result, entries, request['offset'])
     encoded = json.dumps(result, separators=(',', ':'), allow_nan=False)
     if len(encoded.encode('utf-8')) > 4096:
         raise ValueError('projection output bound exceeded')

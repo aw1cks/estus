@@ -1910,13 +1910,14 @@
             "view": { "type": "string", "enum": ["loaded", "installed"] },
             "unit_type": { "type": "string", "enum": ["service", "socket", "timer", "target", "mount", "path", "slice"] },
             "state": { "type": "string", "enum": ["all", "active", "inactive", "failed"] },
-            "unit_pattern": { "type": "string", "minLength": 1, "maxLength": 128 }
+            "unit_pattern": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "offset": { "type": "integer", "minimum": 0, "maximum": 255 }
           },
           "required": ["view", "unit_type", "state", "unit_pattern"],
           "additionalProperties": false
         },
-        "input_map": { "view": "view", "unit_type": "unit_type", "state": "state", "unit_pattern": "unit_pattern" },
-        "description": "List loaded or installed systemd units matching unit_pattern. Use \"*\" for bounded truncation past 256 entries; narrower patterns fail closed if more than 256 units match."
+        "input_map": { "view": "view", "unit_type": "unit_type", "state": "state", "unit_pattern": "unit_pattern", "offset": "offset" },
+        "description": "List loaded or installed systemd units matching unit_pattern, one bounded page per call; pass next_offset as offset until it is absent. \"*\" keeps the first 256 matches (truncated stays true); narrower patterns fail closed if more than 256 units match."
       }
     },
     "observe_time_sync": {

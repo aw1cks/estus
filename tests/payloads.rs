@@ -354,6 +354,61 @@ fn psi_parses_units_and_rejects_missing_duplicate_unknown_and_oversize_lines() -
 }
 
 #[test]
+fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
+    let head = json!({"scope":"system","unit_pattern":"*","view":"loaded","unit_type":"service","state":"active"});
+    let rows: Vec<Value> = (0..300)
+        .map(|i| json!({"unit": format!("unit-{i:03}.service"), "load": "loaded", "active": "active", "sub": "running", "description": format!("Fixture {i}")}))
+        .collect();
+    let mut seen = Vec::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = parsed(
+            "observe_systemd_units",
+            "page_inventory",
+            json!([head, rows, offset]),
+        )?;
+        pages += 1;
+        assert!(serde_json::to_vec(&page)?.len() <= 3800);
+        assert_eq!(page["source_count"], 256);
+        assert_eq!(page["offset"], offset);
+        // Rows past the 256 '*' cap are unreachable, so every page stays truncated.
+        assert_eq!(page["truncated"], true);
+        seen.extend(page["units"].as_array().context("units")?.iter().cloned());
+        match page.get("next_offset") {
+            Some(next) => offset = next.as_u64().context("next_offset")?,
+            None => break,
+        }
+    }
+    assert!(pages > 1);
+    assert_eq!(seen, rows[..256]);
+
+    let narrow = json!({"scope":"system","unit_pattern":"unit-*","view":"loaded","unit_type":"service","state":"active"});
+    let last = parsed(
+        "observe_systemd_units",
+        "page_inventory",
+        json!([narrow, rows[..3], 0]),
+    )?;
+    assert_eq!(last["truncated"], false);
+    assert!(last.get("next_offset").is_none());
+    for (head, rows, offset) in [
+        (&narrow, json!(rows[..257]), json!(0)),
+        (&narrow, json!(rows[..3]), json!(256)),
+        (&narrow, json!(rows[..3]), json!(-1)),
+        (&narrow, json!(rows[..3]), json!(true)),
+        (&narrow, json!([{"unit": "x".repeat(4000)}]), json!(0)),
+    ] {
+        rejected(
+            "observe_systemd_units",
+            "page_inventory",
+            json!([head, rows, offset]),
+            "ValueError",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn memory_selected_fields_preserve_units_and_fail_closed_on_selected_corruption() -> Result<()> {
     let source = b"MemTotal: 4 kB\nMemFree: 1 kB\nFutureField: unknown\n";
     assert_eq!(

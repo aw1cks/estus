@@ -24,14 +24,36 @@ systemctl daemon-reload"#).await.context("PREPARE installed template: root unit 
         let oracle = guest.shell("systemctl list-unit-files estus-fixture@.service --no-legend --no-pager").await.context("ORACLE installed template inventory")?;
         ensure!(oracle.status.success() && String::from_utf8(oracle.stdout)?.contains("estus-fixture@.service"), "template oracle failed");
         let prep = guest.shell(r#"set -eu
-for i in $(seq 1 12); do
+for i in $(seq 1 80); do
   printf '[Service]\nExecStart=/usr/bin/sleep infinity\n' > "/run/systemd/system/estus-fixture-overflow$i.service"
 done
 systemctl daemon-reload"#).await.context("PREPARE installed inventory overflow")?;
         ensure!(prep.status.success(), "overflow preparation failed: {}", String::from_utf8_lossy(&prep.stderr));
-        let bounded = binding.call(json!({"view":"installed","unit_type":"service","state":"all","unit_pattern":"estus-fixture*"})).await.context("THIRD bounded installed inventory execution")?;
-        let bounded = catalog::projection(&bounded).context("THIRD bounded installed inventory projection")?;
-        ensure!(bounded["truncated"] == true && bounded["source_count"].as_u64().context("source count")? > 8 && bounded["units"].as_array().context("bounded units")?.len() <= 8, "bounded inventory silently lost completeness");
+        let oracle = guest.shell("systemctl list-unit-files 'estus-fixture*' --type=service --no-legend --no-pager --plain").await.context("ORACLE paged installed inventory")?;
+        ensure!(oracle.status.success(), "paged inventory oracle failed");
+        let expected = String::from_utf8(oracle.stdout)?.lines().filter(|line| !line.trim().is_empty()).count();
+        let mut paged = Vec::new();
+        let mut offset = 0;
+        let mut pages = 0;
+        loop {
+            let page = binding.call(json!({"view":"installed","unit_type":"service","state":"all","unit_pattern":"estus-fixture*","offset":offset})).await.context("THIRD paged installed inventory execution")?;
+            let page = catalog::projection(&page).context("THIRD paged installed inventory projection")?;
+            pages += 1;
+            ensure!(page["source_count"].as_u64().context("source count")? as usize == expected, "page source_count disagrees with oracle");
+            paged.extend(page["units"].as_array().context("paged units")?.iter().filter_map(|u| u["unit_file"].as_str().map(str::to_owned)));
+            match page.get("next_offset") {
+                Some(next) => {
+                    ensure!(page["truncated"] == true, "page with next_offset must be truncated");
+                    offset = next.as_u64().context("next_offset")?;
+                }
+                None => {
+                    ensure!(page["truncated"] == false, "final page below the cap must not be truncated");
+                    break;
+                }
+            }
+        }
+        let unique: std::collections::BTreeSet<_> = paged.iter().collect();
+        ensure!(pages > 1 && paged.len() == expected && unique.len() == expected, "paged inventory lost or repeated entries");
         let prep = guest.shell(r#"set -eu
 mkdir -p /home/mcp/.config/systemd/user
 printf '[Service]\nExecStart=/usr/bin/sleep infinity\n' > /home/mcp/.config/systemd/user/estus-fixture.service
