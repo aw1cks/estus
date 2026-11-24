@@ -1,4 +1,34 @@
 import estus_runtime
+
+
+def page_entries(result, observed, offset, budget=3900, max_nodes=256):
+    """Fill one ID-sorted page from offset to the projection budget.
+
+    next_offset is present while entries remain; an entry that cannot fit an
+    empty page fails instead of returning a page that never advances.
+    """
+    import json
+    if type(offset) is not int or not 0 <= offset <= 128:
+        raise ValueError('invalid entry page offset')
+    page = dict(result, entries=[], total_count=len(observed))
+    def nodes(v):
+        if isinstance(v, dict): return 1 + sum(nodes(x) for x in v.values())
+        if isinstance(v, list): return 1 + sum(nodes(x) for x in v)
+        return 1
+    for entry in observed[offset:]:
+        page['entries'].append(entry)
+        # observed_at is added after paging; the budget leaves room for it.
+        if len(json.dumps(page, separators=(',', ':')).encode('utf-8')) > budget or nodes(page) >= max_nodes:
+            page['entries'].pop()
+            if not page['entries']:
+                raise ValueError('boot entry exceeds projection budget')
+            break
+    end = offset + len(page['entries'])
+    if end < len(observed):
+        page['next_offset'] = end
+    return page
+
+
 def main():
     import datetime, json, os, platform
     if platform.system() != 'Linux':
@@ -55,13 +85,9 @@ def main():
         return selected
 
     offset = a['offset']
-    if type(offset) is not int or not 0 <= offset <= 128:
-        raise ValueError('invalid entry page offset')
     observed = sorted([v for v,e in entries()], key=lambda row: row['entry_id'])
-    result['entries'] = observed[offset:offset + 4]
-    result['total_count'] = len(observed)
-    result['next_offset'] = offset + 4 if offset + 4 < len(observed) else -1
     result['scope'] = 'ID-sorted live bootctl pages; concurrent entry changes can shift offsets'
+    result = page_entries(result, observed, offset)
 
     result['observed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z')
     encoded = json.dumps(result,separators=(',',':'),allow_nan=False)

@@ -573,6 +573,46 @@ fn kernel_module_pages_fill_the_budget_until_next_offset_is_absent() -> Result<(
 }
 
 #[test]
+fn boot_entry_pages_fit_long_paths_and_reach_every_entry() -> Result<()> {
+    // Four entries with 1 KiB kernel paths overflowed the old fixed page of 4.
+    let entries: Vec<Value> = (0..6)
+        .map(|i| json!({"entry_id": format!("entry-{i}.conf"), "source": "esp", "type": "type1", "command_line_sensitive": true, "unknown": [], "linux": format!("/{}", "k".repeat(1024)), "initrd": ["/initrd.img"]}))
+        .collect();
+    let head = json!({"boot_id": "1ccac6df-3646-4eaf-a77d-bc9d57cc97b3", "source": "Linux procfs/sysfs", "unavailable": [], "scope": "ID-sorted"});
+    let mut seen = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = parsed(
+            "observe_boot_entries",
+            "page_entries",
+            json!([head, entries, offset]),
+        )?;
+        assert!(serde_json::to_vec(&page)?.len() <= 3900);
+        assert_eq!(page["total_count"], 6);
+        seen.extend(
+            page["entries"]
+                .as_array()
+                .context("entries")?
+                .iter()
+                .cloned(),
+        );
+        match page.get("next_offset") {
+            Some(next) => offset = next.as_u64().context("next_offset")?,
+            None => break,
+        }
+    }
+    assert_eq!(seen, entries);
+    let oversized = json!([{"entry_id": "x", "linux": "k".repeat(4000)}]);
+    rejected(
+        "observe_boot_entries",
+        "page_entries",
+        json!([head, oversized, 0]),
+        "ValueError",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
     let head = json!({"scope":"system","unit_pattern":"*","view":"loaded","unit_type":"service","state":"active"});
     let rows: Vec<Value> = (0..300)
