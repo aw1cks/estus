@@ -1,6 +1,6 @@
 [tools.inspect_kernel_log]
 description = "Read bounded kernel-only journal records for one boot and time window. Cursor expiry means incomplete, not no records."
-revision = "1_native1"
+revision = "2_native1"
 authority = "automation:catalog"
 effects = ["read", "sensitive_read"]
 execution = { kind = "native_payload", source = "/etc/estus/payloads/inspect_kernel_log/collector.py", no_log = false }
@@ -8,7 +8,7 @@ fixed_args = { "target_python" = "/usr/bin/python3" }
 
 input_map = { "boot_id" = "boot_id", "since" = "since", "journal_until" = "until", "priority" = "priority", "cursor" = "cursor", "limit" = "limit" }
 limits = { timeout_secs = 40 }
-input_schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "maxLength" = 32 }, "since" = { "type" = "integer", "minimum" = 0, "maximum" = 4102444800 }, "until" = { "type" = "integer", "minimum" = 0, "maximum" = 4102444800 }, "priority" = { "type" = "integer", "minimum" = 0, "maximum" = 7 }, "cursor" = { "type" = "string", "maxLength" = 256 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 4 } }, "required" = ["boot_id", "since", "until", "priority", "limit"], "additionalProperties" = false }
+input_schema = { "type" = "object", "properties" = { "boot_id" = { "type" = "string", "maxLength" = 36 }, "since" = { "type" = "integer", "minimum" = 0, "maximum" = 4102444800 }, "until" = { "type" = "integer", "minimum" = 0, "maximum" = 4102444800 }, "priority" = { "type" = "integer", "minimum" = 0, "maximum" = 7 }, "cursor" = { "type" = "string", "maxLength" = 256 }, "limit" = { "type" = "integer", "minimum" = 1, "maximum" = 4 } }, "required" = ["boot_id", "since", "until", "priority", "limit"], "additionalProperties" = false }
 [tools.inspect_kernel_log.result]
 kind = "capability_projection"
 fields = { "boot_id" = ["mcp_result", "boot_id"], "scope" = ["mcp_result", "scope"], "status" = ["mcp_result", "status"], "records" = ["mcp_result", "records"], "continuation_cursor" = ["mcp_result", "continuation_cursor"], "truncated" = ["mcp_result", "truncated"], "incomplete" = ["mcp_result", "incomplete"], "incomplete_reason" = ["mcp_result", "incomplete_reason"], "since" = ["mcp_result", "since"], "until" = ["mcp_result", "until"], "priority_max" = ["mcp_result", "priority_max"] }

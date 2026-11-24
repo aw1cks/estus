@@ -1,4 +1,16 @@
 import estus_runtime
+def journal_boot_id(value, current):
+    """Accept 'current', journald's 32-hex boot ID or the dashed /proc form."""
+    import re
+    if value == 'current':
+        value = current()
+    if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}', value):
+        value = value.replace('-', '')
+    if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{32}', value):
+        raise ValueError('invalid boot')
+    return value
+
+
 def slice_message_text(raw):
     if isinstance(raw, list) and all(type(x) is int and 0 <= x <= 255 for x in raw):
         return bytes(raw).decode('utf-8', 'replace')
@@ -139,15 +151,8 @@ def parse_cursor_arg(cursor_arg, direction):
 
 
 def main():
-    import os, json, re
+    import os, json
     args = estus_runtime.request()
-
-    def read(path, bound=65536):
-        with open(path, 'rb') as f:
-            data = f.read(bound + 1)
-        if len(data) > bound:
-            raise ValueError('source exceeds bound')
-        return data.decode('utf-8', errors='strict').strip()
 
     def run(argv, bound=8388608):
         return estus_runtime.run_bounded(
@@ -174,11 +179,7 @@ def main():
     contains = p['contains'] or ''
     raw_cursor = parse_cursor_arg(p['cursor'] or '', direction)
 
-    boot = p['boot_id']
-    if boot == 'current':
-        boot = read('/proc/sys/kernel/random/boot_id', 128).replace('-', '')
-    if not re.fullmatch('[0-9a-f]{32}', boot):
-        raise ValueError('invalid boot')
+    boot = journal_boot_id(p['boot_id'], estus_runtime.boot_id)
 
     unit = p['unit']
     if unit is not None and (not isinstance(unit, str) or not unit or len(unit) > 128 or '\x00' in unit):

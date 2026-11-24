@@ -1,12 +1,20 @@
 import estus_runtime
+def journal_boot_id(value, current):
+    """Accept 'current', journald's 32-hex boot ID or the dashed /proc form."""
+    import re
+    if value == 'current':
+        value = current()
+    if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}', value):
+        value = value.replace('-', '')
+    if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{32}', value):
+        raise ValueError('invalid boot')
+    return value
+
+
 def main():
     import os, json, re
     MAX=9007199254740991
     args=estus_runtime.request()
-    def read(path, bound=65536):
-        with open(path,'rb') as f: data=f.read(bound+1)
-        if len(data)>bound: raise ValueError('source exceeds bound')
-        return data.decode('utf-8',errors='strict').strip()
     def run(argv, bound=1048576):
         return estus_runtime.run_bounded(
             argv, timeout=10, max_bytes=bound)['stdout']
@@ -19,9 +27,7 @@ def main():
 
     if p['since']>p['until']: raise ValueError('inverted time interval')
     if not re.fullmatch(r'[A-Za-z0-9=;_-]{0,256}',p['cursor']): raise ValueError('invalid bounded cursor syntax')
-    boot=p['boot_id']
-    if boot=='current': boot=read('/proc/sys/kernel/random/boot_id',128).replace('-','')
-    if not re.fullmatch('[0-9a-f]{32}',boot): raise ValueError('invalid boot')
+    boot=journal_boot_id(p['boot_id'],estus_runtime.boot_id)
     base=[os.environ['ESTUS_EXEC_JOURNALCTL'],'--no-pager','--quiet','--output=json','--all']
     def records(argv):
         text=run(argv)

@@ -611,7 +611,7 @@
           "type": "object",
           "properties": {
             "unit": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "boot_id": { "type": "string", "maxLength": 32 },
+            "boot_id": { "type": "string", "maxLength": 36 },
             "since": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
             "until": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
             "priority": { "type": "integer", "minimum": 0, "maximum": 7 },
@@ -649,7 +649,7 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "boot_id": { "type": "string", "maxLength": 32 },
+            "boot_id": { "type": "string", "maxLength": 36 },
             "cursor": { "type": "string", "minLength": 1, "maxLength": 256 },
             "offset": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
             "max_bytes": { "type": "integer", "minimum": 1, "maximum": 4096 }
@@ -683,7 +683,7 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "boot_id": { "type": "string", "maxLength": 32 },
+            "boot_id": { "type": "string", "maxLength": 36 },
             "since": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
             "until": { "type": "integer", "minimum": 0, "maximum": 4102444800 },
             "priority": { "type": "integer", "minimum": 0, "maximum": 7 },

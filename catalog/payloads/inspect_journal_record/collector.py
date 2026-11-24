@@ -61,16 +61,21 @@ def read_journal_record_from_records(probe, boot, raw_cursor, offset, max_bytes)
     }
 
 
+def journal_boot_id(value, current):
+    """Accept 'current', journald's 32-hex boot ID or the dashed /proc form."""
+    import re
+    if value == 'current':
+        value = current()
+    if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}', value):
+        value = value.replace('-', '')
+    if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{32}', value):
+        raise ValueError('invalid boot')
+    return value
+
+
 def main():
     import os, json, re
     args = estus_runtime.request()
-
-    def read(path, bound=65536):
-        with open(path, 'rb') as f:
-            data = f.read(bound + 1)
-        if len(data) > bound:
-            raise ValueError('source exceeds bound')
-        return data.decode('utf-8', errors='strict').strip()
 
     def run(argv, bound=4194304):
         return estus_runtime.run_bounded(
@@ -87,11 +92,7 @@ def main():
     if not raw_cursor or not re.fullmatch(r'[A-Za-z0-9=;_-]{1,256}', raw_cursor):
         raise ValueError('invalid bounded cursor syntax')
 
-    boot = p['boot_id']
-    if boot == 'current':
-        boot = read('/proc/sys/kernel/random/boot_id', 128).replace('-', '')
-    if not re.fullmatch('[0-9a-f]{32}', boot):
-        raise ValueError('invalid boot')
+    boot = journal_boot_id(p['boot_id'], estus_runtime.boot_id)
 
     offset = p['offset']
     max_bytes = p['max_bytes']

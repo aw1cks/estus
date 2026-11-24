@@ -409,6 +409,34 @@ fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
 }
 
 #[test]
+fn journal_collectors_accept_dashed_and_journald_boot_ids() -> Result<()> {
+    let journald = "1ccac6df36464eafa77dbc9d57cc97b3";
+    for role in [
+        "inspect_journal",
+        "inspect_journal_record",
+        "inspect_kernel_log",
+    ] {
+        for input in [journald, "1ccac6df-3646-4eaf-a77d-bc9d57cc97b3"] {
+            assert_eq!(
+                parsed(role, "journal_boot_id", json!([input, null]))?,
+                journald,
+                "{role} {input}"
+            );
+        }
+        for input in [
+            json!(""),
+            json!("1CCAC6DF36464EAFA77DBC9D57CC97B3"),
+            json!("1ccac6df-36464eaf-a77d-bc9d57cc97b3"),
+            json!("1ccac6df36464eafa77dbc9d57cc97b"),
+            json!(null),
+        ] {
+            rejected(role, "journal_boot_id", json!([input, null]), "ValueError")?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn memory_selected_fields_preserve_units_and_fail_closed_on_selected_corruption() -> Result<()> {
     let source = b"MemTotal: 4 kB\nMemFree: 1 kB\nFutureField: unknown\n";
     assert_eq!(

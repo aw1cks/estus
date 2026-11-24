@@ -23,6 +23,14 @@ async fn journal_read_real_guest_acceptance() -> Result<()> {
         ensure!(records.iter().any(|r| r["cursor"] == marker["__CURSOR"] && r["message"] == marker["MESSAGE"] && r["boot_id"] == marker["_BOOT_ID"]), "selected real marker missing");
         ensure!(records.iter().all(|r| r["unit"] == "estus-fixture.service"), "unit filter escaped");
         ensure!(value["incomplete"] == true, "retention incompleteness hidden");
+        let dashed = guest.shell("cat /proc/sys/kernel/random/boot_id").await?;
+        ensure!(dashed.status.success(), "boot_id oracle failed");
+        let dashed = String::from_utf8(dashed.stdout)?.trim().to_owned();
+        let mut by_dashed = inputs.clone();
+        by_dashed["boot_id"] = json!(dashed);
+        let by_dashed = binding.call(by_dashed).await.context("inspect_journal dashed boot_id call")?;
+        let by_dashed = catalog::projection(&by_dashed).context("inspect_journal dashed boot_id projection")?;
+        ensure!(by_dashed["boot_id"] == value["boot_id"] && by_dashed["boot_id"] == json!(dashed.replace('-', "")), "dashed boot_id not normalized to the journald form");
         let mut continuation = inputs.clone();
         continuation["cursor"] = value["continuation_cursor"].clone();
         continuation["direction"] = json!("backward");
