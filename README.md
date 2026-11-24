@@ -1,125 +1,177 @@
 # Estus
 
-Estus is a stdio MCP server that gives an LLM agent a curated set of Linux SRE
-operations over operator-configured SSH: structured observation, sensitive
-inspection, previews, single-purpose changes, generic command execution, and an
-opt-in catalog of reviewed collectors and Ansible modules. It is **not** a
-sandbox, an SSH credential store, a bastion, or a policy engine for arbitrary
-shell work: the Rust process owns MCP framing, SSH transport, limits, cleanup and
-the write quarantine, while remote SSH identities, the remote OS and
-the operator's `sudoers` remain authoritative. A client that can execute as the
-service account can bypass Estus entirely. See
-[docs/threat-model.md](docs/threat-model.md).
+**Keep SSH in your hands.**
 
-Only MCP JSON is written to server stdout; diagnostics go to stderr.
+Estus is an [MCP](https://modelcontextprotocol.io) server that lets an AI agent
+triage and operate Linux hosts over SSH, through structured, policy-gated tools
+instead of a raw shell.
 
-## Quickstart
+![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)
 
-Build and run (Rust 1.88+), or install the wheel with Python 3.14:
+> **Status: pre-1.0.** Configuration format and tool schemas may change between
+> releases. Read the [security model](docs/security.md) before pointing Estus at
+> anything you care about.
 
-```sh
-cargo build --release --locked && ./target/release/estus --help
-uv build --python 3.14 && uv tool install --python 3.14 ./dist/estus-*.whl
+## Why
+
+Giving an agent `ssh` gives it a shell with all of your access, and "allow this
+command?" prompts are hard to review. Estus sits in between. The agent calls
+named tools with typed arguments, and you decide, per host, which tools exist
+and what they can touch.
+
+- **Tools, not shell strings.** `observe_memory`, `inspect_journal`,
+  `change_systemd_unit`. Catalog tools take fixed, typed inputs and return
+  structured results, so there are no flags or paths to smuggle in.
+- **Policy per host.** Production can be read-only while staging may restart
+  services. Rules combine by "strictest wins", so file order never weakens them.
+- **Tiered for approvals.** Every tool is `observe`, `inspect`, `preview`,
+  `change` or `exec`. Auto-approve reads; prompt for the rest.
+- **Honest about failure.** If a change's acknowledgement is lost, Estus doesn't
+  guess. It locks writes on that host and never retries. You reconcile, then
+  unlock.
+- **Your SSH, your credentials.** Estus runs your OpenSSH. It never sees, stores
+  or asks for keys, and uses your host-key checking and `ProxyJump`. Targets
+  need only `sshd` and `python3` (3.8+).
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Agent / MCP client] -- "MCP over stdio" --> E[estus]
+    E -- "your OpenSSH" --> H1[web-1]
+    E --> H2[db-1]
+    P[(your policy: TOML)] -.-> E
 ```
 
-A minimal closed configuration — one host, read-only catalog tools only:
+Your MCP client starts Estus as a local process. Estus validates each call
+against your policy, runs it over SSH, and returns a structured result.
+
+### An example
+
+You ask: *"Is web-1 under memory pressure?"* The agent calls `observe_memory`:
+
+```json
+{"host": "web-1", "inputs": {}}
+```
+
+```json
+{
+  "data": {
+    "status": "successful",
+    "complete": true,
+    "changed": false,
+    "host": "web-1",
+    "projection": {
+      "status": "complete",
+      "value": {
+        "memory_bytes": {
+          "mem_total_bytes": 33532788736,
+          "mem_available_bytes": 32737964032,
+          "swap_total_bytes": 1073733632,
+          "swap_free_bytes": 1073733632
+        },
+        "vm_counters": { "oom_kill_events": 0, "swap_out_pages": 0 }
+      }
+    }
+  },
+  "error": null
+}
+```
+
+*(Trimmed for length.)* The agent never wrote a shell command, and could not have
+asked for anything outside this tool's schema.
+
+### Tiers
+
+| Tier | Meaning | Suggested approval |
+| --- | --- | --- |
+| `observe` | Read-only telemetry | allow |
+| `inspect` | Sensitive reads (logs, files, processes) and active probes | ask |
+| `preview` | "What would this change do?", read-only | ask |
+| `change` | One mutation | ask |
+| `exec` | Arbitrary remote execution | ask |
+
+Estus ships a large catalog of reviewed tools (systemd, network, storage,
+kernel, packages, logs and more) that you opt into by name or by preset. It also
+has a few generic builtin tools for files and commands. They are off until you
+enable them in `[capabilities]`: reading files, writing files, running commands
+and sudo are separate switches. See [concepts](docs/concepts.md).
+
+## Install
+
+**Nix** (includes the tool catalog):
+
+```sh
+nix run github:aw1cks/estus -- --config /path/to/estus.toml
+```
+
+**From source, as a Python wheel.** Building needs Rust 1.88+ and Python 3.10+;
+the installed wheel runs on Python 3.8+.
+
+```sh
+git clone https://github.com/aw1cks/estus && cd estus
+uv build --wheel
+uv tool install ./dist/estus-*.whl
+estus --version
+```
+
+Estus needs OpenSSH on the machine that runs it. macOS and Linux are supported;
+targets are Linux. Other build options are in
+[building from source](docs/development/building.md).
+
+## Quick start
+
+A config with one host, read-only:
 
 ```toml
 mode = "headless"
 capabilities = { named = true, file_read = true }
-require_preview = false
 
 [selection]
 presets = ["linux-health"]
 
-[targets.server]
-ssh_host = "server-ordinary"      # an ordinary OpenSSH destination
-sudo = { mode = "disabled" }      # the default
+[targets.web-1]
+ssh_host = "web-1"                # a Host from your ssh config
 
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"       # target interpreter for catalog collectors
+[automation.targets.web-1]
+destination = "web-1"
+python = "/usr/bin/python3"
 ```
+
+Check what it allows, without connecting anywhere:
 
 ```sh
-estus --config /etc/estus/estus.toml
+estus --config estus.toml auth explain web-1
 ```
 
-`[targets]` is the authority boundary: any `[targets]` table (even empty)
-authorizes exactly the logical names it lists, and only those names are accepted
-as `host` values. Its absence leaves the caller naming a raw SSH destination and
-is only reachable in workstation mode.
-
-For local development with no configuration file, `--workstation` opts into
-open destinations and all five capability ceilings; it is flag-only. Without it,
-a no-config start is headless: `named` only, no exec, sudo, file-write or
-catalog exposure.
+Then add it to your MCP client. For Claude Code:
 
 ```sh
-estus --workstation                       # zero-config development (ordinary reads + builtins)
-estus --yolo                              # unrestricted escape hatch (all non-lab tools + open sudo)
-estus --config operator.toml auth explain db1              # explain matched groups/profiles offline
-estus --config operator.toml auth can-i exec_command db1   # exit 0 = yes, 1 = no
-nix run --no-write-lock-file .#dev-mcp    # same, with the Nix-built module bundle
+claude mcp add estus -- estus --config /absolute/path/to/estus.toml
 ```
 
-MCP client entry (Claude Desktop, OMP, or any stdio client):
+[Getting started](docs/getting-started.md) goes through this step by step, and
+[Connecting a client](docs/clients.md) covers other clients and approval rules.
 
-```json
-{
-  "mcpServers": {
-    "estus": {
-      "command": "estus",
-      "args": ["--config", "/etc/estus/estus.toml"]
-    }
-  }
-}
-```
+## Security
 
-## Tool tiers
+Estus is a policy and honesty layer between an agent and OpenSSH. It is **not a
+sandbox**: `exec_command` runs arbitrary shell on the target when you enable it,
+and anything that runs as the same OS user as Estus can bypass it. The
+[security model](docs/security.md) says what is and isn't enforced, and
+[deployment](docs/deployment.md) shows how to run it with separated accounts.
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
-Every published tool carries `_meta.risk_tier`. Configure client approval on
-exact names; the tier is the recommended default.
+## Documentation
 
-| Tier | Builtins | Meaning | Approval |
-| --- | --- | --- | --- |
-| `observe` | `observe_targets`, `observe_stat`, read-only catalog collectors | Read-only telemetry | allow |
-| `inspect` | `inspect_file`, `inspect_directory`, `inspect_output`, sensitive reads, probes | Sensitive reads or active probes | ask |
-| `preview` | `preview_*` catalog tools | Read-only pre-change check | ask |
-| `change` | `change_*` file/SFTP and catalog mutations, `change_target_quarantine_clear` | Single-purpose mutation | ask |
-| `exec` | `exec_command`, `exec_argv`, `exec_sudo` | Arbitrary remote execution | ask |
+- [Getting started](docs/getting-started.md): zero to a working read-only setup
+- [Concepts](docs/concepts.md): tools, tiers, targets, policy, previews, quarantine
+- [Connecting a client](docs/clients.md): Claude Code and other MCP clients
+- [Configuration](docs/configuration.md) and [policy](docs/policy.md): every key, with recipes
+- [Catalog](docs/catalog.md) and the [per-tool reference](docs/tools/catalog-reference.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [All documentation](docs/README.md), [examples](examples/README.md) and [contributing](CONTRIBUTING.md)
 
-[skills/estus-sre/SKILL.md](skills/estus-sre/SKILL.md) carries the generated
-allow/ask lists for the full published inventory (15 builtins plus the 104
-bundled catalog tools).
+## License
 
-Per-target narrowing is separate from the tier: `max_tier` denies every tool,
-builtin or catalog, above a ceiling, and `selection` names the tools that host keeps. `require_preview`
-(global, with a per-target override) applies only to named `change`/`exec` bindings
-that have a qualified preview pairing: such a call needs a fresh matching preview,
-and a named binding with no pairing — including every generic tool — is refused
-with `preview_required`. Builtin `change_*` and `exec_*` tools are not gated by it.
-
-## Layout
-
-- [docs/configuration.md](docs/configuration.md) — every configuration key,
-  precedence and environment variable.
-- [docs/catalog.md](docs/catalog.md) — catalog list/export, enabling tools, site
-  overlays, collector integrity, offline bundle build/inspect.
-- [docs/tools.md](docs/tools.md) — builtin tool behaviour, output handles,
-  progress, quarantine and uncertainty semantics.
-- [docs/threat-model.md](docs/threat-model.md) — adversaries, what Estus
-  enforces, what it does not.
-- [docs/development.md](docs/development.md) — build, Nix, tests, acceptance
-  suites, fuzzing, CI.
-
-Examples live in [`examples/`](examples): `dev-no-targets.toml`,
-`automation_probe.toml`, the four reviewed `examples/workflows/*.toml` recipes and
-`examples/separated-accounts/` for the recommended two-account deployment.
-
-## Limits
-
-Configuration ceilings are enforced before connecting: escaped command 65536
-bytes, per-request reply budget 16 MiB, `max_output_bytes` and `max_file_bytes`
-1 MiB by default, `max_timeout_secs` 600. Server-wide concurrency is 64 requests;
-the session reports `mcp_session_overloaded` rather than buffering more.
+[AGPL-3.0-or-later](LICENSE).

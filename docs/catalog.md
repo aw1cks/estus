@@ -1,273 +1,142 @@
 # Catalog
 
-The bundled catalog is a versioned set of reviewed tool templates: TOML
-definitions plus, for native collectors, `payloads/<tool>/{collector.py,
-manifest.json}`. Installing a package ships it under `share/estus/catalog`
-(`_catalog` in the wheel); `catalog/` in this repository is the canonical asset
-source.
+Use the catalog to give your agent specific Linux operations without granting
+it a shell. Estus ships the tool definitions; you choose which ones your site
+enables.
 
-Current inventory: 104 templates, manifest schema 3, inventory version 10.
-96 are native Python payloads that need only a target interpreter; 8 are
-`ansible_module` entries that need an operator-built bundle. Installing the
-package enables nothing and grants no credential or sudo.
+## Enable a preset
 
-## list and export
+Save this as `estus.toml` and replace `web-1` with your target and its SSH
+destination. The `linux-health` preset enables CPU, memory and pressure
+observations.
+
+```toml
+capabilities.named = true
+selection.presets = ["linux-health"]
+targets.web-1.ssh_host = "web-1"
+automation.targets.web-1.destination = "web-1"
+automation.targets.web-1.python = "/usr/bin/python3"
+```
+
+A preset selects tool names. It does not provide allowlists or grant authority.
+See the [preset list](tools/catalog-reference.md#presets) for current members.
+
+## Enable an individual tool
+
+To enable only `observe_host_summary`, replace `selection.presets` in the
+example above with:
+
+```toml
+# fragment
+selection.allow = ["observe_host_summary"]
+```
+
+Keep both keys if you want the named tool in addition to a preset. Check the
+[reference](tools/catalog-reference.md) before adding a tool: some require a
+site allowlist, a named [authority](concepts.md#authority), or an
+[Ansible bundle](ansible-bundles.md).
+
+## List or export tools
+
+Run `estus catalog list` to see the presets and tool definitions in your
+installed catalog. Here is one line from the output:
+
+```text
+observe_cpu	site_policy_template	ready to enable	Read aggregate CPU tick counters and topology IDs, optionally sampling twice. The view may be host-wide, not your affinity or quota.	linux,python3
+```
+
+Use `estus catalog list --json` for structured output. Pass `--root` to read a
+specific catalog directory instead of the installed one.
+
+To review the definitions and collector sources offline, export a tool with
+`--tool` or a preset with `--preset`. Use a new output directory:
 
 ```sh
-estus catalog list
-estus catalog list --json
-estus catalog list --root "$PWD/catalog"
-estus catalog export --preset linux-health --output ./health
-estus catalog export --tool observe_host_summary --output ./host-review
+estus catalog export --preset linux-health --output health-review
 ```
 
-Neither command needs SSH, Ansible or ambient configuration; an explicit
-`--config`, `--ssh` or `--ssh-config` is rejected rather than ignored, and an
-invalid `--root` fails instead of selecting another catalog. Export requires at
-least one `--tool` or `--preset`, at most 256 names, and a new output directory
-(existing paths are never replaced, and a partial export is removed).
+```json
+{"enabled":false,"ok":true,"qualification_file":"catalog-selection.json","tools":["observe_cpu","observe_memory","observe_pressure"],"version":"10"}
+```
 
-Export writes mode-0700 directories and mode-0600 files:
-`tools.toml` (inert `[tools.<name>]` tables only, with `execution.source`
-rewritten to the copied collector), `payloads/<tool>/…` for payload tools, and
-`catalog-selection.json` describing schema/version/qualification. It creates no
-credentials, approvals or configuration.
+The export contains `tools.toml`, `catalog-selection.json`, and a `payloads/`
+directory for collector sources and manifests. This is review material, not a
+site configuration. You do not need an export to enable installed tools.
 
-An export is a review starting point, not a site configuration: the shipped
-definitions hold no targets, authority or policy. Copy each table into your
-`[tools.<name>]` keys, or keep the file beside the site and restate policy with a
-`[tools.<name>]` overlay — then add `[selection]`, `[targets]` and
-`[automation]` yourself.
+## Read the qualification labels
 
-`list` prints one line per template:
-`name<TAB>qualification<TAB>policy note<TAB>description<TAB>requires`.
-`--json` emits `{schema, version, presets, tools}` with
-`{name, description, qualification, policy_required, requires}` per tool.
+Qualification describes the template, not whether it will work on your hosts.
 
-Presets name tools and nothing else:
-
-| Preset | Members |
+| Label | Meaning |
 | --- | --- |
-| `linux-health` | `observe_cpu`, `observe_memory`, `observe_pressure` |
-| `network-observe` | `observe_network`, `observe_network_device`, `observe_network_routes`, `observe_network_route_lookup`, `observe_network_rules`, `observe_network_namespaces` |
-| `network-probes` | `inspect_dns_lookup`, `inspect_icmp_probe`, `inspect_tcp_connect_probe`, `inspect_network_path_probe` |
-| `sensitive-observe` | `inspect_processes`, `inspect_process`, `inspect_process_fds`, `inspect_sockets`, `inspect_journal`, `inspect_kernel_log`, `inspect_journal_record` |
+| `site_policy_template` | A reviewed tool definition. Check `policy_required` to see whether you need to supply site policy before enabling it. |
+| `laboratory_only` | The tool expects a specific lab fixture or synthetic device. Keep it out of production. |
+| `unqualified` | No readiness claim. |
+| `deployment_qualified` | Reserved for a tool with documented evidence for a complete deployment workflow. |
 
-There is no `all` or `admin` preset; reboot, module/package/repository mutation,
-NIC tuning and other maintenance are individual opt-ins.
+## Supply site policy
 
-## Qualification labels
+If `catalog list --json` reports `policy_required` as `true`, add a
+`[tools.<name>]` overlay with the policy that tool expects. Estus requires at
+least one of these keys; which one you need depends on where the tool applies
+its allowlist.
 
-`qualification` describes the template, not a configured binding, and not a
-successful deployment:
-
-- `site_policy_template` (90 entries) — reviewed shape with placeholder
-  allowlists; the site must restate `fixed_args`, `constraints` or
-  `input_schema` before enabling (`policy_required = true`).
-- `laboratory_only` (14 entries) — hard-coded synthetic-device or fixture
-  contracts (`netdevsim`, the `estus_nic_model` driver, MD/NVMe fixtures). Not
-  production defaults.
-- `unqualified` — no readiness claim.
-
-`deployment_qualified` is reserved for documented complete workflow evidence and
-no current entry carries it. Inspection marks non-catalog bindings unqualified.
-
-## Enabling tools
-
-Site configuration enables catalog tools by name; the site supplies only the
-policy it knows — targets, authority and fixed arguments.
-
-```toml
-mode = "headless"
-capabilities = { named = true }
-
-[selection]
-allow = ["observe_cpu", "observe_memory", "observe_pressure"]
-
-[catalog]
-version = "10"
-
-[targets.server]
-ssh_host = "server-ordinary"
-
-[automation.targets.server]
-destination = "server-ordinary"
-python = "/usr/bin/python3"
-```
-
-`[selection] presets = ["linux-health"]` is equivalent and needs no export.
-Unit names, interfaces, paths, module parameters, package names and repositories
-outside `linux-health` are generally **fixture policies**: adapt the closed input
-enums, fixed policy and allowlists together.
-
-Shipped definitions are tool tables only: they name no targets and no
-allowlists. Targets default to every configured destination (and per-target
-permission is still checked separately); a `policy_required` template must be
-given `fixed_args`, `constraints` or `input_schema` (for tools whose caller enum
-is the allowlist, such as kernel modules or devices) before it can be
-materialised. Templates with nothing site-specific are not `policy_required`
-and are enabled by name alone.
-Policy arguments — `allowed_units`, `allowed_keys`, `allowed_entries`,
-`approved_keys`, `approved_root`, `allowed_packages`, `operator_policy`,
-`configured_paths`, `reviewed_devices` — are therefore absent from the catalog,
-and a collector that needs one fails closed until you supply it. The systemd
-tools ship their full `allowed_operations` set; restate it to narrow.
-
-## Site overlays
-
-A `[tools.<name>]` table without `execution` overlays the installed definition.
-Only `targets`, `authority`, `fixed_args`, `constraints`, `input_schema`,
-`input_map` and `limits` may be overridden; description, revision, effects,
-result and contract come from the catalog and are rejected as site overrides, so
-a site cannot rewrite what a tool claims.
-
-`fixed_args`, `constraints` and `limits` merge key by key: restating
-`allowed_units` keeps `target_python` and `manager_scope` from the catalog.
-`targets`, `authority`, `input_schema` and `input_map` replace the catalog value
-wholesale.
-
-```toml
-[tools.change_systemd_unit]
-targets = ["server"]
-authority = "automation:catalog"
-constraints = { allowed_units = ["site-app.service"] }
-```
-
-Domain policy is site-wide, so two hosts needing different allowlists declare two
-definition names and each target selects the one it may call:
-
-```toml
-[selection]
-allow = ["change_systemd_unit", "change_systemd_unit_web"]
-
-[tools.change_systemd_unit]
-targets = ["db-1"]
-authority = "automation:catalog"
-constraints = { allowed_units = ["postgresql.service"] }
-
-[tools.change_systemd_unit_web]
-targets = ["web-1"]
-authority = "automation:catalog"
-constraints = { allowed_units = ["nginx.service"] }
-
-[targets.db-1]
-ssh_host = "db-1-ordinary"
-selection = { allow = ["change_systemd_unit"] }
-
-[targets.web-1]
-ssh_host = "web-1-ordinary"
-selection = { allow = ["change_systemd_unit_web"] }
-```
-
-## Collector integrity
-
-Two separate checks, both drift detection rather than attestation:
-
-- At activation, the collector bytes must equal the installed manifest's
-  `source_sha256`; an edited collector fails to load.
-- Immediately before dispatch, the source bytes are checked again and the
-  manifest's `requires` list is verified on the target in the same round trip
-  that runs the collector: interpreter floor, importable modules and resolvable
-  executables. Nothing is cached, so the answer describes the target now; an
-  explicit interpreter failure never falls back to another one.
-
-A missing declared utility fails before dispatch as `resource_unavailable` with
-`remote_state_unknown=false`. Anyone who can rewrite both the collector and its
-manifest can also replace the binary.
-
-## Preview and facts policy
-
-Facts-backed definitions reuse maintained Ansible facts or a query-only status
-API instead of adding a second collector:
-
-| Binding | Reused facts |
+| Key | Use it to |
 | --- | --- |
-| `observe_systemd_unit` | `systemd_service` query-only `status` |
-| `observe_hardware_system`, `inspect_hardware_identifiers` | `setup` DMI fields |
-| `observe_storage_devices`, `observe_storage_device` | `setup` device/link facts |
-| `observe_storage_mounts` | `mount_facts` |
-| `observe_packages` | `package_facts` |
-| `observe_nic_features` | `setup` network feature facts |
+| `fixed_args` | Set values the caller cannot choose, such as an approved root directory. |
+| `constraints` | Supply an allowlist or a bound the collector enforces, such as `allowed_units`. |
+| `input_schema` | Limit caller input at validation, for example by making an argument an enum of approved names. |
 
-For query-only unit status, omit `state`, `enabled` and `masked` and fix daemon
-reload/reexec flags false — `enabled=false`/`masked=false` request changes.
-`observe_host_summary`, `observe_cpu` and `observe_memory` remain native payloads
-because setup does not provide the boot UUID, raw CPU tick counters/two-sample
-deltas, or exact byte gauges with the selected VM counters.
+This configuration lets the agent read status for `example.service` on
+`web-1`. It leaves the installed tool's system-manager scope and input mapping
+unchanged.
 
-Under `require_preview = true`, a qualified preview must precede the matching
-change with the same inputs. The gate covers only named `change`/`exec` bindings
-that declare such a pairing; builtin `change_*`/`exec_*` tools are not gated, and a
-named binding with no pairing is refused rather than delayed.
-`preview_sysctl` is a native payload taking `{key, value, mode}`: `mode = "config"`
-diffs `/etc/sysctl.d/90-estus-catalog-<slug>.conf` and pairs with `change_sysctl_config`;
-`mode = "runtime"` previews `/proc/sys` only and pairs with `change_sysctl_runtime`.
-`preview_systemd_service` is a native payload taking `{unit, operation}` and pairs with
-`change_systemd_unit` and `change_systemd_unit_file`. Packages:
-`preview_package`/`preview_apt`/`preview_dnf` share the `estus.packages` domain
-and bind the requested names and canonical state, so a preview never authorizes a
-different module or extra option. A preview is single-use, expires after five
-minutes, and is invalidated by any intervening change.
+```toml
+capabilities.named = true
+selection.allow = ["observe_systemd_unit"]
+targets.web-1.ssh_host = "web-1"
+automation.targets.web-1.destination = "web-1"
+automation.targets.web-1.python = "/usr/bin/python3"
 
-## Offline module bundles
+[tools.observe_systemd_unit]
+constraints = { allowed_units = ["example.service"] }
+```
 
-Module execution uses a prebuilt pack: a directory containing `bundle.json`,
-`wrapper.py` and `modules/<fqcn>.zip` per included module.
+Save it as `estus.toml` and check the tool's authorization without connecting
+to the host:
 
 ```sh
-estus bundle build --python /opt/ansible/bin/python \
-  --collections-path /opt/collections --output /etc/estus/bundle
-estus bundle inspect --bundle /etc/estus/bundle
+estus --config estus.toml auth can-i observe_systemd_unit web-1
 ```
 
-- `--python` must be absolute and already have ansible-core (plus any selected
-  collections); the builder runs it isolated with a fixed locale and installs
-  nothing. Ansible 14.4.0 / Core 2.21.5 with baseline collections is the pinned
-  build environment; Core alone is insufficient for collection modules such as
-  `community.general.apk`.
-- `--collections-path` is repeatable. `--module` is repeatable and defaults to
-  the stock SRE set: `ansible.builtin.systemd_service`, `ansible.posix.sysctl`,
-  `ansible.builtin.apt`, `ansible.builtin.dnf`, `ansible.builtin.dnf5`,
-  `ansible.builtin.package_facts`, `ansible.builtin.stat`,
-  `ansible.builtin.service_facts`.
-- `--output` must be new; the builder refuses to replace an existing directory
-  and removes partial output on failure. `--timeout-secs` bounds the build
-  (1–600, default 120).
+An overlay keeps the installed tool and changes its site settings. It can also
+restrict the target list, select an authority, or adjust limits and input
+mapping. See [Policy](policy.md) for the overlay keys and merge rules.
 
-`inspect` verifies without Python, Ansible or SSH and prints one JSON line:
-`status`, `error_code`, `ansible_core_version`, `bundle_sha256`, `module_count`;
-failure exits non-zero. Loading enforces manifest schema, canonical-JSON bundle
-digest, wrapper digest, per-module archive digests, sizes, FQCN shapes and router
-targets. A tampered or partially written pack fails closed.
+## Check target requirements
 
-Selection order: `[automation].bundle`, then `ESTUS_ANSIBLE_BUNDLE`, then
-executable-relative discovery (`../share/estus/bundle`, `../../_bundle`,
-`../_bundle`). A binding may pin its own `bundle`. `[automation].required = true`
-makes a missing or broken pack a startup failure.
+The [reference](tools/catalog-reference.md) shows the required target Python
+and lists utilities and platform requirements. Most native collectors need
+Python 3.8 or newer; some NIC tools need 3.10. The `requires` field in
+`catalog list --json` lists platform or utility requirements such as `systemd`
+or `ethtool`. Set the interpreter path for your target if it differs from the
+one in the example.
 
-### Cross-distro packages
+Estus checks the installed collector against the SHA-256 in its manifest when
+it loads the tool. Before running the collector, the target bootstrap checks
+the received bytes and the manifest's declared prerequisites, including the
+Python version, modules and executables. Missing prerequisites fail before
+the collector runs. These checks detect drift; they do not attest to the
+installation or the target.
 
-`ansible.builtin.package` is a router: the bundle maps it to the manager detected
-on the target (apt, dnf/dnf5, apk, zypper, pacman; `yum`/`yum4`/`dnf4` normalize
-to `dnf`). An undetected manager fails closed with `unsupported` — never a shell
-fallback. `change_package` wraps the router; `change_apt` and `change_dnf` are
-escape hatches for manager-specific options. Target prerequisites
-(`python3-apt`, `python3-dnf`/`python3-libdnf5`) are operator-provisioned;
-`auto_install_module_deps = false` means a missing binding fails as
-`dependency_unavailable`.
+## Read facts and preview changes
 
-Bundled module execution omits the removed Ansible string-conversion setting,
-which allows previews to run with current ansible-core releases.
+Use the dedicated read tool for facts: `observe_systemd_unit` reads status,
+`observe_hardware_system` reads firmware identifiers such as the product name,
+and `observe_packages` reads installed packages. They run native collectors, so
+you do not need a bundle to get these facts.
 
-## What is not in the catalog
-
-Roles and playbooks are not execution kinds, and the binding schema accepts only
-`native_argv`, `controller_script`, `native_payload` and `ansible_module`. There
-is no `execution.role_path`, no `--role-path`, no role snapshot and no
-compatibility shim. Rework a legacy site to a canonical catalog tool (preferred),
-a native payload, or a bundle module binding.
-
-Privileged and sensitive entries declare `automation:catalog` authority where
-required; that is never inferred from a native sudo grant. Inputs cannot choose
-flags, paths, environment, inventory, credentials or privilege beyond the
-reviewed domain.
+Look up the preview paired with a change in the
+[reference](tools/catalog-reference.md). Enable and configure both tools when
+your [preview policy](concepts.md#preview-before-change) requires a matching
+preview. Some changes have no pairing.

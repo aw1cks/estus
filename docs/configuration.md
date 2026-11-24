@@ -1,383 +1,328 @@
 # Configuration
 
-Estus reads exactly one TOML file, selected explicitly. There is no automatic
-discovery, no include mechanism and no partial merge.
+Use this page to set up Estus for your SSH hosts and tune its runtime settings.
+For the rules that decide what an agent can call, see [policy](policy.md).
 
-```sh
-estus --config /etc/estus/estus.toml
-```
+## One host, read-only catalog tools
 
-Every key below is accepted by `src/config/`; unknown keys are rejected with a
-fixed `schema_path` diagnostic naming the section, never the offending value.
-Retired spellings (`[directory]`, `[rules]`, `destination_policy`,
-`enabled_tools`, `tool_presets`, `disabled_tools`, per-target `capabilities`) are
-rejected with a message naming their replacement.
-
-## Precedence
-
-For each of the three path selections the order is CLI flag, then environment
-variable, then TOML:
-
-| Selection | CLI | Environment | TOML |
-| --- | --- | --- | --- |
-| Configuration | `--config` | `ESTUS_CONFIG` | — |
-| SSH executable | `--ssh` | `ESTUS_SSH` | `[ssh].executable` |
-| SSH config | `--ssh-config` | `ESTUS_SSH_CONFIG` | `[ssh].config_file` |
-
-A selected path is literal: no tilde or variable interpolation, no `PATH` search.
-`--ssh`/`ESTUS_SSH` relative paths resolve against the launch directory;
-`[ssh]` relative paths against the TOML file's directory. An invalid override
-fails loading instead of falling back to a lower-priority source. The executable
-is resolved once and shared by native SSH, `doctor` and automation; without an
-explicit selection, `ssh` is looked up on `PATH`, skipping non-absolute entries.
-
-Numeric limits also accept environment overrides:
-`ESTUS_CONNECT_TIMEOUT_SECS`, `ESTUS_OPERATION_TIMEOUT_SECS`,
-`ESTUS_MAX_TIMEOUT_SECS`, `ESTUS_MAX_OUTPUT_BYTES`, `ESTUS_MAX_FILE_BYTES`.
-Catalog and bundle additionally read `ESTUS_CATALOG_ROOT` and
-`ESTUS_ANSIBLE_BUNDLE`. `--workstation` has no environment equivalent, so an
-inherited environment cannot widen authority.
-
-## Top level
+Save this as `estus.toml`. Replace `web-1` on the right-hand side of `ssh_host`
+and `destination` with an OpenSSH destination you already use. The agent still
+calls the logical target `web-1`.
 
 ```toml
-mode = "headless"          # headless (default) | workstation
-default_profile = "prod"   # optional: deny | prod | prod-change | dev | lab | <custom>
-profiles_dir = "profiles"  # optional explicit drop-in dir (relative to this TOML file)
-groups_dir = "groups"      # optional explicit drop-in dir
-targets_dir = "targets"    # optional explicit drop-in dir (closes open mode even when empty)
-require_preview = false    # requires a matching preview for preview-paired named tools
-disclose_sudo_policy = false
-```
+capabilities = { named = true }
 
-- `mode = "headless"` is the default for any configuration file. `--workstation`
-  may only restate a declared `mode = "workstation"`; it never upgrades a file.
-  With no file at all, `--workstation` is required to get anything beyond the
-  read-only inspection builtins.
-- `--yolo` (flag-only, no environment variable, cannot be combined with
-  `--config` or `ESTUS_CONFIG`) is the unrestricted workstation escape hatch:
-  open destinations, all five capabilities, same-account root sudo, and all
-  non-lab catalog templates with synthesized wildcard policy allowlists. Pass
-  `--include-lab` alongside `--yolo` to include `laboratory_only` hardware
-  templates. Write quarantine, stdin-framed digests, 16 MiB wire budgets, and
-  `untrusted_remote_output` framing remain active, and startup emits a
-  `yolo_mode_active` warning.
-- `default_profile` applies whenever `[profiles]`/`[[groups]]` policy is active
-  and no group matches a host. When `[[groups]]` is declared without
-  `default_profile`, unmatched hosts fail closed.
-- `require_preview` applies to `change` and `exec` tools; a target may override
-  it. Named bindings with a qualified preview pairing require a fresh matching
-  preview (consumed once, 5-minute TTL); unqualified `change`/`exec` tools are
-  refused with `preview_required`.
-- `disclose_sudo_policy` includes declared sudo users/programs in target
-  discovery output.
+[selection]
+allow = ["observe_cpu", "observe_memory"]
 
-## `[capabilities]`
-
-Five independent exposure ceilings. Explicit configuration defaults to
-
-```toml
-capabilities = { named = true, file_read = true, file_write = false, exec = false, sudo = false }
-```
-
-| Key | Publishes |
-| --- | --- |
-| `named` | catalog/named bindings at all |
-| `file_read` | `inspect_file`, `observe_stat`, `inspect_directory` |
-| `file_write` | `change_file_write`, `change_mkdir`, `change_rename`, `change_file_remove`, `change_directory_remove`, `change_file_replace` |
-| `exec` | `exec_command`, `exec_argv` |
-| `sudo` | `exec_sudo`, and catalog bindings under `automation:<authority>` |
-
-`observe_targets`, `inspect_output` and `change_target_quarantine_clear` are
-always available when the target policy permits them. Capabilities are not
-account sandboxes.
-
-## `[ssh]`
-
-```toml
-[ssh]
-executable = "/opt/openssh/bin/ssh"     # default: ssh from PATH
-config_file = "/etc/estus/ssh_config"   # replacement, not an overlay
-```
-
-`config_file` must be a readable regular file at load; a broken replacement never
-falls back to the invoking user's SSH configuration.
-
-## `[limits]`
-
-```toml
-[limits]
-connect_timeout_secs = 10
-operation_timeout_secs = 60
-max_timeout_secs = 600
-max_output_bytes = 1048576
-max_file_bytes = 1048576
-```
-
-All values must be strictly positive; `connect_timeout_secs` and
-`operation_timeout_secs` must not exceed `max_timeout_secs`. `max_timeout_secs`
-and `max_file_bytes` are also injected as `maximum` into the published builtin
-input schemas.
-
-## `[output]`
-
-Retention for `retain_output=true` command handles.
-
-```toml
-[output]
-enabled = true
-per_stream_bytes = 1048576   # 1 … 4194304
-total_bytes = 16777216       # ≥ 2×per_stream_bytes, ≤ 67108864
-max_handles = 8              # 1 … 64
-ttl_secs = 300               # 1 … 3600
-```
-
-## `[quarantine]`
-
-```toml
-[quarantine]
-state_dir = "/var/lib/estus/quarantine"
-```
-
-Directory for durable quarantine records. When set, a new quarantine is written and
-`fsync`ed — via a temporary name and atomic rename — before the reply that reports
-it is returned, and a clear unlinks the record before the gate opens. Records are
-restored on the next start, so a quarantine survives a restart of the server
-process. The directory must be owned by the current UID with mode 0700 and hold
-only owned regular records; anything else fails startup. When omitted, quarantine
-is in-memory only for the life of the process.
-
-## `[targets.<name>]`
-
-The destination authority boundary. Any `[targets]` table — even an empty one —
-authorizes exactly the logical names it lists; its absence (workstation mode only)
-lets the caller name a raw SSH destination. Headless configurations always have
-the table.
-
-```toml
-[targets.server]
-ssh_host = "server-ordinary"        # required; an OpenSSH destination
-description = "web front end"       # ≤ 1024 bytes
-labels = { env = "prod", role = "web" }   # ≤ 16 labels, key ≤ 64, value ≤ 256
-max_tier = "inspect"                # observe | inspect | preview | change | exec
-require_preview = true              # overrides the global flag
-profile = "prod"                    # optional built-in or custom profile
-selection = { allow = ["observe_cpu", "observe_memory"] }
-
-[targets.server.sudo]
-mode = "separate-identity"          # disabled (default) | same-account | separate-identity
-ssh_host = "server-elevated"        # required for separate-identity, distinct from every ordinary alias
-users = ["root"]                    # default ["root"], POSIX account names
-programs = ["/usr/bin/systemctl"]   # optional absolute executable allowlist
-```
-
-- `ssh_host` must be non-empty, contain no NUL or whitespace, and not start with
-  `-`. `sudo.ssh_host` must not equal any configured ordinary alias.
-- `max_tier` denies every tool, builtin or catalog, whose published tier exceeds
-  it on that host; a catalog tool must be both selected and within the ceiling.
-- `selection` is the same shape as the global `[selection]` and only narrows it:
-  `allow`/`presets` list what this host may call, `deny` subtracts, a present
-  table with every list empty denies every named tool, and an omitted table
-  inherits the global set.
-- Sudo policy is per-target and never inherited by catalog bindings, which
-  declare `automation` or `automation:<authority>` authority instead.
-
-## `[profiles.<name>]` and `[[groups]]`
-
-Built-in profiles provide reusable policy defaults that compile down to
-`max_tier`, `require_preview`, `capabilities`, `sudo`, and optional `selection`:
-
-| Profile | `max_tier` | `require_preview` | Capabilities | `sudo` | `allow_ip_literals` |
-| --- | --- | --- | --- | --- | --- |
-| `deny` | *(none)* | `true` | none | `disabled` | `false` |
-| `prod` | `inspect` | `true` | `named`, `file_read` | `disabled` | `false` |
-| `prod-change` | `change` | `true` | `named`, `file_read` | `disabled` | `false` |
-| `dev` | `exec` | `false` | `named`, `file_read`, `file_write`, `exec` | `disabled` | `false` |
-| `lab` | `exec` | `false` | all five | `same-account` (`root`) | `true` |
-
-Custom profiles live under `[profiles.<name>]` and may `extends` any built-in or
-other custom profile (built-in names cannot be redefined). Groups under
-`[[groups]]` match hosts by `match_hosts` (case-insensitive `*`/`?` globs) and/or
-`match_labels` (exact matches on `[targets.<name>].labels`). When `profile` is
-omitted on a group, it defaults to the group's own `name` (`name = "prod"` maps
-directly to profile `"prod"`):
-
-```toml
-mode = "workstation"
-default_profile = "prod"
-
-[profiles.prod-db]
-extends = "prod"
+[targets.web-1]
+ssh_host = "web-1"
 max_tier = "observe"
 
-[[groups]]
-name = "lab"
-match_hosts = ["*.lab.internal", "lab-*"]
+[automation.targets.web-1]
+destination = "web-1"
+```
 
-[[groups]]
-name = "dev"
-match_hosts = ["*.dev.internal", "dev-*", "stg-*"]
+The `[automation.targets]` entry gives the catalog collectors their SSH
+destination. These two collectors default to `/usr/bin/python3` on the remote
+host; they do not need an Ansible bundle.
+
+Check the policy without connecting, then pass `--config estus.toml` in your
+[MCP client's launch arguments](clients.md).
+
+```sh
+estus --config estus.toml auth can-i observe_cpu web-1
+```
+
+## Production and development hosts
+
+Use labels to apply the same policy to several targets. Here the `prod` group
+allows telemetry and inspection, while the `dev` group also allows ordinary
+command execution. The fallback denies access if you omit or mistype a label.
+
+```toml
+capabilities = { named = true, file_read = true, exec = true }
+default_profile = "deny"
+
+[selection]
+allow = ["observe_memory"]
+
+[targets.web-1]
+ssh_host = "web-1"
+labels = { env = "prod" }
+
+[targets.db-1]
+ssh_host = "db-1"
+labels = { env = "prod" }
+
+[targets.dev-1]
+ssh_host = "dev-1"
+labels = { env = "dev" }
 
 [[groups]]
 name = "prod"
-match_hosts = ["*.prod.internal", "prod-*", "*-prd-*"]
+match_labels = { env = "prod" }
+
+[[groups]]
+name = "dev"
+match_labels = { env = "dev" }
+
+[automation.targets.web-1]
+destination = "web-1"
+
+[automation.targets.db-1]
+destination = "db-1"
+
+[automation.targets.dev-1]
+destination = "dev-1"
 ```
 
-Evaluation rules:
-- **Strictest-wins lattice (order-independent):** when a host matches multiple
-  groups (or a group plus a target `profile`), `max_tier` takes the minimum,
-  `require_preview` takes logical OR, `capabilities` takes bitwise AND, `sudo`
-  intersects, and `selection` intersects. TOML ordering can never weaken policy.
-- **SSH alias protection:** in open mode, `match_hosts` evaluates both the
-  caller-supplied host string and the canonical `hostname` from `ssh -G` so an
-  OpenSSH alias pointing to `db1.prod.internal` still inherits `prod`.
-- **IP-literal guard:** raw IPv4/IPv6 literals (including aliases resolving via
-  `ssh -G` to an IP) cannot enter groups whose profile has
-  `allow_ip_literals = false` (`prod`, `prod-change`, `dev`).
-- **Offline policy inspection:** use `estus auth explain <host> [--json]` and
-  `estus auth can-i <tool> <host> [--json]` (exit `0` = allowed, `1` = denied)
-  to verify which groups matched and why without opening any SSH connection.
+See [profiles and groups](policy.md#profiles-and-groups) for other ways to
+match targets and combine profiles.
 
-### Explicit drop-in directories (`profiles_dir`, `groups_dir`, `targets_dir`)
+## A separate SSH identity for sudo
 
-Estus never discovers ambient `$XDG_CONFIG_HOME` files automatically, but an
-explicit configuration file may opt into non-recursive drop-in directories for
-profiles, groups, and targets (useful with Nix / Home Manager / Ansible
-modules). Paths resolve literally relative to the root TOML file and must exist
-and be readable directories at startup:
-
-- Each `*.toml` regular file (including Nix store symlinks to regular files;
-  non-`.toml` files ignored; max 64 files / 1 MiB each) may declare either a
-  single entry whose name defaults to the filename stem (`profiles/prod-db.toml`,
-  `groups/prod.toml`, `targets/eu-db-01.toml`) or a multi-entry table
-  (`[profiles.*]`, `[[groups]]`, `[targets.*]`).
-- Drop-ins cannot set top-level `mode`, `capabilities`, `ssh`,
-  `default_profile`, `limits`, or `automation`; duplicate names across root and
-  drop-in files fail closed at startup.
-- Declaring `targets_dir` closes destination policy to configured targets even
-  when the directory is empty.
-- `estus auth explain` prints the source drop-in filename beside each matched
-  target, group, and custom profile.
-
-## `[selection]`
+Set up `web-1` and `web-1-elevated` as OpenSSH aliases that log in with different
+accounts. On the host, grant the elevated login non-interactive sudo access
+for `/usr/bin/id` as root. This config exposes `exec_sudo` but not ordinary
+`exec_command` or `exec_argv`.
 
 ```toml
+capabilities = { sudo = true }
+
+[targets.web-1]
+ssh_host = "web-1"
+max_tier = "exec"
+
+[targets.web-1.sudo]
+mode = "separate-identity"
+ssh_host = "web-1-elevated"
+users = ["root"]
+programs = ["/usr/bin/id"]
+```
+
+Different alias names alone do not separate credentials. See
+[deployment](deployment.md) for setting up and checking the identities.
+
+To check the route without running a command, use
+`estus --config estus.toml auth can-i exec_sudo web-1`.
+
+## Nix or Home Manager drop-ins
+
+Have your configuration manager generate these files. The paths in the main
+file are relative to the directory containing `estus.toml`. Each directory
+entry may be a symlink to a regular file in the Nix store.
+
+`estus.toml`:
+
+```toml
+capabilities = { named = true }
+default_profile = "deny"
+profiles_dir = "profiles.d"
+groups_dir = "groups.d"
+targets_dir = "targets.d"
+
 [selection]
-presets = ["linux-health"]
-allow = ["observe_cpu", "change_systemd_unit"]
-deny = ["change_host_reboot"]
+allow = ["observe_memory"]
+
+[automation.targets.web-1]
+destination = "web-1"
 ```
 
-The global set is every builtin the capability ceiling permits, plus `presets`
-and `allow`; `deny` always subtracts. Presets are catalog data and only name
-tools. Unknown or duplicate names fail loading; up to 256 named bindings are
-supported.
-
-A name with a local `[tools.<name>]` table is used as written. A name with no
-local definition is a catalog template and is materialized from the installed
-catalog; only then is the catalog loaded.
-
-## `[tools.<name>]`
-
-Named tool definitions, and the site overlay for catalog templates.
+`profiles.d/telemetry.toml`:
 
 ```toml
-[tools.change_systemd_unit]
-targets = ["db-1"]
-authority = "automation:catalog"
-constraints = { allowed_units = ["postgresql.service"] }
-limits = { timeout_secs = 30 }
+extends = "prod"
+max_tier = "observe"
 ```
 
-Keys: `description`, `revision`, `targets`, `authority`, `effects`, `execution`,
-`input_schema`, `fixed_args`, `input_map`, `argument_types`, `constraints`,
-`result`, `limits`.
-
-- A table **with** `execution` is a complete operator-authored definition used as
-  written (a custom tool, or an edited export).
-- A table **without** `execution` for a catalog name is site policy only, and may
-  override only `targets`, `authority`, `fixed_args`, `constraints`,
-  `input_schema`, `input_map` and `limits`. Anything else — description,
-  revision, effects, result, contract — comes from the catalog and is rejected as
-  a site override.
-- `constraints` accepts `allowed_units`, `allowed_keys`, `allowed_interfaces`,
-  `allowed_packages`. It is site-wide: two hosts needing different allowlists
-  declare two definition names.
-- Execution kinds are `native_argv`, `controller_script`, `native_payload` and
-  `ansible_module`. Roles and playbooks are not execution kinds.
-- A binding whose `authority` is `automation` (or `automation:<name>`) must name
-  targets declared under the matching `[automation…]` mapping; `ansible_module`
-  bindings additionally need a non-empty target `python`.
-
-## `[catalog]`
+`groups.d/frontends.toml`:
 
 ```toml
-[catalog]
-root = "/opt/estus/catalog"   # explicit installed asset directory
-version = "10"                # optional assertion against the installed inventory
+profile = "telemetry"
+match_hosts = ["web-*"]
 ```
 
-An explicit invalid root fails rather than selecting another catalog. When
-`version` is present it must equal the installed manifest version, so a reviewed
-pin cannot silently adopt an upgrade.
-
-## `[controller]`
+`targets.d/web-1.toml`:
 
 ```toml
-[controller]
-workspace_root = "/var/lib/estus/workspace"   # bounded absolute path
+ssh_host = "web-1"
 ```
 
-Scratch space for controller-script execution, default 16 MiB / 512 entries,
-polled rather than hard-quota enforced.
+`estus --config estus.toml auth explain web-1` shows which files supplied the
+target, group and profile. See [drop-in rules](policy.md#drop-in-directories)
+for file formats and duplicate handling.
 
-## `[automation]`
+## Choosing a configuration file
 
-```toml
-[automation]
-required = false                      # missing/broken bundle becomes a startup failure
-bundle = "/etc/estus/bundle"          # wins over ESTUS_ANSIBLE_BUNDLE
-max_concurrent = 8                    # 1 … 16
+Choose one readable, regular TOML file using `--config` or `ESTUS_CONFIG`.
+Estus does not search for a config file. Unknown keys fail validation. The
+only extra TOML files it reads as part of your configuration are the
+explicitly configured drop-ins.
 
-[automation.targets.server]
-destination = "server-ordinary"       # OpenSSH destination for module/payload transport
-python = "/usr/bin/python3"           # absolute target interpreter; required for ansible_module
+| Path | First choice | Then | Then |
+| --- | --- | --- | --- |
+| Estus config | `--config` | `ESTUS_CONFIG` | No file |
+| SSH executable | `--ssh` | `ESTUS_SSH` | `[ssh].executable` |
+| SSH config | `--ssh-config` | `ESTUS_SSH_CONFIG` | `[ssh].config_file` |
 
-[automation.authorities.ops]
-ssh_config_file = "/etc/estus/automation-ssh.conf"
-bundle = "/opt/estus/bundle"          # optional; inherits the ordinary pack
-ssh_auth_sock = "/run/estus/agent.sock"   # optional explicit agent; omitting disables inheritance
-become = { method = "sudo", user = "root", executable = "/usr/bin/sudo" }
+CLI and environment paths in this table are relative to the launch directory.
+Relative paths in TOML are relative to the selected file's directory where
+the setting accepts them. Estus uses paths literally, without `~` or
+environment-variable expansion. An invalid higher-priority path is an error,
+not a reason to try the next setting. Catalog, bundle and numeric settings
+have their own [environment precedence](#environment-variables).
 
-[automation.authorities.ops.targets.server]
-destination = "server-automation"
-python = "/usr/bin/python3"
-```
+## Modes
 
-`automation.targets` fixes the SSH destination and target interpreter for
-ordinary `automation` authority — independent of native sudo. Named authorities
-(`automation.<name>`, at most 16, identifier ≤ 64 bytes) add a replacement SSH
-configuration, an optional separate bundle, an optional agent socket and a fixed
-`become` user; `become.executable` is an operator-pinned absolute path (use
-`/run/wrappers/bin/sudo` on NixOS). Declared mappings must name configured
-logical targets. `[automation.authorities.<name>.targets]` and
-`[automation.targets]` both validate the destination shape and the absolute
-Python path.
+| Mode | How to select it | Destination and capability defaults |
+| --- | --- | --- |
+| Headless | Default, with or without a file; `mode = "headless"` states it explicitly | Closed target list, empty if you declare none. See the [capability defaults](policy.md#capabilities). |
+| Workstation | `mode = "workstation"` in a file, or `--workstation` without a file | Open destinations unless you declare `[targets]` or `targets_dir`. Unspecified capabilities default to on; elevated calls still need a sudo route. |
+| `--yolo` | Flag only; rejects a file selected by `--config` or `ESTUS_CONFIG` | Open destinations, all capabilities, same-account root sudo and the non-lab catalog. For throwaway hosts only. |
 
-## `doctor`
+`--workstation` may restate `mode = "workstation"` in a file but cannot upgrade
+a headless file. No environment variable selects workstation or `--yolo`
+mode. `--include-lab` requires `--yolo` and adds laboratory-only catalog
+tools.
+
+## SSH: `[ssh]`
+
+| Key | Default | What it sets |
+| --- | --- | --- |
+| `executable` | First usable `ssh` in an absolute directory on `PATH` | OpenSSH executable used by Estus. The resolved path must be at most 4096 UTF-8 bytes and point to a regular file with an execute bit set. Estus does not search `PATH` for an explicit value. |
+| `config_file` | OpenSSH's normal configuration | Replacement OpenSSH configuration, passed with `-F`. It must be a readable regular file. It is not an overlay. |
+
+## Runtime limits: `[limits]`
+
+| Key | Default | What it limits |
+| --- | ---: | --- |
+| `connect_timeout_secs` | `10` | SSH connection setup, in seconds |
+| `operation_timeout_secs` | `60` | Default operation deadline, in seconds |
+| `max_timeout_secs` | `600` | Maximum requested operation timeout, in seconds |
+| `max_output_bytes` | `1048576` | Captured command output per stream, in bytes, before response framing |
+| `max_file_bytes` | `1048576` | File transfer, command stdin and output-handle read requests, in bytes |
+
+All values must be positive integers. The connection and default operation
+timeouts must be at most `max_timeout_secs`. Per-tool and wire limits can
+reduce how much data a call can return. See [tool results](tools/results.md).
+
+## Output retention: `[output]`
+
+These settings apply to [output handles](tools/results.md), not the inline
+command response.
+
+| Key | Default | Allowed values |
+| --- | ---: | --- |
+| `enabled` | `true` | `true` or `false` |
+| `per_stream_bytes` | `1048576` | `1`–`4194304` bytes per stream |
+| `total_bytes` | `16777216` | At least twice `per_stream_bytes`, up to `67108864` bytes per session |
+| `max_handles` | `8` | `1`–`64` handles per session |
+| `ttl_secs` | `300` | `1`–`3600` seconds |
+
+## Persistent quarantine: `[quarantine]`
+
+Set `state_dir` to keep [quarantine](concepts.md#when-a-change-goes-wrong-uncertainty-and-quarantine)
+records across Estus restarts. It defaults to unset, which keeps them in
+memory only. Create the directory before startup, owned by the user running
+Estus and with mode `0700`. The final directory entry cannot be a symlink.
+Dedicate it to Estus: it restores up to 256 owned regular records of at most
+4 KiB each and refuses unexpected entries. It ignores temporary `.tmp-*`
+entries left by interrupted writes.
+
+## Catalog assets: `[catalog]`
+
+| Key | Default | What it sets |
+| --- | --- | --- |
+| `root` | Unset; installed launchers can supply `ESTUS_CATALOG_ROOT` | Directory containing `catalog.json`. An explicit root must be a real directory, not a symlink. |
+| `version` | Unset | Exact string expected in the manifest's `version` field. A mismatch fails startup. |
+
+Prefer `root` in your config to change the server's asset directory.
+`estus catalog list` and `estus catalog export` are standalone commands;
+use their `--root` option, not `--config`. See [catalog](catalog.md).
+
+## Local scripts: `[controller]`
+
+`workspace_root` is unset by default and is required when you enable a custom
+`controller_script` tool. Set it to an absolute path of at most 1024 bytes.
+Create the directory with mode `0700` and make the user running Estus its
+owner. Estus creates a private working directory there for each invocation.
+Read [security](security.md) before enabling a local script.
+
+## Automation routes: `[automation]`
+
+An [authority](concepts.md#authority) determines how a catalog tool reaches a
+target. Use `[automation.targets.<target>]` for the ordinary `automation`
+authority. Use `[automation.authorities.<name>.targets.<target>]` for
+`automation:<name>`. The keys of both tables are configured logical targets;
+both mappings default to empty.
+
+| Key in either target mapping | Default | What it sets |
+| --- | --- | --- |
+| `destination` | Required | OpenSSH destination for this authority. Use a nonempty string with no whitespace, NUL or leading `-`. |
+| `python` | Unset | Absolute path to the remote interpreter. For native collectors, a configured path takes precedence over the tool's defaults. `ansible_module` tools on configured targets require an explicit path. |
+
+A named authority uses the following keys under
+`[automation.authorities.<name>]`.
+
+| Key | Default | What it sets |
+| --- | --- | --- |
+| `ssh_config_file` | Required | Its own replacement OpenSSH configuration; a readable regular file when the authority is in use |
+| `ssh_auth_sock` | Unset | Path to an agent socket. Omit to avoid inheriting the ordinary agent. |
+| `become.method` | Required | `sudo` |
+| `become.user` | Required | Fixed POSIX account name, at most 64 bytes |
+| `become.executable` | `/usr/bin/sudo` | Absolute path to the remote sudo executable |
+| `targets` | Required | Per-target destination and interpreter mappings |
+| `bundle` | Inherits the ordinary bundle | Optional bundle override, only for Ansible module tools. Use an absolute path so the override does not depend on the launch directory. |
+
+You can declare up to 16 named authorities. Names are 1–64 ASCII bytes:
+letters or `_` first, then letters, digits, `_` or `-`. Interpreter, SSH config,
+agent socket and sudo executable paths must be absolute, at most 4096 bytes
+and contain no NUL.
+
+| Key in `[automation]` | Default | What it sets |
+| --- | --- | --- |
+| `max_concurrent` | `8` | Session-wide concurrency across native collectors and Ansible module tools; `1`–`16` |
+| `bundle` | Unset | Ordinary Ansible bundle path; takes precedence over `ESTUS_ANSIBLE_BUNDLE` |
+| `required` | `false` | `true` requires a usable Ansible bundle at server startup even if no module tool needs it. It does not enable tools. |
+
+`[automation].bundle` and `ESTUS_ANSIBLE_BUNDLE` must be absolute paths of at
+most 4096 bytes. The `bundle` and `required` settings only affect the optional
+[Ansible bundle runtime](ansible-bundles.md).
+
+## Environment variables
+
+| Variable | What it sets | Precedence |
+| --- | --- | --- |
+| `ESTUS_CONFIG` | Estus TOML file | Below `--config` |
+| `ESTUS_SSH` | OpenSSH executable | Below `--ssh`, above `[ssh].executable` |
+| `ESTUS_SSH_CONFIG` | Replacement OpenSSH config | Below `--ssh-config`, above `[ssh].config_file` |
+| `ESTUS_CONNECT_TIMEOUT_SECS` | Connection timeout in seconds | Overrides `[limits].connect_timeout_secs` |
+| `ESTUS_OPERATION_TIMEOUT_SECS` | Default operation timeout in seconds | Overrides `[limits].operation_timeout_secs` |
+| `ESTUS_MAX_TIMEOUT_SECS` | Maximum operation timeout in seconds | Overrides `[limits].max_timeout_secs` |
+| `ESTUS_MAX_OUTPUT_BYTES` | Command output cap in bytes | Overrides `[limits].max_output_bytes` |
+| `ESTUS_MAX_FILE_BYTES` | File and stdin cap in bytes | Overrides `[limits].max_file_bytes` |
+| `ESTUS_CATALOG_ROOT` | Catalog asset directory | Below `[catalog].root` for the server, or `--root` for `estus catalog` |
+| `ESTUS_ANSIBLE_BUNDLE` | Ansible bundle directory | Below `[automation].bundle`, above installed bundle discovery |
+
+Set numeric overrides as positive decimal integers without whitespace or
+signs. Some packaged launchers set `ESTUS_CATALOG_ROOT` themselves.
+
+## Check a configured host with `doctor`
 
 ```sh
-estus doctor --target server                 # policy + ssh -G resolution
-estus doctor --target server --runtime ansible
+estus --config estus.toml doctor --target web-1
+estus --config estus.toml doctor --runtime ansible
 ```
 
-`doctor` reports the resolved `ssh_executable`, per-target
-`effective_ssh_policy` from `ssh -G -- <destination>`
-(`strict_host_key_checking`, `update_host_keys`, `batch_mode`, warnings when
-host-key checking is disabled) and, with `--runtime ansible`, the same pack
-verification `estus bundle inspect` performs. It executes no workload and
-establishes no target/module compatibility. Note that OpenSSH `ssh -G` evaluates
-`Match exec` stanzas.
+With `--target`, `doctor` connects using the ordinary SSH identity and probes
+SFTP. It reports results as JSON without running a remote command or testing
+sudo. When available, its `effective_ssh_policy` reports OpenSSH's
+`StrictHostKeyChecking`, `UpdateHostKeys` and `BatchMode` settings. This comes
+from `ssh -G`, which can evaluate local `Match exec` stanzas.
 
-`doctor`, `bundle` and `catalog` are the only subcommands; there is no
-`estus schema`.
+Repeat `--target` for up to 32 distinct configured targets. `--timeout-secs`
+sets a single deadline for the run and defaults to `operation_timeout_secs`.
+`--runtime ansible` verifies the ordinary bundle locally; it does not check
+module compatibility on a target. For an offline answer about which tools are
+allowed, use [`auth`](policy.md#check-policy-with-auth) instead.
