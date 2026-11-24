@@ -1,4 +1,4 @@
-include Cargo.toml Cargo.lock setup.py
+include Cargo.toml Cargo.lock setup.py build.rs
 recursive-include src *.rs *.py
 include catalog/catalog.json
 # Selected executor-specific catalog assets come from BuildPy.get_source_files().

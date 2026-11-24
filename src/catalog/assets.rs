@@ -74,6 +74,8 @@ pub enum CatalogError {
     SitePolicyRequired { tool: String },
     #[error("catalog definition requires targets for tool {tool}")]
     TargetsRequired { tool: String },
+    #[error("no catalog found; run `estus catalog install`")]
+    NotInstalled,
 }
 
 impl CatalogError {
@@ -93,6 +95,7 @@ impl CatalogError {
             Self::OverrideNotSitePolicy { .. } => "catalog_definition_override_not_site_policy",
             Self::SitePolicyRequired { .. } => "catalog_definition_requires_site_policy",
             Self::TargetsRequired { .. } => "catalog_definition_requires_targets",
+            Self::NotInstalled => "catalog_not_installed",
         }
     }
 
@@ -111,6 +114,7 @@ impl CatalogError {
             | Self::OverrideNotSitePolicy { tool }
             | Self::SitePolicyRequired { tool }
             | Self::TargetsRequired { tool } => tool,
+            Self::NotInstalled => "estus catalog install",
         }
     }
 
@@ -147,20 +151,41 @@ pub(crate) enum WorkstationEntry {
     },
 }
 
+/// Where the catalog lives when no root is given: next to the executable, as
+/// `<prefix>/bin/estus` with `<prefix>/share/estus/catalog` (what
+/// `estus catalog install`, the packages and Nix produce). Inside a cargo
+/// `target/` tree the repository's own `catalog/` is accepted too, for
+/// development; it is never searched for elsewhere.
 pub(crate) fn discover_default_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
-    for relative in [
-        "../share/estus/catalog",
-        "../../catalog",
-        "../../../catalog",
-    ] {
+    let in_cargo_target = exe_dir
+        .ancestors()
+        .any(|dir| dir.file_name().is_some_and(|name| name == "target"));
+    let development: &[&str] = if in_cargo_target {
+        &["../../catalog", "../../../catalog"]
+    } else {
+        &[]
+    };
+    for relative in std::iter::once("../share/estus/catalog").chain(development.iter().copied()) {
         let candidate = exe_dir.join(relative);
         if candidate.join("catalog.json").is_file() {
             return candidate.canonicalize().ok();
         }
     }
     None
+}
+
+/// The directory `estus catalog install` fills by default: the first place
+/// [`discover_default_root`] looks.
+pub(crate) fn default_install_dir() -> Option<PathBuf> {
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .parent()?
+            .parent()?
+            .join("share/estus/catalog"),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -375,11 +400,10 @@ impl Catalog {
     pub fn load(root: Option<&Path>) -> Result<Self, CatalogError> {
         let root = match root {
             Some(root) => root.to_path_buf(),
-            None => PathBuf::from(std::env::var_os("ESTUS_CATALOG_ROOT").ok_or_else(|| {
-                CatalogError::Missing {
-                    asset: "catalog root".to_owned(),
-                }
-            })?),
+            None => std::env::var_os("ESTUS_CATALOG_ROOT")
+                .map(PathBuf::from)
+                .or_else(discover_default_root)
+                .ok_or(CatalogError::NotInstalled)?,
         };
         let root_name = bounded_name(&root);
         if fs::symlink_metadata(&root)

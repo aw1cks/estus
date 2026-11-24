@@ -1046,9 +1046,8 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             "pyproject.toml",
             "setup.py",
             "src/main.rs",
+            "build.rs",
             "src/bundle/builder.py",
-            "vendor/openssh-sftp-client/Cargo.toml",
-            "vendor/openssh-sftp-client/src/lib.rs",
         ] {
             ensure!(
                 extracted.join(required).is_file(),

@@ -25,7 +25,7 @@ fn test_binary() -> std::ffi::OsString {
 /// The workflow this replaces is gone: no offline approval, comparison or
 /// snapshot step exists, so none may appear in help output.
 #[test]
-fn catalog_help_lists_only_list_and_export() -> Result<()> {
+fn catalog_help_lists_the_supported_subcommands() -> Result<()> {
     let output = Command::new(test_binary())
         .args(["catalog", "--help"])
         .env_remove("ESTUS_CONFIG")
@@ -40,7 +40,7 @@ fn catalog_help_lists_only_list_and_export() -> Result<()> {
             "removed subcommand `{removed}` still advertised:\n{text}"
         );
     }
-    for kept in ["list", "export"] {
+    for kept in ["list", "export", "install"] {
         ensure!(
             text.lines().any(|line| line.trim_start().starts_with(kept)),
             "subcommand `{kept}` is missing:\n{text}"
@@ -113,7 +113,9 @@ fn listing_is_offline_and_health_preset_does_not_expand_authority() -> Result<()
 #[test]
 fn export_is_inert_and_writes_only_reviewable_inputs() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let destination = directory.path().join("health");
+    // Export refuses output paths that pass through a symlink, and macOS's temp
+    // directory sits under the `/var` symlink.
+    let destination = directory.path().canonicalize()?.join("health");
     let output = invoke(&[
         "export".as_ref(),
         "--preset".as_ref(),
@@ -496,6 +498,183 @@ result = {{ kind = "capability_projection", fields = {{ ok = ["ok"] }}, schema =
     ensure!(
         !diagnostic.contains("edited after install"),
         "rejection reflected collector contents"
+    );
+    Ok(())
+}
+
+fn run_in(binary: &Path, arguments: &[&str]) -> Result<Output> {
+    Ok(Command::new(binary)
+        .args(arguments)
+        .env_remove("ESTUS_CATALOG_ROOT")
+        .env_remove("ESTUS_CONFIG")
+        .env_remove("ESTUS_SSH")
+        .stdin(std::process::Stdio::null())
+        .output()?)
+}
+
+#[test]
+fn install_writes_the_bundled_catalog_and_is_idempotent() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let target = dir.path().join("share/estus/catalog");
+    let target_text = target.to_str().context("target path")?;
+    let binary = PathBuf::from(test_binary());
+
+    let first = run_in(&binary, &["catalog", "install", "--dir", target_text])?;
+    ensure!(
+        first.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&first.stdout)?;
+    ensure!(report["ok"] == true && report["installed"] == true);
+    ensure!(report["files"].as_u64().is_some_and(|files| files > 100));
+    for relative in ["catalog.json", "payloads/observe_cpu/collector.py"] {
+        ensure!(
+            std::fs::read(target.join(relative))? == std::fs::read(assets().join(relative))?,
+            "{relative} was not installed byte for byte"
+        );
+    }
+    // The installed tree is a usable root.
+    let listed = run_in(
+        &binary,
+        &["catalog", "--root", target_text, "list", "--json"],
+    )?;
+    ensure!(listed.status.success(), "installed catalog does not load");
+
+    // Installing the same catalog again changes nothing.
+    let again = run_in(&binary, &["catalog", "install", "--dir", target_text])?;
+    ensure!(again.status.success());
+    ensure!(serde_json::from_slice::<serde_json::Value>(&again.stdout)?["installed"] == false);
+
+    // A catalog that differs is never overwritten without --replace.
+    let manifest = target.join("catalog.json");
+    let mut edited = std::fs::read(&manifest)?;
+    edited.push(b'\n');
+    std::fs::write(&manifest, &edited)?;
+    let refused = run_in(&binary, &["catalog", "install", "--dir", target_text])?;
+    ensure!(!refused.status.success());
+    ensure!(String::from_utf8_lossy(&refused.stderr).contains("catalog_install_exists"));
+    ensure!(
+        std::fs::read(&manifest)? == edited,
+        "a refused install modified the existing catalog"
+    );
+    let replaced = run_in(
+        &binary,
+        &["catalog", "install", "--dir", target_text, "--replace"],
+    )?;
+    ensure!(
+        replaced.status.success(),
+        "replace failed: {}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    ensure!(std::fs::read(&manifest)? == std::fs::read(assets().join("catalog.json"))?);
+    let leftovers: Vec<_> = std::fs::read_dir(target.parent().context("parent")?)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with(".estus-catalog"))
+        .collect();
+    ensure!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
+    Ok(())
+}
+
+#[test]
+fn install_refuses_a_symlinked_target_and_a_root_option() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real)?;
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link)?;
+    let binary = PathBuf::from(test_binary());
+    let link_text = link.to_str().context("link path")?;
+    let output = run_in(
+        &binary,
+        &["catalog", "install", "--dir", link_text, "--replace"],
+    )?;
+    ensure!(!output.status.success());
+    ensure!(String::from_utf8_lossy(&output.stderr).contains("catalog_path_unsafe"));
+    ensure!(
+        std::fs::read_dir(&real)?.next().is_none(),
+        "install wrote through a symlink"
+    );
+
+    let rooted = run_in(
+        &binary,
+        &[
+            "catalog",
+            "--root",
+            assets().to_str().context("assets")?,
+            "install",
+            "--dir",
+            dir.path().join("x").to_str().context("x")?,
+        ],
+    )?;
+    ensure!(!rooted.status.success());
+    ensure!(String::from_utf8_lossy(&rooted.stderr).contains("catalog_option_not_applicable"));
+    Ok(())
+}
+
+/// The case this feature exists for: a lone binary, with no packaging around it,
+/// installs the catalog next to itself and then works in every mode.
+#[test]
+fn a_lone_binary_installs_and_then_finds_its_catalog() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin)?;
+    let binary = bin.join("estus");
+    std::fs::copy(test_binary(), &binary)?;
+
+    // Before installing there is nothing to find, and the error says what to do.
+    let missing = run_in(&binary, &["catalog", "list"])?;
+    ensure!(!missing.status.success());
+    ensure!(String::from_utf8_lossy(&missing.stderr).contains("catalog_not_installed"));
+
+    let installed = run_in(&binary, &["catalog", "install"])?;
+    ensure!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    ensure!(
+        dir.path()
+            .join("share/estus/catalog/catalog.json")
+            .is_file()
+    );
+    let listed = run_in(&binary, &["catalog", "list"])?;
+    ensure!(
+        listed.status.success(),
+        "catalog next to the binary was not found"
+    );
+
+    // A headless site config that selects a catalog tool resolves it too.
+    let config = dir.path().join("estus.toml");
+    std::fs::write(
+        &config,
+        indoc::indoc! {r#"
+            mode = "headless"
+            capabilities = { named = true }
+            [selection]
+            presets = ["linux-health"]
+            [targets.web-1]
+            ssh_host = "web-1"
+            [automation.targets.web-1]
+            destination = "web-1"
+            python = "/usr/bin/python3"
+        "#},
+    )?;
+    let allowed = run_in(
+        &binary,
+        &[
+            "--config",
+            config.to_str().context("config")?,
+            "auth",
+            "can-i",
+            "observe_cpu",
+            "web-1",
+        ],
+    )?;
+    ensure!(
+        allowed.status.success(),
+        "headless config did not find the installed catalog: {}",
+        String::from_utf8_lossy(&allowed.stderr)
     );
     Ok(())
 }

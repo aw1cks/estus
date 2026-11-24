@@ -1,10 +1,12 @@
-//! Installed catalog discovery and inert export for operator review. Site
-//! configuration enables catalog tools directly; nothing here approves anything.
+//! Installed catalog discovery, inert export for operator review, and writing
+//! the catalog bundled in this binary to disk. Site configuration enables
+//! catalog tools directly; nothing here approves anything.
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -93,6 +95,17 @@ enum CatalogCommand {
         /// New directory; existing paths are never replaced.
         #[arg(long)]
         output: PathBuf,
+    },
+    /// Write the catalog bundled in this binary to disk, so the server can find it.
+    Install {
+        /// Directory to create. Defaults to the place the server looks first,
+        /// `<prefix>/share/estus/catalog` for a binary at `<prefix>/bin/estus`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Replace an existing catalog that differs from this build's, for
+        /// example after an upgrade.
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -290,6 +303,136 @@ fn export(
     )
 }
 
+/// True when `root` holds exactly the bundled files, byte for byte, and
+/// nothing else. Symlinks and special files never match.
+fn installed_matches(root: &Path, files: &[(&str, &[u8])]) -> bool {
+    fn count(directory: &Path, total: &mut usize) -> bool {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    if !count(&entry.path(), total) {
+                        return false;
+                    }
+                }
+                Ok(kind) if kind.is_file() => *total += 1,
+                _ => return false,
+            }
+        }
+        true
+    }
+    let mut total = 0;
+    if !count(root, &mut total) || total != files.len() {
+        return false;
+    }
+    files.iter().all(|(relative, bytes)| {
+        let path = root.join(relative);
+        fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes.len() as u64)
+            && fs::read(&path).is_ok_and(|found| found == *bytes)
+    })
+}
+
+/// Write the bundled catalog next to its destination and rename it into place,
+/// so a failure never leaves a half-written catalog behind.
+fn install(dir: Option<PathBuf>, replace: bool) -> Result<Value, Failure> {
+    let unavailable = || Failure::Code("catalog_install_unavailable");
+    let target = match dir {
+        Some(dir) => dir,
+        None => super::assets::default_install_dir()
+            .ok_or(Failure::Code("catalog_install_dir_unknown"))?,
+    };
+    let files = super::embedded::files();
+    let summary = |installed: bool| {
+        json!({
+            "ok": true,
+            "installed": installed,
+            "dir": target.display().to_string(),
+            "version": super::embedded::version(),
+            "files": files.len(),
+        })
+    };
+
+    let existing = match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.is_dir() => true,
+        Ok(_) => return Err(Failure::Code("catalog_path_unsafe")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => return Err(unavailable()),
+    };
+    if existing {
+        if installed_matches(&target, files) {
+            return Ok(summary(false));
+        }
+        if !replace {
+            return Err(Failure::Code("catalog_install_exists"));
+        }
+    }
+
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(parent)
+        .map_err(|_| unavailable())?;
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    );
+    let staging = parent.join(format!(".estus-catalog-{stamp}"));
+    DirBuilder::new()
+        .mode(0o755)
+        .create(&staging)
+        .map_err(|_| unavailable())?;
+    let staged = (|| -> Result<(), Failure> {
+        for (relative, bytes) in files {
+            let path = staging.join(relative);
+            if let Some(directory) = path.parent() {
+                DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o755)
+                    .create(directory)
+                    .map_err(|_| unavailable())?;
+            }
+            write_new(&path, bytes, 0o644).map_err(|_| unavailable())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let swapped = if existing {
+        let previous = parent.join(format!(".estus-catalog-old-{stamp}"));
+        fs::rename(&target, &previous)
+            .and_then(|()| {
+                fs::rename(&staging, &target).inspect_err(|_| {
+                    let _ = fs::rename(&previous, &target);
+                })
+            })
+            .map(|()| {
+                let _ = fs::remove_dir_all(&previous);
+            })
+    } else {
+        fs::rename(&staging, &target)
+    };
+    if swapped.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(unavailable());
+    }
+    Ok(summary(true))
+}
+
 pub(crate) async fn run(
     args: CatalogArgs,
     _cli: crate::config::Cli,
@@ -298,41 +441,61 @@ pub(crate) async fn run(
     let phase = match &args.command {
         CatalogCommand::List { .. } => "catalog_list",
         CatalogCommand::Export { .. } => "catalog_export",
+        CatalogCommand::Install { .. } => "catalog_install",
     };
     let root = args.root;
-    let command = args.command;
-    let loaded = tokio::task::spawn_blocking(move || {
-        Catalog::load(root.as_deref())
-            .map(|catalog| (catalog, command))
-            .map_err(Failure::from)
-    })
-    .await;
-    let result = match loaded {
-        Ok(Ok((catalog, command))) if !shutdown.is_cancelled() => match command {
-            CatalogCommand::List { json } => {
-                match tokio::task::spawn_blocking(move || describe(&catalog, json)).await {
-                    Ok(value) => value,
-                    Err(_) => Err(Failure::Code("catalog_unavailable")),
-                }
-            }
-            CatalogCommand::Export {
-                tools,
-                presets,
-                output,
-            } => {
-                match tokio::task::spawn_blocking(move || export(&catalog, tools, presets, &output))
-                    .await
-                {
+    let result = match args.command {
+        CatalogCommand::Install { dir, replace } => {
+            if root.is_some() {
+                // `--root` selects a catalog that exists; install creates one.
+                Err(Failure::Code("catalog_option_not_applicable"))
+            } else {
+                match tokio::task::spawn_blocking(move || install(dir, replace)).await {
                     Ok(Ok(value)) => serde_json::to_vec(&value)
                         .map_err(|_| Failure::Code("catalog_output_invalid")),
                     Ok(Err(error)) => Err(error),
-                    Err(_) => Err(Failure::Code("catalog_output_unavailable")),
+                    Err(_) => Err(Failure::Code("catalog_install_unavailable")),
                 }
             }
-        },
-        Ok(Err(error)) => Err(error),
-        Ok(Ok(_)) => Err(Failure::Code("cancelled")),
-        Err(_) => Err(Failure::Code("catalog_unavailable")),
+        }
+        command => {
+            let loaded = tokio::task::spawn_blocking(move || {
+                Catalog::load(root.as_deref())
+                    .map(|catalog| (catalog, command))
+                    .map_err(Failure::from)
+            })
+            .await;
+            match loaded {
+                Ok(Ok((catalog, command))) if !shutdown.is_cancelled() => match command {
+                    CatalogCommand::List { json } => {
+                        match tokio::task::spawn_blocking(move || describe(&catalog, json)).await {
+                            Ok(value) => value,
+                            Err(_) => Err(Failure::Code("catalog_unavailable")),
+                        }
+                    }
+                    CatalogCommand::Export {
+                        tools,
+                        presets,
+                        output,
+                    } => {
+                        match tokio::task::spawn_blocking(move || {
+                            export(&catalog, tools, presets, &output)
+                        })
+                        .await
+                        {
+                            Ok(Ok(value)) => serde_json::to_vec(&value)
+                                .map_err(|_| Failure::Code("catalog_output_invalid")),
+                            Ok(Err(error)) => Err(error),
+                            Err(_) => Err(Failure::Code("catalog_output_unavailable")),
+                        }
+                    }
+                    CatalogCommand::Install { .. } => Err(Failure::Code("catalog_unavailable")),
+                },
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(_)) => Err(Failure::Code("cancelled")),
+                Err(_) => Err(Failure::Code("catalog_unavailable")),
+            }
+        }
     };
     match result {
         Ok(mut bytes) if !shutdown.is_cancelled() => {
