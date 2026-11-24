@@ -465,3 +465,57 @@ targets_dir = \"targets\"
 
     Ok(())
 }
+
+#[test]
+fn can_i_native_sudo_tool_does_not_require_the_global_sudo_capability() -> Result<()> {
+    // The server publishes and dispatches a native sudo tool on the target's
+    // sudo route alone, so `auth can-i` must agree.
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("native-sudo.toml");
+    std::fs::write(
+        &config_path,
+        indoc::indoc! {r#"
+            mode = "headless"
+            capabilities = { named = true }
+            [selection]
+            allow = ["observe_root"]
+
+            [targets.server]
+            ssh_host = "server-ordinary"
+
+            [targets.server.sudo]
+            mode = "separate-identity"
+            ssh_host = "server-elevated"
+            users = ["root"]
+            programs = ["/usr/bin/id"]
+
+            [tools.observe_root]
+            description = "Observe the fixed root UID through the privileged SSH identity."
+            revision = "1"
+            targets = ["server"]
+            authority = { sudo = "root" }
+            effects = ["read"]
+            execution = { kind = "native_argv", program = "/usr/bin/id", argv = ["-u", "--"] }
+            input_schema = { type = "object", additionalProperties = false, required = [], properties = {} }
+            result = { kind = "command" }
+            limits = { timeout_secs = 10, max_output_bytes = 1024 }
+        "#},
+    )?;
+    let output = Command::new(estus_binary())
+        .env("ESTUS_CATALOG_ROOT", catalog_root())
+        .args([
+            "--config",
+            config_path.to_str().context("config path")?,
+            "auth",
+            "can-i",
+            "observe_root",
+            "server",
+        ])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "can-i denied a published native sudo tool: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
+}

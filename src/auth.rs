@@ -467,11 +467,12 @@ fn decide_binding(
     effective: &EffectivePolicy,
 ) -> ToolDecision {
     let tier = risk_tier_for_binding(binding);
-    let needs_sudo = binding.sudo().is_some()
-        || matches!(
-            binding.automation_authority(),
-            Some(AutomationAuthority::Named(_))
-        );
+    let native_sudo = binding.sudo().is_some();
+    let named_authority = matches!(
+        binding.automation_authority(),
+        Some(AutomationAuthority::Named(_))
+    );
+    let needs_sudo = native_sudo || named_authority;
 
     if !config.global_capabilities().named {
         return ToolDecision {
@@ -492,7 +493,10 @@ fn decide_binding(
             ),
         };
     }
-    if needs_sudo && !config.global_capabilities().sudo {
+    // A native sudo route is gated by the target's sudo policy and the active
+    // profile, not by the global capability (see `Config::resolve_binding`).
+    // Only a named automation authority needs `capabilities.sudo`.
+    if named_authority && !config.global_capabilities().sudo {
         return ToolDecision {
             allowed: false,
             tier: Some(tier),
@@ -623,16 +627,7 @@ fn decide_binding(
 }
 
 fn is_preview_paired_binding(name: &str) -> bool {
-    matches!(
-        name,
-        "change_package"
-            | "change_apt"
-            | "change_dnf"
-            | "change_sysctl_runtime"
-            | "change_sysctl_config"
-            | "change_systemd_unit"
-            | "change_systemd_unit_file"
-    )
+    crate::server::preview::PREVIEW_PAIRED_CHANGES.contains(&name)
 }
 
 fn lookup_tier(config: &Config, tool_name: &str) -> Option<RiskTier> {

@@ -288,6 +288,21 @@ impl Change {
     }
 }
 
+/// Catalog change tools that have a qualified preview pairing. The native
+/// tools lower through [`PreviewSpec::for_payload`] and the package tools
+/// through [`PreviewSpec::for_ansible`]. `estus auth` reads this list, so keep
+/// it in step with those two functions.
+pub(crate) const PREVIEW_PAIRED_CHANGES: &[&str] = &[
+    "change_package",
+    "change_apt",
+    "change_dnf",
+    "change_kernel_module_load",
+    "change_sysctl_config",
+    "change_sysctl_runtime",
+    "change_systemd_unit",
+    "change_systemd_unit_file",
+];
+
 impl PreviewSpec {
     fn from_change(change: Change) -> Option<Self> {
         let (prestate_module, prestate_args) = change.prestate();
@@ -823,5 +838,43 @@ mod tests {
         )
         .unwrap();
         assert_ne!(preview.intent_digest, other.intent_digest);
+    }
+
+    #[test]
+    fn paired_change_list_matches_the_native_lowering() {
+        // Every listed native change tool must lower to a preview spec; the
+        // package tools pair through their Ansible module instead.
+        for (name, args) in [
+            (
+                "change_kernel_module_load",
+                json!({"name": "dummy", "parameters": {}}),
+            ),
+            (
+                "change_sysctl_config",
+                json!({"key": "kernel.printk", "value": 3}),
+            ),
+            (
+                "change_sysctl_runtime",
+                json!({"key": "kernel.printk", "value": 3}),
+            ),
+            (
+                "change_systemd_unit",
+                json!({"unit": "a.service", "operation": "restart"}),
+            ),
+            (
+                "change_systemd_unit_file",
+                json!({"unit": "a.service", "operation": "enable"}),
+            ),
+        ] {
+            assert!(
+                PREVIEW_PAIRED_CHANGES.contains(&name),
+                "{name} is missing from PREVIEW_PAIRED_CHANGES"
+            );
+            assert!(
+                PreviewSpec::for_payload(name, false, &args).is_some(),
+                "{name} has no preview lowering"
+            );
+        }
+        assert!(PreviewSpec::for_payload("change_network_link_down", false, &json!({})).is_none());
     }
 }
