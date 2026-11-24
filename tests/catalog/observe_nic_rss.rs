@@ -12,9 +12,17 @@ async fn observe_nic_rss() -> Result<()> {
         let mut indirection = Vec::new();
         let mut offset = 0;
         let value = loop {
-            let envelope = binding.call(json!({"interface":"eth0","offset":offset})).await?;
+            let envelope = binding
+                .call(json!({"interface":"eth0","offset":offset}))
+                .await?;
             let value = catalog::projection(&envelope)?.clone();
-            indirection.extend(value["indirection"].as_array().context("indirection")?.iter().cloned());
+            indirection.extend(
+                value["indirection"]
+                    .as_array()
+                    .context("indirection")?
+                    .iter()
+                    .cloned(),
+            );
             match value.get("next_offset") {
                 Some(next) => offset = next.as_u64().context("next_offset")?,
                 None => break value,
