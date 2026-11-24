@@ -20,7 +20,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 ## 3. Continuation & Output Handles
 - Paginated inspection tools use explicit single-use tokens or byte offsets:
   - `inspect_directory`: one bounded page per call, `max_entries` 1–1000 (default 200); `truncated=true` means more entries existed, so re-call the same `host`/`path` with a larger `max_entries` or accept the prefix. The result is not a snapshot.
-  - `inspect_journal`: optional `unit`, literal `contains`, `limit` 1–500, `direction` (`backward` default or `forward`), direction-bound `continuation_cursor` packed within 131072 bytes.
+  - `inspect_journal`: optional `unit`, literal `contains`, `limit` 1–500, `direction` (`backward` default or `forward`). A truncated result returns `continuation_cursor`; pass it back as `cursor` with the same direction to continue.
   - `inspect_journal_record`: reconstruct long/truncated messages by `boot_id`, `cursor`, `offset`, and `max_bytes` (1–4096 base64 UTF-8 slices) until `eof=true`.
 - Command and local-execution tools support `retain_output=true`, returning session-scoped handles readable via `inspect_output`.
 
@@ -44,7 +44,7 @@ description: Safe observation-first Linux triage, journal inspection, and change
 ## 6. MCP Guidance Surfaces
 - **Prompts**: `triage_host`, `diagnose_service`, `safe_change`, `network_triage`.
 - **Resources**: `estus://guides/systemd`, `estus://guides/linux-memory`, `estus://guides/networking`, `estus://guides/preview`, `estus://guides/uncertainty-reconciliation`, and `estus://targets/{host}/policy`.
-- Both surfaces name only tools the running configuration publishes, and restate the tier, preview and quarantine rules above rather than adding policy.
+- Prompts take the target as `host` and name only operations that target's resolved policy permits. The static `estus://guides/*` resources are generic and may mention tools your server does not publish; read `estus://targets/{host}/policy` for the resolved policy. Neither surface adds policy; they restate the tier, preview and quarantine rules above.
 
 ## 7. Exact-Name Client Approval Policy (119 Published Tools)
 Published tools are the 15 builtin names plus the 104 bundled catalog tools. Which catalog tools are actually published depends on the selected configuration: the `[capabilities]` ceiling, then `[selection]`, then each `[targets.<host>].selection` and `max_tier`. In zero-config workstation mode the installed catalog and bundle decide. The lists below are the full inventory grouped by category, not this site's policy. Configure exact tool names under your MCP client's permission rules; prefix globs are optional because client support varies.
