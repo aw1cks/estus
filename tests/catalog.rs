@@ -117,6 +117,10 @@ mod tools {
     mod observe_network_rules;
     mod observe_nic;
     mod observe_nic_eee;
+    mod observe_nic_features;
+    mod observe_nic_fec;
+    mod observe_nic_pause;
+    mod observe_nic_rss;
     mod observe_nic_stats;
     mod observe_nic_transceiver;
     mod observe_packages;
