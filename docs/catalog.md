@@ -36,6 +36,38 @@ Keep both keys if you want the named tool in addition to a preset. Check the
 site allowlist, a named [authority](concepts.md#authority), or an
 [Ansible bundle](ansible-bundles.md).
 
+## Install the catalog
+
+The wheel and the Nix package come with the catalog. A binary you built with
+Cargo or downloaded on its own carries a copy inside it, and needs it written to
+disk once:
+
+```sh
+estus catalog install
+```
+
+It prints one line of JSON (the file count varies by release):
+
+```json
+{"dir":"/home/you/.cargo/share/estus/catalog","files":301,"installed":true,"ok":true,"version":"10"}
+```
+
+By default this writes `../share/estus/catalog` relative to the executable, so
+`~/.cargo/bin/estus` installs to `~/.cargo/share/estus/catalog`. That is the
+first place Estus looks, so nothing else needs configuring. To put it somewhere
+else, pass `--dir` and point Estus at it with `[catalog] root` or
+`ESTUS_CATALOG_ROOT` (see [configuration](configuration.md#catalog-assets-catalog)).
+
+Running it again is safe. If the files already match this build, it reports
+`"installed": false` and changes nothing. If a different catalog is there, it
+refuses with `catalog_install_exists` rather than overwrite it. **After you
+upgrade Estus, run `estus catalog install --replace`** so the installed catalog
+matches the new binary; Estus does not update it for you.
+
+Install writes only the catalog, with directories `0755` and files `0644`. It
+enables no tool and grants no access. For a locked-down deployment, run it as
+root into a root-owned directory; see [deployment](deployment.md).
+
 ## List or export tools
 
 Run `estus catalog list` to see the presets and tool definitions in your

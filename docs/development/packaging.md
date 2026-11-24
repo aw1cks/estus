@@ -16,7 +16,7 @@ uv tool install --python 3.14 ./dist/local/estus-*.whl
 
 ## What's in the wheel
 
-The wheel contains a private platform-specific Rust executable and a Python launcher. The launcher selects the installed catalog directory and replaces itself with the executable, leaving MCP stdio and process lifecycle to Rust. Wheels use the tag `py3-none-<platform>` because the executable does not link to a CPython ABI.
+The wheel contains a private platform-specific Rust executable and a Python launcher. The launcher selects the installed catalog directory and replaces itself with the executable, leaving MCP stdio and process lifecycle to Rust. The executable also carries its own copy of the catalog (see `build.rs`), which is how a plain `cargo install` build can write one out with `estus catalog install`; the wheel does not need that copy. Wheels use the tag `py3-none-<platform>` because the executable does not link to a CPython ABI.
 
 | Task | Python requirement |
 | --- | --- |

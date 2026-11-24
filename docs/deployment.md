@@ -10,7 +10,7 @@ If your agent can run local commands, run Estus under a different Linux account 
 
    | Path | Owner and mode | Purpose |
    | --- | --- | --- |
-   | `/opt/estus` | Root-controlled installation | Install the Linux package or closure here; a root-owned symlink to an immutable package works. The wrapper starts `/opt/estus/bin/estus`. |
+   | `/opt/estus` | Root-controlled installation | Install the Linux package or closure here; a root-owned symlink to an immutable package works. For a bare binary, put it at `/opt/estus/bin/estus` and run `/opt/estus/bin/estus catalog install` as root, which writes the catalog to `/opt/estus/share/estus/catalog` where Estus finds it. The service account only needs to read it. The wrapper starts `/opt/estus/bin/estus`. |
    | `/usr/local/libexec/estus-ingress` | `root:root`, `0755` | Install `estus-ingress` on the service host. It clears the environment, sets a fixed home, path and temporary directory, and starts Estus with a fixed configuration. It never interprets `SSH_ORIGINAL_COMMAND`. |
    | `/etc/estus` | `root:estus-service`, `0750` | Keep service configuration readable by the service and writable only by root. |
    | `/etc/estus/server.toml` | `root:estus-service`, `0640` | Install `server.toml`. It admits the logical target `target` and selects the fixed `record_identity` operation, not the generic `exec_*` tools. |

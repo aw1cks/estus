@@ -11,6 +11,8 @@ cargo build --release --locked
 ./target/release/estus --help
 ```
 
+`build.rs` embeds the contents of `catalog/` in the binary, so editing a catalog file rebuilds it, and `estus catalog install` can write that copy to disk. Binaries under `target/` find the repository's own `catalog/` automatically (the two directories above `target/<profile>/`), so a development build needs no install step. Anywhere else, a bare binary needs `estus catalog install` once; see the [catalog guide](../catalog.md#install-the-catalog).
+
 ## Build with Nix
 
 With flakes enabled, run the checkout's default build or the build pinned to the minimum supported Rust version (MSRV):

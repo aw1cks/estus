@@ -234,12 +234,23 @@ entries left by interrupted writes.
 
 | Key | Default | What it sets |
 | --- | --- | --- |
-| `root` | Unset; installed launchers can supply `ESTUS_CATALOG_ROOT` | Directory containing `catalog.json`. An explicit root must be a real directory, not a symlink. |
+| `root` | Unset | Directory containing `catalog.json`. An explicit root must be a real directory, not a symlink. |
 | `version` | Unset | Exact string expected in the manifest's `version` field. A mismatch fails startup. |
 
-Prefer `root` in your config to change the server's asset directory.
-`estus catalog list` and `estus catalog export` are standalone commands;
-use their `--root` option, not `--config`. See [catalog](catalog.md).
+Estus uses the first catalog it finds, in this order:
+
+1. `[catalog].root` (`--root` for the `estus catalog` commands).
+2. `ESTUS_CATALOG_ROOT`.
+3. `../share/estus/catalog` relative to the `estus` executable.
+
+An explicit root that turns out to be invalid is an error, not a reason to try
+the next one. If nothing is found, anything that needs the catalog fails with
+`catalog_not_installed`; run [`estus catalog install`](catalog.md#install-the-catalog)
+to write the catalog built into the binary next to it. The wheel and the Nix
+package supply their own copy and set `ESTUS_CATALOG_ROOT` for you.
+
+`estus catalog list`, `export` and `install` are standalone commands; use their
+`--root` or `--dir` option, not `--config`. See [catalog](catalog.md).
 
 ## Local scripts: `[controller]`
 
@@ -302,11 +313,11 @@ most 4096 bytes. The `bundle` and `required` settings only affect the optional
 | `ESTUS_MAX_TIMEOUT_SECS` | Maximum operation timeout in seconds | Overrides `[limits].max_timeout_secs` |
 | `ESTUS_MAX_OUTPUT_BYTES` | Command output cap in bytes | Overrides `[limits].max_output_bytes` |
 | `ESTUS_MAX_FILE_BYTES` | File and stdin cap in bytes | Overrides `[limits].max_file_bytes` |
-| `ESTUS_CATALOG_ROOT` | Catalog asset directory | Below `[catalog].root` for the server, or `--root` for `estus catalog` |
+| `ESTUS_CATALOG_ROOT` | Catalog asset directory | Below `[catalog].root` (or `--root`), above the directory next to the executable |
 | `ESTUS_ANSIBLE_BUNDLE` | Ansible bundle directory | Below `[automation].bundle`, above installed bundle discovery |
 
 Set numeric overrides as positive decimal integers without whitespace or
-signs. Some packaged launchers set `ESTUS_CATALOG_ROOT` themselves.
+signs.
 
 ## Check a configured host with `doctor`
 

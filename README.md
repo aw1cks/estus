@@ -105,8 +105,18 @@ and sudo are separate switches. See [concepts](docs/concepts.md).
 nix run github:aw1cks/estus -- --config /path/to/estus.toml
 ```
 
-**From source, as a Python wheel.** Building needs Rust 1.88+ and Python 3.10+;
-the installed wheel runs on Python 3.8+.
+**Cargo.** Needs Rust 1.88+. The tool catalog is built into the binary; write it
+to disk once, next to the binary, where Estus looks for it:
+
+```sh
+cargo install --git https://github.com/aw1cks/estus --locked
+estus catalog install
+```
+
+After upgrading, run `estus catalog install --replace` to refresh it.
+
+**Python wheel.** Building needs Rust 1.88+ and Python 3.10+; the installed
+wheel runs on Python 3.8+ and includes the catalog.
 
 ```sh
 git clone https://github.com/aw1cks/estus && cd estus
