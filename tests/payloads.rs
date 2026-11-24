@@ -354,6 +354,62 @@ fn psi_parses_units_and_rejects_missing_duplicate_unknown_and_oversize_lines() -
 }
 
 #[test]
+fn psi_absence_distinguishes_disabled_from_unsupported() -> Result<()> {
+    let built = "CONFIG_PSI=y\n";
+    let default_off = "CONFIG_PSI=y\nCONFIG_PSI_DEFAULT_DISABLED=y\n";
+    let absent = "# CONFIG_PSI is not set\n";
+    for (cmdline, config, expected) in [
+        // RHEL-family default: built in, off unless psi=1.
+        (
+            "ro quiet",
+            json!(default_off),
+            json!(["disabled", "kernel_default"]),
+        ),
+        (
+            "ro psi=0",
+            json!(built),
+            json!(["disabled", "boot_parameter"]),
+        ),
+        (
+            "psi=off",
+            Value::Null,
+            json!(["disabled", "boot_parameter"]),
+        ),
+        // The last psi= wins, as in the kernel.
+        (
+            "psi=1 psi=n",
+            json!(default_off),
+            json!(["disabled", "boot_parameter"]),
+        ),
+        (
+            "psi=0 psi=1",
+            json!(default_off),
+            json!(["unsupported", null]),
+        ),
+        (
+            "psi=bogus",
+            json!(default_off),
+            json!(["disabled", "kernel_default"]),
+        ),
+        ("psi=0", json!(absent), json!(["unsupported", null])),
+        ("ro", json!(absent), json!(["unsupported", null])),
+        ("ro", Value::Null, json!(["unsupported", null])),
+        ("ro", json!(built), json!(["unsupported", null])),
+    ] {
+        assert_eq!(
+            parsed(
+                "observe_pressure",
+                "classify_missing_psi",
+                json!([cmdline, config])
+            )?,
+            expected,
+            "{cmdline} {config}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn systemd_units_pages_cover_every_row_once_and_fail_closed() -> Result<()> {
     let head = json!({"scope":"system","unit_pattern":"*","view":"loaded","unit_type":"service","state":"active"});
     let rows: Vec<Value> = (0..300)
