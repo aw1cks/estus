@@ -3,7 +3,8 @@
 #   estus bundle build --python /opt/ansible/bin/python --output /etc/estus/bundle
 #   estus bundle inspect --bundle /etc/estus/bundle
 # Point [automation].bundle at that directory (or set ESTUS_ANSIBLE_BUNDLE).
-# No Python or Ansible runs during MCP startup or tool execution.
+# Nothing runs at startup. When the tool is called, the module runs on the target
+# using the interpreter set under [automation.targets.server].
 # MCP input: {"host":"server","inputs":{}}
 mode = "headless"
 capabilities = { named = true }

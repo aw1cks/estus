@@ -5,9 +5,9 @@
 #   estus bundle inspect --bundle /etc/estus/bundle
 #   estus --config examples/automation_runtime.toml doctor --runtime ansible
 #   estus --config examples/automation_runtime.toml
-# ESTUS_ANSIBLE_BUNDLE overrides the file reference; the file reference wins.
-# This validates bundle integrity only; it does not publish or execute tools.
-# The base wheel and native package stay independent unless required = true.
+# [automation].bundle takes precedence over ESTUS_ANSIBLE_BUNDLE.
+# required = true makes a missing or broken bundle a startup failure, even though
+# no tool is selected here. It does not publish or execute any tool.
 mode = "headless"
 capabilities = { named = true }
 [selection]
