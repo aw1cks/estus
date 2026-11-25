@@ -5,6 +5,8 @@ jobs:
   cleanup:
     if: github.event.pull_request.head.repo.full_name == github.repository
     name: Cleanup PR caches
+    permissions:
+      actions: write
     runs-on: ubuntu-26.04
     steps:
     - env:
@@ -29,5 +31,4 @@ name: Cache Cleanup
   pull_request:
     types:
     - closed
-permissions:
-  actions: write
+permissions: {}
