@@ -16,6 +16,7 @@ New here? Read [Getting started](getting-started.md), then [Concepts](concepts.m
 | [Builtin tools](tools/builtin.md) | Use file and command tools |
 | [Reading results](tools/results.md) | Understand replies, errors, output handles and progress |
 | [Ansible bundles](ansible-bundles.md) | Enable the optional Ansible-backed tools |
+| [Define your own Ansible tool](ansible-tools.md) | Turn an Ansible module into a typed tool |
 | [Troubleshooting](troubleshooting.md) | Fix an error code or a server that won't start |
 
 ## Running it safely

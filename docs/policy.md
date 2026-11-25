@@ -220,6 +220,7 @@ It sets `description`, `revision`, `authority`, `effects`, `execution` and
 `input_schema`, `fixed_args`, `input_map`, `argument_types`, `constraints` and
 `limits` where the executor supports them. Supported execution kinds are
 `native_argv`, `native_payload`, `ansible_module` and `controller_script`.
+For an Ansible module, see [Define your own Ansible tool](ansible-tools.md).
 
 ### Use different allowlists on two hosts
 

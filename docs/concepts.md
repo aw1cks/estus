@@ -41,8 +41,9 @@ the catalog doesn't cover.
 
 Most catalog tools are Python collectors that Estus sends to the target over SSH
 and runs with the target's `python3`. A few, mainly the package tools, drive
-Ansible modules and need an [offline bundle](ansible-bundles.md). The builtins
-need nothing on the target except SSH (and SFTP for file tools).
+Ansible modules and need an [offline bundle](ansible-bundles.md); you can also
+[turn any Ansible module into a tool](ansible-tools.md). The builtins need
+nothing on the target except SSH (and SFTP for file tools).
 
 ## Tiers
 

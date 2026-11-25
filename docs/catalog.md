@@ -145,6 +145,10 @@ An overlay keeps the installed tool and changes its site settings. It can also
 restrict the target list, select an authority, or adjust limits and input
 mapping. See [Policy](policy.md) for the overlay keys and merge rules.
 
+To add a tool that isn't in the catalog, including one that runs an Ansible
+module, see [Policy](policy.md#catalog-overlays-and-custom-definitions) and
+[Define your own Ansible tool](ansible-tools.md).
+
 ## Check target requirements
 
 The [reference](tools/catalog-reference.md) shows the required target Python

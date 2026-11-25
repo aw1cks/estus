@@ -22,6 +22,9 @@ and what they can touch.
 - **Tools, not shell strings.** `observe_memory`, `inspect_journal`,
   `change_systemd_unit`. Catalog tools take fixed, typed inputs and return
   structured results, so there are no flags or paths to smuggle in.
+- **Ansible modules as tools.** Turn any module from an offline bundle into a
+  typed tool of your own, with no playbooks. See
+  [below](#ansible-modules-as-tools).
 - **Policy per host.** Production can be read-only while staging may restart
   services. Rules combine by "strictest wins", so file order never weakens them.
 - **Tiered for approvals.** Every tool is `observe`, `inspect`, `preview`,
@@ -97,6 +100,34 @@ has a few generic builtin tools for files and commands. They are off until you
 enable them in `[capabilities]`: reading files, writing files, running commands
 and sudo are separate switches. See [concepts](docs/concepts.md).
 
+## Ansible modules as tools
+
+Estus can run Ansible modules, compiled ahead of time into an offline bundle, as
+typed tools. Some ship in the catalog, such as package changes with a check-mode
+preview and diff. Or turn any module into a tool of your own: you choose the
+inputs the agent may pass, fix every other argument, and pick which fields of
+the result come back.
+
+```toml
+# fragment: the core of a custom tool
+[tools.observe_path_stat]
+execution = { kind = "ansible_module", module = "ansible.builtin.stat" }
+input_map = { path = "path" }                           # all the agent supplies
+fixed_args = { get_checksum = false, get_mime = false } # everything else is yours
+
+[tools.observe_path_stat.result]
+kind = "ansible_projection"
+fields = { exists = ["stat", "exists"] }                # all that comes back
+```
+
+Nothing needs Ansible at run time, on the machine running Estus or on the
+target; the target needs Python 3.9 or later for these tools. The agent can't
+widen what the tool does, and its name sets its tier, so your approval rules
+apply. A module does run as code on the target under the authority you pick, so
+review it, and the bundle, like anything else you deploy. See [Ansible
+bundles](docs/ansible-bundles.md) to build one and [Define your own Ansible
+tool](docs/ansible-tools.md) for the full example.
+
 ## Install
 
 **Nix** (includes the tool catalog):
@@ -104,6 +135,9 @@ and sudo are separate switches. See [concepts](docs/concepts.md).
 ```sh
 nix run github:aw1cks/estus -- --config /path/to/estus.toml
 ```
+
+Use `github:aw1cks/estus#automation` instead for a build that also ships an
+Ansible bundle.
 
 **Cargo.** Needs Rust 1.88+. The tool catalog is built into the binary; write it
 to disk once, next to the binary, where Estus looks for it:
