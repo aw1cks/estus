@@ -216,11 +216,13 @@
           # zizmor rightly treats as unsafe. Same-repo PRs clean up here; caches
           # from fork PRs age out under GitHub's 7-day eviction.
           on.pull_request.types = [ "closed" ];
-          permissions.actions = "write";
+          # Nothing at the workflow level; only the cleanup job may delete caches.
+          permissions = { };
           jobs.cleanup = {
             "if" = "github.event.pull_request.head.repo.full_name == github.repository";
             name = "Cleanup PR caches";
             runs-on = "ubuntu-26.04";
+            permissions.actions = "write";
             timeout-minutes = 5;
             steps = [
               {
