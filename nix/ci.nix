@@ -8,6 +8,9 @@
       nixCache = "nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569"; # v7.0.2
       uploadArtifact = "actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874"; # v4.4.0
       cachePrefix = "nix-\${{ runner.os }}-\${{ runner.arch }}-";
+      # Must not start with cachePrefix: SSH baseline restores, and purges, any key
+      # with that prefix, and would otherwise pick up the release toolchain store.
+      releaseCachePrefix = "nix-release-\${{ runner.os }}-\${{ runner.arch }}-";
       releasePlease = "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"; # v5.0.0
       downloadArtifact = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"; # v8.0.2
       pypiPublish = "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"; # v1.14.3
@@ -36,11 +39,11 @@
           "if" = "\${{ !startsWith(github.ref, 'refs/tags/') }}";
           uses = nixCache;
           "with" = {
-            primary-key = cachePrefix + "release-\${{ hashFiles('**/*.nix', 'flake.lock') }}";
-            restore-prefixes-first-match = cachePrefix + "release-";
+            primary-key = releaseCachePrefix + "\${{ hashFiles('**/*.nix', 'flake.lock') }}";
+            restore-prefixes-first-match = releaseCachePrefix;
             save = true;
             purge = "\${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
-            purge-prefixes = cachePrefix + "release-";
+            purge-prefixes = releaseCachePrefix;
             purge-created = 0;
             purge-primary-key = "never";
             gc-max-store-size-linux = "2G";
@@ -87,7 +90,9 @@
                 }
               ];
             };
-            timeout-minutes = 45;
+            # A run with a cold Nix store takes 35-40 minutes; leave room for a
+            # slow runner rather than failing on the clock.
+            timeout-minutes = 75;
             permissions = {
               contents = "read";
               # cache-nix-action needs this for same-ref cache purging.

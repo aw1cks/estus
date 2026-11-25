@@ -65,7 +65,7 @@ jobs:
           runner: ubuntu-26.04-arm
         - name: ssh-native-macos-arm64
           runner: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 75
 name: SSH baseline
 'on':
   pull_request: {}
