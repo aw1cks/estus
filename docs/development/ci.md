@@ -26,7 +26,7 @@ Three more workflows handle releases. **Release artifacts** (`release-artifacts.
 
 | Layer | What it covers |
 | --- | --- |
-| Flake checks | Default and MSRV native builds and network-free tests, acceptance harness compilation, wheel build, formatting, Clippy, RustSec advisory checks, Python bootstrap and static checks, generated workflow consistency |
+| Flake checks | Default and MSRV native builds and network-free tests, acceptance harness compilation, wheel build, formatting, Clippy, RustSec advisory checks, dependency bans, licenses and sources, documentation links, spelling, Python bootstrap and static checks, generated workflow consistency |
 | Packaged MSRV native | Loopback SSH/SFTP, controller scripts, `doctor`, and progress notifications |
 | Packaged MSRV bundle | Bundle build, inspection, digest and module execution checks |
 | Linux containers | Installed stdio suites and the SSH/SFTP/sudo baseline against the native fixture, for both the default and MSRV packages |

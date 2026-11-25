@@ -1,0 +1,28 @@
+[files]
+extend-exclude = [
+    # ASCII-armored OpenPGP fixture: the body and checksum are encoded bytes.
+    "tests/fixtures/catalog/packages/signing/test-only-signing-key.asc",
+]
+
+[default]
+extend-ignore-re = [
+    # Exact byte literals for checksum mismatch and base64 padding tests.
+    '\bb"(?:abd|fo)"',
+]
+
+[default.extend-identifiers]
+# Spelling of the field in openssh-sftp-error.
+occuring_error = "occuring_error"
+# Linux MODULE_PARM_DESC macro and modinfo's output/JSON key.
+MODULE_PARM_DESC = "MODULE_PARM_DESC"
+parm = "parm"
+# ethtool's JSON field for the vendor part number.
+vendor_pn = "vendor_pn"
+# iproute2 JSON keys for incoming and outgoing interfaces.
+iif = "iif"
+oif = "oif"
+# nvme-cli JSON keys for thermal management time and transition counts.
+thm_temp1_total_time = "thm_temp1_total_time"
+thm_temp1_trans_count = "thm_temp1_trans_count"
+thm_temp2_total_time = "thm_temp2_total_time"
+thm_temp2_trans_count = "thm_temp2_trans_count"
