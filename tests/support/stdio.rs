@@ -158,6 +158,11 @@ impl Server {
         .await?;
         let initialized = self.response(1).await?;
         ensure!(initialized["result"]["protocolVersion"] == "2025-11-25");
+        ensure!(
+            initialized["result"]["serverInfo"]["name"] == "estus",
+            "server identifies itself as {}, not estus",
+            initialized["result"]["serverInfo"]["name"]
+        );
         ensure!(initialized["result"]["capabilities"]["tools"].is_object());
         ensure!(initialized["result"]["capabilities"]["prompts"].is_object());
         ensure!(initialized["result"]["capabilities"]["resources"].is_object());

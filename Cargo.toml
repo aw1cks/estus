@@ -1,12 +1,22 @@
 [package]
-name = "estus"
+name = "estus-mcp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Stdio MCP server that gives AI agents structured, policy-gated Linux operations over your own SSH"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/aw1cks/estus"
-publish = false
+readme = "README.md"
+keywords = ["mcp", "ssh", "sre", "linux", "ai-agents"]
+categories = ["command-line-utilities", "development-tools"]
+# The crate ships the program and the catalog `build.rs` embeds, nothing else.
+exclude = [
+    "/.github/", "/.omp/", "/nix/", "/tests/", "/fuzz/", "/scripts/", "/python/",
+    "/docs/", "/examples/", "/skills/", "/dist/", "/result",
+    "/flake.nix", "/flake.lock", "/pyproject.toml", "/setup.py", "/MANIFEST.in",
+    "/deny.toml", "/clippy.toml", "/release-please-config.json",
+    "/.release-please-manifest.json", "/.git-blame-ignore-revs",
+]
 
 [lib]
 name = "estus"

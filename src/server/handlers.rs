@@ -639,8 +639,10 @@ impl ServerHandler for Estus {
                 .enable_resources()
                 .build(),
         )
+        // The wire name is the product and command name, not the crate name:
+        // clients and docs identify the server as `estus`.
         .with_server_info(rmcp::model::Implementation::new(
-            env!("CARGO_PKG_NAME"),
+            "estus",
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(super::guidance::INSTRUCTIONS)

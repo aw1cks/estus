@@ -10,7 +10,13 @@ use super::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Estus: operator-controlled SSH over MCP")]
+// The command is `estus` whatever the crate is called; clap would otherwise
+// print the crate name, `estus-mcp`, for --version.
+#[command(
+    name = "estus",
+    version,
+    about = "Estus: operator-controlled SSH over MCP"
+)]
 pub(crate) struct Cli {
     /// Operator TOML configuration; no file is discovered automatically.
     #[arg(long, global = true, env = "ESTUS_CONFIG", hide_env_values = true)]

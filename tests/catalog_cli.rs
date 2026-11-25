@@ -2,6 +2,19 @@ use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[test]
+fn version_names_the_command_not_the_crate() -> Result<()> {
+    let output = Command::new(test_binary()).arg("--version").output()?;
+    ensure!(output.status.success());
+    ensure!(
+        String::from_utf8_lossy(&output.stdout).trim()
+            == concat!("estus ", env!("CARGO_PKG_VERSION")),
+        "unexpected --version output: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
+}
+
 fn assets() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog")
 }

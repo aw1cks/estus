@@ -415,7 +415,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "estus"
+name = "estus-fuzz"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "estus-mcp",
+ "hex",
+ "libfuzzer-sys",
+ "openssh-sftp-client",
+ "openssh-sftp-protocol",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shell-escape",
+]
+
+[[package]]
+name = "estus-mcp"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -439,25 +458,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
-]
-
-[[package]]
-name = "estus-fuzz"
-version = "0.0.0"
-dependencies = [
- "base64",
- "bytes",
- "estus",
- "hex",
- "libfuzzer-sys",
- "openssh-sftp-client",
- "openssh-sftp-protocol",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "shell-escape",
 ]
 
 [[package]]
