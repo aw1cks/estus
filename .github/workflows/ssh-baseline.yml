@@ -5,6 +5,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
 jobs:
+  retry:
+    if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && true }}
+    name: Request a retry of infrastructure failures
+    needs:
+    - verify
+    permissions:
+      actions: write
+    runs-on: ubuntu-26.04
+    steps:
+    - env:
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RUN_ID: ${{ github.run_id }}
+      name: Dispatch ci-retry.yml for this run
+      run: gh workflow run ci-retry.yml --ref main -f run_id="$RUN_ID"
+    timeout-minutes: 5
   verify:
     name: ${{ matrix.name }}
     permissions:

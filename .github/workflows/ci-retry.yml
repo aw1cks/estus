@@ -1,0 +1,35 @@
+# Generated from nix/ci.nix. Run: nix run .#generate-workflows
+%YAML 1.1
+---
+concurrency:
+  cancel-in-progress: false
+  group: ci-retry-${{ inputs.run_id }}
+jobs:
+  retry:
+    name: Re-run infrastructure failures
+    permissions:
+      actions: write
+      checks: read
+      contents: read
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - env:
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RUN_ID: ${{ inputs.run_id }}
+      name: Re-run the run's failed jobs if GitHub failed to run them
+      run: bash scripts/ci-retry.sh
+    timeout-minutes: 20
+name: CI retry
+'on':
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Workflow run to inspect and, if GitHub failed to run its jobs, re-run
+        required: true
+        type: string
+permissions:
+  contents: read
