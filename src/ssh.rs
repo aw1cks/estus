@@ -35,7 +35,16 @@ const IDLE: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(2);
 const SOCKET_POLL: Duration = Duration::from_millis(5);
 const READINESS_POLL: Duration = Duration::from_millis(25);
-const MAX_SOCKET_BYTES: usize = 100;
+/// Bytes a Unix socket pathname can use: `sun_path` (104 on macOS and the BSDs,
+/// 108 on Linux) less its terminating NUL.
+const SUN_PATH_BYTES: usize = std::mem::size_of::<nix::libc::sockaddr_un>()
+    - std::mem::offset_of!(nix::libc::sockaddr_un, sun_path)
+    - 1;
+/// OpenSSH binds a control master at `<path>.<16 random characters>` and only
+/// then links it into place (mux.c, muxserver_listen), so that temporary name,
+/// 17 bytes longer than the path Estus chooses, is what has to fit.
+const OPENSSH_TEMPORARY_SUFFIX_BYTES: usize = 17;
+const MAX_SOCKET_BYTES: usize = SUN_PATH_BYTES - OPENSSH_TEMPORARY_SUFFIX_BYTES;
 const SOCKET_ENTRY_RESERVE_BYTES: usize = 12;
 
 type Key = (String, String, IdentityRole);
@@ -1677,5 +1686,28 @@ mod tests {
         let dir = create_socket_directory(Some(poisoned_parent.as_os_str()), uid).unwrap();
         assert_eq!(dir.path().parent(), Some(Path::new("/tmp")));
         drop(dir);
+    }
+
+    #[test]
+    fn the_longest_accepted_socket_path_still_binds_with_opensshs_temporary_suffix() {
+        // Build a real path of exactly the length OpenSSH will bind for the
+        // longest control path Estus accepts, and bind it. A bound that ignores
+        // the suffix, or another platform's sun_path, fails here.
+        let base = tempfile::Builder::new()
+            .prefix("sk-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let base_path = base.path().canonicalize().unwrap();
+        let temporary_length = MAX_SOCKET_BYTES + OPENSSH_TEMPORARY_SUFFIX_BYTES;
+        let name_length = temporary_length - base_path.as_os_str().as_bytes().len() - 1;
+        let fits = base_path.join("a".repeat(name_length));
+        assert_eq!(fits.as_os_str().as_bytes().len(), temporary_length);
+        std::os::unix::net::UnixListener::bind(&fits)
+            .expect("OpenSSH's temporary name for the longest accepted path must bind");
+        let too_long = base_path.join("b".repeat(name_length + 1));
+        assert!(
+            std::os::unix::net::UnixListener::bind(&too_long).is_err(),
+            "the bound is not tight: one byte more also binds"
+        );
     }
 }
