@@ -18,6 +18,8 @@ The SSH baseline workflow runs on Linux x86-64, Linux arm64 and macOS arm64. The
 
 The SSH baseline workflow runs on every pull request and every push to `main`. A push to a branch other than `main` does not run it; open a pull request. Each push to `main` runs in its own concurrency group, so every commit gets a result and runs of consecutive pushes overlap. A pull request's runs share one group, so a new push to the PR cancels the previous run. The fuzz workflow runs only on pull requests that change `src/`, `fuzz/`, `Cargo.toml` or `Cargo.lock`, and weekly.
 
+A repository ruleset requires `ssh-baseline-linux` and `ssh-baseline-linux-arm64` to pass before a pull request can merge into `main`; branches don't need to be up to date with `main` first. `ssh-native-macos-arm64` is not required, because GitHub's macOS arm64 runners are sometimes unavailable for long enough that GitHub cancels the queued job. The required checks are tied to the GitHub Actions app, so a status set by anything else doesn't satisfy them.
+
 Three more workflows handle releases. **Release artifacts** (`release-artifacts.yml`) builds and tests the release binaries and wheels; it runs on pull requests that touch the release files, on demand, and as the first stage of publishing. **Release Please** (`release-please.yml`) runs on every push to `main` and keeps the release pull request up to date. **Publish** (`publish.yml`) builds and publishes, and only for an unpublished release on a `v*` tag on `main`. Anything `GITHUB_TOKEN` creates, a pull request or a tag, triggers no workflows, so Release Please dispatches **SSH baseline** and **Release artifacts** on the release branch, and **Publish** on the new tag. See [Releasing](release.md).
 
 | Layer | What it covers |
