@@ -3,6 +3,7 @@
   perSystem = { pkgs, estusBuild, ... }:
     let
       inherit (estusBuild) package msrvBuild craneLib commonArgs cargoArtifacts acceptance wheel;
+      sourceRoot = ../..;
     in
     {
       checks.package = package;
@@ -23,6 +24,25 @@
         src = commonArgs.src;
         cargoAuditExtraArgs = "--no-yanked";
       };
+      checks.deny = craneLib.cargoDeny (commonArgs // {
+        # Advisory checks use the pinned database in checks.audit.
+        cargoDenyChecks = "bans licenses sources";
+        cargoDenyExtraArgs = "--frozen";
+      });
+      checks.docs-links = pkgs.runCommand "estus-docs-links" {
+        nativeBuildInputs = [ pkgs.python3 ];
+      } ''
+        cd ${sourceRoot}
+        python3 -I scripts/check-doc-links.py
+        touch "$out"
+      '';
+      checks.typos = pkgs.runCommand "estus-typos" {
+        nativeBuildInputs = [ pkgs.typos ];
+      } ''
+        cd ${sourceRoot}
+        typos --hidden
+        touch "$out"
+      '';
       checks.bootstrap-tests = pkgs.runCommand "estus-bootstrap-tests" {
         nativeBuildInputs = [ pkgs.python3 ];
       } ''
