@@ -25,6 +25,7 @@
       ./nix/flake/acceptance.nix
       ./nix/flake/checks.nix
       ./nix/flake/devshells.nix
+      ./nix/flake/release.nix
     ];
 
     systems = [

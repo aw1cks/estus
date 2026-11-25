@@ -1,6 +1,7 @@
 """Build-time copying of the single reviewed catalog source tree."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -77,6 +78,10 @@ class BuildPy(build_py):
 class BdistWheel(bdist_wheel):
     def get_tag(self):
         _, _, plat = super().get_tag()
+        # A release build may claim several platforms at once. A fully static
+        # binary is valid on musl and on any glibc, so scripts/release.py sets
+        # this to a dotted tag set. Unset, the wheel carries the build host's tag.
+        plat = os.environ.get("ESTUS_WHEEL_PLATFORM_TAGS") or plat
         return "py3", "none", plat
 
 
