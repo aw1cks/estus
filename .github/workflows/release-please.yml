@@ -20,14 +20,15 @@ jobs:
         config-file: .github/release-please-config.json
         manifest-file: .github/release-please-manifest.json
     - env:
-        BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
         GH_REPO: ${{ github.repository }}
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PR_JSON: ${{ steps.release.outputs.pr }}
       if: steps.release.outputs.prs_created == 'true'
       name: Run CI on the release pull request
       run: |
-        gh workflow run ssh-baseline.yml --ref "$BRANCH"
-        gh workflow run release-artifacts.yml --ref "$BRANCH"
+        branch=$(jq -r .headBranchName <<<"$PR_JSON")
+        gh workflow run ssh-baseline.yml --ref "$branch"
+        gh workflow run release-artifacts.yml --ref "$branch"
     - env:
         GH_REPO: ${{ github.repository }}
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
