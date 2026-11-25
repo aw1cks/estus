@@ -1,0 +1,158 @@
+# Generated from nix/ci.nix. Run: nix run .#generate-workflows
+%YAML 1.1
+---
+jobs:
+  build-linux:
+    name: Build Linux binaries, wheels and sdist
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      with:
+        gc-max-store-size-linux: 2G
+        gc-max-store-size-macos: 2G
+        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('**/*.nix', 'flake.lock') }}
+        purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        purge-created: 0
+        purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-release-
+        purge-primary-key: never
+        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-release-
+        save: true
+    - name: Build binaries (glibc 2.34 floor and static musl, x86_64 and aarch64)
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py binaries --out dist
+    - name: Build wheels
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py wheels --out dist
+    - name: Build the source distribution
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py sdist --out dist
+    - name: Check that the crate packages and builds
+      run: nix develop --no-update-lock-file .#release --command cargo publish --dry-run --locked
+    - uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874
+      with:
+        if-no-files-found: error
+        name: release-linux
+        path: dist
+        retention-days: 14
+    timeout-minutes: 60
+  build-macos:
+    name: Build macOS binary and wheel
+    permissions:
+      actions: write
+      contents: read
+    runs-on: macos-26
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      with:
+        gc-max-store-size-linux: 2G
+        gc-max-store-size-macos: 2G
+        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('**/*.nix', 'flake.lock') }}
+        purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        purge-created: 0
+        purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-release-
+        purge-primary-key: never
+        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-release-
+        save: true
+    - name: Build binary
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py binaries --out dist
+    - name: Build wheel
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py wheels --out dist
+    - uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874
+      with:
+        if-no-files-found: error
+        name: release-macos
+        path: dist
+        retention-days: 14
+    timeout-minutes: 45
+  smoke-linux:
+    name: Smoke test Linux (${{ matrix.arch }})
+    needs: build-linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: release-linux
+        path: dist
+    - name: Install and run the artifacts in distribution containers
+      run: python3 scripts/release.py smoke dist --mode docker
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: x86_64
+          runner: ubuntu-26.04
+        - arch: aarch64
+          runner: ubuntu-26.04-arm
+    timeout-minutes: 30
+  smoke-macos:
+    name: Smoke test macOS
+    needs: build-macos
+    permissions:
+      actions: write
+      contents: read
+    runs-on: macos-26
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      with:
+        gc-max-store-size-linux: 2G
+        gc-max-store-size-macos: 2G
+        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('**/*.nix', 'flake.lock') }}
+        purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        purge-created: 0
+        purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-release-
+        purge-primary-key: never
+        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-release-
+        save: true
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      with:
+        name: release-macos
+        path: dist
+    - name: Install and run the artifacts
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py smoke dist --mode native
+    timeout-minutes: 30
+name: Release artifacts
+'on':
+  pull_request:
+    paths:
+    - scripts/release.py
+    - nix/flake/release.nix
+    - nix/ci.nix
+    - flake.lock
+    - setup.py
+    - pyproject.toml
+    - MANIFEST.in
+    - build.rs
+    - Cargo.toml
+    - Cargo.lock
+    - .github/workflows/release*.yml
+  workflow_call: {}
+  workflow_dispatch: {}
+permissions:
+  contents: read

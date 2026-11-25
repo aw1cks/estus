@@ -8,6 +8,39 @@
       nixCache = "nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569"; # v7.0.2
       uploadArtifact = "actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874"; # v4.4.0
       cachePrefix = "nix-\${{ runner.os }}-\${{ runner.arch }}-";
+      releasePlease = "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"; # v5.0.0
+      downloadArtifact = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"; # v8.0.2
+      pypiPublish = "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"; # v1.14.3
+      # Checkout, Nix and the shared store cache: the start of every release job
+      # that runs inside the release dev shell.
+      nixSetup = [
+        {
+          uses = checkout;
+          "with".persist-credentials = false;
+        }
+        {
+          uses = lixInstaller;
+          "with" = {
+            github_access_token = "\${{ secrets.GITHUB_TOKEN }}";
+            extra_nix_config = "auto-optimise-store = false\n";
+          };
+        }
+        {
+          uses = nixCache;
+          "with" = {
+            primary-key = cachePrefix + "release-\${{ hashFiles('**/*.nix', 'flake.lock') }}";
+            restore-prefixes-first-match = cachePrefix + "release-";
+            save = true;
+            purge = "\${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
+            purge-prefixes = cachePrefix + "release-";
+            purge-created = 0;
+            purge-primary-key = "never";
+            gc-max-store-size-linux = "2G";
+            gc-max-store-size-macos = "2G";
+          };
+        }
+      ];
+      releaseShell = "nix develop --no-update-lock-file .#release --command";
       workflows = {
         "ssh-baseline.yml" = {
           name = "SSH baseline";
@@ -287,6 +320,336 @@
                 "with".if-no-files-found = "ignore";
               }
             ];
+          };
+        };
+        # Builds every release artifact and tests it where it is meant to run. It
+        # runs on pull requests that touch the release machinery, on demand, and
+        # as the first stage of a release.
+        "release-artifacts.yml" = {
+          name = "Release artifacts";
+          on = {
+            pull_request.paths = [
+              "scripts/release.py"
+              "nix/flake/release.nix"
+              "nix/ci.nix"
+              "flake.lock"
+              "setup.py"
+              "pyproject.toml"
+              "MANIFEST.in"
+              "build.rs"
+              "Cargo.toml"
+              "Cargo.lock"
+              ".github/workflows/release*.yml"
+            ];
+            workflow_dispatch = { };
+            workflow_call = { };
+          };
+          permissions.contents = "read";
+          jobs = {
+            build-linux = {
+              name = "Build Linux binaries, wheels and sdist";
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 60;
+              permissions = {
+                contents = "read";
+                actions = "write";
+              };
+              steps = nixSetup ++ [
+                {
+                  name = "Build binaries (glibc 2.34 floor and static musl, x86_64 and aarch64)";
+                  run = "${releaseShell} python3 scripts/release.py binaries --out dist";
+                }
+                {
+                  name = "Build wheels";
+                  run = "${releaseShell} python3 scripts/release.py wheels --out dist";
+                }
+                {
+                  name = "Build the source distribution";
+                  run = "${releaseShell} python3 scripts/release.py sdist --out dist";
+                }
+                {
+                  name = "Check that the crate packages and builds";
+                  run = "${releaseShell} cargo publish --dry-run --locked";
+                }
+                {
+                  uses = uploadArtifact;
+                  "with" = {
+                    name = "release-linux";
+                    path = "dist";
+                    if-no-files-found = "error";
+                    retention-days = 14;
+                  };
+                }
+              ];
+            };
+            build-macos = {
+              name = "Build macOS binary and wheel";
+              runs-on = "macos-26";
+              timeout-minutes = 45;
+              permissions = {
+                contents = "read";
+                actions = "write";
+              };
+              steps = nixSetup ++ [
+                {
+                  name = "Build binary";
+                  run = "${releaseShell} python3 scripts/release.py binaries --out dist";
+                }
+                {
+                  name = "Build wheel";
+                  run = "${releaseShell} python3 scripts/release.py wheels --out dist";
+                }
+                {
+                  uses = uploadArtifact;
+                  "with" = {
+                    name = "release-macos";
+                    path = "dist";
+                    if-no-files-found = "error";
+                    retention-days = 14;
+                  };
+                }
+              ];
+            };
+            # Each architecture is tested on a runner of its own kind, so nothing
+            # runs under emulation.
+            smoke-linux = {
+              name = "Smoke test Linux (\${{ matrix.arch }})";
+              needs = "build-linux";
+              runs-on = "\${{ matrix.runner }}";
+              timeout-minutes = 30;
+              strategy = {
+                fail-fast = false;
+                matrix.include = [
+                  {
+                    arch = "x86_64";
+                    runner = "ubuntu-26.04";
+                  }
+                  {
+                    arch = "aarch64";
+                    runner = "ubuntu-26.04-arm";
+                  }
+                ];
+              };
+              steps = [
+                {
+                  uses = checkout;
+                  "with".persist-credentials = false;
+                }
+                {
+                  uses = downloadArtifact;
+                  "with" = {
+                    name = "release-linux";
+                    path = "dist";
+                  };
+                }
+                {
+                  name = "Install and run the artifacts in distribution containers";
+                  run = "python3 scripts/release.py smoke dist --mode docker";
+                }
+              ];
+            };
+            smoke-macos = {
+              name = "Smoke test macOS";
+              needs = "build-macos";
+              runs-on = "macos-26";
+              timeout-minutes = 30;
+              permissions = {
+                contents = "read";
+                actions = "write";
+              };
+              steps = nixSetup ++ [
+                {
+                  uses = downloadArtifact;
+                  "with" = {
+                    name = "release-macos";
+                    path = "dist";
+                  };
+                }
+                {
+                  name = "Install and run the artifacts";
+                  run = "${releaseShell} python3 scripts/release.py smoke dist --mode native";
+                }
+              ];
+            };
+          };
+        };
+        # release-please keeps a release pull request up to date and, when that
+        # is merged, tags a draft release. The same run then builds, tests and
+        # publishes, and only publishes the draft once every channel succeeded.
+        "release.yml" = {
+          name = "Release";
+          on = {
+            push.branches = [ "main" ];
+            workflow_dispatch = { };
+          };
+          permissions.contents = "read";
+          # One release run at a time, and never cancel one that may be partway
+          # through publishing; a later push waits.
+          concurrency = {
+            group = "release";
+            cancel-in-progress = false;
+          };
+          jobs = {
+            release-please = {
+              name = "Release pull request";
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 10;
+              permissions = {
+                contents = "write";
+                pull-requests = "write";
+                issues = "write";
+                actions = "write";
+              };
+              outputs = {
+                release_created = "\${{ steps.release.outputs.release_created }}";
+                tag_name = "\${{ steps.release.outputs.tag_name }}";
+                version = "\${{ steps.release.outputs.version }}";
+              };
+              steps = [
+                {
+                  id = "release";
+                  uses = releasePlease;
+                  "with" = {
+                    config-file = "release-please-config.json";
+                    manifest-file = ".release-please-manifest.json";
+                  };
+                }
+                {
+                  # A pull request made with GITHUB_TOKEN triggers no workflows,
+                  # whatever permissions the token has. A dispatch is the
+                  # exception, so ask for the checks explicitly; they attach to
+                  # the branch head, which is what the pull request shows.
+                  name = "Run CI on the release pull request";
+                  "if" = "steps.release.outputs.prs_created == 'true'";
+                  env = {
+                    GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                    GH_REPO = "\${{ github.repository }}";
+                    BRANCH = "\${{ fromJSON(steps.release.outputs.pr).headBranchName }}";
+                  };
+                  run = ''
+                    gh workflow run ssh-baseline.yml --ref "$BRANCH"
+                    gh workflow run release-artifacts.yml --ref "$BRANCH"
+                  '';
+                }
+              ];
+            };
+            artifacts = {
+              name = "Artifacts";
+              needs = "release-please";
+              "if" = "needs.release-please.outputs.release_created == 'true'";
+              uses = "./.github/workflows/release-artifacts.yml";
+              permissions = {
+                contents = "read";
+                actions = "write";
+              };
+            };
+            publish-github = {
+              name = "GitHub release assets";
+              needs = [ "release-please" "artifacts" ];
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 15;
+              permissions.contents = "write";
+              steps = [
+                {
+                  uses = checkout;
+                  "with".persist-credentials = false;
+                }
+                {
+                  uses = downloadArtifact;
+                  "with" = {
+                    pattern = "release-*";
+                    merge-multiple = true;
+                    path = "dist";
+                  };
+                }
+                {
+                  name = "Write checksums";
+                  run = "python3 scripts/release.py checksums dist";
+                }
+                {
+                  name = "Attach everything to the draft release";
+                  env = {
+                    GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                    GH_REPO = "\${{ github.repository }}";
+                    TAG = "\${{ needs.release-please.outputs.tag_name }}";
+                  };
+                  run = ''gh release upload "$TAG" dist/* --clobber'';
+                }
+              ];
+            };
+            publish-pypi = {
+              name = "PyPI";
+              needs = [ "release-please" "artifacts" ];
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 15;
+              # Trusted publishing: PyPI trusts this workflow and environment, so
+              # there is no token to store.
+              environment = "pypi";
+              permissions = {
+                contents = "read";
+                id-token = "write";
+              };
+              steps = [
+                {
+                  uses = downloadArtifact;
+                  "with" = {
+                    pattern = "release-*";
+                    merge-multiple = true;
+                    path = "all";
+                  };
+                }
+                {
+                  # The binary tarballs are not Python distributions.
+                  name = "Select the wheels and the sdist";
+                  env.VERSION = "\${{ needs.release-please.outputs.version }}";
+                  run = ''
+                    mkdir pypi
+                    cp all/*.whl "all/estus-$VERSION.tar.gz" pypi/
+                    ls -l pypi
+                  '';
+                }
+                {
+                  uses = pypiPublish;
+                  "with".packages-dir = "pypi";
+                }
+              ];
+            };
+            publish-crates = {
+              name = "crates.io";
+              needs = [ "release-please" "artifacts" ];
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 30;
+              environment = "crates-io";
+              permissions = {
+                contents = "read";
+                actions = "write";
+              };
+              steps = nixSetup ++ [
+                {
+                  name = "Publish the crate";
+                  env.CARGO_REGISTRY_TOKEN = "\${{ secrets.CARGO_REGISTRY_TOKEN }}";
+                  run = "${releaseShell} cargo publish --locked";
+                }
+              ];
+            };
+            finalize = {
+              name = "Publish the release";
+              needs = [ "release-please" "publish-github" "publish-pypi" "publish-crates" ];
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 5;
+              permissions.contents = "write";
+              steps = [
+                {
+                  name = "Take the release out of draft";
+                  env = {
+                    GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                    GH_REPO = "\${{ github.repository }}";
+                    TAG = "\${{ needs.release-please.outputs.tag_name }}";
+                  };
+                  run = ''gh release edit "$TAG" --draft=false'';
+                }
+              ];
+            };
           };
         };
       };
