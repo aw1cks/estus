@@ -6,7 +6,12 @@ Estus is an [MCP](https://modelcontextprotocol.io) server that lets an AI agent
 triage and operate Linux hosts over SSH, through structured, policy-gated tools
 instead of a raw shell.
 
-![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)
+[![SSH baseline](https://github.com/aw1cks/estus/actions/workflows/ssh-baseline.yml/badge.svg?branch=main)](https://github.com/aw1cks/estus/actions/workflows/ssh-baseline.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/aw1cks/estus/graph/badge.svg)](https://app.codecov.io/gh/aw1cks/estus)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/aw1cks/estus/badge)](https://scorecard.dev/viewer/?uri=github.com/aw1cks/estus)
+[![crates.io](https://img.shields.io/crates/v/estus-mcp)](https://crates.io/crates/estus-mcp)
+[![PyPI](https://img.shields.io/pypi/v/estus)](https://pypi.org/project/estus/)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
 
 > **Status: pre-1.0.** Configuration format and tool schemas may change between
 > releases. Read the [security model](docs/security.md) before pointing Estus at
