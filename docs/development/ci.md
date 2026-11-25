@@ -10,7 +10,7 @@ From the checkout root:
 nix run .#generate-workflows
 ```
 
-Include the changes under `.github/workflows/` in your PR. `nix flake check` checks that the generated files match.
+Include the changes under `.github/workflows/` in your PR. `nix flake check` checks that the generated files match, and runs [zizmor](https://docs.zizmor.sh/) on them (`checks.zizmor`, offline, configured in `.github/zizmor.yml`). A zizmor finding fails the check: fix the workflow in `nix/ci.nix`, or, if the finding does not apply, add a scoped ignore to `.github/zizmor.yml` with the reason next to it.
 
 ## What runs on GitHub
 

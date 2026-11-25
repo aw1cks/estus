@@ -3,6 +3,7 @@
 ---
 jobs:
   cleanup:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     name: Cleanup PR caches
     runs-on: ubuntu-26.04
     steps:
@@ -25,7 +26,7 @@ jobs:
     timeout-minutes: 5
 name: Cache Cleanup
 'on':
-  pull_request_target:
+  pull_request:
     types:
     - closed
 permissions:

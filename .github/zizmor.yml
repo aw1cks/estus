@@ -1,0 +1,11 @@
+# zizmor configuration, used by `nix flake check` (checks.zizmor) and by zizmor
+# run from the repository root. Keep every ignore scoped and explained.
+rules:
+  self-repository:
+    ignore:
+      # publish.yml calls release-artifacts.yml with `uses: ./...`. GitHub's newer
+      # `$/...` form is rejected by the pinned actionlint and by act, and for a
+      # job-level reusable workflow `./` is resolved before any step runs, so the
+      # runtime-filesystem substitution this audit guards against cannot happen.
+      # Switch once actionlint accepts `$/`.
+      - publish.yml

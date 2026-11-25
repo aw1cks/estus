@@ -11,9 +11,9 @@
       releasePlease = "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"; # v5.0.0
       downloadArtifact = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"; # v8.0.2
       pypiPublish = "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"; # v1.14.3
-      # Checkout, Nix and the shared store cache: the start of every release job
-      # that runs inside the release dev shell.
-      nixSetup = [
+      # Checkout and Nix: the start of every job that runs inside the release dev
+      # shell. Jobs that publish use this alone, never the Actions cache.
+      nixInstall = [
         {
           uses = checkout;
           "with".persist-credentials = false;
@@ -25,7 +25,15 @@
             extra_nix_config = "auto-optimise-store = false\n";
           };
         }
+      ];
+      # nixInstall plus the shared store cache, for jobs that only build.
+      nixSetup = nixInstall ++ [
         {
+          # Never restore build state from the Actions cache when building a
+          # release. Publishing runs on a tag, and so does release-artifacts.yml
+          # when publish.yml calls it, so a cache any other run wrote cannot reach
+          # a published artifact; Nix fetches from the signed binary cache instead.
+          "if" = "\${{ !startsWith(github.ref, 'refs/tags/') }}";
           uses = nixCache;
           "with" = {
             primary-key = cachePrefix + "release-\${{ hashFiles('**/*.nix', 'flake.lock') }}";
@@ -153,10 +161,14 @@
         };
         "cache-cleanup.yml" = {
           name = "Cache Cleanup";
-          # Closed fork PRs need a write token too. Never check out PR code here.
-          on.pull_request_target.types = [ "closed" ];
+          # pull_request_target would give fork PRs a write token too, but it runs
+          # with the base repository's privileges on fork-triggered events, which
+          # zizmor rightly treats as unsafe. Same-repo PRs clean up here; caches
+          # from fork PRs age out under GitHub's 7-day eviction.
+          on.pull_request.types = [ "closed" ];
           permissions.actions = "write";
           jobs.cleanup = {
+            "if" = "github.event.pull_request.head.repo.full_name == github.repository";
             name = "Cleanup PR caches";
             runs-on = "ubuntu-26.04";
             timeout-minutes = 5;
@@ -690,11 +702,9 @@
               runs-on = "ubuntu-26.04";
               timeout-minutes = 30;
               environment = "crates-io";
-              permissions = {
-                contents = "read";
-                actions = "write";
-              };
-              steps = nixSetup ++ [
+              # No Actions cache here, so no `actions: write` either.
+              permissions.contents = "read";
+              steps = nixInstall ++ [
                 {
                   name = "Publish the crate";
                   env.CARGO_REGISTRY_TOKEN = "\${{ secrets.CARGO_REGISTRY_TOKEN }}";
@@ -762,6 +772,17 @@
         nativeBuildInputs = [ pkgs.diffutils ];
       } ''
         diff -ru ${generated} ${../.github/workflows}
+        touch "$out"
+      '';
+      # Static security analysis of the workflows. It reads the generated files,
+      # which checks.workflows keeps identical to the committed ones. Offline,
+      # because the build sandbox has no network: the online audits only check
+      # pins against GitHub, and the actions here are already pinned by SHA.
+      checks.zizmor = pkgs.runCommand "github-workflows-zizmor" {
+        nativeBuildInputs = [ pkgs.zizmor ];
+      } ''
+        export HOME="$TMPDIR" NO_COLOR=1
+        zizmor --offline --no-progress --config ${../.github/zizmor.yml} ${generated}/*.yml
         touch "$out"
       '';
       apps = {
