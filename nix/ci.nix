@@ -53,6 +53,30 @@
         }
       ];
       releaseShell = "nix develop --no-update-lock-file .#release --command";
+      # The last job of a workflow that GitHub sometimes fails to run (macOS
+      # runners in particular). If any job it waits on failed or was cancelled,
+      # it asks ci-retry.yml, from main, to look at this run once it has
+      # finished; a run cannot re-run itself while it is in progress. ci-retry
+      # only re-runs jobs that GitHub never ran or whose runner died.
+      retryDispatch = { needs, condition ? "true" }: {
+        name = "Request a retry of infrastructure failures";
+        inherit needs;
+        "if" = "\${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && ${condition} }}";
+        runs-on = "ubuntu-26.04";
+        timeout-minutes = 5;
+        permissions.actions = "write";
+        steps = [
+          {
+            name = "Dispatch ci-retry.yml for this run";
+            env = {
+              GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+              GH_REPO = "\${{ github.repository }}";
+              RUN_ID = "\${{ github.run_id }}";
+            };
+            run = ''gh workflow run ci-retry.yml --ref main -f run_id="$RUN_ID"'';
+          }
+        ];
+      };
       workflows = {
         "ssh-baseline.yml" = {
           name = "SSH baseline";
@@ -164,6 +188,7 @@
               }
             ];
           };
+          jobs.retry = retryDispatch { needs = [ "verify" ]; };
         };
         "cache-cleanup.yml" = {
           name = "Cache Cleanup";
@@ -489,6 +514,12 @@
                 }
               ];
             };
+            # Only for this workflow's own runs. When publish.yml calls it, the
+            # caller's retry job covers the whole run.
+            retry = retryDispatch {
+              needs = [ "build-linux" "build-macos" "smoke-linux" "smoke-macos" ];
+              condition = "github.workflow == 'Release artifacts'";
+            };
           };
         };
         # release-please keeps a release pull request up to date. When that is
@@ -757,6 +788,52 @@
                 }
               ];
             };
+            retry = retryDispatch {
+              needs = [ "verify" "artifacts" "publish-github" "publish-pypi" "publish-crates" "finalize" ];
+            };
+          };
+        };
+        # Re-runs a finished run's failed jobs when GitHub itself failed to run
+        # them: the job never got a runner, or its runner died. A job that ran and
+        # failed is left alone, and a run is tried at most three times. Dispatched
+        # by the retry job at the end of the workflows above; scripts/ci-retry.sh
+        # makes the decision, and can be run by hand with DRY_RUN=1.
+        "ci-retry.yml" = {
+          name = "CI retry";
+          on.workflow_dispatch.inputs.run_id = {
+            description = "Workflow run to inspect and, if GitHub failed to run its jobs, re-run";
+            required = true;
+            type = "string";
+          };
+          permissions.contents = "read";
+          concurrency = {
+            group = "ci-retry-\${{ inputs.run_id }}";
+            cancel-in-progress = false;
+          };
+          jobs.retry = {
+            name = "Re-run infrastructure failures";
+            runs-on = "ubuntu-26.04";
+            timeout-minutes = 20;
+            permissions = {
+              contents = "read";
+              actions = "write";
+              checks = "read";
+            };
+            steps = [
+              {
+                uses = checkout;
+                "with".persist-credentials = false;
+              }
+              {
+                name = "Re-run the run's failed jobs if GitHub failed to run them";
+                env = {
+                  GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                  GH_REPO = "\${{ github.repository }}";
+                  RUN_ID = "\${{ inputs.run_id }}";
+                };
+                run = "bash scripts/ci-retry.sh";
+              }
+            ];
           };
         };
       };

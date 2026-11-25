@@ -97,7 +97,7 @@ The **Release artifacts** workflow runs the same commands. It runs on pull reque
 
 ## When a release run fails
 
-The release stays a draft, so nothing half-published is visible. Fix the cause, then re-run the failed jobs of the `Publish` run. To start publishing again from the beginning, run `gh workflow run publish.yml --ref v<version>`; it refuses unless the release is still a draft.
+The release stays a draft, so nothing half-published is visible. If GitHub failed to run a job, for example a macOS build that never got a runner, **CI retry** re-runs the failed jobs by itself, up to three attempts. Otherwise, fix the cause, then re-run the failed jobs of the `Publish` run. To start publishing again from the beginning, run `gh workflow run publish.yml --ref v<version>`; it refuses unless the release is still a draft.
 
 - **PyPI rejects re-uploads.** If `PyPI` succeeded and a later job failed, don't re-run `PyPI`.
 - **A bad release.** Delete the draft release and its tag, and fix the problem on `main`. The `release tags` ruleset only lets a repository admin delete a `v*` tag. release-please opens a new release pull request for the next version. If you must reuse a version that reached PyPI, you can't: PyPI never accepts the same version twice.

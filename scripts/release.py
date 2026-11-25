@@ -23,6 +23,7 @@ import shutil
 import stat
 import struct
 import subprocess
+import shlex
 import sys
 import tarfile
 import tempfile
@@ -527,6 +528,22 @@ def smoke_commands(binary_expr, expected_version):
     )
 
 
+def setup(command):
+    """Shell that runs a container's setup, which needs the network, up to three times.
+
+    Package mirrors fail now and then. Quiet when it works; when every attempt
+    fails it prints the last attempt's output and exits, so a failed smoke test
+    says why instead of failing with no output.
+    """
+    return (
+        f"n=0; until sh -c {shlex.quote(command)} >/tmp/setup.log 2>&1; do "
+        "n=$((n + 1)); "
+        'if [ "$n" -ge 3 ]; then echo "container setup failed 3 times; last attempt:"; '
+        "cat /tmp/setup.log; exit 1; fi; "
+        'sleep $((n * 10)); done; '
+    )
+
+
 def smoke_docker(dist, expected_version):
     host = platform.machine().lower()
     host_arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[host]
@@ -539,7 +556,7 @@ def smoke_docker(dist, expected_version):
             fail(f"missing {tarball.name}")
         for profile in BINARY_PROFILES[libc]:
             script = (
-                f"set -e; ({PROFILES[profile]['ssh']}) >/dev/null 2>&1; "
+                f"set -e; {setup(PROFILES[profile]['ssh'])}"
                 f"tar xzf /{tarball.name} -C /opt; "
                 f"{smoke_commands(f'/opt/estus-{target}/bin/estus', expected_version)}"
             )
@@ -557,8 +574,8 @@ def smoke_docker(dist, expected_version):
         family = "manylinux_2_34" if "manylinux_2_34" in wheel.name else "musllinux_1_2"
         for profile in WHEEL_PROFILES[family]["install"]:
             script = (
-                f"set -e; ({PROFILES[profile]['ssh']}) >/dev/null 2>&1; "
-                f"({PROFILES[profile]['python']}) >/dev/null 2>&1; "
+                f"set -e; {setup(PROFILES[profile]['ssh'])}"
+                f"{setup(PROFILES[profile]['python'])}"
                 "python3 -m venv /v; /v/bin/pip install -q --disable-pip-version-check "
                 f"/{wheel.name}; {smoke_commands('/v/bin/estus', expected_version)}"
             )
@@ -566,7 +583,7 @@ def smoke_docker(dist, expected_version):
             expect(f"{wheel.name} installs on {profile}", code == 0, output)
         for profile in WHEEL_PROFILES[family]["refuse"]:
             script = (
-                f"({PROFILES[profile]['python']}) >/dev/null 2>&1; python3 -m venv /v; "
+                f"{setup(PROFILES[profile]['python'])}python3 -m venv /v; "
                 f"/v/bin/pip install -q --disable-pip-version-check --no-index /{wheel.name}"
             )
             code, output = docker_run(profile, docker_platform, [(wheel, wheel.name)], script)
