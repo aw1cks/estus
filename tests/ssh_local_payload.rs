@@ -8,6 +8,7 @@ mod sshl;
 mod support;
 use sshl::*;
 
+#[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
@@ -22,6 +23,10 @@ use support::WireServer;
 use support::assert_masters_gone;
 use support::masters;
 
+// The SSH target in this suite is the host itself. Bundled collectors refuse
+// non-Linux hosts and the pre-state digest reads /proc/modules, so this test
+// only means something when that host is Linux.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking, Nix OpenSSH/coreutils, python3, and a non-root local account"]
 async fn ssh_workstation_dynamic_bundled_health_payloads() -> Result<()> {
@@ -288,6 +293,9 @@ result = {{ kind = "capability_projection", fields = {{ ok = ["mcp_result", "ok"
     cleanup
 }
 
+// Linux-only for the same reason: the independent pre-state digest that gates
+// the change reads /proc/modules on the target, which here is the host.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback networking, Nix OpenSSH/coreutils, python3, and a non-root local account"]
 async fn ssh_native_payload_preview_gate_across_revisions() -> Result<()> {
