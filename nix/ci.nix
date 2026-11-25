@@ -530,11 +530,15 @@
                 env = {
                   GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
                   GH_REPO = "\${{ github.repository }}";
-                  BRANCH = "\${{ fromJSON(steps.release.outputs.pr).headBranchName }}";
+                  # Parsed in the shell: GitHub evaluates a step's env even when
+                  # an earlier step failed and this one will not run, and
+                  # fromJSON fails on the empty output that leaves.
+                  PR_JSON = "\${{ steps.release.outputs.pr }}";
                 };
                 run = ''
-                  gh workflow run ssh-baseline.yml --ref "$BRANCH"
-                  gh workflow run release-artifacts.yml --ref "$BRANCH"
+                  branch=$(jq -r .headBranchName <<<"$PR_JSON")
+                  gh workflow run ssh-baseline.yml --ref "$branch"
+                  gh workflow run release-artifacts.yml --ref "$branch"
                 '';
               }
               {
