@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.1](https://github.com/aw1cks/estus/compare/v0.1.0...v0.1.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **doctor:** report the effective SSH policy when the connection times out ([233519f](https://github.com/aw1cks/estus/commit/233519fa687faefd9061ab29070728b9e6359fdd))
+
+
+### Maintenance
+
+* **deps:** update url to 2.5.9 and the advisory database ([b943f91](https://github.com/aw1cks/estus/commit/b943f91acbe584612e6b5e46c52058355bc5ea5c))
+* **release:** attest release assets and publish per-target SBOMs ([6d6cdfe](https://github.com/aw1cks/estus/commit/6d6cdfe9cc45936e13c5cb5d6f0617baadddd226))
+
 ## 0.1.0 (2026-11-25)
 
 

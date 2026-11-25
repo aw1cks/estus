@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "estus"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stdio MCP server that gives AI agents structured, policy-gated Linux operations over your own SSH"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
