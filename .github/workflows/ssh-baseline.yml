@@ -3,7 +3,7 @@
 ---
 concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
 jobs:
   verify:
     name: ${{ matrix.name }}

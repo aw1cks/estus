@@ -18,8 +18,11 @@
           };
           permissions.contents = "read";
           concurrency = {
-            group = "\${{ github.workflow }}-\${{ github.ref }}";
-            # Let main finish seeding its cache; superseded PRs can stop.
+            # Every push to main gets its own group, so each commit is tested and
+            # none is cancelled or skipped while another run is queued. Pull
+            # requests and manual runs still share one group per ref, and a newer
+            # run supersedes the older one.
+            group = "\${{ github.workflow }}-\${{ github.event_name == 'push' && github.sha || github.ref }}";
             cancel-in-progress = "\${{ github.event_name != 'push' }}";
           };
           jobs.verify = {

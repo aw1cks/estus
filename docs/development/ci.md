@@ -16,6 +16,8 @@ Include the changes under `.github/workflows/` in your PR. `nix flake check` che
 
 The SSH baseline workflow runs on Linux x86-64, Linux arm64 and macOS arm64. The container step runs only on Linux. The fuzz workflow runs on Linux x86-64.
 
+The SSH baseline workflow runs on every pull request and every push to `main`. A push to a branch other than `main` does not run it; open a pull request. Each push to `main` runs in its own concurrency group, so every commit gets a result and runs of consecutive pushes overlap. A pull request's runs share one group, so a new push to the PR cancels the previous run. The fuzz workflow runs only on pull requests that change `src/`, `fuzz/`, `Cargo.toml` or `Cargo.lock`, and weekly.
+
 | Layer | What it covers |
 | --- | --- |
 | Flake checks | Default and MSRV native builds and network-free tests, acceptance harness compilation, wheel build, formatting, Clippy, RustSec advisory checks, Python bootstrap and static checks, generated workflow consistency |
