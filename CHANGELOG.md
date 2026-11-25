@@ -13,6 +13,9 @@ change will be listed under **Changed** or **Removed**.
   default next to the executable (`<prefix>/share/estus/catalog`). A binary from
   `cargo install` or a download no longer depends on packaging to find its
   catalog. Re-run with `--replace` after upgrading.
+- `capabilities` accepts a shorthand name instead of a table: `"catalog_only"`,
+  `"catalog_and_file_read"`, `"all"` or `"none"`. Profiles accept them too. An
+  unknown name is a configuration error.
 - AGPL-3.0-or-later license.
 - Generated catalog reference (`docs/tools/catalog-reference.md`), produced by
   `scripts/gen-catalog-reference.py`.

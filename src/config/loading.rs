@@ -101,14 +101,63 @@ pub(crate) struct DoctorArgs {
     pub timeout_secs: Option<u64>,
 }
 
+/// A named capability set, accepted anywhere a `capabilities` table is. An
+/// unknown name is a parse error, never a silent fallback to the defaults.
+/// The names say which switches are on and nothing about tiers: `named`
+/// publishes whatever catalog tools the selection enables.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CapabilityShorthand {
+    /// Catalog tools only: no files, commands or sudo.
+    CatalogOnly,
+    /// Catalog tools and file reads.
+    CatalogAndFileRead,
+    /// Every capability.
+    All,
+    /// No capability.
+    None,
+}
+
+impl CapabilityShorthand {
+    const fn capabilities(self) -> Capabilities {
+        match self {
+            Self::CatalogOnly => Capabilities::actions_only(),
+            Self::CatalogAndFileRead => Capabilities {
+                named: true,
+                file_read: true,
+                file_write: false,
+                exec: false,
+                sudo: false,
+            },
+            Self::All => Capabilities::all(),
+            Self::None => Capabilities {
+                named: false,
+                file_read: false,
+                file_write: false,
+                exec: false,
+                sudo: false,
+            },
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(super) struct RawCapabilities {
+pub(super) struct RawCapabilitiesTable {
     named: Option<bool>,
     file_read: Option<bool>,
     file_write: Option<bool>,
     exec: Option<bool>,
     sudo: Option<bool>,
+}
+
+/// Either a shorthand name or a table. A table sets only the flags it names
+/// and takes the rest from the defaults; a shorthand sets every flag.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum RawCapabilities {
+    Shorthand(CapabilityShorthand),
+    Table(RawCapabilitiesTable),
 }
 
 impl RawCapabilities {
@@ -117,12 +166,15 @@ impl RawCapabilities {
     }
 
     pub(super) fn resolve_ref(&self, defaults: Capabilities) -> Capabilities {
-        Capabilities {
-            named: self.named.unwrap_or(defaults.named),
-            file_read: self.file_read.unwrap_or(defaults.file_read),
-            file_write: self.file_write.unwrap_or(defaults.file_write),
-            exec: self.exec.unwrap_or(defaults.exec),
-            sudo: self.sudo.unwrap_or(defaults.sudo),
+        match self {
+            Self::Shorthand(shorthand) => shorthand.capabilities(),
+            Self::Table(table) => Capabilities {
+                named: table.named.unwrap_or(defaults.named),
+                file_read: table.file_read.unwrap_or(defaults.file_read),
+                file_write: table.file_write.unwrap_or(defaults.file_write),
+                exec: table.exec.unwrap_or(defaults.exec),
+                sudo: table.sudo.unwrap_or(defaults.sudo),
+            },
         }
     }
 }
@@ -1050,6 +1102,73 @@ mod tests {
             panic!("doctor subcommand expected");
         };
         assert_eq!(args.timeout_secs, None);
+    }
+
+    #[test]
+    fn capability_shorthands_set_every_flag() {
+        for (name, expected) in [
+            ("catalog_only", Capabilities::actions_only()),
+            (
+                "catalog_and_file_read",
+                Capabilities {
+                    named: true,
+                    file_read: true,
+                    file_write: false,
+                    exec: false,
+                    sudo: false,
+                },
+            ),
+            ("all", Capabilities::all()),
+            (
+                "none",
+                Capabilities {
+                    named: false,
+                    file_read: false,
+                    file_write: false,
+                    exec: false,
+                    sudo: false,
+                },
+            ),
+        ] {
+            let text = format!("capabilities = '{name}'\n[targets.one]\nssh_host = 'ordinary'\n");
+            let config = load_text(&text, &[]).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(config.global_capabilities(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_headless_capabilities_table_leaves_unnamed_flags_off() {
+        // Omitting `capabilities` publishes catalog tools; an explicit table
+        // starts from nothing and only turns on what it names.
+        let table = "capabilities = { file_read = true }\n[targets.one]\nssh_host = 'ordinary'\n";
+        assert_eq!(
+            load_text(table, &[]).unwrap().global_capabilities(),
+            Capabilities {
+                named: false,
+                file_read: true,
+                file_write: false,
+                exec: false,
+                sudo: false,
+            }
+        );
+        let omitted = "[targets.one]\nssh_host = 'ordinary'\n";
+        assert_eq!(
+            load_text(omitted, &[]).unwrap().global_capabilities(),
+            Capabilities::actions_only()
+        );
+    }
+
+    #[test]
+    fn profiles_accept_the_same_shorthands() {
+        let profile: profiles::RawProfile =
+            toml::from_str("capabilities = 'catalog_and_file_read'")
+                .expect("profile with a shorthand");
+        let resolved = profile
+            .capabilities
+            .expect("capabilities")
+            .resolve_ref(Capabilities::all());
+        assert!(resolved.named && resolved.file_read);
+        assert!(!resolved.file_write && !resolved.exec && !resolved.sudo);
     }
 
     #[test]

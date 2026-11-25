@@ -699,6 +699,10 @@ mod tests {
                 "config",
             ),
             (
+                "capabilities='secret_payload'".to_owned(),
+                "config",
+            ),
+            (
                 "capabilities={exec='secret_payload'}".to_owned(),
                 "config",
             ),

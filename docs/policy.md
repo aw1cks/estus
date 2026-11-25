@@ -84,6 +84,30 @@ If you supply the table, each omitted key defaults to `false`. In workstation
 mode omitted keys default to `true`. Turning on `named` alone does not select
 any tools in headless mode. Turning on `sudo` does not set up a sudo route.
 
+### Shorthands
+
+Instead of a table, `capabilities` can be one of four names. A shorthand sets all
+five switches at once, so it doesn't depend on the defaults above.
+
+| Value | `named` | `file_read` | `file_write` | `exec` | `sudo` |
+| --- | --- | --- | --- | --- | --- |
+| `"catalog_only"` | on | off | off | off | off |
+| `"catalog_and_file_read"` | on | on | off | off | off |
+| `"all"` | on | on | on | on | on |
+| `"none"` | off | off | off | off | off |
+
+```toml
+capabilities = "catalog_and_file_read"
+```
+
+> **Note:** Capabilities switch groups of tools on; they don't limit what the
+> catalog tools can do. With `named` on, every catalog tool your `[selection]`
+> enables is published, `change_*` tools included. To keep a host to reads, cap
+> its tier with `max_tier = "inspect"` on the target or in a profile.
+
+`"catalog_only"` is the same as omitting `capabilities` in headless mode.
+Profiles accept the same shorthands. An unknown name fails to load.
+
 `observe_targets` and `inspect_output` need no capability. Publishing
 `change_target_quarantine_clear` requires at least one of `named`, `file_write`,
 `exec` or `sudo`. You can remove these local control tools with global
