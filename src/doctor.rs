@@ -323,6 +323,17 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
         let target = config
             .doctor_target(&name)
             .expect("validated immutable configured target");
+        // `ssh -G` only evaluates the configuration, so ask it first: a connection
+        // that uses up the deadline must not take the policy and its warnings with
+        // it, since a timeout is when they matter most.
+        let effective_ssh_policy = effective_ssh_policy(
+            config.ssh_executable(),
+            config.ssh_config(),
+            target.destination,
+            deadline,
+            &shutdown,
+        )
+        .await;
         // One pool per selected target: finalize before advancing, without retaining
         // idle masters or resetting the original whole-run deadline.
         let pool = Pool::diagnostic(
@@ -370,14 +381,6 @@ pub(crate) async fn run(config: Config, args: DoctorArgs, shutdown: Cancellation
             }
         };
         pool.shutdown().await;
-        let effective_ssh_policy = effective_ssh_policy(
-            config.ssh_executable(),
-            config.ssh_config(),
-            target.destination,
-            deadline,
-            &shutdown,
-        )
-        .await;
         targets.push(TargetReport {
             target: name,
             ssh,

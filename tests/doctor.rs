@@ -885,6 +885,45 @@ async fn doctor_reports_ssh_executable_and_effective_policy_warnings() -> Result
 }
 
 #[tokio::test]
+async fn doctor_reports_effective_policy_when_the_connection_times_out() -> Result<()> {
+    let Some(ssh) = support::find_program("ssh").ok() else {
+        return Ok(());
+    };
+    let directory = tempfile::tempdir()?;
+    let ssh_config = directory.path().join("ssh_config");
+    // A proxy that never speaks: the connection always uses up the deadline.
+    fs::write(
+        &ssh_config,
+        "Host stalled.invalid\n  StrictHostKeyChecking no\n  BatchMode yes\n  ProxyCommand sleep 30\n",
+    )?;
+    let config = directory.path().join("estus.toml");
+    fs::write(
+        &config,
+        format!(
+            "capabilities = {{ named = true }}\n[ssh]\nexecutable = {}\nconfig_file = {}\n[targets.stalled]\nssh_host = 'stalled.invalid'\n",
+            serde_json::to_string(&ssh.to_string_lossy())?,
+            serde_json::to_string(&ssh_config.to_string_lossy())?,
+        ),
+    )?;
+    let output = Doctor::start(command(
+        &config,
+        &["--target", "stalled", "--timeout-secs", "2"],
+    )?)?
+    .finish()
+    .await?;
+    let value = report(&output, 1)?;
+    let target = &value["targets"][0];
+    ensure!(target["ssh"]["status"] == "failed", "{value}");
+    ensure!(
+        target["effective_ssh_policy"]["warnings"]
+            .as_array()
+            .is_some_and(|w| w.contains(&json!("strict_host_key_checking_disabled"))),
+        "{value}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn doctor_warns_when_using_ambient_ssh_config() -> Result<()> {
     let Some(ssh) = support::find_program("ssh").ok() else {
         return Ok(());
