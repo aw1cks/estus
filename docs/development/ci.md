@@ -36,6 +36,8 @@ Three more workflows handle releases. **Release artifacts** (`release-artifacts.
 
 Two workflows report to GitHub code scanning, so findings show on the changed lines of a pull request and in the repository's Security tab. **Code scanning** (`code-scanning.yml`) runs on pull requests, on pushes to `main` and weekly. It uploads zizmor's findings with the online audits, which need the network and so can't run inside `nix flake check`: impostor commits, known-vulnerable actions, ref confusion and stale pins. It also uploads every clippy finding as SARIF. The blocking zizmor and clippy gates stay in `nix flake check`. **Scorecard** (`scorecard.yml`) runs the OpenSSF Scorecard on pushes to `main` and weekly, and publishes the result for the README badge. Publishing only works while that workflow keeps to Scorecard's rules: no workflow-level env, defaults or write permissions, and only Scorecard's approved actions in its job. CodeQL runs from GitHub's default setup, which is configured in the repository settings rather than in a workflow file.
 
+**Coverage** (`coverage.yml`) runs on pull requests and pushes to `main` and reports to [Codecov](https://app.codecov.io/gh/aw1cks/estus), which comments on each pull request; neither its status nor the job blocks merging. `nix build .#coverage` runs the network-free Rust tests under `cargo llvm-cov` and nextest's `ci` profile (`.config/nextest.toml`) and writes `lcov.info` and `junit.xml`. The JUnit report feeds Codecov's test analytics: the profile retries a failing test twice, so a test that passes on a retry shows up there as flaky. The SSH, stdio and acceptance suites run outside that build, so the coverage figure is a floor. The build uses rust-overlay's stable toolchain with `llvm-tools-preview` rather than nixpkgs' rustc, whose instrumented build scripts crash. On pushes to `main`, the same workflow builds the release binary from scratch with `cargo build --timings` (`nix build .#build-timings`): the job summary lists the slowest crates, and the `build-timings` artifact holds cargo's full timeline.
+
 | Layer | What it covers |
 | --- | --- |
 | Flake checks | Default and MSRV native builds and network-free tests, acceptance harness compilation, wheel build, formatting, Clippy, RustSec advisory checks, dependency bans, licenses and sources, documentation links, spelling, Python bootstrap and static checks, generated workflow consistency |
@@ -46,6 +48,7 @@ Two workflows report to GitHub code scanning, so findings show on the changed li
 | Fuzzing | Build and replay committed corpora on relevant PRs; time-bounded mutation campaigns on scheduled and manual runs |
 | Release artifacts | Builds every release binary, wheel and the sdist, checks the glibc floor and static linkage, installs each in a distribution container or on macOS, and dry-runs the crate publish |
 | Code scanning | zizmor (with online audits) and clippy findings as SARIF on pull requests, weekly zizmor re-audit; OpenSSF Scorecard; CodeQL default setup |
+| Coverage | Line coverage and test results of the network-free Rust tests in Codecov; build timings on `main` |
 
 ## What to run yourself
 

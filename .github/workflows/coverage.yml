@@ -1,0 +1,113 @@
+# Generated from nix/ci.nix. Run: nix run .#generate-workflows
+%YAML 1.1
+---
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+jobs:
+  build-timings:
+    if: github.event_name != 'pull_request'
+    name: Build timings
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      with:
+        gc-max-store-size-linux: 2G
+        gc-max-store-size-macos: 2G
+        primary-key: nix-coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock', '**/*.rs') }}
+        purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        purge-created: 0
+        purge-prefixes: nix-coverage-${{ runner.os }}-${{ runner.arch }}-
+        purge-primary-key: never
+        restore-prefixes-first-match: nix-coverage-${{ runner.os }}-${{ runner.arch }}-
+        save: true
+    - name: Build with cargo --timings
+      run: |
+        nix build -L --no-update-lock-file .#build-timings --out-link timings
+        cat timings/summary.md >> "$GITHUB_STEP_SUMMARY"
+    - uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
+      with:
+        if-no-files-found: error
+        name: build-timings
+        path: timings/cargo-timing.html
+        retention-days: 30
+    timeout-minutes: 45
+  coverage:
+    name: Coverage and test results
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      with:
+        gc-max-store-size-linux: 2G
+        gc-max-store-size-macos: 2G
+        primary-key: nix-coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock', '**/*.rs') }}
+        purge: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        purge-created: 0
+        purge-prefixes: nix-coverage-${{ runner.os }}-${{ runner.arch }}-
+        purge-primary-key: never
+        restore-prefixes-first-match: nix-coverage-${{ runner.os }}-${{ runner.arch }}-
+        save: true
+    - name: Run the tests with coverage
+      run: nix build -L --no-update-lock-file .#coverage --out-link coverage
+    - if: ${{ !cancelled() }}
+      name: Upload coverage to Codecov
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      with:
+        disable_search: true
+        fail_ci_if_error: true
+        files: coverage/lcov.info
+        flags: unit
+        use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    - if: ${{ !cancelled() }}
+      name: Upload test results to Codecov
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      with:
+        disable_search: true
+        fail_ci_if_error: true
+        files: coverage/junit.xml
+        flags: unit
+        report_type: test_results
+        use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    - name: Fail if any test failed
+      run: |
+        python3 - coverage/junit.xml <<'EOF'
+        import sys
+        import xml.etree.ElementTree as ET
+        suites = ET.parse(sys.argv[1]).getroot()
+        failed = int(suites.get("failures", 0)) + int(suites.get("errors", 0))
+        print(f"{suites.get('tests')} tests, {failed} failed")
+        sys.exit(1 if failed else 0)
+        EOF
+    timeout-minutes: 45
+name: Coverage
+'on':
+  pull_request: {}
+  push:
+    branches:
+    - main
+  workflow_dispatch: {}
+permissions:
+  contents: read
