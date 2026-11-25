@@ -914,12 +914,17 @@ programs = ["/usr/local/bin/PRIVATE_SUDO_PROG"]
 
 #[tokio::test]
 async fn workstation_tools_list_stays_bounded_and_tags_untrusted_remote_output() -> Result<()> {
+    // Both paths must exist wherever the suite runs, including against an
+    // installed package, so take them from the server under test rather than
+    // from the build tree. ESTUS_SSH only has to be an executable: listing tools
+    // never runs it, but startup refuses one that is missing.
+    let catalog = bundled_catalog_json();
     let mut cmd = command(&["--workstation"]);
     cmd.env(
         "ESTUS_CATALOG_ROOT",
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog"),
+        catalog.parent().context("catalog dir")?,
     )
-    .env("ESTUS_SSH", env!("CARGO_BIN_EXE_estus"));
+    .env("ESTUS_SSH", binary());
     let mut server = Server::from_command(cmd)?;
     let scenario = async {
         server

@@ -22,7 +22,9 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-fn binary() -> std::ffi::OsString {
+/// The executable under test: the installed server in acceptance runs, the
+/// freshly built one otherwise.
+pub fn binary() -> std::ffi::OsString {
     std::env::var_os("ESTUS_TEST_BINARY").unwrap_or_else(|| {
         option_env!("ESTUS_TEST_BINARY")
             .unwrap_or(env!("CARGO_BIN_EXE_estus"))
@@ -30,10 +32,15 @@ fn binary() -> std::ffi::OsString {
     })
 }
 
-/// The catalog the tested server actually ships: an installed package keeps it
-/// at `../share/estus/catalog` beside the executable (the server's own default
+/// The catalog the tested server actually ships. A harness that installed the
+/// server elsewhere (the wheel keeps it at `site-packages/estus/_catalog`) names
+/// it with `ESTUS_TEST_CATALOG`; an installed package otherwise keeps it at
+/// `../share/estus/catalog` beside the executable (the server's own default
 /// discovery); a source build falls back to the checkout.
 pub fn bundled_catalog_json() -> std::path::PathBuf {
+    if let Some(directory) = std::env::var_os("ESTUS_TEST_CATALOG") {
+        return std::path::PathBuf::from(directory).join("catalog.json");
+    }
     std::path::Path::new(&binary())
         .parent()
         .map(|bin| bin.join("../share/estus/catalog/catalog.json"))

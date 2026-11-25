@@ -590,7 +590,13 @@ async fn installed_wheel_channels() -> Result<()> {
                 "{channel} {name} must retain laboratory qualification and {prerequisite}"
             );
         }
-        let export = installed.root.path().join(format!("catalog-{channel}"));
+        // Export refuses an output path that passes through a symlink, and
+        // macOS's /tmp is one; the root itself stays short for Darwin.
+        let export = installed
+            .root
+            .path()
+            .canonicalize()?
+            .join(format!("catalog-{channel}"));
         let exported = checked(
             launch(false)
                 .args(["catalog", "export", "--preset", "linux-health", "--output"])
@@ -615,6 +621,9 @@ async fn installed_wheel_channels() -> Result<()> {
                 .is_some_and(|tools| tools.len() == 3),
             "{channel} health export is incomplete"
         );
+        // An export holds each tool's definition, manifest and collector; it
+        // stopped writing overlays and snapshots when catalog tools began to be
+        // enabled by name.
         for name in ["observe_cpu", "observe_memory", "observe_pressure"] {
             ensure!(
                 export
@@ -622,12 +631,15 @@ async fn installed_wheel_channels() -> Result<()> {
                     .is_file()
                     && export
                         .join(format!("payloads/{name}/collector.py"))
-                        .is_file()
-                    && export.join(format!("overlays/{name}.json")).is_file(),
+                        .is_file(),
                 "{channel} health export is missing production assets for {name}"
             );
         }
-        let laboratory = installed.root.path().join(format!("laboratory-{channel}"));
+        let laboratory = installed
+            .root
+            .path()
+            .canonicalize()?
+            .join(format!("laboratory-{channel}"));
         let exported = checked(
             launch(false)
                 .args([
@@ -782,7 +794,8 @@ async fn installed_wheel_channels() -> Result<()> {
             installed
                 .command(&suite)
                 .args(["--nocapture", "--test-threads=1"])
-                .env("ESTUS_TEST_BINARY", installed.launcher(false)),
+                .env("ESTUS_TEST_BINARY", installed.launcher(false))
+                .env("ESTUS_TEST_CATALOG", &direct_catalog),
         )
         .await?;
     }
