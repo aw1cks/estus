@@ -35,6 +35,8 @@ jobs:
       run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py wheels --out dist
     - name: Build the source distribution
       run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py sdist --out dist
+    - name: Write an SBOM per release target
+      run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py sbom --out dist
     - name: Check that the crate packages and builds
       run: nix develop --no-update-lock-file .#release --command cargo publish --dry-run --locked
     - uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874

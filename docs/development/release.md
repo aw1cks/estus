@@ -36,7 +36,18 @@ A tag that release-please creates with the workflow's `GITHUB_TOKEN` does not st
 | Wheel, macOS | `estus-<version>-py3-none-macosx_11_0_arm64.whl` | Apple silicon |
 | Source distribution | `estus-<version>.tar.gz` | Building from source |
 | Crate | `estus-mcp` on crates.io | `cargo install estus-mcp` installs the `estus` command |
+| SBOMs | `estus-<target>.cdx.json` | CycloneDX 1.5: the crates compiled into that target's binary, from `Cargo.lock` |
 | Checksums | `SHA256SUMS` | Covers every file above except the crate |
+
+Every release asset has a signed [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) tying it to the Publish run, the workflow file and the commit that built it, and each target's binary tarball and wheels have an SBOM attestation for that target's SBOM. Check a download with the GitHub CLI:
+
+```sh
+gh attestation verify estus-x86_64-unknown-linux-musl.tar.gz --repo aw1cks/estus
+gh attestation verify estus-x86_64-unknown-linux-musl.tar.gz --repo aw1cks/estus \
+  --predicate-type https://cyclonedx.org/bom
+```
+
+The wheels and sdist on PyPI also carry PyPI's own attestations ([PEP 740](https://peps.python.org/pep-0740/)), which trusted publishing adds. `release.py sbom` writes the SBOMs in the Release artifacts run, so pull requests that touch the release check them too.
 
 Each binary tarball unpacks to `estus-<target>/bin/estus` with the catalog at `estus-<target>/share/estus/catalog`. Estus looks for the catalog next to the binary, so an extracted tarball works with no install step. The tarball names carry no version, so `releases/latest/download/<name>` is a stable URL.
 

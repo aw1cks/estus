@@ -26,6 +26,7 @@
         packages = [
           toolchain
           pkgs.cargo-zigbuild
+          pkgs.cargo-cyclonedx
           pkgs.zig
           pkgs.uv
           pkgs.python3
