@@ -15,6 +15,10 @@
       downloadArtifact = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"; # v8.0.2
       pypiPublish = "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"; # v1.14.3
       cratesIoAuth = "rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9"; # v1.0.6
+      uploadSarif = "github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934"; # v4.39.5
+      scorecardAction = "ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5"; # v2.6.0
+      # A fork's token can't write security events, and fork PRs must not get one.
+      sameRepository = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository";
       # Checkout and Nix: the start of every job that runs inside the release dev
       # shell. Jobs that publish use this alone, never the Actions cache.
       nixInstall = [
@@ -791,6 +795,140 @@
             retry = retryDispatch {
               needs = [ "verify" "artifacts" "publish-github" "publish-pypi" "publish-crates" "finalize" ];
             };
+          };
+        };
+        # Findings as SARIF in GitHub code scanning, so they show on the changed
+        # lines of a pull request and in the Security tab. The blocking gates stay
+        # in `nix flake check`; this adds zizmor's online audits, which need the
+        # network and so can't run in the build sandbox, and clippy's findings as
+        # annotations.
+        "code-scanning.yml" = {
+          name = "Code scanning";
+          on = {
+            push.branches = [ "main" ];
+            pull_request = { };
+            # Online audits can change with no change here: a pinned action can
+            # turn out to be vulnerable, or a tag can move.
+            schedule = [ { cron = "17 4 * * 1"; } ];
+            workflow_dispatch = { };
+          };
+          permissions.contents = "read";
+          concurrency = {
+            group = "\${{ github.workflow }}-\${{ github.ref }}";
+            cancel-in-progress = true;
+          };
+          jobs = {
+            zizmor = {
+              name = "zizmor";
+              "if" = sameRepository;
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 15;
+              permissions = {
+                contents = "read";
+                security-events = "write";
+              };
+              steps = nixInstall ++ [
+                {
+                  # The regular persona, as in the flake check. The pedantic one
+                  # mostly asks for YAML comments, which generated workflows can't
+                  # carry. GH_TOKEN enables the online audits: impostor commits,
+                  # known-vulnerable actions, ref confusion and stale pins.
+                  name = "Audit the workflows, including online audits";
+                  env.GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                  run = "nix shell --no-update-lock-file --inputs-from . nixpkgs#zizmor --command zizmor --format sarif --no-exit-codes . > zizmor.sarif";
+                }
+                {
+                  uses = uploadSarif;
+                  "with" = {
+                    sarif_file = "zizmor.sarif";
+                    category = "zizmor";
+                  };
+                }
+              ];
+            };
+            clippy = {
+              name = "clippy";
+              "if" = sameRepository;
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 30;
+              permissions = {
+                contents = "read";
+                security-events = "write";
+              };
+              steps = nixInstall ++ [
+                {
+                  # Without -D warnings: the gate is checks.clippy; this records
+                  # every finding, so it can be shown on the lines it concerns.
+                  name = "Run clippy";
+                  run = "nix develop --no-update-lock-file .#lint --command cargo clippy --locked --all-targets --all-features --message-format=json > clippy.json";
+                }
+                {
+                  name = "Convert to SARIF";
+                  run = "nix shell --no-update-lock-file --inputs-from . nixpkgs#clippy-sarif nixpkgs#sarif-fmt --command sh -c 'clippy-sarif < clippy.json | tee clippy.sarif | sarif-fmt'";
+                }
+                {
+                  uses = uploadSarif;
+                  "with" = {
+                    sarif_file = "clippy.sarif";
+                    category = "clippy";
+                  };
+                }
+              ];
+            };
+          };
+        };
+        # OpenSSF Scorecard: a weekly supply-chain hygiene score, published for the
+        # README badge and uploaded as SARIF. Publishing only works if this
+        # workflow keeps to Scorecard's rules: no workflow-level env, defaults or
+        # write permissions, and only approved actions in the job, so no run steps.
+        "scorecard.yml" = {
+          name = "Scorecard";
+          on = {
+            push.branches = [ "main" ];
+            schedule = [ { cron = "23 5 * * 1"; } ];
+          };
+          permissions.contents = "read";
+          jobs.analysis = {
+            name = "Scorecard analysis";
+            runs-on = "ubuntu-26.04";
+            timeout-minutes = 15;
+            permissions = {
+              contents = "read";
+              actions = "read";
+              security-events = "write";
+              # Signs the results, so the Scorecard API can trust where they came
+              # from before it publishes them.
+              id-token = "write";
+            };
+            steps = [
+              {
+                uses = checkout;
+                "with".persist-credentials = false;
+              }
+              {
+                uses = scorecardAction;
+                "with" = {
+                  results_file = "results.sarif";
+                  results_format = "sarif";
+                  publish_results = true;
+                  fail_on_publish_error = true;
+                };
+              }
+              {
+                "if" = "always()";
+                uses = uploadArtifact;
+                "with" = {
+                  name = "scorecard-sarif";
+                  path = "results.sarif";
+                  retention-days = 5;
+                };
+              }
+              {
+                "if" = "always()";
+                uses = uploadSarif;
+                "with".sarif_file = "results.sarif";
+              }
+            ];
           };
         };
         # Re-runs a finished run's failed jobs when GitHub itself failed to run

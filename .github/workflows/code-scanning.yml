@@ -1,0 +1,68 @@
+# Generated from nix/ci.nix. Run: nix run .#generate-workflows
+%YAML 1.1
+---
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+jobs:
+  clippy:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: clippy
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Run clippy
+      run: nix develop --no-update-lock-file .#lint --command cargo clippy --locked --all-targets --all-features --message-format=json > clippy.json
+    - name: Convert to SARIF
+      run: nix shell --no-update-lock-file --inputs-from . nixpkgs#clippy-sarif nixpkgs#sarif-fmt --command sh -c 'clippy-sarif < clippy.json | tee clippy.sarif | sarif-fmt'
+    - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934
+      with:
+        category: clippy
+        sarif_file: clippy.sarif
+    timeout-minutes: 30
+  zizmor:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: zizmor
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+      with:
+        extra_nix_config: |
+          auto-optimise-store = false
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      name: Audit the workflows, including online audits
+      run: nix shell --no-update-lock-file --inputs-from . nixpkgs#zizmor --command zizmor --format sarif --no-exit-codes . > zizmor.sarif
+    - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934
+      with:
+        category: zizmor
+        sarif_file: zizmor.sarif
+    timeout-minutes: 15
+name: Code scanning
+'on':
+  pull_request: {}
+  push:
+    branches:
+    - main
+  schedule:
+  - cron: 17 4 * * 1
+  workflow_dispatch: {}
+permissions:
+  contents: read
