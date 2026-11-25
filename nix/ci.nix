@@ -473,70 +473,139 @@
             };
           };
         };
-        # release-please keeps a release pull request up to date and, when that
-        # is merged, tags a draft release. The same run then builds, tests and
-        # publishes, and only publishes the draft once every channel succeeded.
-        "release.yml" = {
-          name = "Release";
+        # release-please keeps a release pull request up to date. When that is
+        # merged it tags a draft release, and this workflow hands the tag to
+        # publish.yml. Nothing here builds or publishes.
+        "release-please.yml" = {
+          name = "Release Please";
           on = {
             push.branches = [ "main" ];
             workflow_dispatch = { };
           };
           permissions.contents = "read";
-          # One release run at a time, and never cancel one that may be partway
-          # through publishing; a later push waits.
+          # Never run two at once, so two pushes cannot race over the release
+          # pull request.
           concurrency = {
             group = "release";
             cancel-in-progress = false;
           };
+          jobs.release-please = {
+            name = "Release pull request";
+            runs-on = "ubuntu-26.04";
+            timeout-minutes = 10;
+            permissions = {
+              contents = "write";
+              pull-requests = "write";
+              issues = "write";
+              actions = "write";
+            };
+            steps = [
+              {
+                id = "release";
+                uses = releasePlease;
+                "with" = {
+                  config-file = ".github/release-please-config.json";
+                  manifest-file = ".github/release-please-manifest.json";
+                };
+              }
+              {
+                # A pull request made with GITHUB_TOKEN triggers no workflows,
+                # whatever permissions the token has. A dispatch is the
+                # exception, so ask for the checks explicitly; they attach to
+                # the branch head, which is what the pull request shows.
+                name = "Run CI on the release pull request";
+                "if" = "steps.release.outputs.prs_created == 'true'";
+                env = {
+                  GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                  GH_REPO = "\${{ github.repository }}";
+                  BRANCH = "\${{ fromJSON(steps.release.outputs.pr).headBranchName }}";
+                };
+                run = ''
+                  gh workflow run ssh-baseline.yml --ref "$BRANCH"
+                  gh workflow run release-artifacts.yml --ref "$BRANCH"
+                '';
+              }
+              {
+                # The tag was created with GITHUB_TOKEN too, so it starts no
+                # workflow (checked: neither a tag push nor a published release
+                # does). Dispatch publish.yml on the tag itself instead: it then
+                # runs against the tag's commit, and its environments see a tag.
+                name = "Start publishing";
+                "if" = "steps.release.outputs.release_created == 'true'";
+                env = {
+                  GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
+                  GH_REPO = "\${{ github.repository }}";
+                  TAG = "\${{ steps.release.outputs.tag_name }}";
+                };
+                run = ''gh workflow run publish.yml --ref "$TAG"'';
+              }
+            ];
+          };
+        };
+        # Builds, tests and publishes one release. It only runs on a tag, and only
+        # for a draft release whose tag is on main, which is what release-please
+        # leaves behind. The release is taken out of draft last, once every
+        # channel has succeeded, so nobody sees a release with missing files.
+        "publish.yml" = {
+          name = "Publish";
+          on = {
+            # release-please.yml dispatches this on the new tag. A tag pushed by
+            # a person, or by release-please with a personal token, starts it
+            # directly; the checks below still require a draft release.
+            push.tags = [ "v*" ];
+            workflow_dispatch = { };
+          };
+          permissions.contents = "read";
+          # Never cancel a publish that may be partway through.
+          concurrency = {
+            group = "publish-\${{ github.ref }}";
+            cancel-in-progress = false;
+          };
           jobs = {
-            release-please = {
-              name = "Release pull request";
+            verify = {
+              name = "Check the release";
               runs-on = "ubuntu-26.04";
-              timeout-minutes = 10;
-              permissions = {
-                contents = "write";
-                pull-requests = "write";
-                issues = "write";
-                actions = "write";
-              };
-              outputs = {
-                release_created = "\${{ steps.release.outputs.release_created }}";
-                tag_name = "\${{ steps.release.outputs.tag_name }}";
-                version = "\${{ steps.release.outputs.version }}";
-              };
+              timeout-minutes = 5;
+              # GitHub lists draft releases only to users with push access.
+              permissions.contents = "write";
               steps = [
                 {
-                  id = "release";
-                  uses = releasePlease;
-                  "with" = {
-                    config-file = "release-please-config.json";
-                    manifest-file = ".release-please-manifest.json";
-                  };
-                }
-                {
-                  # A pull request made with GITHUB_TOKEN triggers no workflows,
-                  # whatever permissions the token has. A dispatch is the
-                  # exception, so ask for the checks explicitly; they attach to
-                  # the branch head, which is what the pull request shows.
-                  name = "Run CI on the release pull request";
-                  "if" = "steps.release.outputs.prs_created == 'true'";
+                  name = "Require an unpublished release on a tag on main";
                   env = {
                     GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
                     GH_REPO = "\${{ github.repository }}";
-                    BRANCH = "\${{ fromJSON(steps.release.outputs.pr).headBranchName }}";
+                    REF_TYPE = "\${{ github.ref_type }}";
+                    TAG = "\${{ github.ref_name }}";
+                    SHA = "\${{ github.sha }}";
                   };
                   run = ''
-                    gh workflow run ssh-baseline.yml --ref "$BRANCH"
-                    gh workflow run release-artifacts.yml --ref "$BRANCH"
+                    set -euo pipefail
+                    if [ "$REF_TYPE" != tag ]; then
+                      echo "::error::Run this on a release tag, not a branch."
+                      exit 1
+                    fi
+                    case "$TAG" in
+                      v[0-9]*) ;;
+                      *) echo "::error::$TAG is not a version tag."; exit 1 ;;
+                    esac
+                    draft=$(gh api "repos/$GH_REPO/releases" --paginate \
+                      --jq ".[] | select(.tag_name == \"$TAG\") | .draft")
+                    if [ "$draft" != true ]; then
+                      echo "::error::There is no draft release for $TAG; only an unpublished release can be published."
+                      exit 1
+                    fi
+                    status=$(gh api "repos/$GH_REPO/compare/main...$SHA" --jq .status)
+                    case "$status" in
+                      identical|behind) ;;
+                      *) echo "::error::$TAG is not on main."; exit 1 ;;
+                    esac
                   '';
                 }
               ];
             };
             artifacts = {
               name = "Artifacts";
-              needs = "release-please";
-              "if" = "needs.release-please.outputs.release_created == 'true'";
+              needs = "verify";
               uses = "./.github/workflows/release-artifacts.yml";
               permissions = {
                 contents = "read";
@@ -545,7 +614,7 @@
             };
             publish-github = {
               name = "GitHub release assets";
-              needs = [ "release-please" "artifacts" ];
+              needs = "artifacts";
               runs-on = "ubuntu-26.04";
               timeout-minutes = 15;
               permissions.contents = "write";
@@ -571,7 +640,7 @@
                   env = {
                     GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
                     GH_REPO = "\${{ github.repository }}";
-                    TAG = "\${{ needs.release-please.outputs.tag_name }}";
+                    TAG = "\${{ github.ref_name }}";
                   };
                   run = ''gh release upload "$TAG" dist/* --clobber'';
                 }
@@ -579,7 +648,7 @@
             };
             publish-pypi = {
               name = "PyPI";
-              needs = [ "release-please" "artifacts" ];
+              needs = "artifacts";
               runs-on = "ubuntu-26.04";
               timeout-minutes = 15;
               # Trusted publishing: PyPI trusts this workflow and environment, so
@@ -601,10 +670,11 @@
                 {
                   # The binary tarballs are not Python distributions.
                   name = "Select the wheels and the sdist";
-                  env.VERSION = "\${{ needs.release-please.outputs.version }}";
+                  env.TAG = "\${{ github.ref_name }}";
                   run = ''
+                    version="''${TAG#v}"
                     mkdir pypi
-                    cp all/*.whl "all/estus-$VERSION.tar.gz" pypi/
+                    cp all/*.whl "all/estus-$version.tar.gz" pypi/
                     ls -l pypi
                   '';
                 }
@@ -616,7 +686,7 @@
             };
             publish-crates = {
               name = "crates.io";
-              needs = [ "release-please" "artifacts" ];
+              needs = "artifacts";
               runs-on = "ubuntu-26.04";
               timeout-minutes = 30;
               environment = "crates-io";
@@ -634,7 +704,7 @@
             };
             finalize = {
               name = "Publish the release";
-              needs = [ "release-please" "publish-github" "publish-pypi" "publish-crates" ];
+              needs = [ "publish-github" "publish-pypi" "publish-crates" ];
               runs-on = "ubuntu-26.04";
               timeout-minutes = 5;
               permissions.contents = "write";
@@ -644,7 +714,7 @@
                   env = {
                     GH_TOKEN = "\${{ secrets.GITHUB_TOKEN }}";
                     GH_REPO = "\${{ github.repository }}";
-                    TAG = "\${{ needs.release-please.outputs.tag_name }}";
+                    TAG = "\${{ github.ref_name }}";
                   };
                   run = ''gh release edit "$TAG" --draft=false'';
                 }

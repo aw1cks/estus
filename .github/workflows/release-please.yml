@@ -1,0 +1,46 @@
+# Generated from nix/ci.nix. Run: nix run .#generate-workflows
+%YAML 1.1
+---
+concurrency:
+  cancel-in-progress: false
+  group: release
+jobs:
+  release-please:
+    name: Release pull request
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-26.04
+    steps:
+    - id: release
+      uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+      with:
+        config-file: .github/release-please-config.json
+        manifest-file: .github/release-please-manifest.json
+    - env:
+        BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      if: steps.release.outputs.prs_created == 'true'
+      name: Run CI on the release pull request
+      run: |
+        gh workflow run ssh-baseline.yml --ref "$BRANCH"
+        gh workflow run release-artifacts.yml --ref "$BRANCH"
+    - env:
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG: ${{ steps.release.outputs.tag_name }}
+      if: steps.release.outputs.release_created == 'true'
+      name: Start publishing
+      run: gh workflow run publish.yml --ref "$TAG"
+    timeout-minutes: 10
+name: Release Please
+'on':
+  push:
+    branches:
+    - main
+  workflow_dispatch: {}
+permissions:
+  contents: read

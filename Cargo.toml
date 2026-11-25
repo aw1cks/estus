@@ -14,8 +14,7 @@ exclude = [
     "/.github/", "/.omp/", "/nix/", "/tests/", "/fuzz/", "/scripts/", "/python/",
     "/docs/", "/examples/", "/skills/", "/dist/", "/result",
     "/flake.nix", "/flake.lock", "/pyproject.toml", "/setup.py", "/MANIFEST.in",
-    "/deny.toml", "/clippy.toml", "/release-please-config.json",
-    "/.release-please-manifest.json", "/.git-blame-ignore-revs",
+    "/deny.toml", "/clippy.toml", "/.git-blame-ignore-revs",
 ]
 
 [lib]
