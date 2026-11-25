@@ -31,6 +31,10 @@
           pkgs.cargo-audit
         ];
       };
+      # Just the pinned toolchain (cargo, rustc, clippy, rustfmt), for CI jobs
+      # that run cargo directly. The default shell also builds Estus itself,
+      # for the dev MCP wrapper.
+      devShells.lint = craneLib.devShell { };
       # Optional tooling only; normal builds/checks retain their stable toolchain.
       devShells.fuzz = fuzzLib.devShell {
         packages = [ pkgs.cargo-fuzz pkgs.clang ];

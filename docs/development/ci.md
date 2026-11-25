@@ -24,6 +24,8 @@ GitHub sometimes fails to run a job at all, most often a macOS arm64 job that ne
 
 Three more workflows handle releases. **Release artifacts** (`release-artifacts.yml`) builds and tests the release binaries and wheels; it runs on pull requests that touch the release files, on demand, and as the first stage of publishing. **Release Please** (`release-please.yml`) runs on every push to `main` and keeps the release pull request up to date. **Publish** (`publish.yml`) builds and publishes, and only for an unpublished release on a `v*` tag on `main`. Anything `GITHUB_TOKEN` creates, a pull request or a tag, triggers no workflows, so Release Please dispatches **SSH baseline** and **Release artifacts** on the release branch, and **Publish** on the new tag. See [Releasing](release.md).
 
+Two workflows report to GitHub code scanning, so findings show on the changed lines of a pull request and in the repository's Security tab. **Code scanning** (`code-scanning.yml`) runs on pull requests, on pushes to `main` and weekly. It uploads zizmor's findings with the online audits, which need the network and so can't run inside `nix flake check`: impostor commits, known-vulnerable actions, ref confusion and stale pins. It also uploads every clippy finding as SARIF. The blocking zizmor and clippy gates stay in `nix flake check`. **Scorecard** (`scorecard.yml`) runs the OpenSSF Scorecard on pushes to `main` and weekly, and publishes the result for the README badge. Publishing only works while that workflow keeps to Scorecard's rules: no workflow-level env, defaults or write permissions, and only Scorecard's approved actions in its job. CodeQL runs from GitHub's default setup, which is configured in the repository settings rather than in a workflow file.
+
 | Layer | What it covers |
 | --- | --- |
 | Flake checks | Default and MSRV native builds and network-free tests, acceptance harness compilation, wheel build, formatting, Clippy, RustSec advisory checks, Python bootstrap and static checks, generated workflow consistency |
@@ -33,6 +35,7 @@ Three more workflows handle releases. **Release artifacts** (`release-artifacts.
 | Python distributions | Installed wheel acceptance and source archive round-trip on each SSH baseline platform |
 | Fuzzing | Build and replay committed corpora on relevant PRs; time-bounded mutation campaigns on scheduled and manual runs |
 | Release artifacts | Builds every release binary, wheel and the sdist, checks the glibc floor and static linkage, installs each in a distribution container or on macOS, and dry-runs the crate publish |
+| Code scanning | zizmor (with online audits) and clippy findings as SARIF on pull requests, weekly zizmor re-audit; OpenSSF Scorecard; CodeQL default setup |
 
 ## What to run yourself
 
