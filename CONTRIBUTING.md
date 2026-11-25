@@ -20,6 +20,8 @@ cargo test --locked --test catalog_distribution
 
 Use Conventional Commit subjects: `fix(catalog): describe the fix` or `docs: describe the change`. They are not just style. [release-please](docs/development/release.md) builds each release's version bump and notes from them, so `feat:` and `fix:` appear in the changelog and `feat!:` marks a breaking change. Keep the PR focused. Explain why the change is needed, link the issue if there is one, and list the checks you ran. Include a regression test for a bug fix and update the docs when behavior changes.
 
+Changes reach `main` only through pull requests, merged by rebase so history stays linear. A pull request can merge once `ssh-baseline-linux` and `ssh-baseline-linux-arm64` pass. `ssh-native-macos-arm64` runs too, but isn't required, because GitHub's macOS arm64 runners are often queued; check its result before merging anything platform-specific. Force pushes to `main` and deleting it are blocked for everyone.
+
 ## Change a catalog tool
 
 Start with a similar tool and the [catalog guide](docs/catalog.md). Register the tool and its executor in `catalog/catalog.json`, and put its definition in `catalog/<tool>.toml`. For a Python collector, update `catalog/payloads/<tool>/collector.py` and its `manifest.json`, including the source digest if the collector changed. Add tests for the tool's inputs and results.

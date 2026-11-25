@@ -67,6 +67,7 @@ The workflows can't do these for you.
 2. **Environments.** Create two environments, `pypi` and `crates-io`. In each, under deployment branches and tags, allow only tags matching `v*`, so nothing but a release tag can publish. Adding a required reviewer gives you a manual gate as well.
 3. **PyPI.** Add a pending trusted publisher for the project `estus` with owner `aw1cks`, repository `estus`, workflow `publish.yml` and environment `pypi`. No token is stored; PyPI trusts the workflow.
 4. **crates.io.** Add a trusted publisher to `estus-mcp` (crate settings, Trusted Publishing) with owner `aw1cks`, repository `estus`, workflow `publish.yml` and environment `crates-io`, then turn on "Trusted Publishing only" so that no API token can publish it. No secret is stored: the publish job exchanges its OIDC token for a short-lived crates.io token, which is revoked when the job ends. crates.io only offers trusted publishing for a crate that already exists, so a brand-new crate needs one publish with a scoped API token first; `estus-mcp` was first published that way, as 0.1.0.
+5. **Rulesets.** Three repository rulesets protect the release path. `main: integrity` blocks deleting `main`, force pushes to it, and non-linear history, with no bypass. `main: pull requests` requires a pull request and the two Linux SSH baseline checks; repository admins can bypass it in an emergency. `release tags` stops `v*` tags from being deleted or moved once created, with an admin bypass; release-please can still create them, because creating a tag isn't restricted.
 
 ## The first release
 
@@ -99,7 +100,7 @@ The **Release artifacts** workflow runs the same commands. It runs on pull reque
 The release stays a draft, so nothing half-published is visible. Fix the cause, then re-run the failed jobs of the `Publish` run. To start publishing again from the beginning, run `gh workflow run publish.yml --ref v<version>`; it refuses unless the release is still a draft.
 
 - **PyPI rejects re-uploads.** If `PyPI` succeeded and a later job failed, don't re-run `PyPI`.
-- **A bad release.** Delete the draft release and its tag, and fix the problem on `main`. release-please opens a new release pull request for the next version. If you must reuse a version that reached PyPI, you can't: PyPI never accepts the same version twice.
+- **A bad release.** Delete the draft release and its tag, and fix the problem on `main`. The `release tags` ruleset only lets a repository admin delete a `v*` tag. release-please opens a new release pull request for the next version. If you must reuse a version that reached PyPI, you can't: PyPI never accepts the same version twice.
 
 ## Where this differs from the Nix wheel
 
