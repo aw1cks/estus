@@ -502,14 +502,30 @@ result = {{ kind = "capability_projection", fields = {{ ok = ["ok"] }}, schema =
     Ok(())
 }
 
+/// Runs `binary`, retrying while the kernel reports it busy. A test that copies
+/// an executable and runs it at once can hit ETXTBSY: another test thread's
+/// child, between fork and exec, may still hold the copy's write descriptor. It
+/// clears within milliseconds, so retry that error only, and only briefly.
 fn run_in(binary: &Path, arguments: &[&str]) -> Result<Output> {
-    Ok(Command::new(binary)
-        .args(arguments)
-        .env_remove("ESTUS_CATALOG_ROOT")
-        .env_remove("ESTUS_CONFIG")
-        .env_remove("ESTUS_SSH")
-        .stdin(std::process::Stdio::null())
-        .output()?)
+    let mut attempts = 0;
+    loop {
+        let result = Command::new(binary)
+            .args(arguments)
+            .env_remove("ESTUS_CATALOG_ROOT")
+            .env_remove("ESTUS_CONFIG")
+            .env_remove("ESTUS_SSH")
+            .stdin(std::process::Stdio::null())
+            .output();
+        match result {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return Ok(other?),
+        }
+    }
 }
 
 #[test]

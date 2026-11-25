@@ -344,20 +344,33 @@ fn stub_interpreter(directory: &Path, name: &str, body: &str) -> Result<PathBuf>
     Ok(path)
 }
 
+/// Builds with a stub interpreter. The stub was written an instant ago, so
+/// `estus` can fail to spawn it with ETXTBSY (see `catalog_cli::run_in`), which
+/// it reports as `spawn_failed`. Retry that outcome only, and only briefly.
 fn build_with(python: &Path, output_dir: &Path) -> Result<Output> {
-    invoke(
-        &[
-            "bundle".as_ref(),
-            "build".as_ref(),
-            "--python".as_ref(),
-            python.as_os_str(),
-            "--output".as_ref(),
-            output_dir.as_os_str(),
-            "--timeout-secs".as_ref(),
-            "30".as_ref(),
-        ],
-        &[],
-    )
+    let mut attempts = 0;
+    loop {
+        let output = invoke(
+            &[
+                "bundle".as_ref(),
+                "build".as_ref(),
+                "--python".as_ref(),
+                python.as_os_str(),
+                "--output".as_ref(),
+                output_dir.as_os_str(),
+                "--timeout-secs".as_ref(),
+                "30".as_ref(),
+            ],
+            &[],
+        )?;
+        let raced = serde_json::from_slice::<Value>(&output.stdout)
+            .is_ok_and(|report| report["error_code"] == "spawn_failed");
+        if !raced || attempts >= 100 {
+            return Ok(output);
+        }
+        attempts += 1;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 #[test]
