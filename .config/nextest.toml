@@ -1,0 +1,12 @@
+# The profile the coverage run uses (`packages.coverage`). The test gate is
+# `nix flake check`, which runs `cargo test` without retries; this profile feeds
+# Codecov's test analytics.
+[profile.ci]
+# A test that fails and then passes on retry is recorded as flaky in the JUnit
+# report, rather than hidden or failing the run.
+retries = 2
+fail-fast = false
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

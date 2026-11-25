@@ -11,6 +11,12 @@
           extensions = [ "rust-src" ];
         }
       );
+      # Coverage needs an official toolchain with llvm-tools; see coverage.nix.
+      coverageLib = craneLib.overrideToolchain (p:
+        (p.extend inputs.rust-overlay.overlays.default).rust-bin.stable.latest.minimal.override {
+          extensions = [ "llvm-tools-preview" ];
+        }
+      );
       commonArgs = {
         src = pkgs.lib.cleanSourceWith {
           src = sourceRoot;
@@ -41,7 +47,12 @@
         commonArgs = commonArgs // { preBuild = "rustc --version"; };
         cargoTestExtraArgs = "--all-targets";
       };
-      inherit (defaultBuild) cargoArtifacts package acceptance;
+      inherit (defaultBuild) cargoArtifacts package acceptance buildTimings;
+      coverage = import ../packages/coverage.nix {
+        inherit pkgs commonArgs;
+        craneLib = coverageLib;
+        inherit (defaultBuild) controllerTestPrograms;
+      };
       automationRuntime = import ../packages/automation-runtime.nix { inherit pkgs sourceRoot; };
       directModuleBundle = import ../packages/direct-module-bundle.nix { inherit pkgs sourceRoot automationRuntime; };
       wheel = import ../packages/wheel.nix { inherit pkgs sourceRoot; craneLib = msrvLib; };
@@ -72,7 +83,8 @@
         ssh-acceptance-msrv = msrvBuild.acceptance;
         automation-runtime = automationRuntime;
         direct-module-bundle = directModuleBundle;
-        inherit automation wheel;
+        inherit automation wheel coverage;
+        build-timings = buildTimings;
         automation-msrv = automationMsrv;
         catalog-vm = catalogVm;
         catalog-lab-vm = catalogLabVm;

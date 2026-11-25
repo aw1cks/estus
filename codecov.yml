@@ -1,0 +1,26 @@
+# Coverage of the network-free Rust tests (packages.coverage, the `unit` flag).
+# The SSH, stdio and acceptance suites run outside it, so the figures are a floor.
+coverage:
+  status:
+    # Reported on pull requests, never blocking: the merge gates are the SSH
+    # baseline checks.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "condensed_header, diff, flags, files, condensed_footer"
+  # On every pull request, edited in place as new commits arrive.
+  require_changes: false
+  behavior: default
+
+# The coverage build runs in the Nix sandbox, where the checkout is /build/source.
+fixes:
+  - "/build/source/::"
+
+ignore:
+  - "fuzz/**"
+  - "tests/**"

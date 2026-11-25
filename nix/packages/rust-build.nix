@@ -82,7 +82,22 @@ let
     inherit pkgs craneLib commonArgs cargoArtifacts package;
     inherit controllerTestPrograms;
   };
+  # `cargo build --timings` of the release binary from scratch, dependencies
+  # included: cargo-timing.html (timeline and concurrency) and summary.md (the
+  # slowest units), for the CI job summary.
+  buildTimings = craneLib.mkCargoDerivation (commonArgs // {
+    pname = "estus-build-timings";
+    cargoArtifacts = null;
+    doCheck = false;
+    nativeBuildInputs = [ pkgs.python3 ];
+    buildPhaseCargoCommand = "cargo build --release --locked --timings";
+    installPhaseCommand = ''
+      mkdir -p "$out"
+      install -m644 target/cargo-timings/cargo-timing.html "$out/"
+      python3 ${../../scripts/build-timings-summary.py} "$out/cargo-timing.html" > "$out/summary.md"
+    '';
+  });
 in
 {
-  inherit cargoArtifacts package acceptance;
+  inherit cargoArtifacts package acceptance buildTimings controllerTestPrograms;
 }

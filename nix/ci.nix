@@ -18,6 +18,26 @@
       uploadSarif = "github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934"; # v4.39.5
       scorecardAction = "ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5"; # v2.6.0
       attest = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"; # v4.2.2
+      codecov = "codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5"; # v7.1.1
+      coverageCachePrefix = "nix-coverage-\${{ runner.os }}-\${{ runner.arch }}-";
+      # The store cache for jobs that build the Rust code. Each job family has
+      # its own prefix, so none restores, or purges, another's store.
+      rustStoreCache = prefix: {
+        uses = nixCache;
+        "with" = {
+          # Rust changes must refresh immutable caches, not just Nix changes.
+          primary-key = prefix + "\${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock', '**/*.rs') }}";
+          restore-prefixes-first-match = prefix;
+          save = true;
+          # Fork tokens are read-only; builds still restore/save PR caches.
+          purge = "\${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
+          purge-prefixes = prefix;
+          purge-created = 0;
+          purge-primary-key = "never";
+          gc-max-store-size-linux = "2G";
+          gc-max-store-size-macos = "2G";
+        };
+      };
       # Every target a release ships: one SBOM attestation each. Publish checks
       # this against the SBOMs `release.py sbom` actually wrote.
       releaseTargets = [
@@ -150,22 +170,7 @@
                   extra_nix_config = "auto-optimise-store = false\n";
                 };
               }
-              {
-                uses = nixCache;
-                "with" = {
-                  # Rust changes must refresh immutable caches, not just Nix changes.
-                  primary-key = cachePrefix + "\${{ hashFiles('**/*.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock', '**/*.rs') }}";
-                  restore-prefixes-first-match = cachePrefix;
-                  save = true;
-                  # Fork tokens are read-only; builds still restore/save PR caches.
-                  purge = "\${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
-                  purge-prefixes = cachePrefix;
-                  purge-created = 0;
-                  purge-primary-key = "never";
-                  gc-max-store-size-linux = "2G";
-                  gc-max-store-size-macos = "2G";
-                };
-              }
+              (rustStoreCache cachePrefix)
               {
                 name = "Run flake checks";
                 run = "nix flake check -L --no-update-lock-file --keep-going";
@@ -836,6 +841,120 @@
             };
             retry = retryDispatch {
               needs = [ "verify" "artifacts" "publish-github" "publish-pypi" "publish-crates" "finalize" ];
+            };
+          };
+        };
+        # Line coverage and test results of the network-free Rust tests, for
+        # Codecov, and on main a from-scratch `cargo build --timings`. Neither
+        # gates merging: the tests' gate is `nix flake check` in SSH baseline.
+        "coverage.yml" = {
+          name = "Coverage";
+          on = {
+            pull_request = { };
+            push.branches = [ "main" ];
+            workflow_dispatch = { };
+          };
+          permissions.contents = "read";
+          concurrency = {
+            group = "\${{ github.workflow }}-\${{ github.ref }}";
+            cancel-in-progress = true;
+          };
+          jobs = {
+            coverage = {
+              name = "Coverage and test results";
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 45;
+              permissions = {
+                contents = "read";
+                # Codecov authenticates the uploads with an OIDC token.
+                id-token = "write";
+                # cache-nix-action needs this for same-ref cache purging.
+                actions = "write";
+              };
+              steps = nixInstall ++ [
+                (rustStoreCache coverageCachePrefix)
+                {
+                  name = "Run the tests with coverage";
+                  run = "nix build -L --no-update-lock-file .#coverage --out-link coverage";
+                }
+              ]
+              ++ map (upload: {
+                name = "Upload ${upload.what} to Codecov";
+                # Upload failing tests too: that is what test results are for.
+                "if" = "\${{ !cancelled() }}";
+                uses = codecov;
+                "with" = upload.settings // {
+                  disable_search = true;
+                  fail_ci_if_error = true;
+                  # A fork's pull request gets no OIDC token; Codecov takes
+                  # tokenless uploads from forks of public repositories.
+                  use_oidc = "\${{ ${sameRepository} }}";
+                };
+              }) [
+                {
+                  what = "coverage";
+                  settings = {
+                    files = "coverage/lcov.info";
+                    flags = "unit";
+                  };
+                }
+                {
+                  what = "test results";
+                  settings = {
+                    files = "coverage/junit.xml";
+                    flags = "unit";
+                    report_type = "test_results";
+                  };
+                }
+              ]
+              ++ [
+                {
+                  # The coverage build reports failing tests instead of failing,
+                  # so their results reach Codecov; fail here instead.
+                  name = "Fail if any test failed";
+                  run = ''
+                    python3 - coverage/junit.xml <<'EOF'
+                    import sys
+                    import xml.etree.ElementTree as ET
+                    suites = ET.parse(sys.argv[1]).getroot()
+                    failed = int(suites.get("failures", 0)) + int(suites.get("errors", 0))
+                    print(f"{suites.get('tests')} tests, {failed} failed")
+                    sys.exit(1 if failed else 0)
+                    EOF
+                  '';
+                }
+              ];
+            };
+            build-timings = {
+              name = "Build timings";
+              # From scratch, dependencies included: worth it once per change
+              # to main, not on every pull request push.
+              "if" = "github.event_name != 'pull_request'";
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 45;
+              permissions = {
+                contents = "read";
+                actions = "write";
+              };
+              steps = nixInstall ++ [
+                (rustStoreCache coverageCachePrefix)
+                {
+                  name = "Build with cargo --timings";
+                  run = ''
+                    nix build -L --no-update-lock-file .#build-timings --out-link timings
+                    cat timings/summary.md >> "$GITHUB_STEP_SUMMARY"
+                  '';
+                }
+                {
+                  uses = uploadArtifact;
+                  "with" = {
+                    name = "build-timings";
+                    path = "timings/cargo-timing.html";
+                    if-no-files-found = "error";
+                    retention-days = 30;
+                  };
+                }
+              ];
             };
           };
         };
