@@ -43,13 +43,9 @@ and what they can touch.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[Agent / MCP client] -- "MCP over stdio" --> E[estus]
-    E -- "your OpenSSH" --> H1[web-1]
-    E --> H2[db-1]
-    P[(your policy: TOML)] -.-> E
-```
+<!-- An image, not Mermaid: PyPI and crates.io don't render Mermaid. The URL is
+absolute so it resolves there too. Source: docs/images/how-it-works.svg. -->
+![An agent or MCP client talks to estus over MCP on stdio; estus checks each call against your TOML policy and runs it on hosts such as web-1 and db-1 through your OpenSSH.](https://raw.githubusercontent.com/aw1cks/estus/main/docs/images/how-it-works.svg)
 
 Your MCP client starts Estus as a local process. Estus validates each call
 against your policy, runs it over SSH, and returns a structured result.
