@@ -52,7 +52,12 @@ estus bundle build \
 > installs the collections. The builder doesn't scan the environment it runs in,
 > so you pass the directory that contains `ansible_collections/`. For the
 > `ansible` package that is the environment's `site-packages`. Without it the
-> build fails with `builder_failed`.
+> build fails with `builder_failed`, and the report's `detail` says why:
+>
+> ```json
+> {"ok": false, "error_code": "builder_failed", "phase": "bundle_build",
+>  "detail": "[WARNING]: community.general.apk was not found\n…\nMissing ansible-doc specification for community.general.apk"}
+> ```
 
 The default module set is `ansible.builtin.apt`, `dnf`, `dnf5`, `package_facts`
 and `stat`, plus `community.general.apk`, `zypper` and `pacman`. Pass `--module`
@@ -154,7 +159,7 @@ installation for apt and dnf5.
 
 | Symptom | What to check |
 | --- | --- |
-| `builder_failed` | Most often a missing `--collections-path`: the collections are installed but the builder isn't told where. Otherwise the selected Python needs `ansible-core` 2.19 or later and every requested module. |
+| `builder_failed` | Read the report's `detail`, which holds the last lines the builder wrote. A `… was not found` line for a collection means a missing `--collections-path`. Otherwise the selected Python needs `ansible-core` 2.19 or later and every requested module. |
 | Startup rejects a bundle or module | Run `bundle inspect` on the selected path. Replace an incomplete or altered bundle with an intact build, and check that it includes the requested module. A selected module tool on configured targets needs a bundle even if `required` is `false`. |
 | `module_not_in_bundle` | A tool names a module the bundle doesn't contain. Rebuild with `--module` for it. |
 | Generic package call returns `unsupported` | No route matches the detected manager in the active bundle. Add the appropriate backend or use a supported target. Estus does not fall back to a shell command. |

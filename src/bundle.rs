@@ -17,7 +17,10 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::{ChildStderr, Command},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -31,6 +34,11 @@ const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WRAPPER_BYTES: usize = 256 * 1024;
 const MAX_ZIP_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOTAL_ZIP_BYTES: usize = 64 * 1024 * 1024;
+/// How much of the builder's stderr a failed build reports.
+const MAX_BUILDER_DETAIL_BYTES: usize = 2048;
+/// How long to wait for the builder's stderr to close after it exits. A
+/// grandchild that inherited the pipe must not hold the build open.
+const BUILDER_STDERR_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Args)]
 pub(crate) struct BundleArgs {
@@ -588,6 +596,39 @@ pub(crate) async fn run_cli(
     }
 }
 
+/// Drain `pipe` to EOF so the builder never blocks on a full pipe, keeping only
+/// the last `cap` bytes. The flag says whether anything was dropped.
+async fn read_tail(mut pipe: ChildStderr, cap: usize) -> (Vec<u8>, bool) {
+    let mut tail: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 4096];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                tail.extend_from_slice(&chunk[..read]);
+                if tail.len() > cap {
+                    tail.drain(..tail.len() - cap);
+                    truncated = true;
+                }
+            }
+        }
+    }
+    (tail, truncated)
+}
+
+/// The builder's closing words, as text. When the tail was cut it begins
+/// mid-line, so the partial first line is dropped.
+fn builder_detail(tail: &[u8], truncated: bool) -> Option<String> {
+    let text = String::from_utf8_lossy(tail);
+    let mut text = text.trim_end();
+    if truncated {
+        text = text.split_once('\n').map_or(text, |(_, rest)| rest);
+    }
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 async fn build_bundle(
     python: &Path,
     collections_paths: &[PathBuf],
@@ -639,7 +680,7 @@ async fn build_bundle(
         .env("LANG", "C.UTF-8")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     for col in collections_paths {
         cmd.arg("--collections-path").arg(col);
@@ -649,14 +690,33 @@ async fn build_bundle(
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut detail = None;
     let run_res = tokio::select! {
         biased;
         _ = shutdown.cancelled() => Err("cancelled"),
         _ = tokio::time::sleep_until(deadline) => Err("timeout"),
-        status = async { cmd.spawn().map_err(|_| "spawn_failed")?.wait().await.map_err(|_| "io_error") } => {
-            match status {
-                Ok(s) if s.success() => Ok(()),
-                Ok(_) => Err("builder_failed"),
+        outcome = async {
+            let mut child = cmd.spawn().map_err(|_| "spawn_failed")?;
+            let reader = child
+                .stderr
+                .take()
+                .map(|pipe| tokio::spawn(read_tail(pipe, MAX_BUILDER_DETAIL_BYTES)));
+            let status = child.wait().await.map_err(|_| "io_error")?;
+            let stderr = match reader {
+                Some(task) => tokio::time::timeout(BUILDER_STDERR_GRACE, task)
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
+                None => None,
+            };
+            Ok::<_, &'static str>((status, stderr))
+        } => {
+            match outcome {
+                Ok((status, _)) if status.success() => Ok(()),
+                Ok((_, stderr)) => {
+                    detail = stderr.and_then(|(tail, truncated)| builder_detail(&tail, truncated));
+                    Err("builder_failed")
+                }
                 Err(code) => Err(code),
             }
         }
@@ -664,10 +724,11 @@ async fn build_bundle(
     let _ = fs::remove_file(&script_file);
     if let Err(code) = run_res {
         let _ = fs::remove_dir_all(output);
-        return (
-            false,
-            json!({"ok": false, "error_code": code, "phase": "bundle_build"}),
-        );
+        let mut report = json!({"ok": false, "error_code": code, "phase": "bundle_build"});
+        if let Some(detail) = detail {
+            report["detail"] = Value::String(detail);
+        }
+        return (false, report);
     }
     match BundlePack::load(output) {
         Ok(pack) => (
@@ -728,5 +789,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn builder_detail_keeps_the_closing_words_and_drops_a_cut_first_line() {
+        assert_eq!(
+            builder_detail(b"WARNING: x\nMissing thing\n", false).as_deref(),
+            Some("WARNING: x\nMissing thing")
+        );
+        // A cut tail starts mid-line, so that partial line is dropped.
+        assert_eq!(
+            builder_detail(b"ial line\nthe cause\n", true).as_deref(),
+            Some("the cause")
+        );
+        // A single cut line has no line boundary to fall back to.
+        assert_eq!(
+            builder_detail(b"only a fragment", true).as_deref(),
+            Some("only a fragment")
+        );
+        assert_eq!(builder_detail(b"  \n\n", false), None);
+        assert_eq!(builder_detail(b"", true), None);
+        // Invalid UTF-8 is replaced, not an error.
+        assert!(builder_detail(b"bad \xff byte", false).is_some_and(|text| text.contains("bad")));
     }
 }

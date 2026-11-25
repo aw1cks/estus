@@ -32,6 +32,9 @@ change will be listed under **Changed** or **Removed**.
 - The wheel's minimum Python is now 3.8 (was 3.10). Building from source still
   needs Python 3.10 or later.
 - Package description updated.
+- `estus bundle build` reports the builder's own last lines as `detail` when it
+  fails with `builder_failed`, instead of discarding them. The detail is capped
+  at 2 KiB.
 
 ### Fixed
 

@@ -334,3 +334,95 @@ fn doctor_reports_bundle_health_only_from_the_configured_pack() -> Result<()> {
     );
     Ok(())
 }
+
+/// A stub interpreter, so the failure path is exercised without Ansible.
+fn stub_interpreter(directory: &Path, name: &str, body: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = directory.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    Ok(path)
+}
+
+fn build_with(python: &Path, output_dir: &Path) -> Result<Output> {
+    invoke(
+        &[
+            "bundle".as_ref(),
+            "build".as_ref(),
+            "--python".as_ref(),
+            python.as_os_str(),
+            "--output".as_ref(),
+            output_dir.as_os_str(),
+            "--timeout-secs".as_ref(),
+            "30".as_ref(),
+        ],
+        &[],
+    )
+}
+
+#[test]
+fn a_failed_build_reports_what_the_builder_said() -> Result<()> {
+    let work = tempfile::tempdir()?;
+    let failing = stub_interpreter(
+        work.path(),
+        "failing",
+        "echo 'WARNING: community.general.zypper was not found' >&2\n\
+         echo 'Missing ansible-doc specification for community.general.apk' >&2\n\
+         exit 3",
+    )?;
+    let output_dir = work.path().join("out-failing");
+    let output = build_with(&failing, &output_dir)?;
+    ensure!(output.status.code() == Some(1));
+    let failed = report(&output)?;
+    ensure!(
+        failed["ok"] == false && failed["phase"] == "bundle_build",
+        "{failed}"
+    );
+    ensure!(failed["error_code"] == "builder_failed", "{failed}");
+    let detail = failed["detail"].as_str().context("detail")?;
+    ensure!(
+        detail.contains("Missing ansible-doc specification for community.general.apk"),
+        "detail lost the builder's message: {detail}"
+    );
+    ensure!(!output_dir.exists(), "retained a partial bundle");
+
+    // A builder that writes far more than a pipe holds must neither deadlock nor
+    // flood the report: only the last lines survive, and never a cut-off line.
+    let chatty = stub_interpreter(
+        work.path(),
+        "chatty",
+        "i=0\n\
+         while [ \"$i\" -lt 3000 ]; do echo \"noise line $i padding padding padding padding\" >&2; i=$((i+1)); done\n\
+         echo 'the real cause' >&2\n\
+         exit 1",
+    )?;
+    let output = build_with(&chatty, &work.path().join("out-chatty"))?;
+    ensure!(output.status.code() == Some(1));
+    let chatty_report = report(&output)?;
+    ensure!(
+        chatty_report["error_code"] == "builder_failed",
+        "{chatty_report}"
+    );
+    let detail = chatty_report["detail"].as_str().context("detail")?;
+    ensure!(
+        detail.len() <= 2048,
+        "detail is unbounded: {} bytes",
+        detail.len()
+    );
+    ensure!(detail.ends_with("the real cause"), "{detail}");
+    ensure!(
+        detail.starts_with("noise line"),
+        "detail begins mid-line: {detail}"
+    );
+
+    // Nothing said means no detail, not an empty one.
+    let silent = stub_interpreter(work.path(), "silent", "exit 1")?;
+    let output = build_with(&silent, &work.path().join("out-silent"))?;
+    let silent_report = report(&output)?;
+    ensure!(
+        silent_report["error_code"] == "builder_failed",
+        "{silent_report}"
+    );
+    ensure!(silent_report.get("detail").is_none(), "{silent_report}");
+    Ok(())
+}
