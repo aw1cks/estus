@@ -1128,7 +1128,8 @@ async fn source_distribution_roundtrip_preserves_manifest_selected_assets() -> R
             asset_bytes(&location)? == expected,
             "installed source wheel changed approved assets"
         );
-        let exported = case.join("exported");
+        // Export refuses an output path through a symlink; macOS's /tmp is one.
+        let exported = case.canonicalize()?.join("exported");
         let output = checked(
             installed
                 .command(&launcher)

@@ -93,7 +93,11 @@
             [ pkgs.uv pkgs.openssh pkgs.coreutils pkgs.bash pkgs.unzip pkgs.llvmPackages.llvm
               pkgs.gnutar pkgs.gzip msrvToolchain pkgs.stdenv.cc ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ]
-          )}
+          )} \
+          ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin
+            # Rust links -liconv on Darwin. The cc wrapper only finds it inside a
+            # Nix build environment, and this test builds the sdist outside one.
+            "--prefix LIBRARY_PATH : ${pkgs.libiconv}/lib"}
       '';
       bundleAcceptance = native: harness: optional:
         pkgs.runCommand "estus-bundle-acceptance" {
