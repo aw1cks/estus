@@ -1021,13 +1021,14 @@
         pkgs.writeText "${name}.json" (builtins.toJSON workflow)
       ) workflows;
       generated = pkgs.runCommand "github-workflows" {
-        nativeBuildInputs = [ pkgs.remarshal ];
+        nativeBuildInputs = [ pkgs.remarshal pkgs.python3 ];
       } ''
         mkdir -p "$out"
         ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: file: ''
           printf '%s\n' '# Generated from nix/ci.nix. Run: nix run .#generate-workflows' > "$out/${name}"
           remarshal --from json --to yaml-1.1 --yaml-style-newline '|' --width inf ${file} >> "$out/${name}"
         '') rendered)}
+        python3 ${./annotate-action-pins.py} ${./ci.nix} "$out"/*.yml
       '';
       generateWorkflows = pkgs.writeShellApplication {
         name = "generate-workflows";

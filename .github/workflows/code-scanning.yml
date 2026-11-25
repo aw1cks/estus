@@ -13,10 +13,10 @@ jobs:
       security-events: write
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
       with:
         extra_nix_config: |
           auto-optimise-store = false
@@ -25,7 +25,7 @@ jobs:
       run: nix develop --no-update-lock-file .#lint --command cargo clippy --locked --all-targets --all-features --message-format=json > clippy.json
     - name: Convert to SARIF
       run: nix shell --no-update-lock-file --inputs-from . nixpkgs#clippy-sarif nixpkgs#sarif-fmt --command sh -c 'clippy-sarif < clippy.json | tee clippy.sarif | sarif-fmt'
-    - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934
+    - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
       with:
         category: clippy
         sarif_file: clippy.sarif
@@ -38,10 +38,10 @@ jobs:
       security-events: write
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d
+    - uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
       with:
         extra_nix_config: |
           auto-optimise-store = false
@@ -50,7 +50,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       name: Audit the workflows, including online audits
       run: nix shell --no-update-lock-file --inputs-from . nixpkgs#zizmor --command zizmor --format sarif --no-exit-codes . > zizmor.sarif
-    - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934
+    - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
       with:
         category: zizmor
         sarif_file: zizmor.sarif

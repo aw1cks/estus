@@ -12,6 +12,16 @@ nix run .#generate-workflows
 
 Include the changes under `.github/workflows/` in your PR. `nix flake check` checks that the generated files match, and runs [zizmor](https://docs.zizmor.sh/) on them (`checks.zizmor`, offline, configured in `.github/zizmor.yml`). A zizmor finding fails the check: fix the workflow in `nix/ci.nix`, or, if the finding does not apply, add a scoped ignore to `.github/zizmor.yml` with the reason next to it.
 
+### Action pins and Renovate
+
+Pin every action in the `let` block of `nix/ci.nix` to a full commit SHA, with its release tag in a comment:
+
+```nix
+checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"; # v7.0.1
+```
+
+Generation copies that tag onto each `uses:` line of the generated workflows (`nix/annotate-action-pins.py`), because the YAML is generated through JSON, which has no comments; a pin without one fails generation. [Renovate](https://docs.renovatebot.com/) (`renovate.json`) proposes updates weekly. Hosted Renovate can't run Nix, so it updates both copies itself in one branch: its GitHub Actions support updates the generated `uses:` lines, and a regex rule updates the matching pin in `nix/ci.nix`. If the two ever disagree, `checks.workflows` fails the pull request. A grouping rule that applies to the GitHub Actions manager alone would split the two copies into different branches, so give such rules both managers (`github-actions` and `custom.regex`). Check a change to `renovate.json` with `nix shell nixpkgs#renovate -c renovate-config-validator --strict`, and see what it would propose with `renovate --platform=local --dry-run=lookup`, with a GitHub token in `RENOVATE_GITHUB_COM_TOKEN`.
+
 ## What runs on GitHub
 
 The SSH baseline workflow runs on Linux x86-64, Linux arm64 and macOS arm64. The container step runs only on Linux. The fuzz workflow runs on Linux x86-64.
