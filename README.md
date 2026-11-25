@@ -130,6 +130,36 @@ tool](docs/ansible-tools.md) for the full example.
 
 ## Install
 
+**pip or uv.** Prebuilt wheels for Linux (x86_64 and aarch64, glibc or musl) and
+macOS (Apple silicon), for Python 3.8 and later:
+
+```sh
+uv tool install estus    # or: pipx install estus
+estus --version
+```
+
+**Prebuilt binary.** Each [release](https://github.com/aw1cks/estus/releases) has
+a tarball per platform. Use `-gnu` on glibc 2.34 or later (RHEL 9, Ubuntu 22.04,
+Debian 12) and `-musl`, a static build, on anything older or on Alpine:
+
+```sh
+curl -fsSL https://github.com/aw1cks/estus/releases/latest/download/estus-x86_64-unknown-linux-gnu.tar.gz | tar xz
+./estus-x86_64-unknown-linux-gnu/bin/estus --version
+```
+
+The tarball carries the tool catalog, and Estus finds it next to the binary.
+
+**Cargo.** Needs Rust 1.88+. The crate is `estus-mcp`; it installs the `estus`
+command. The catalog is built into the binary, so write it to disk once, next to
+the binary, where Estus looks for it:
+
+```sh
+cargo install estus-mcp --locked
+estus catalog install
+```
+
+After upgrading, run `estus catalog install --replace` to refresh it.
+
 **Nix** (includes the tool catalog):
 
 ```sh
@@ -139,29 +169,10 @@ nix run github:aw1cks/estus -- --config /path/to/estus.toml
 Use `github:aw1cks/estus#automation` instead for a build that also ships an
 Ansible bundle.
 
-**Cargo.** Needs Rust 1.88+. The tool catalog is built into the binary; write it
-to disk once, next to the binary, where Estus looks for it:
-
-```sh
-cargo install --git https://github.com/aw1cks/estus --locked
-estus catalog install
-```
-
-After upgrading, run `estus catalog install --replace` to refresh it.
-
-**Python wheel.** Building needs Rust 1.88+ and Python 3.10+; the installed
-wheel runs on Python 3.8+ and includes the catalog.
-
-```sh
-git clone https://github.com/aw1cks/estus && cd estus
-uv build --wheel
-uv tool install ./dist/estus-*.whl
-estus --version
-```
-
 Estus needs OpenSSH on the machine that runs it. macOS and Linux are supported;
-targets are Linux. Other build options are in
-[building from source](docs/development/building.md).
+targets are Linux. To build from source, see
+[building from source](docs/development/building.md) and
+[packaging](docs/development/packaging.md).
 
 ## Quick start
 

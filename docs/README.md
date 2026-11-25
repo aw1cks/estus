@@ -38,3 +38,4 @@ New here? Read [Getting started](getting-started.md), then [Concepts](concepts.m
 | [Packaging](development/packaging.md) | Build wheels and source archives |
 | [Fuzzing](development/fuzzing.md) | Run the fuzz targets |
 | [CI](development/ci.md) | Understand the generated workflows |
+| [Releasing](development/release.md) | Cut a release, or fix one that failed |

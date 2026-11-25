@@ -18,6 +18,8 @@ The SSH baseline workflow runs on Linux x86-64, Linux arm64 and macOS arm64. The
 
 The SSH baseline workflow runs on every pull request and every push to `main`. A push to a branch other than `main` does not run it; open a pull request. Each push to `main` runs in its own concurrency group, so every commit gets a result and runs of consecutive pushes overlap. A pull request's runs share one group, so a new push to the PR cancels the previous run. The fuzz workflow runs only on pull requests that change `src/`, `fuzz/`, `Cargo.toml` or `Cargo.lock`, and weekly.
 
+Two more workflows handle releases. **Release artifacts** (`release-artifacts.yml`) builds and tests the release binaries and wheels; it runs on pull requests that touch the release files, on demand, and as the first stage of a release. **Release** (`release.yml`) runs on every push to `main`: it keeps the release pull request up to date and, when that is merged, publishes. A pull request that `GITHUB_TOKEN` creates triggers no workflows, so the release workflow dispatches **SSH baseline** and **Release artifacts** on the release branch itself. See [Releasing](release.md).
+
 | Layer | What it covers |
 | --- | --- |
 | Flake checks | Default and MSRV native builds and network-free tests, acceptance harness compilation, wheel build, formatting, Clippy, RustSec advisory checks, Python bootstrap and static checks, generated workflow consistency |
@@ -26,6 +28,7 @@ The SSH baseline workflow runs on every pull request and every push to `main`. A
 | Linux containers | Installed stdio suites and the SSH/SFTP/sudo baseline against the native fixture, for both the default and MSRV packages |
 | Python distributions | Installed wheel acceptance and source archive round-trip on each SSH baseline platform |
 | Fuzzing | Build and replay committed corpora on relevant PRs; time-bounded mutation campaigns on scheduled and manual runs |
+| Release artifacts | Builds every release binary, wheel and the sdist, checks the glibc floor and static linkage, installs each in a distribution container or on macOS, and dry-runs the crate publish |
 
 ## What to run yourself
 

@@ -36,6 +36,10 @@ nix build .#wheel --out-link "nix/result/wheel/$system"
 
 The Nix recipe runs the same Python build backend without build isolation, using pinned dependencies and vendored Cargo sources. It builds with Zig on Linux (`manylinux_2_17` on x86-64 and arm64) and Clang/LLD on macOS (`macosx_11_0_arm64`). It skips Nix fixup so the executable inside the wheel does not link to libraries in the Nix store.
 
+## Release wheels
+
+The wheels published to PyPI are not built with Nix. `scripts/release.py` builds them with cargo-zigbuild against a glibc 2.34 floor and, separately, a fully static musl binary, so they carry the tags `manylinux_2_34`, and `manylinux2014` plus `musllinux_1_2` for the static one. See [Releasing](release.md). The static wheel gets its dotted tag from `ESTUS_WHEEL_PLATFORM_TAGS`, which `setup.py` reads; unset, a wheel carries the build host's tag.
+
 ## Test the source archive
 
 ```sh

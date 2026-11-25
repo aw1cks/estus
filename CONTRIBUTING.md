@@ -18,7 +18,7 @@ cargo test --locked --test stdio_protocol --test stdio_catalog --test stdio_poli
 cargo test --locked --test catalog_distribution
 ```
 
-Use Conventional Commit-style subjects: `fix(catalog): describe the fix` or `docs: describe the change`. Keep the PR focused. Explain why the change is needed, link the issue if there is one, and list the checks you ran. Include a regression test for a bug fix and update the docs when behavior changes.
+Use Conventional Commit subjects: `fix(catalog): describe the fix` or `docs: describe the change`. They are not just style. [release-please](docs/development/release.md) builds each release's version bump and notes from them, so `feat:` and `fix:` appear in the changelog and `feat!:` marks a breaking change. Keep the PR focused. Explain why the change is needed, link the issue if there is one, and list the checks you ran. Include a regression test for a bug fix and update the docs when behavior changes.
 
 ## Change a catalog tool
 
