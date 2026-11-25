@@ -14,6 +14,7 @@
       releasePlease = "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"; # v5.0.0
       downloadArtifact = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"; # v8.0.2
       pypiPublish = "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"; # v1.14.3
+      cratesIoAuth = "rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9"; # v1.0.6
       # Checkout and Nix: the start of every job that runs inside the release dev
       # shell. Jobs that publish use this alone, never the Actions cache.
       nixInstall = [
@@ -711,12 +712,29 @@
               runs-on = "ubuntu-26.04";
               timeout-minutes = 30;
               environment = "crates-io";
-              # No Actions cache here, so no `actions: write` either.
-              permissions.contents = "read";
+              # Trusted publishing: crates.io trusts this workflow and
+              # environment, and the job exchanges its OIDC token for a
+              # short-lived crates.io token. No secret is stored.
+              permissions = {
+                contents = "read";
+                id-token = "write";
+              };
               steps = nixInstall ++ [
                 {
+                  # Fetch the toolchain before asking for a token, so the
+                  # short-lived token is only alive for the publish itself.
+                  name = "Prepare the release shell";
+                  run = "${releaseShell} cargo --version";
+                }
+                {
+                  id = "auth";
+                  # Exchanges the job's OIDC token for a crates.io token, and
+                  # revokes it again when the job ends.
+                  uses = cratesIoAuth;
+                }
+                {
                   name = "Publish the crate";
-                  env.CARGO_REGISTRY_TOKEN = "\${{ secrets.CARGO_REGISTRY_TOKEN }}";
+                  env.CARGO_REGISTRY_TOKEN = "\${{ steps.auth.outputs.token }}";
                   run = "${releaseShell} cargo publish --locked";
                 }
               ];

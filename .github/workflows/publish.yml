@@ -35,6 +35,7 @@ jobs:
     needs: artifacts
     permissions:
       contents: read
+      id-token: write
     runs-on: ubuntu-26.04
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -45,8 +46,12 @@ jobs:
         extra_nix_config: |
           auto-optimise-store = false
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Prepare the release shell
+      run: nix develop --no-update-lock-file .#release --command cargo --version
+    - id: auth
+      uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9
     - env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
       name: Publish the crate
       run: nix develop --no-update-lock-file .#release --command cargo publish --locked
     timeout-minutes: 30

@@ -66,7 +66,7 @@ The workflows can't do these for you.
 1. **Pull requests.** In the repository's Settings, Actions, General, allow GitHub Actions to create and approve pull requests.
 2. **Environments.** Create two environments, `pypi` and `crates-io`. In each, under deployment branches and tags, allow only tags matching `v*`, so nothing but a release tag can publish. Adding a required reviewer gives you a manual gate as well.
 3. **PyPI.** Add a pending trusted publisher for the project `estus` with owner `aw1cks`, repository `estus`, workflow `publish.yml` and environment `pypi`. No token is stored; PyPI trusts the workflow.
-4. **crates.io.** Create an API token that can publish `estus-mcp` and store it as the secret `CARGO_REGISTRY_TOKEN` in the `crates-io` environment. crates.io also supports trusted publishing, but only for a crate that already exists, so use the token for the first publish and consider moving after that.
+4. **crates.io.** Add a trusted publisher to `estus-mcp` (crate settings, Trusted Publishing) with owner `aw1cks`, repository `estus`, workflow `publish.yml` and environment `crates-io`, then turn on "Trusted Publishing only" so that no API token can publish it. No secret is stored: the publish job exchanges its OIDC token for a short-lived crates.io token, which is revoked when the job ends. crates.io only offers trusted publishing for a crate that already exists, so a brand-new crate needs one publish with a scoped API token first; `estus-mcp` was first published that way, as 0.1.0.
 
 ## The first release
 
