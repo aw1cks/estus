@@ -44,6 +44,7 @@ craneLib.mkCargoDerivation (commonArgs // {
     #!${pkgs.runtimeShell}
     set -eu
     export ESTUS_TEST_BINARY=${package}/bin/estus
+    export PATH=${pkgs.lib.makeBinPath [ pkgs.openssh pkgs.coreutils pkgs.python314 ]}:\$PATH
     for suite in ssh_local_exec ssh_local_files ssh_local_output ssh_local_payload ssh_local_quarantine; do
       "$out/libexec/\$suite" --ignored --nocapture --test-threads=2
     done
