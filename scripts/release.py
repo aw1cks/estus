@@ -8,6 +8,9 @@ The same commands run on a developer machine and in CI (inside `nix develop
     release.py wheels   [--out DIR] [--target T ...]   py3-none-<platform> wheels
     release.py sdist    [--out DIR]                    source distribution
     release.py checksums DIR                           write DIR/SHA256SUMS
+    release.py sbom     [--out DIR] [--target T ...]   CycloneDX SBOM per release target
+    release.py sbom-subjects DIR --out DIR [--expect T ...]
+                                                       per-target checksums of what each SBOM describes
     release.py smoke DIR [--mode docker|native]        install and run what was built
 
 Linux artifacts are cross-built with cargo-zigbuild: a glibc build with a 2.34
@@ -16,6 +19,7 @@ floor and a fully static musl build, for x86_64 and aarch64. macOS builds native
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 import re
@@ -66,6 +70,8 @@ DARWIN_TARGETS = {"aarch64-apple-darwin": {"arch": "arm64"}}
 # The macOS version the wheel tag (macosx_11_0_arm64) promises: the first release
 # for Apple silicon. Binaries are built for it and checked against it.
 DARWIN_MIN_OS = (11, 0)
+# Every target a release ships, in the order the release lists them.
+RELEASE_TARGETS = [*LINUX_TARGETS, *DARWIN_TARGETS]
 
 # Wheel platform tags per Linux target. A glibc wheel needs glibc 2.34. The
 # static wheel has no libc dependency, so it claims both musl and the oldest
@@ -436,16 +442,89 @@ def cmd_sdist(args):
     run(["uv", "build", "--sdist", "--out-dir", out], cwd=ROOT)
 
 
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def cmd_checksums(args):
     directory = Path(args.dir).resolve()
     lines = []
     for path in sorted(directory.iterdir()):
         if path.name == "SHA256SUMS" or not path.is_file():
             continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        lines.append(f"{digest}  {path.name}")
+        lines.append(f"{sha256(path)}  {path.name}")
     (directory / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
     log(f"wrote {directory / 'SHA256SUMS'} ({len(lines)} files)")
+
+
+def sbom_name(target):
+    return f"estus-{target}.cdx.json"
+
+
+def check_sbom(path, target):
+    try:
+        bom = json.loads(path.read_text(encoding="utf-8"))
+        component = bom["metadata"]["component"]
+    except (OSError, ValueError, KeyError) as error:
+        fail(f"{path.name}: not a CycloneDX SBOM: {error}")
+    expected = version()
+    if bom.get("bomFormat") != "CycloneDX" or (component.get("name"), component.get("version")) != ("estus-mcp", expected):
+        fail(f"{path.name}: describes {component.get('name')} {component.get('version')}, not estus-mcp {expected}")
+    if not bom.get("components"):
+        fail(f"{path.name}: lists no dependencies for {target}")
+    return len(bom["components"])
+
+
+def cmd_sbom(args):
+    """One CycloneDX SBOM per release target: the crates compiled into that binary.
+
+    Dependencies differ by target (libc, platform crates), so each binary gets its
+    own. Build-time dependencies (build scripts, cc) are left out: they aren't
+    shipped. SOURCE_DATE_EPOCH, from the commit, makes the files reproducible.
+    """
+    require_tool("cargo-cyclonedx")
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    if "SOURCE_DATE_EPOCH" not in env:
+        commit_time = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=ROOT, capture_output=True, text=True)
+        if commit_time.returncode == 0 and commit_time.stdout.strip():
+            env["SOURCE_DATE_EPOCH"] = commit_time.stdout.strip()
+    for target in args.target or RELEASE_TARGETS:
+        stem = sbom_name(target).removesuffix(".json")
+        run(["cargo", "cyclonedx", "--format", "json", "--spec-version", "1.5", "--target", target,
+             "--no-build-deps", "--override-filename", stem, "-q"], cwd=ROOT, env=env)
+        produced = ROOT / sbom_name(target)
+        count = check_sbom(produced, target)
+        shutil.move(produced, out / produced.name)
+        log(f"{produced.name}: {count} dependencies")
+
+
+def cmd_sbom_subjects(args):
+    """For each SBOM in DIR, a sha256sum-format list of the files it describes.
+
+    That is the target's binary tarball and its wheels; actions/attest reads the
+    list as the attestation's subjects. With --expect, the SBOMs present must be
+    for exactly those targets, so the workflow can't attest a different set from
+    the one that was built.
+    """
+    dist = Path(args.dist).resolve()
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    found = sorted(p.name.removeprefix("estus-").removesuffix(".cdx.json") for p in dist.glob(sbom_name("*")))
+    if args.expect is not None and found != sorted(args.expect):
+        fail(f"{dist} has SBOMs for {found}, but the workflow attests {sorted(args.expect)}")
+    for target in found:
+        if target not in RELEASE_TARGETS:
+            fail(f"{sbom_name(target)} is not for a release target")
+        tag = expected_wheel_tags(target)
+        wheels = [w for w in sorted(dist.glob("*.whl")) if w.name.removesuffix(".whl").rsplit("-", 1)[1] == tag]
+        tarball = dist / f"estus-{target}.tar.gz"
+        if not tarball.is_file() or not wheels:
+            fail(f"{sbom_name(target)}: expected {tarball.name} and a {tag} wheel in {dist}")
+        subjects = [tarball, *wheels]
+        (out / f"{target}.sha256").write_text("".join(f"{sha256(p)}  {p.name}\n" for p in subjects), encoding="utf-8")
+        log(f"{sbom_name(target)} describes {', '.join(p.name for p in subjects)}")
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +724,15 @@ def main():
     p = sub.add_parser("checksums")
     p.add_argument("dir")
     p.set_defaults(func=cmd_checksums)
+    p = sub.add_parser("sbom")
+    p.add_argument("--out", default=str(ROOT / "dist" / "release"))
+    p.add_argument("--target", action="append", help="repeatable; default: every release target")
+    p.set_defaults(func=cmd_sbom)
+    p = sub.add_parser("sbom-subjects")
+    p.add_argument("dist")
+    p.add_argument("--out", required=True)
+    p.add_argument("--expect", nargs="+", help="the targets the SBOMs must be for, no more and no fewer")
+    p.set_defaults(func=cmd_sbom_subjects)
     p = sub.add_parser("smoke")
     p.add_argument("dist")
     p.add_argument("--mode", choices=["docker", "native"])

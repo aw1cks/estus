@@ -17,6 +17,16 @@
       cratesIoAuth = "rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9"; # v1.0.6
       uploadSarif = "github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934"; # v4.39.5
       scorecardAction = "ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5"; # v2.6.0
+      attest = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"; # v4.2.2
+      # Every target a release ships: one SBOM attestation each. Publish checks
+      # this against the SBOMs `release.py sbom` actually wrote.
+      releaseTargets = [
+        "x86_64-unknown-linux-gnu"
+        "aarch64-unknown-linux-gnu"
+        "x86_64-unknown-linux-musl"
+        "aarch64-unknown-linux-musl"
+        "aarch64-apple-darwin"
+      ];
       # A fork's token can't write security events, and fork PRs must not get one.
       sameRepository = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository";
       # Checkout and Nix: the start of every job that runs inside the release dev
@@ -415,6 +425,12 @@
                   run = "${releaseShell} python3 scripts/release.py sdist --out dist";
                 }
                 {
+                  # Every target's, macOS included: they come from Cargo.lock and
+                  # the target's cfg, not from a build.
+                  name = "Write an SBOM per release target";
+                  run = "${releaseShell} python3 scripts/release.py sbom --out dist";
+                }
+                {
                   name = "Check that the crate packages and builds";
                   run = "${releaseShell} cargo publish --dry-run --locked";
                 }
@@ -674,7 +690,12 @@
               needs = "artifacts";
               runs-on = "ubuntu-26.04";
               timeout-minutes = 15;
-              permissions.contents = "write";
+              permissions = {
+                contents = "write";
+                # Sigstore signing and the attestations API.
+                id-token = "write";
+                attestations = "write";
+              };
               steps = [
                 {
                   uses = checkout;
@@ -692,6 +713,27 @@
                   name = "Write checksums";
                   run = "python3 scripts/release.py checksums dist";
                 }
+                # Attest before anything is attached: if this fails, the draft
+                # release is untouched and the run can simply be re-run.
+                {
+                  name = "Attest build provenance for every asset";
+                  uses = attest;
+                  "with".subject-path = "dist/*";
+                }
+                {
+                  name = "List the files each SBOM describes";
+                  run = "python3 scripts/release.py sbom-subjects dist --out sbom-subjects --expect ${lib.concatStringsSep " " releaseTargets}";
+                }
+              ]
+              ++ map (target: {
+                name = "Attest the ${target} SBOM";
+                uses = attest;
+                "with" = {
+                  sbom-path = "dist/estus-${target}.cdx.json";
+                  subject-checksums = "sbom-subjects/${target}.sha256";
+                };
+              }) releaseTargets
+              ++ [
                 {
                   name = "Attach everything to the draft release";
                   env = {

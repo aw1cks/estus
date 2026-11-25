@@ -59,7 +59,9 @@ jobs:
     name: GitHub release assets
     needs: artifacts
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     runs-on: ubuntu-26.04
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -72,6 +74,37 @@ jobs:
         pattern: release-*
     - name: Write checksums
       run: python3 scripts/release.py checksums dist
+    - name: Attest build provenance for every asset
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+      with:
+        subject-path: dist/*
+    - name: List the files each SBOM describes
+      run: python3 scripts/release.py sbom-subjects dist --out sbom-subjects --expect x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin
+    - name: Attest the x86_64-unknown-linux-gnu SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+      with:
+        sbom-path: dist/estus-x86_64-unknown-linux-gnu.cdx.json
+        subject-checksums: sbom-subjects/x86_64-unknown-linux-gnu.sha256
+    - name: Attest the aarch64-unknown-linux-gnu SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+      with:
+        sbom-path: dist/estus-aarch64-unknown-linux-gnu.cdx.json
+        subject-checksums: sbom-subjects/aarch64-unknown-linux-gnu.sha256
+    - name: Attest the x86_64-unknown-linux-musl SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+      with:
+        sbom-path: dist/estus-x86_64-unknown-linux-musl.cdx.json
+        subject-checksums: sbom-subjects/x86_64-unknown-linux-musl.sha256
+    - name: Attest the aarch64-unknown-linux-musl SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+      with:
+        sbom-path: dist/estus-aarch64-unknown-linux-musl.cdx.json
+        subject-checksums: sbom-subjects/aarch64-unknown-linux-musl.sha256
+    - name: Attest the aarch64-apple-darwin SBOM
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+      with:
+        sbom-path: dist/estus-aarch64-apple-darwin.cdx.json
+        subject-checksums: sbom-subjects/aarch64-apple-darwin.sha256
     - env:
         GH_REPO: ${{ github.repository }}
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
