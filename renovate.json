@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "Europe/London",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "nix": {
+    "enabled": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Action pins in nix/ci.nix, which generates .github/workflows. The github-actions manager updates the generated files in the same branch, and checks.workflows fails if the two differ.",
+      "managerFilePatterns": ["/^nix/ci\\.nix$/"],
+      "matchStrings": [
+        "\"(?<depName>[\\w.-]+/[\\w.-]+)(?:/[\\w./-]+)?@(?<currentDigest>[0-9a-f]{40})\"; # (?<currentValue>\\S+)"
+      ],
+      "datasourceTemplate": "github-tags"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Action pins: hidden from the release notes.",
+      "matchManagers": ["github-actions", "custom.regex"],
+      "semanticCommitType": "ci"
+    },
+    {
+      "description": "config:recommended groups these majors for github-actions only; nix/ci.nix must be in the same branch.",
+      "matchManagers": ["github-actions", "custom.regex"],
+      "matchPackageNames": ["actions/download-artifact", "actions/upload-artifact"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "GitHub Artifact Actions"
+    },
+    {
+      "description": "Flake inputs: hidden from the release notes.",
+      "matchManagers": ["nix"],
+      "semanticCommitType": "build"
+    },
+    {
+      "description": "Lix's installer tags releases by date: v2026-06-15.",
+      "matchPackageNames": ["samueldr/lix-gha-installer-action"],
+      "versioning": "regex:^v(?<major>\\d{4})-(?<minor>\\d{2})-(?<patch>\\d{2})$"
+    }
+  ]
+}
