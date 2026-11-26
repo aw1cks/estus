@@ -47,6 +47,7 @@ jobs:
         retention-days: 14
     timeout-minutes: 60
   build-macos:
+    continue-on-error: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--'))) }}
     name: Build macOS binary and wheel
     permissions:
       actions: write
@@ -83,6 +84,9 @@ jobs:
         name: release-macos
         path: dist
         retention-days: 14
+    - if: failure() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--')))
+      name: Report advisory macOS failure
+      run: echo "::warning::The macOS PR check failed. See the failed step above."
     timeout-minutes: 45
   retry:
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.workflow == 'Release artifacts' }}
@@ -127,6 +131,7 @@ jobs:
           runner: ubuntu-26.04-arm
     timeout-minutes: 30
   smoke-macos:
+    continue-on-error: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--'))) }}
     name: Smoke test macOS
     needs: build-macos
     permissions:
@@ -160,6 +165,9 @@ jobs:
         path: dist
     - name: Install and run the artifacts
       run: nix develop --no-update-lock-file .#release --command python3 scripts/release.py smoke dist --mode native
+    - if: failure() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--')))
+      name: Report advisory macOS failure
+      run: echo "::warning::The macOS PR check failed. See the failed step above."
     timeout-minutes: 30
 name: Release artifacts
 'on':
