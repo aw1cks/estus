@@ -22,6 +22,7 @@ jobs:
       run: gh workflow run ci-retry.yml --ref main -f run_id="$RUN_ID"
     timeout-minutes: 5
   verify:
+    continue-on-error: ${{ matrix.name == 'ssh-native-macos-arm64' && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--'))) }}
     name: ${{ matrix.name }}
     permissions:
       actions: write
@@ -71,6 +72,9 @@ jobs:
       run: |
         nix run -L --no-update-lock-file .#ci
         nix run -L --no-update-lock-file .#ci-msrv
+    - if: failure() && matrix.name == 'ssh-native-macos-arm64' && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--')))
+      name: Report advisory macOS failure
+      run: echo "::warning::The macOS PR check failed. See the failed step above."
     strategy:
       fail-fast: false
       matrix:

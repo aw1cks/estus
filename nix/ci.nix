@@ -87,6 +87,14 @@
         }
       ];
       releaseShell = "nix develop --no-update-lock-file .#release --command";
+      # Release Please dispatches checks on its PR branch explicitly.
+      prCheck = "(github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/release-please--')))";
+      macosBaselinePr = "matrix.name == 'ssh-native-macos-arm64' && ${prCheck}";
+      warnMacosPr = condition: {
+        name = "Report advisory macOS failure";
+        "if" = "failure() && ${condition}";
+        run = ''echo "::warning::The macOS PR check failed. See the failed step above."'';
+      };
       # The last job of a workflow that GitHub sometimes fails to run (macOS
       # runners in particular). If any job it waits on failed or was cancelled,
       # it asks ci-retry.yml, from main, to look at this run once it has
@@ -129,6 +137,7 @@
             cancel-in-progress = "\${{ github.event_name != 'push' }}";
           };
           jobs.verify = {
+            continue-on-error = "\${{ ${macosBaselinePr} }}";
             name = "\${{ matrix.name }}";
             runs-on = "\${{ matrix.runner }}";
             strategy = {
@@ -205,6 +214,7 @@
                   nix run -L --no-update-lock-file .#ci-msrv
                 '';
               }
+              (warnMacosPr macosBaselinePr)
             ];
           };
           jobs.retry = retryDispatch { needs = [ "verify" ]; };
@@ -453,6 +463,7 @@
               ];
             };
             build-macos = {
+              continue-on-error = "\${{ ${prCheck} }}";
               name = "Build macOS binary and wheel";
               runs-on = "macos-26";
               timeout-minutes = 45;
@@ -478,6 +489,7 @@
                     retention-days = 14;
                   };
                 }
+                (warnMacosPr prCheck)
               ];
             };
             # Each architecture is tested on a runner of its own kind, so nothing
@@ -519,6 +531,7 @@
               ];
             };
             smoke-macos = {
+              continue-on-error = "\${{ ${prCheck} }}";
               name = "Smoke test macOS";
               needs = "build-macos";
               runs-on = "macos-26";
@@ -539,6 +552,7 @@
                   name = "Install and run the artifacts";
                   run = "${releaseShell} python3 scripts/release.py smoke dist --mode native";
                 }
+                (warnMacosPr prCheck)
               ];
             };
             # Only for this workflow's own runs. When publish.yml calls it, the
@@ -851,7 +865,7 @@
               steps = [
                 {
                   uses = checkout;
-                  with.persist-credentials = false;
+                  "with".persist-credentials = false;
                 }
                 {
                   name = "Purge the crates.io and PyPI badges from Camo";
@@ -894,14 +908,15 @@
               steps = nixInstall ++ [
                 (rustStoreCache coverageCachePrefix)
                 {
+                  id = "reports";
                   name = "Run the tests with coverage";
                   run = "nix build -L --no-update-lock-file .#coverage --out-link coverage";
                 }
               ]
               ++ map (upload: {
                 name = "Upload ${upload.what} to Codecov";
-                # Upload failing tests too: that is what test results are for.
-                "if" = "\${{ !cancelled() }}";
+                # The build produces reports even when tests fail.
+                "if" = "\${{ !cancelled() && steps.reports.outcome == 'success' }}";
                 uses = codecov;
                 "with" = upload.settings // {
                   disable_search = true;

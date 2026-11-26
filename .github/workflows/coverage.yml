@@ -70,9 +70,10 @@ jobs:
         purge-primary-key: never
         restore-prefixes-first-match: nix-coverage-${{ runner.os }}-${{ runner.arch }}-
         save: true
-    - name: Run the tests with coverage
+    - id: reports
+      name: Run the tests with coverage
       run: nix build -L --no-update-lock-file .#coverage --out-link coverage
-    - if: ${{ !cancelled() }}
+    - if: ${{ !cancelled() && steps.reports.outcome == 'success' }}
       name: Upload coverage to Codecov
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
@@ -81,7 +82,7 @@ jobs:
         files: coverage/lcov.info
         flags: unit
         use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    - if: ${{ !cancelled() }}
+    - if: ${{ !cancelled() && steps.reports.outcome == 'success' }}
       name: Upload test results to Codecov
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
