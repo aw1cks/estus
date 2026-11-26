@@ -841,6 +841,24 @@
                 }
               ];
             };
+            refresh-badges = {
+              name = "Refresh README version badges";
+              needs = "finalize";
+              runs-on = "ubuntu-26.04";
+              timeout-minutes = 5;
+              continue-on-error = true;
+              permissions.contents = "read";
+              steps = [
+                {
+                  uses = checkout;
+                  with.persist-credentials = false;
+                }
+                {
+                  name = "Purge the crates.io and PyPI badges from Camo";
+                  run = "python3 scripts/purge-release-badges.py";
+                }
+              ];
+            };
             retry = retryDispatch {
               needs = [ "verify" "artifacts" "publish-github" "publish-pypi" "publish-crates" "finalize" ];
             };

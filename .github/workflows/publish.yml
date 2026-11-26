@@ -138,6 +138,20 @@ jobs:
       with:
         packages-dir: pypi
     timeout-minutes: 15
+  refresh-badges:
+    continue-on-error: true
+    name: Refresh README version badges
+    needs: finalize
+    permissions:
+      contents: read
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - name: Purge the crates.io and PyPI badges from Camo
+      run: python3 scripts/purge-release-badges.py
+    timeout-minutes: 5
   retry:
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && true }}
     name: Request a retry of infrastructure failures
