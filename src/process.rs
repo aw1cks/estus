@@ -3,11 +3,16 @@
 //! The unreaped anchor reserves the process-group identity until the final group
 //! signal. We never inspect or signal a numeric group after reaping that anchor.
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
 use nix::unistd::Pid;
 
 pub(crate) const ANCHOR_ARG: &str = "--internal-controller-anchor";
@@ -26,6 +31,7 @@ pub(crate) fn anchor() -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct Children {
     anchor: Option<Child>,
@@ -36,6 +42,7 @@ pub(crate) struct Children {
     reap_failed: bool,
 }
 
+#[cfg(unix)]
 impl Children {
     pub(crate) fn start_anchor(&mut self) -> io::Result<u32> {
         let child = Command::new(std::env::current_exe()?)

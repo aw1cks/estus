@@ -474,6 +474,7 @@ enum Authority {
     Controller,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct ScriptSource {
     pub(crate) path: String,
@@ -630,6 +631,7 @@ pub(crate) struct ControllerRequest {
     pub retain_output: bool,
     values: Vec<Value>,
 }
+#[cfg_attr(windows, allow(dead_code))]
 struct ControllerActivation<'a> {
     workspace_root: Option<&'a str>,
     permitted: bool,

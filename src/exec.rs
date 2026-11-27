@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Instant;
 
-use openssh::{Session, Stdio};
+use crate::ssh::{ChildStdin, Command as SshCommand, Session, SshError, Stdio};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +18,7 @@ pub(crate) struct RunContext<'a> {
     pub progress: crate::progress::Reporter,
 }
 
-async fn send_stdin(stream: Option<openssh::ChildStdin>, input: Option<&str>) -> io::Result<()> {
+async fn send_stdin(stream: Option<ChildStdin>, input: Option<&str>) -> io::Result<()> {
     if let Some(mut stream) = stream {
         if let Some(input) = input {
             // Early exit/closed stdin is ordinary command behavior, not transport loss.
@@ -46,7 +46,7 @@ struct Completion {
 
 enum Outcome {
     Completed(Completion),
-    Backend(openssh::Error),
+    Backend(SshError),
     Timeout,
     Cancelled,
 }
@@ -56,7 +56,7 @@ fn argv_command<'s, 'a>(
     program: &str,
     arguments: impl IntoIterator<Item = &'a str>,
     cwd: Option<&str>,
-) -> openssh::Command<'s> {
+) -> SshCommand<'s> {
     let mut command = if let Some(cwd) = cwd {
         let mut command = session.command("cd");
         // Only fixed syntax is raw; cwd, program and arguments remain escaped data.
@@ -144,11 +144,11 @@ pub(crate) async fn run(
             let output = child
                 .stdout()
                 .take()
-                .ok_or_else(|| openssh::Error::ChildIo(io::Error::other("missing stdout pipe")))?;
+                .ok_or_else(|| SshError::ChildIo(io::Error::other("missing stdout pipe")))?;
             let errors = child
                 .stderr()
                 .take()
-                .ok_or_else(|| openssh::Error::ChildIo(io::Error::other("missing stderr pipe")))?;
+                .ok_or_else(|| SshError::ChildIo(io::Error::other("missing stderr pipe")))?;
 
             // Child::wait consumes the native channel and closes its pipes on completion.
             // Drain before polling wait so buffered tail bytes cannot be lost. The outer
@@ -170,15 +170,11 @@ pub(crate) async fn run(
             let exit_code = match child.wait().await {
                 // Native mux cannot distinguish a remote signal from a channel
                 // closed while remote work continues. Only an exit code proves completion.
-                Ok(status) => status
-                    .code()
-                    .ok_or(openssh::Error::RemoteProcessTerminated)?,
-                Err(openssh::Error::Remote(error)) if error.kind() == io::ErrorKind::NotFound => {
-                    127
-                }
+                Ok(status) => status.code().ok_or(SshError::RemoteProcessTerminated)?,
+                Err(SshError::Remote(error)) if error.kind() == io::ErrorKind::NotFound => 127,
                 Err(error) => return Err(error),
             };
-            Ok::<_, openssh::Error>(Completion {
+            Ok::<_, SshError>(Completion {
                 exit_code,
                 io_failed,
             })
@@ -303,14 +299,14 @@ pub(crate) async fn run(
     ToolReply::with_optional_error(data, error)
 }
 
-fn connection_lost(error: &openssh::Error) -> bool {
+fn connection_lost(error: &SshError) -> bool {
     use std::error::Error;
     if matches!(
         error,
-        openssh::Error::Disconnected
-            | openssh::Error::Master(_)
-            | openssh::Error::Connect(_)
-            | openssh::Error::RemoteProcessTerminated
+        SshError::Disconnected
+            | SshError::Master(_)
+            | SshError::Connect(_)
+            | SshError::RemoteProcessTerminated
     ) {
         return true;
     }

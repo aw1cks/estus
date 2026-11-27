@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use openssh::{Session, Stdio};
+use crate::ssh::{Session, Stdio};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},

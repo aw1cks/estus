@@ -51,6 +51,7 @@ impl Capture {
     }
 
     // A closed drain may have missed bytes even when the byte cap was not reached.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn incomplete(&mut self) {
         self.incomplete = true;
     }

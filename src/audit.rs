@@ -195,6 +195,7 @@ pub(crate) fn emit(record: &impl Serialize) {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Serialize)]
 struct QuarantineRecord {
     event: &'static str,
@@ -206,6 +207,7 @@ struct QuarantineRecord {
     capacity: usize,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn cleanup_quarantine(
     phase: &'static str,
     child_reap: usize,

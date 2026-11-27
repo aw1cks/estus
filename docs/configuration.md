@@ -226,6 +226,8 @@ Set `state_dir` to keep [quarantine](concepts.md#when-a-change-goes-wrong-uncert
 records across Estus restarts. It defaults to unset, which keeps them in
 memory only. Create the directory before startup, owned by the user running
 Estus and with mode `0700`. The final directory entry cannot be a symlink.
+On Windows, Estus rejects symlinks and non-directories but does not verify
+NTFS ACLs or owner SIDs; restrict directory permissions yourself.
 Dedicate it to Estus: it restores up to 256 owned regular records of at most
 4 KiB each and refuses unexpected entries. It ignores temporary `.tmp-*`
 entries left by interrupted writes.

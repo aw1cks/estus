@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -213,10 +214,13 @@ fn describe(catalog: &Catalog, as_json: bool) -> Result<Vec<u8>, Failure> {
 }
 
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Failure> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(windows)]
+    let _ = mode;
+    let mut file = options
         .open(path)
         .map_err(|_| Failure::Code("catalog_output_unavailable"))?;
     file.write_all(bytes)
@@ -230,13 +234,19 @@ fn export(
     path: &Path,
 ) -> Result<Value, Failure> {
     let names = selected(catalog, tools, presets)?;
-    DirBuilder::new()
-        .mode(0o700)
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut dir_builder = DirBuilder::new();
+    #[cfg(unix)]
+    dir_builder.mode(0o700);
+    dir_builder
         .create(path)
         .map_err(|_| Failure::Code("catalog_output_exists_or_unavailable"))?;
     let result = (|| {
-        DirBuilder::new()
-            .mode(0o700)
+        #[cfg_attr(windows, allow(unused_mut))]
+        let mut payloads_builder = DirBuilder::new();
+        #[cfg(unix)]
+        payloads_builder.mode(0o700);
+        payloads_builder
             .create(path.join("payloads"))
             .map_err(|_| Failure::Code("catalog_output_unavailable"))?;
         let mut definitions = toml::Table::new();
@@ -377,11 +387,11 @@ fn install(dir: Option<PathBuf>, replace: bool) -> Result<Value, Failure> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o755)
-        .create(parent)
-        .map_err(|_| unavailable())?;
+    let mut parent_builder = DirBuilder::new();
+    parent_builder.recursive(true);
+    #[cfg(unix)]
+    parent_builder.mode(0o755);
+    parent_builder.create(parent).map_err(|_| unavailable())?;
     let stamp = format!(
         "{}-{}",
         std::process::id(),
@@ -390,19 +400,22 @@ fn install(dir: Option<PathBuf>, replace: bool) -> Result<Value, Failure> {
             .map_or(0, |elapsed| elapsed.as_nanos())
     );
     let staging = parent.join(format!(".estus-catalog-{stamp}"));
-    DirBuilder::new()
-        .mode(0o755)
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut staging_builder = DirBuilder::new();
+    #[cfg(unix)]
+    staging_builder.mode(0o755);
+    staging_builder
         .create(&staging)
         .map_err(|_| unavailable())?;
     let staged = (|| -> Result<(), Failure> {
         for (relative, bytes) in files {
             let path = staging.join(relative);
             if let Some(directory) = path.parent() {
-                DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o755)
-                    .create(directory)
-                    .map_err(|_| unavailable())?;
+                let mut sub_builder = DirBuilder::new();
+                sub_builder.recursive(true);
+                #[cfg(unix)]
+                sub_builder.mode(0o755);
+                sub_builder.create(directory).map_err(|_| unavailable())?;
             }
             write_new(&path, bytes, 0o644).map_err(|_| unavailable())?;
         }
