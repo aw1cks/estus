@@ -1,6 +1,14 @@
 {
   description = "A stdio MCP server using OpenSSH";
 
+  # Used when this flake is the one you run, e.g. `nix run github:aw1cks/estus`,
+  # and only if you accept it. Flakes used as inputs cannot set substituters;
+  # see docs/clients.md#home-manager. Keep in sync with `binaryCache` in nix/ci.nix.
+  nixConfig = {
+    extra-substituters = [ "https://aw1cks-estus.cachix.org" ];
+    extra-trusted-public-keys = [ "aw1cks-estus.cachix.org-1:J4jI1cSMiSkNNjHbyA1wyavdwMeqT2EHAwuboKZ/jNk=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
