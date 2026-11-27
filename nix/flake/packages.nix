@@ -50,6 +50,11 @@
         automation-runtime = automationRuntime;
         direct-module-bundle = directModuleBundle;
         inherit automation wheel coverage;
+        # One directory per agent skill, e.g. `${skills}/estus-sre`.
+        skills = pkgs.runCommand "estus-skills" { } ''
+          mkdir -p "$out"
+          cp -r --no-preserve=mode ${../../skills}/. "$out"
+        '';
         build-timings = buildTimings;
         automation-msrv = automationMsrv;
         catalog-vm = catalogVm;
