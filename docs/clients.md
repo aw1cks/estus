@@ -76,6 +76,87 @@ keeps it, and add:
 If `estus` isn't on the client's `PATH` (GUI apps often have a short one), use
 the full path to the binary as `command`.
 
+## Home Manager
+
+The Nix flake exports `homeModules.default`. It needs a Home Manager release
+that has [`programs.mcp`](https://github.com/nix-community/home-manager/blob/release-26.05/modules/programs/mcp.nix),
+26.05 or later.
+
+```nix
+{
+  imports = [ inputs.estus.homeModules.default ];
+  programs.estus = {
+    enable = true;
+    settings = {
+      capabilities = { named = true; };
+      selection.allow = [ "observe_cpu" "observe_memory" ];
+      targets.web-1.ssh_host = "web-1";
+      automation.targets.web-1.destination = "web-1";
+    };
+  };
+}
+```
+
+`settings` is the [configuration](configuration.md) as Nix, written to
+`$XDG_CONFIG_HOME/estus/estus.toml`. With a target declared, Home Manager loads
+it with Estus at build time, so a rejected config fails `home-manager switch`
+rather than the client's startup. Set `programs.estus.validate = false` if it
+names a file the build sandbox cannot see, such as `ssh.config_file`.
+
+The module adds an `estus` entry to `programs.mcp.servers` with the absolute
+config path and enables `programs.mcp`. Clients that support it pick the entry
+up through their own switch, for example
+`programs.claude-code.enableMcpIntegration = true`. Set
+`programs.estus.mcp.enable = false` to skip this and wire the client yourself.
+Approval rules and the skill are not part of `programs.mcp`; set them on the
+client, as in the sections above.
+
+Use `programs.estus.package = inputs.estus.packages.${pkgs.stdenv.hostPlatform.system}.automation`
+for the build that ships an Ansible bundle. The default package puts its own
+OpenSSH first on `PATH`. On macOS that replaces Apple's `ssh`, which can break
+Keychain-backed keys and `UseKeychain` lines in `~/.ssh/config`; set
+`settings.ssh.executable = "/usr/bin/ssh"` to keep Apple's.
+
+### Overlay
+
+`inputs.estus.overlays.default` adds `estus` and `estus-automation` to `pkgs`,
+built with your nixpkgs instead of the one this flake pins. It needs a Rust
+1.88 or later in that set, and the binary cache below won't have it. Use it with
+`programs.estus.package = pkgs.estus;`.
+
+### The skill
+
+`inputs.estus.packages.${system}.skills` holds one directory per agent skill.
+For Claude Code:
+
+```nix
+programs.claude-code.skills.estus-sre =
+  "${inputs.estus.packages.${pkgs.stdenv.hostPlatform.system}.skills}/estus-sre";
+```
+
+### Binary cache
+
+CI pushes `default`, `automation` and `skills` for every commit on `main` that
+passes, on x86_64-linux, aarch64-linux and aarch64-darwin, to
+`https://aw1cks-estus.cachix.org`. Without it, Nix builds Estus from source.
+A flake's `nixConfig` doesn't apply to flakes you import, so add the cache to
+your own Nix settings. On NixOS or nix-darwin:
+
+```nix
+nix.settings = {
+  substituters = [ "https://aw1cks-estus.cachix.org" ];
+  trusted-public-keys = [ "aw1cks-estus.cachix.org-1:J4jI1cSMiSkNNjHbyA1wyavdwMeqT2EHAwuboKZ/jNk=" ];
+};
+```
+
+With standalone Home Manager, put the same in `nix.conf`
+(`extra-substituters`, `extra-trusted-public-keys`). Only trusted users can
+add substituters. `nix run github:aw1cks/estus` offers the cache through the
+flake's `nixConfig`; answer yes to the prompt, or pass `--accept-flake-config`.
+Don't set `inputs.nixpkgs.follows` on `inputs.estus`, or your build differs from
+the cached one. A commit is cached once CI has passed on it, so a lock that
+points at a commit on `main` or at a release tag normally hits the cache.
+
 ## OMP
 
 OMP reads project MCP servers from `.omp/mcp.json`:
