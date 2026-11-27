@@ -22,6 +22,7 @@
     imports = [
       ./nix/ci.nix
       ./nix/flake/packages.nix
+      ./nix/flake/overlays.nix
       ./nix/flake/acceptance.nix
       ./nix/flake/checks.nix
       ./nix/flake/devshells.nix
