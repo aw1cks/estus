@@ -6,6 +6,24 @@
       checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"; # v7.0.1
       lixInstaller = "samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d"; # v2026-06-15
       nixCache = "nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569"; # v7.0.2
+      cachixAction = "cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866"; # v17
+      # Keep in sync with `nixConfig` in flake.nix.
+      binaryCache = "aw1cks-estus";
+      baselineRunners = [
+        {
+          # Preserve the existing required-check name.
+          name = "ssh-baseline-linux";
+          runner = "ubuntu-26.04";
+        }
+        {
+          name = "ssh-baseline-linux-arm64";
+          runner = "ubuntu-26.04-arm";
+        }
+        {
+          name = "ssh-native-macos-arm64";
+          runner = "macos-26";
+        }
+      ];
       uploadArtifact = "actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874"; # v4.4.0
       cachePrefix = "nix-\${{ runner.os }}-\${{ runner.arch }}-";
       # Must not start with cachePrefix: SSH baseline restores, and purges, any key
@@ -142,21 +160,7 @@
             runs-on = "\${{ matrix.runner }}";
             strategy = {
               fail-fast = false;
-              matrix.include = [
-                {
-                  # Preserve the existing required-check name.
-                  name = "ssh-baseline-linux";
-                  runner = "ubuntu-26.04";
-                }
-                {
-                  name = "ssh-baseline-linux-arm64";
-                  runner = "ubuntu-26.04-arm";
-                }
-                {
-                  name = "ssh-native-macos-arm64";
-                  runner = "macos-26";
-                }
-              ];
+              matrix.include = baselineRunners;
             };
             # A run with a cold Nix store takes 35-40 minutes; leave room for a
             # slow runner rather than failing on the clock.
@@ -218,6 +222,50 @@
             ];
           };
           jobs.retry = retryDispatch { needs = [ "verify" ]; };
+          # Publishing is its own job so that the token lives in an environment
+          # restricted to main (Settings > Environments > binary-cache > Deployment
+          # branches). No pull-request run, and no other job, can read it. Release
+          # tags are commits on main, so they are covered. A miss in the Actions
+          # cache rebuilds the packages, which the checks above already built.
+          jobs.cache = {
+            needs = [ "verify" ];
+            "if" = "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'";
+            runs-on = "\${{ matrix.runner }}";
+            strategy = {
+              fail-fast = false;
+              matrix.include = baselineRunners;
+            };
+            timeout-minutes = 75;
+            environment = "binary-cache";
+            permissions.contents = "read";
+            steps = nixInstall ++ [
+              {
+                # Installs the cachix client. CI itself neither pulls from the
+                # cache nor pushes every build result.
+                uses = cachixAction;
+                "with" = {
+                  name = binaryCache;
+                  skipPush = true;
+                  skipAddingSubstituter = true;
+                };
+              }
+              # Reuse the store verify saved; this job never writes the cache.
+              (lib.recursiveUpdate (rustStoreCache cachePrefix) {
+                "with" = {
+                  save = false;
+                  purge = false;
+                };
+              })
+              {
+                name = "Push packages to the binary cache";
+                env.CACHIX_AUTH_TOKEN = "\${{ secrets.CACHIX_AUTH_TOKEN }}";
+                run = ''
+                  nix build -L --no-update-lock-file --no-link --print-out-paths \
+                    .#default .#automation .#skills | cachix push ${binaryCache}
+                '';
+              }
+            ];
+          };
         };
         "cache-cleanup.yml" = {
           name = "Cache Cleanup";

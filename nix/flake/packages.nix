@@ -3,7 +3,8 @@
   perSystem = { pkgs, ... }:
     let
       sourceRoot = ../..;
-      craneLib = inputs.crane.mkLib pkgs;
+      native = import ../packages/estus.nix { inherit inputs pkgs sourceRoot; };
+      inherit (native) craneLib commonArgs defaultBuild automationRuntime directModuleBundle withAutomation automation;
       msrvToolchain = (pkgs.extend inputs.rust-overlay.overlays.default).rust-bin.stable."1.88.0".minimal;
       msrvLib = craneLib.overrideToolchain msrvToolchain;
       fuzzLib = craneLib.overrideToolchain (p:
@@ -17,30 +18,6 @@
           extensions = [ "llvm-tools-preview" ];
         }
       );
-      commonArgs = {
-        src = pkgs.lib.cleanSourceWith {
-          src = sourceRoot;
-          filter = path: type:
-            path != "${toString sourceRoot}/fuzz"
-            && path != "${toString sourceRoot}/nix/result"
-            && !pkgs.lib.hasPrefix "${toString sourceRoot}/nix/result/" path
-            && (craneLib.filterCargoSources path type
-              || (pkgs.lib.hasPrefix "${toString sourceRoot}/src/" path
-                && pkgs.lib.hasSuffix ".py" path)
-              || pkgs.lib.hasPrefix "${toString sourceRoot}/examples/" path
-              || pkgs.lib.hasPrefix "${toString sourceRoot}/catalog/" path
-              || path == "${toString sourceRoot}/skills/estus-sre/SKILL.md"
-              || path == "${toString sourceRoot}/pyproject.toml"
-              || path == "${toString sourceRoot}/python/estus/__init__.py"
-              || path == "${toString sourceRoot}/setup.py"
-              || pkgs.lib.hasPrefix "${toString sourceRoot}/tests/fixtures/catalog/" path);
-        };
-        strictDeps = true;
-        doCheck = true;
-      };
-      defaultBuild = import ../packages/rust-build.nix {
-        inherit pkgs craneLib commonArgs;
-      };
       msrvBuild = import ../packages/rust-build.nix {
         inherit pkgs;
         craneLib = msrvLib;
@@ -53,19 +30,8 @@
         craneLib = coverageLib;
         inherit (defaultBuild) controllerTestPrograms;
       };
-      automationRuntime = import ../packages/automation-runtime.nix { inherit pkgs sourceRoot; };
-      directModuleBundle = import ../packages/direct-module-bundle.nix { inherit pkgs sourceRoot automationRuntime; };
       wheel = import ../packages/wheel.nix { inherit pkgs sourceRoot; craneLib = msrvLib; };
       cargoVendor = msrvLib.vendorCargoDeps commonArgs;
-      withAutomation = native: pkgs.runCommand "estus-automation-${native.version}" {
-        nativeBuildInputs = [ pkgs.makeWrapper ];
-        meta.mainProgram = "estus";
-      } ''
-        mkdir -p "$out/bin"
-        makeWrapper ${native}/bin/estus "$out/bin/estus" \
-          --set ESTUS_ANSIBLE_BUNDLE ${directModuleBundle}
-      '';
-      automation = withAutomation package;
       automationMsrv = withAutomation msrvBuild.package;
       catalogVm = import ../tests/catalog/catalog-vm.nix { inherit inputs sourceRoot; hostPkgs = pkgs; };
       catalogLabVm = import ../tests/catalog/catalog-vm.nix { inherit inputs sourceRoot; hostPkgs = pkgs; lab = true; };
@@ -84,6 +50,11 @@
         automation-runtime = automationRuntime;
         direct-module-bundle = directModuleBundle;
         inherit automation wheel coverage;
+        # One directory per agent skill, e.g. `${skills}/estus-sre`.
+        skills = pkgs.runCommand "estus-skills" { } ''
+          mkdir -p "$out"
+          cp -r --no-preserve=mode ${../../skills}/. "$out"
+        '';
         build-timings = buildTimings;
         automation-msrv = automationMsrv;
         catalog-vm = catalogVm;

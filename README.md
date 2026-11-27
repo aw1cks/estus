@@ -170,6 +170,28 @@ nix run github:aw1cks/estus -- --config /path/to/estus.toml
 Use `github:aw1cks/estus#automation` instead for a build that also ships an
 Ansible bundle.
 
+**Home Manager** (needs a release with `programs.mcp`, 26.05 or later). The
+flake exports a module that writes `estus.toml` for you, checks it at build
+time and registers Estus in `programs.mcp.servers`:
+
+```nix
+{
+  imports = [ inputs.estus.homeModules.default ];
+  programs.estus = {
+    enable = true;
+    settings = {
+      capabilities = { named = true; file_read = true; };
+      selection.presets = [ "linux-health" ];
+      targets.web-1.ssh_host = "web-1";
+      automation.targets.web-1.destination = "web-1";
+    };
+  };
+  programs.claude-code.enableMcpIntegration = true; # or opencode, codex, ...
+}
+```
+
+See [Connecting a client](docs/clients.md#home-manager).
+
 Estus needs OpenSSH on the machine that runs it. macOS and Linux are supported;
 targets are Linux. To build from source, see
 [building from source](docs/development/building.md) and
