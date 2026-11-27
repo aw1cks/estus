@@ -129,12 +129,14 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ConfigError> {
     if !path.is_absolute() {
         return Err(invalid());
     }
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| invalid())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| invalid())?;
     if !file.metadata().map_err(|_| invalid())?.is_file() {
         return Err(invalid());
     }

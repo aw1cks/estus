@@ -492,6 +492,7 @@ impl ControllerError {
 /// types differ, so this is the one non-alias over the generic `Reply`.
 pub(crate) type ControllerReply = Reply<ControllerData, ControllerError>;
 
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControllerTermination {

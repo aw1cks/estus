@@ -874,6 +874,7 @@ pub(crate) fn encode_range(
     })
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn verify_script(
     bytes: Vec<u8>,
     eof: bool,

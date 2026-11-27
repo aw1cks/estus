@@ -6,18 +6,25 @@
 //! path), never file contents; the config boundary projects the static reason
 //! into a `ConfigError`, and the catalog CLI emits the variant code plus the
 //! context as an audit record.
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
 use nix::{
     fcntl::{OFlag, openat},
     sys::stat::Mode,
 };
+
+#[cfg(unix)]
+type DirHandle = File;
+#[cfg(windows)]
+type DirHandle = PathBuf;
 use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
@@ -277,7 +284,7 @@ where
 #[derive(Debug)]
 pub struct Catalog {
     root: PathBuf,
-    directory: File,
+    directory: DirHandle,
     manifest: Manifest,
 }
 
@@ -333,7 +340,41 @@ fn risk_prefix_matches_effects(name: &str, effects: &[&str]) -> bool {
     }
 }
 
-fn open_child(directory: &File, name: &Path, is_directory: bool) -> Result<File, CatalogError> {
+#[cfg(unix)]
+fn open_child_dir(directory: &DirHandle, name: &Path) -> Result<DirHandle, CatalogError> {
+    open_child(directory, name, true)
+}
+
+#[cfg(windows)]
+fn open_child_dir(directory: &DirHandle, name: &Path) -> Result<DirHandle, CatalogError> {
+    if name.components().count() != 1
+        || !matches!(
+            name.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(CatalogError::Missing {
+            asset: bounded_name(name),
+        });
+    }
+    let path = directory.join(name);
+    let meta = fs::symlink_metadata(&path).map_err(|_| CatalogError::Missing {
+        asset: bounded_name(name),
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(CatalogError::Missing {
+            asset: bounded_name(name),
+        });
+    }
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn open_child(
+    directory: &DirHandle,
+    name: &Path,
+    is_directory: bool,
+) -> Result<File, CatalogError> {
     if name.components().count() != 1
         || !matches!(
             name.components().next(),
@@ -367,6 +408,36 @@ fn open_child(directory: &File, name: &Path, is_directory: bool) -> Result<File,
         });
     }
     Ok(file)
+}
+
+#[cfg(windows)]
+fn open_child(
+    directory: &DirHandle,
+    name: &Path,
+    _is_directory: bool,
+) -> Result<File, CatalogError> {
+    if name.components().count() != 1
+        || !matches!(
+            name.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(CatalogError::Missing {
+            asset: bounded_name(name),
+        });
+    }
+    let path = directory.join(name);
+    let meta = fs::symlink_metadata(&path).map_err(|_| CatalogError::Missing {
+        asset: bounded_name(name),
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(CatalogError::Missing {
+            asset: bounded_name(name),
+        });
+    }
+    File::open(&path).map_err(|_| CatalogError::Unreadable {
+        asset: bounded_name(name),
+    })
 }
 
 fn bounded_read(file: File, asset: &str, limit: u64) -> Result<Vec<u8>, CatalogError> {
@@ -415,13 +486,23 @@ impl Catalog {
         {
             return Err(CatalogError::Missing { asset: root_name });
         }
-        let directory = OpenOptions::new()
+        #[cfg(unix)]
+        let directory: DirHandle = OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&root)
             .map_err(|_| CatalogError::Missing {
                 asset: root_name.clone(),
             })?;
+        #[cfg(windows)]
+        let directory: DirHandle = {
+            if !root.is_dir() {
+                return Err(CatalogError::Missing {
+                    asset: root_name.clone(),
+                });
+            }
+            root.clone()
+        };
         let root =
             fs::canonicalize(&root).map_err(|_| CatalogError::Unreadable { asset: root_name })?;
         let bytes = bounded_read(
@@ -508,7 +589,7 @@ impl Catalog {
     }
 
     fn validate_definition(
-        directory: &File,
+        directory: &DirHandle,
         name: &str,
         definition: &str,
     ) -> Result<toml::Table, CatalogError> {
@@ -829,8 +910,8 @@ impl Catalog {
         match &template.executor {
             Executor::AnsibleModule { .. } => Ok(WorkstationEntry::Module { definition }),
             Executor::NativePayload { .. } => {
-                let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
-                let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
+                let payloads_dir = open_child_dir(&self.directory, Path::new("payloads"))?;
+                let tool_dir = open_child_dir(&payloads_dir, Path::new(name))?;
                 let source_bytes = bounded_read(
                     open_child(&tool_dir, Path::new("collector.py"), false)?,
                     &format!("payloads/{name}/collector.py"),
@@ -922,8 +1003,8 @@ impl Catalog {
         match &template.executor {
             Executor::AnsibleModule { .. } => Ok(WorkstationEntry::Module { definition }),
             Executor::NativePayload { .. } => {
-                let payloads_dir = open_child(&self.directory, Path::new("payloads"), true)?;
-                let tool_dir = open_child(&payloads_dir, Path::new(name), true)?;
+                let payloads_dir = open_child_dir(&self.directory, Path::new("payloads"))?;
+                let tool_dir = open_child_dir(&payloads_dir, Path::new(name))?;
                 let source_bytes = bounded_read(
                     open_child(&tool_dir, Path::new("collector.py"), false)?,
                     &format!("payloads/{name}/collector.py"),
@@ -970,8 +1051,8 @@ impl Catalog {
                 asset: bounded_name(destination),
             });
         }
-        let payloads = open_child(&self.directory, Path::new("payloads"), true)?;
-        let directory = open_child(&payloads, Path::new(name), true)?;
+        let payloads = open_child_dir(&self.directory, Path::new("payloads"))?;
+        let directory = open_child_dir(&payloads, Path::new(name))?;
         let mut scan = PayloadScan {
             files: Vec::new(),
             remaining: PAYLOAD_LIMIT,
@@ -1013,8 +1094,11 @@ impl Catalog {
             }
             ancestor = path.parent();
         }
-        fs::DirBuilder::new()
-            .mode(0o700)
+        #[cfg_attr(windows, allow(unused_mut))]
+        let mut dest_builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        dest_builder.mode(0o700);
+        dest_builder
             .create(destination)
             .map_err(|_| CatalogError::UnsafePath {
                 asset: bounded_name(destination),
@@ -1023,24 +1107,26 @@ impl Catalog {
             for (relative, bytes) in files {
                 let output = destination.join(relative);
                 if let Some(parent) = output.parent() {
-                    fs::DirBuilder::new()
-                        .recursive(true)
-                        .mode(0o700)
+                    let mut dir_builder = fs::DirBuilder::new();
+                    dir_builder.recursive(true);
+                    #[cfg(unix)]
+                    dir_builder.mode(0o700);
+                    dir_builder
                         .create(parent)
                         .map_err(|_| CatalogError::Unreadable {
                             asset: bounded_name(parent),
                         })?;
                 }
                 let output_name = bounded_name(&output);
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                options
                     .mode(0o600)
-                    .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-                    .open(output)
-                    .map_err(|_| CatalogError::Unreadable {
-                        asset: output_name.clone(),
-                    })?;
+                    .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+                let mut file = options.open(output).map_err(|_| CatalogError::Unreadable {
+                    asset: output_name.clone(),
+                })?;
                 file.write_all(&bytes)
                     .map_err(|_| CatalogError::Unreadable { asset: output_name })?;
             }
@@ -1192,7 +1278,7 @@ struct PayloadScan {
 }
 
 fn collect_payload(
-    directory: &File,
+    directory: &DirHandle,
     source: &Path,
     relative: &Path,
     scan: &mut PayloadScan,
@@ -1223,7 +1309,7 @@ fn collect_payload(
             if name == "__pycache__" {
                 continue;
             }
-            let child = open_child(directory, Path::new(&name), true)?;
+            let child = open_child_dir(directory, Path::new(&name))?;
             collect_payload(&child, &source.join(&name), &path, scan, depth + 1)?;
         } else if kind.is_file() {
             if matches!(

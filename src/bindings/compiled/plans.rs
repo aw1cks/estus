@@ -1,12 +1,16 @@
+#[cfg(unix)]
+use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+};
 use std::{
     borrow::Cow,
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::{self, Read},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
+    io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -29,22 +33,33 @@ use super::{
     ScriptSource, Slot, bound, invalid,
 };
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn controller_root(root: Option<&str>) -> Result<Arc<Path>, ConfigError> {
-    let root = root.ok_or_else(|| invalid("Active controller tools require workspace_root"))?;
-    let root =
-        fs::canonicalize(root).map_err(|_| invalid("Controller workspace is unavailable"))?;
-    let metadata =
-        fs::metadata(&root).map_err(|_| invalid("Controller workspace is unavailable"))?;
-    if root.as_os_str().as_bytes().len() > 1024
-        || !metadata.is_dir()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o7777 != 0o700
+    #[cfg(windows)]
     {
-        return Err(invalid(
-            "Controller workspace must be an owned private directory",
-        ));
+        let _ = root;
+        Err(invalid(
+            "Controller script tools are not supported on Windows",
+        ))
     }
-    Ok(Arc::from(root))
+    #[cfg(unix)]
+    {
+        let root = root.ok_or_else(|| invalid("Active controller tools require workspace_root"))?;
+        let root =
+            fs::canonicalize(root).map_err(|_| invalid("Controller workspace is unavailable"))?;
+        let metadata =
+            fs::metadata(&root).map_err(|_| invalid("Controller workspace is unavailable"))?;
+        if root.as_os_str().as_bytes().len() > 1024
+            || !metadata.is_dir()
+            || metadata.uid() != nix::unistd::geteuid().as_raw()
+            || metadata.permissions().mode() & 0o7777 != 0o700
+        {
+            return Err(invalid(
+                "Controller workspace must be an owned private directory",
+            ));
+        }
+        Ok(Arc::from(root))
+    }
 }
 
 pub(crate) struct PreparedBinding<'a> {
@@ -133,6 +148,7 @@ impl io::Write for BoundedJson {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct ControllerPlan {
     pub(crate) source: Cow<'static, str>,
@@ -143,6 +159,7 @@ pub(crate) struct ControllerPlan {
     pub(crate) workspace_root: Arc<Path>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct PreparedController {
     pub(crate) plan: Arc<ControllerPlan>,
     pub(crate) input_json: Vec<u8>,
@@ -151,6 +168,7 @@ pub(crate) struct PreparedController {
 }
 
 impl ControllerActivation<'_> {
+    #[cfg_attr(windows, allow(dead_code))]
     fn root(&mut self) -> Result<Arc<Path>, ConfigError> {
         match &self.canonical_root {
             Some(root) => Ok(Arc::clone(root)),
@@ -170,6 +188,18 @@ impl ControllerActivation<'_> {
         environment: BTreeMap<String, String>,
         cwd: Option<String>,
     ) -> Result<Option<Arc<ControllerPlan>>, ConfigError> {
+        #[cfg(windows)]
+        {
+            let _ = (source, interpreter, environment, cwd);
+            if enabled && self.permitted {
+                Err(invalid(
+                    "Controller script tools are not supported on Windows",
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+        #[cfg(unix)]
         let plan = if enabled && self.permitted {
             let root = self.root()?;
             let metadata = fs::metadata(&interpreter.program)
@@ -214,6 +244,7 @@ impl ControllerActivation<'_> {
         } else {
             None
         };
+        #[cfg(unix)]
         Ok(plan)
     }
 }

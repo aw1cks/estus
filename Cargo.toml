@@ -27,7 +27,6 @@ name = "estus"
 path = "src/main.rs"
 [dependencies]
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
-openssh = { version = "0.11.6", default-features = false, features = ["native-mux"] }
 openssh-sftp-client = { version = "0.15.12", default-features = false }
 openssh-sftp-error = { version = "0.5.1", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "signal", "fs"] }
@@ -45,14 +44,17 @@ futures-util = "0.3"
 getrandom = "0.4.3"
 tempfile = "3"
 thiserror = "2"
-nix = { version = "0.30.1", default-features = false, features = ["signal", "process", "user", "fs", "dir"] }
 jsonschema = { version = "0.40", default-features = false }
+shell-escape = "0.1.5"
+
+[target.'cfg(unix)'.dependencies]
+openssh = { version = "0.11.6", default-features = false, features = ["native-mux"] }
+nix = { version = "0.30.1", default-features = false, features = ["signal", "process", "user", "fs", "dir"] }
 
 [dev-dependencies]
 testcontainers = "0.28.0"
 anyhow = "1"
 indoc = "2"
-shell-escape = "0.1.5"
 rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-child-process"] }
 openssh-sftp-protocol = { version = "=0.26.1", default-features = false }
 

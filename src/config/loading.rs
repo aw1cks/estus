@@ -1,4 +1,6 @@
-use std::{ffi::OsString, io::Read, os::unix::fs::OpenOptionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::{ffi::OsString, io::Read};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -528,9 +530,11 @@ impl Config {
         }
         let (mut document, base) = if let Some(path) = config_path {
             let path = resolve_path(path, cwd, "config")?;
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NONBLOCK)
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            options.custom_flags(nix::libc::O_NONBLOCK);
+            let mut file = options
                 .open(&path)
                 .map_err(|_| invalid("config", "cannot read explicitly selected TOML file"))?;
             if !file
@@ -608,16 +612,16 @@ impl Config {
         if let Some(path) = &ssh_config {
             // An explicit replacement must be readable now; never silently fall back
             // to the invoking user's normal SSH configuration.
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NONBLOCK)
-                .open(path)
-                .map_err(|_| {
-                    invalid(
-                        "ssh.config_file",
-                        "cannot read replacement SSH configuration",
-                    )
-                })?;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            options.custom_flags(nix::libc::O_NONBLOCK);
+            let file = options.open(path).map_err(|_| {
+                invalid(
+                    "ssh.config_file",
+                    "cannot read replacement SSH configuration",
+                )
+            })?;
             if !file
                 .metadata()
                 .map_err(|_| {
@@ -912,9 +916,11 @@ fn read_dropin_dir(
     }
     let mut out = Vec::with_capacity(paths.len());
     for (stem, name_str, path) in paths {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NONBLOCK)
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(nix::libc::O_NONBLOCK);
+        let file = options
             .open(&path)
             .map_err(|_| invalid(field, "cannot read drop-in TOML file"))?;
         if !file
@@ -1039,6 +1045,7 @@ fn resolve_ssh_executable(
     selected: Option<PathBuf>,
     path: impl FnOnce() -> Option<OsString>,
 ) -> Result<PathBuf, ConfigError> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     let available = |path: &Path| {
@@ -1047,7 +1054,14 @@ fn resolve_ssh_executable(
                 .to_str()
                 .is_some_and(|text| text.len() <= 4096 && !text.contains('\0'))
             && std::fs::metadata(path).is_ok_and(|metadata| {
-                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                #[cfg(unix)]
+                {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(windows)]
+                {
+                    metadata.is_file()
+                }
             })
     };
     if let Some(selected) = selected {
@@ -1065,7 +1079,10 @@ fn resolve_ssh_executable(
             if !directory.is_absolute() {
                 continue;
             }
+            #[cfg(unix)]
             let candidate = directory.join("ssh");
+            #[cfg(windows)]
+            let candidate = directory.join("ssh.exe");
             if available(&candidate) {
                 return Ok(candidate);
             }

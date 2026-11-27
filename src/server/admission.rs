@@ -1,8 +1,9 @@
+#[cfg(unix)]
+use std::os::fd::AsFd;
 use std::{
     collections::BTreeMap,
     fs::File,
     io::{Read, Write},
-    os::fd::AsFd,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -10,6 +11,7 @@ use std::{
     },
 };
 
+#[cfg(unix)]
 use nix::{
     dir::Dir,
     errno::Errno,
@@ -126,7 +128,10 @@ struct PersistedRecord {
 }
 
 struct Persistence {
+    #[cfg(unix)]
     dir: File,
+    #[cfg(windows)]
+    dir: std::path::PathBuf,
     /// Serializes record writes against unlinks so one transition's file
     /// operation cannot interleave with another's.
     transition: Mutex<()>,
@@ -136,6 +141,7 @@ fn record_stem(host: &str) -> String {
     hex::encode(Sha256::digest(host.as_bytes()))
 }
 
+#[cfg(unix)]
 impl Persistence {
     fn open(path: &Path) -> Result<(Self, BTreeMap<String, QuarantineState>), ConfigError> {
         let invalid = |reason: &'static str| ConfigError::new("quarantine.state_dir", reason);
@@ -304,6 +310,137 @@ impl Persistence {
             Ok(()) => self.dir.sync_data(),
             Err(Errno::ENOENT) => Ok(()),
             Err(err) => Err(std::io::Error::from(err)),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Persistence {
+    fn open(path: &Path) -> Result<(Self, BTreeMap<String, QuarantineState>), ConfigError> {
+        let invalid = |reason: &'static str| ConfigError::new("quarantine.state_dir", reason);
+        let meta = std::fs::symlink_metadata(path)
+            .map_err(|_| invalid("cannot inspect quarantine state directory"))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(invalid(
+                "quarantine state directory must be a real directory",
+            ));
+        }
+        let mut restored = BTreeMap::new();
+        let entries = std::fs::read_dir(path)
+            .map_err(|_| invalid("cannot enumerate quarantine state directory"))?;
+        for entry in entries {
+            let entry = entry.map_err(|_| invalid("cannot read quarantine state entry"))?;
+            let name_os = entry.file_name();
+            let name = name_os
+                .to_str()
+                .ok_or_else(|| invalid("invalid entry in quarantine state directory"))?;
+            if name.starts_with(".tmp-") {
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".json") else {
+                return Err(invalid("unexpected entry in quarantine state directory"));
+            };
+            if stem.len() != 64 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(invalid("invalid quarantine state filename"));
+            }
+            if restored.len() >= MAX_DYNAMIC_GATES {
+                return Err(invalid("quarantine state directory exceeds entry bound"));
+            }
+            let entry_path = entry.path();
+            let entry_meta = std::fs::symlink_metadata(&entry_path)
+                .map_err(|_| invalid("cannot stat quarantine state record"))?;
+            if entry_meta.file_type().is_symlink() || !entry_meta.is_file() {
+                return Err(invalid("quarantine state record must be a regular file"));
+            }
+            let file = File::open(&entry_path)
+                .map_err(|_| invalid("cannot open quarantine state record"))?;
+            let mut bytes = Vec::new();
+            file.take(MAX_PERSISTED_RECORD_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| invalid("cannot read quarantine state record"))?;
+            if bytes.len() > MAX_PERSISTED_RECORD_BYTES {
+                return Err(invalid("quarantine state record exceeds size bound"));
+            }
+            let record: PersistedRecord = strict_json::parse(&bytes)
+                .and_then(serde_json::from_value)
+                .map_err(|_| invalid("malformed quarantine state record"))?;
+            if record.schema != 1
+                || record.host.is_empty()
+                || record.host.len() > 256
+                || record.host.chars().any(char::is_control)
+                || record.authority.is_empty()
+                || record.authority.len() > 128
+                || record_stem(&record.host) != stem
+            {
+                return Err(invalid("invalid quarantine state record identity"));
+            }
+            let executor = intern_known(KNOWN_EXECUTORS, &record.executor)
+                .ok_or_else(|| invalid("unknown executor in quarantine state record"))?;
+            let cause = QuarantineCause::from_str(&record.cause)
+                .ok_or_else(|| invalid("unknown cause in quarantine state record"))?;
+            restored.insert(
+                record.host,
+                QuarantineState {
+                    authority: record.authority,
+                    executor,
+                    cause,
+                    persisted: true,
+                },
+            );
+        }
+        Ok((
+            Self {
+                dir: path.to_path_buf(),
+                transition: Mutex::new(()),
+            },
+            restored,
+        ))
+    }
+
+    fn save(&self, host: &str, state: &QuarantineState) -> std::io::Result<()> {
+        let _guard = self
+            .transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stem = record_stem(host);
+        let final_path = self.dir.join(format!("{stem}.json"));
+        let nonce = PERSIST_NONCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = self.dir.join(format!(".tmp-{stem}-{nonce}"));
+        let payload = serde_json::to_vec(&PersistedRecord {
+            schema: 1,
+            host: host.to_owned(),
+            authority: state.authority.clone(),
+            executor: state.executor.to_owned(),
+            cause: state.cause.as_str().to_owned(),
+        })
+        .map_err(std::io::Error::other)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        if let Err(err) = file.write_all(&payload).and_then(|()| file.sync_data()) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        drop(file);
+        if let Err(err) = std::fs::rename(&tmp_path, &final_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn remove(&self, host: &str) -> std::io::Result<()> {
+        let _guard = self
+            .transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stem = record_stem(host);
+        let final_path = self.dir.join(format!("{stem}.json"));
+        match std::fs::remove_file(&final_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
         }
     }
 }

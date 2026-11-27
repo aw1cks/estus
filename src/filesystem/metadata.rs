@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+use std::ffi::OsStr;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openssh_sftp_client::metadata::MetaData;
@@ -14,7 +14,7 @@ pub struct ListEntry {
 
 impl ListEntry {
     pub fn from_filename(filename: &OsStr, metadata: MetaData) -> Self {
-        let bytes = filename.as_bytes();
+        let bytes = filename.as_encoded_bytes();
         Self {
             name: std::str::from_utf8(bytes).ok().map(str::to_owned),
             name_base64: STANDARD.encode(bytes),

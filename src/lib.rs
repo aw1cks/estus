@@ -87,6 +87,7 @@ use std::{
 use clap::{CommandFactory, FromArgMatches};
 use rmcp::ServiceExt;
 use tokio::io::{AsyncRead, ReadBuf};
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
@@ -98,20 +99,54 @@ enum Diagnostic {
 /// Runs `operation` until it completes or SIGINT/SIGTERM arrives. On a signal
 /// the shared shutdown token is cancelled first, then the operation is given a
 /// chance to finish before the process exits.
+#[cfg(unix)]
+struct Signals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(windows)]
+struct Signals;
+
+impl Signals {
+    fn new() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self)
+        }
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.interrupt.recv() => {}
+                _ = self.terminate.recv() => {}
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 async fn run_cancellable<T>(
-    interrupt: &mut tokio::signal::unix::Signal,
-    terminate: &mut tokio::signal::unix::Signal,
+    signals: &mut Signals,
     shutdown: &CancellationToken,
     operation: impl Future<Output = T>,
 ) -> T {
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
-        _ = interrupt.recv() => {
-            shutdown.cancel();
-            operation.as_mut().await
-        },
-        _ = terminate.recv() => {
+        () = signals.recv() => {
             shutdown.cancel();
             operation.as_mut().await
         },
@@ -208,15 +243,12 @@ fn standalone_catalog(
         Err(_) => return fail("runtime_start_failed"),
     };
     let status = runtime.block_on(async {
-        let (Ok(mut interrupt), Ok(mut terminate)) = (
-            signal(SignalKind::interrupt()),
-            signal(SignalKind::terminate()),
-        ) else {
+        let Ok(mut signals) = Signals::new() else {
             return fail("signal_setup_failed");
         };
         let shutdown = CancellationToken::new();
         let operation = catalog::cli::run(args, cli, shutdown.clone());
-        let status = run_cancellable(&mut interrupt, &mut terminate, &shutdown, operation).await;
+        let status = run_cancellable(&mut signals, &shutdown, operation).await;
         ExitCode::from(status)
     });
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -224,10 +256,7 @@ fn standalone_catalog(
 }
 
 async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCode {
-    let (Ok(mut interrupt), Ok(mut terminate)) = (
-        signal(SignalKind::interrupt()),
-        signal(SignalKind::terminate()),
-    ) else {
+    let Ok(mut signals) = Signals::new() else {
         return fail("signal_setup_failed");
     };
     if let Some(command) = command {
@@ -246,13 +275,12 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
                 }
             }
         };
-        let report = run_cancellable(&mut interrupt, &mut terminate, &shutdown, operation).await;
+        let report = run_cancellable(&mut signals, &shutdown, operation).await;
         return ExitCode::from(report);
     }
     let shutdown = CancellationToken::new();
     let activated = run_cancellable(
-        &mut interrupt,
-        &mut terminate,
+        &mut signals,
         &shutdown,
         config.activate_automation(&shutdown),
     )
@@ -284,7 +312,7 @@ async fn run(mut config: config::Config, command: Option<Diagnostic>) -> ExitCod
         Ok(application) => application,
         Err(error) => return invalid_config(&error),
     };
-    let result = run_session(&application, &mut interrupt, &mut terminate).await;
+    let result = run_session(&application, &mut signals).await;
     application.shutdown().await;
     result
 }
@@ -294,11 +322,7 @@ fn invalid_config(error: &config::ConfigError) -> ExitCode {
     ExitCode::FAILURE
 }
 
-async fn run_session(
-    application: &server::Estus,
-    interrupt: &mut tokio::signal::unix::Signal,
-    terminate: &mut tokio::signal::unix::Signal,
-) -> ExitCode {
+async fn run_session(application: &server::Estus, signals: &mut Signals) -> ExitCode {
     let shutdown = application.shutdown_token();
     let pending = application.pending_replies();
     let overload = pending.overload_token();
@@ -329,8 +353,7 @@ async fn run_session(
                 return fail("mcp_initialize_failed");
             }
         },
-        _ = interrupt.recv() => return ExitCode::SUCCESS,
-        _ = terminate.recv() => return ExitCode::SUCCESS,
+        () = signals.recv() => return ExitCode::SUCCESS,
     };
     let cancellation = service.cancellation_token();
     let waiting = service.waiting();
@@ -348,8 +371,7 @@ async fn run_session(
                 fail("mcp_session_failed")
             };
         },
-        _ = interrupt.recv() => {},
-        _ = terminate.recv() => {},
+        () = signals.recv() => {},
     }
     shutdown.cancel();
     cancellation.cancel();

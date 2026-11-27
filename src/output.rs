@@ -1,9 +1,10 @@
 //! Request-owned, bounded local output capabilities. Nothing is created until finish.
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions, Permissions},
+    fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     sync::{Arc, Mutex, MutexGuard, Weak},
     time::{Duration, Instant},
 };
@@ -542,20 +543,21 @@ fn write_artifact(
     if cancelled() {
         return Err(io::ErrorKind::Interrupted.into());
     }
-    let directory = tempfile::Builder::new()
-        .prefix("estus-output-")
-        .permissions(Permissions::from_mode(0o700))
-        .tempdir()?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("estus-output-");
+    #[cfg(unix)]
+    builder.permissions(std::fs::Permissions::from_mode(0o700));
+    let directory = builder.tempdir()?;
     let lengths = [stdout.bytes.len() as u64, stderr.bytes.len() as u64];
     for (name, bytes) in [("stdout", stdout.bytes), ("stderr", stderr.bytes)] {
         if cancelled() {
             return Err(io::ErrorKind::Interrupted.into());
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(directory.path().join(name))?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(directory.path().join(name))?;
         file.write_all(&bytes)?;
         // Closing before returning is essential: only closed artifacts publish.
         drop(file);

@@ -1068,17 +1068,19 @@ impl Config {
 }
 
 fn inspect_automation_authority(config: &Path, socket: Option<&Path>) -> Result<(), ConfigError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
-        .open(config)
-        .map_err(|_| {
-            invalid(
-                "automation.authorities.*.ssh_config_file",
-                "cannot read replacement SSH configuration",
-            )
-        })?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(config).map_err(|_| {
+        invalid(
+            "automation.authorities.*.ssh_config_file",
+            "cannot read replacement SSH configuration",
+        )
+    })?;
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
         return Err(invalid(
             "automation.authorities.*.ssh_config_file",
@@ -1086,12 +1088,19 @@ fn inspect_automation_authority(config: &Path, socket: Option<&Path>) -> Result<
         ));
     }
     if let Some(socket) = socket {
-        use std::os::unix::fs::FileTypeExt;
-        if !std::fs::metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
-            return Err(invalid(
-                "automation.authorities.*.ssh_auth_sock",
-                "selected agent socket is unavailable",
-            ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if !std::fs::metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+                return Err(invalid(
+                    "automation.authorities.*.ssh_auth_sock",
+                    "selected agent socket is unavailable",
+                ));
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = socket;
         }
     }
     Ok(())

@@ -2,11 +2,12 @@
 //!
 //! Bundles are compiled outside the MCP server lifecycle (`estus bundle build`) so no
 //! local Python or Ansible runtime is required during MCP server startup or tool execution.
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -179,11 +180,11 @@ impl BundleCheck {
 }
 
 fn read_regular_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, &'static str> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| "bundle_unavailable")?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    let file = options.open(path).map_err(|_| "bundle_unavailable")?;
     let meta = file.metadata().map_err(|_| "bundle_unavailable")?;
     if !meta.is_file() {
         return Err("invalid_bundle_entry");
@@ -649,17 +650,22 @@ async fn build_bundle(
             json!({"ok": false, "error_code": "bundle_output_exists", "phase": "bundle_build"}),
         );
     }
-    if fs::DirBuilder::new().mode(0o700).create(output).is_err() {
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut dir_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    dir_builder.mode(0o700);
+    if dir_builder.create(output).is_err() {
         return (
             false,
             json!({"ok": false, "error_code": "bundle_output_unavailable", "phase": "bundle_build"}),
         );
     }
     let script_file = output.join(".estus-builder.py");
-    if OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut script_options = OpenOptions::new();
+    script_options.write(true).create_new(true);
+    #[cfg(unix)]
+    script_options.mode(0o600);
+    if script_options
         .open(&script_file)
         .and_then(|mut f: File| f.write_all(BUILDER_PY.as_bytes()))
         .is_err()

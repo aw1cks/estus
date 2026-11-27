@@ -20,15 +20,14 @@ use std::{
     fmt::Write as _,
     future::Future,
     io::{self, SeekFrom},
-    os::unix::ffi::OsStrExt,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
 
+use crate::ssh::{Child, Session, SshError, Stdio};
 use bytes::BytesMut;
 use futures_util::StreamExt;
-use openssh::{Session, Stdio};
 use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions, metadata::Permissions};
 use openssh_sftp_error::SftpErrorKind;
 use tokio::{
@@ -185,15 +184,15 @@ fn sftp_failure(error: SftpError) -> Failure {
     }
 }
 
-fn ssh_failure(error: openssh::Error) -> Failure {
+fn ssh_failure(error: SshError) -> Failure {
     match error {
-        openssh::Error::Remote(error) if error.kind() == io::ErrorKind::NotFound => Failure::io(),
-        openssh::Error::Remote(error) | openssh::Error::ChildIo(error) => io_failure(&error),
-        openssh::Error::Master(_)
-        | openssh::Error::Connect(_)
-        | openssh::Error::SshMux(_)
-        | openssh::Error::Disconnected
-        | openssh::Error::RemoteProcessTerminated => Failure {
+        SshError::Remote(error) if error.kind() == io::ErrorKind::NotFound => Failure::io(),
+        SshError::Remote(error) | SshError::ChildIo(error) => io_failure(&error),
+        SshError::Master(_)
+        | SshError::Connect(_)
+        | SshError::SshMux(_)
+        | SshError::Disconnected
+        | SshError::RemoteProcessTerminated => Failure {
             error: ToolError::new(
                 ErrorCode::ConnectionLost,
                 "SFTP channel could not be opened or was lost",
@@ -201,6 +200,7 @@ fn ssh_failure(error: openssh::Error) -> Failure {
             ),
             check_master: true,
         },
+        #[allow(unreachable_patterns)]
         _ => Failure::io(),
     }
 }
@@ -830,7 +830,7 @@ async fn list_sftp(sftp: Sftp, mut spec: ListSpec<'_>) -> Result<ListData, Failu
             None => return Ok(data),
             Some(result) => result.map_err(sftp_failure)?,
         };
-        let bytes = entry.filename().as_os_str().as_bytes();
+        let bytes = entry.filename().as_os_str().as_encoded_bytes();
         if matches!(bytes, b"." | b"..") {
             continue;
         }
@@ -867,9 +867,9 @@ pub(crate) async fn list(
     run_sftp(session, context, |sftp| list_sftp(sftp, spec)).await
 }
 
-async fn close_channel<S>(
+async fn close_channel(
     cancel: &CancellationToken,
-    child: Option<openssh::Child<S>>,
+    child: Option<Child<'_>>,
     released: [Option<oneshot::Receiver<()>>; 2],
 ) -> Result<(), Failure> {
     cancel.cancel();
